@@ -80,12 +80,29 @@ defmodule SymphonyElixir.AgentRunner do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    with {:ok, policy} <- policy_for_issue(issue, opts),
+         {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
       try do
+        opts = Keyword.put(opts, :policy, policy)
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
         AppServer.stop_session(session)
       end
+    end
+  end
+
+  defp policy_for_issue(issue, opts) do
+    case Keyword.fetch(opts, :policy) do
+      {:ok, policy} when is_map(policy) -> {:ok, policy}
+      _ -> resolve_policy_for_issue(issue)
+    end
+  end
+
+  defp resolve_policy_for_issue(issue) do
+    case Config.issue_policy(issue) do
+      {:ok, policy} -> {:ok, policy}
+      {:skip, reason} -> {:error, {:issue_profile_binding_skipped, reason}}
+      {:error, reason} -> {:error, reason}
     end
   end
 

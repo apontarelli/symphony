@@ -269,7 +269,9 @@ defmodule SymphonyElixir.CoreTest do
       {%{"bad" => %{"metadata" => %{"add_flags" => "strict"}}}, "bad.metadata.flags cannot be merged with add_* policy field; expected_map"},
       {%{"bad" => %{"append_items" => [%{"add_flags" => "strict"}]}}, "bad.items.0.flags cannot be merged with add_* policy field; expected_map"},
       {%{"bad" => %{"add_delivery" => %{"mode" => "direct"}}}, "bad.delivery.mode not supported in v1"},
-      {%{"bad" => %{"delivery" => %{}}}, "bad.delivery.pr_target is required in resolved policy"}
+      {%{"bad" => %{"delivery" => %{}}}, "bad.delivery.pr_target is required in resolved policy"},
+      {%{"bad" => %{"add_policy_metadata" => %{"source" => "operator"}}}, "bad.add_policy_metadata targets reserved policy_metadata"},
+      {%{"bad" => %{"append_policy_ref" => ["manual"]}}, "bad.append_policy_ref targets reserved policy_ref"}
     ]
 
     for {profile_override, expected_message} <- cases do
@@ -323,6 +325,304 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:ok, changed_policy} = Schema.resolve_effective_policy(changed_settings, "default")
     refute changed_policy["policy_ref"] == left_policy["policy_ref"]
+  end
+
+  test "workflow profile refinements can be composed explicitly" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{"delivery" => %{"pr_target" => "Human Review"}, "checks" => ["format"]},
+                 "project_alpha" => %{"delivery" => %{"pr_target" => "Merging"}, "checks" => ["project"]},
+                 "strict_label" => %{"append_checks" => ["dialyzer"]}
+               }
+             })
+
+    assert {:ok, policy} =
+             Schema.resolve_effective_policy(settings, "project_alpha", ["strict_label"], metadata: %{source: "test"})
+
+    assert policy["delivery"]["pr_target"] == "Merging"
+    assert policy["checks"] == ["project", "dialyzer"]
+    assert policy["policy_metadata"] == %{"source" => "test"}
+
+    assert {:error, {:invalid_workflow_profile_ref, 123}} =
+             Schema.resolve_effective_policy(settings, "project_alpha", [123], [])
+  end
+
+  test "external Linear project binding selects policy and allows label refinement without changing delivery" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}, checks: ["format"]},
+        project_alpha: %{delivery: %{pr_target: "Merging"}, checks: ["project"]},
+        catch_all: %{delivery: %{pr_target: "Human Review"}, checks: ["catch-all"]},
+        strict_label: %{append_checks: ["dialyzer"], add_review: %{mode: "strict"}}
+      }
+    )
+
+    ProfileBindings.set(%{
+      team_key: "SID",
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      labels: [%{label: "Strict", profile: "strict_label"}],
+      catch_all: %{enabled: true, profile: "catch_all"},
+      allow_default: true
+    })
+
+    issue = %Issue{
+      id: "issue-project-a",
+      identifier: "SID-101",
+      title: "Project-bound dispatch",
+      state: "Todo",
+      project_slug: "project-a",
+      labels: ["strict"]
+    }
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert policy["delivery"]["pr_target"] == "Merging"
+    assert policy["checks"] == ["project", "dialyzer"]
+    assert policy["review"] == %{"mode" => "strict"}
+    assert policy["policy_metadata"]["source"] == "project_binding"
+    assert policy["policy_metadata"]["profile"] == "project_alpha"
+    assert policy["policy_metadata"]["label_refinement"] == %{"label" => "strict", "profile" => "strict_label"}
+  end
+
+  test "unprojected Linear issues require explicit catch-all binding" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        catch_all: %{delivery: %{pr_target: "Human Review"}, checks: ["triage"]}
+      }
+    )
+
+    issue = %Issue{
+      id: "issue-unprojected",
+      identifier: "SID-102",
+      title: "Unprojected issue",
+      state: "Todo",
+      team_key: "SID",
+      labels: []
+    }
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}]
+    })
+
+    assert {:skip, :no_matching_linear_profile_binding} = Config.issue_policy(issue)
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      allow_default: true
+    })
+
+    assert {:skip, :no_matching_linear_profile_binding} = Config.issue_policy(issue)
+
+    projected_issue = %{issue | project_slug: "project-b"}
+    assert {:ok, default_policy} = Config.issue_policy(projected_issue)
+    assert default_policy["policy_metadata"]["source"] == "default"
+
+    ProfileBindings.set(%{
+      team_key: "SID",
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      catch_all: %{enabled: true, profile: "catch_all"}
+    })
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert policy["checks"] == ["triage"]
+    assert policy["policy_metadata"]["source"] == "catch_all"
+
+    assert {:skip, :linear_catch_all_team_mismatch} =
+             Config.issue_policy(%{issue | id: "issue-other-team", team_key: "OTHER"})
+  end
+
+  test "legacy Linear default only applies to the configured tracker project" do
+    issue = %Issue{
+      id: "issue-default",
+      identifier: "SID-DEFAULT",
+      title: "Default project",
+      state: "Todo",
+      project_slug: "project"
+    }
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert policy["policy_metadata"]["source"] == "default"
+
+    assert {:skip, :no_matching_linear_profile_binding} =
+             Config.issue_policy(%{issue | id: "issue-other-project", project_slug: "other-project"})
+
+    assert {:skip, :no_matching_linear_profile_binding} =
+             Config.issue_policy(%{issue | id: "issue-no-project", project_slug: nil})
+  end
+
+  test "loaded empty external bindings do not silently fall back to default" do
+    ProfileBindings.set(%{})
+
+    issue = %Issue{
+      id: "issue-empty-bindings",
+      identifier: "SID-EMPTY",
+      title: "Loaded empty bindings",
+      state: "Todo",
+      project_slug: "project"
+    }
+
+    assert {:skip, :no_matching_linear_profile_binding} = Config.issue_policy(issue)
+  end
+
+  test "CLI profile override wins for the current process and records metadata" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        override_profile: %{delivery: %{pr_target: "Human Review"}, checks: ["override"]}
+      }
+    )
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}]
+    })
+
+    issue = %Issue{
+      id: "issue-override",
+      identifier: "SID-103",
+      title: "Override profile",
+      state: "Todo",
+      project_slug: "project-a",
+      labels: []
+    }
+
+    ProfileBindings.set_profile_override("override_profile")
+    assert {:ok, override_policy} = Config.issue_policy(issue)
+    assert override_policy["checks"] == ["override"]
+    assert override_policy["policy_metadata"]["source"] == "cli_override"
+    assert override_policy["policy_metadata"]["cli_override"] == true
+
+    ProfileBindings.clear_profile_override()
+    assert {:ok, project_policy} = Config.issue_policy(issue)
+    assert project_policy["delivery"]["pr_target"] == "Merging"
+    assert project_policy["policy_metadata"]["source"] == "project_binding"
+  end
+
+  test "ambiguous same-precedence bindings block policy selection and dispatch logs an actionable signal" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        project_beta: %{delivery: %{pr_target: "Human Review"}}
+      }
+    )
+
+    issue = %Issue{
+      id: "issue-ambiguous",
+      identifier: "SID-104",
+      title: "Ambiguous project",
+      state: "Todo",
+      project_slug: "project-a",
+      labels: []
+    }
+
+    ProfileBindings.set(%{
+      projects: [
+        %{project_slug: "project-a", profile: "project_alpha"},
+        %{project_slug: "project-a", profile: "project_beta"}
+      ]
+    })
+
+    assert {:error, {:ambiguous_linear_project_profile_binding, _project, _matches}} = Config.issue_policy(issue)
+
+    state = %Orchestrator.State{running: %{}, claimed: MapSet.new(), max_concurrent_agents: 1}
+
+    log =
+      capture_log(fn ->
+        refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+      end)
+
+    assert log =~ "Linear profile binding failed"
+    assert log =~ "ambiguous_linear_project_profile_binding"
+  end
+
+  test "ambiguous label refinements block policy selection" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        strict_label: %{append_checks: ["dialyzer"]},
+        urgent_label: %{append_checks: ["smoke"]}
+      }
+    )
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      labels: [
+        %{label: "strict", profile: "strict_label"},
+        %{label: "urgent", profile: "urgent_label"}
+      ]
+    })
+
+    issue = %Issue{
+      id: "issue-labels",
+      identifier: "SID-105",
+      title: "Ambiguous labels",
+      state: "Todo",
+      project_slug: "project-a",
+      labels: ["strict", "urgent"]
+    }
+
+    assert {:error, {:ambiguous_linear_label_profile_binding, ["strict", "urgent"], _matches}} =
+             Config.issue_policy(issue)
+  end
+
+  test "project bindings referencing unknown profiles fail validation" do
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "missing"}]
+    })
+
+    assert {:error, {:unknown_linear_profile_binding, :project, "missing", {:unknown_workflow_profile, "missing", ["default"]}}} =
+             Config.validate!()
+  end
+
+  test "malformed external Linear bindings fail validation" do
+    cases = [
+      {%{projects: [%{project_id: "project-id", project_slug: "project-a", profile: "default"}]}, "project bindings require exactly one of project_id or project_slug"},
+      {%{projects: %{}}, "projects must be a list"},
+      {%{projects: ["project-a"]}, "projects[0] must be a map"},
+      {%{labels: %{}}, "labels must be a list"},
+      {%{labels: ["strict"]}, "labels[0] must be a map"},
+      {%{catch_all: []}, "catch_all must be a map or profile string"},
+      {%{catch_all: %{enabled: true, profile: "default"}}, "catch_all requires exactly one of team_id or team_key"},
+      {%{team_id: "team-id", team_key: "SID", catch_all: %{enabled: true, profile: "default"}}, "catch_all requires exactly one of team_id or team_key"}
+    ]
+
+    for {bindings, expected_message} <- cases do
+      ProfileBindings.set(bindings)
+
+      assert {:error, {:invalid_linear_profile_bindings, message}} = Config.validate!()
+      assert message =~ expected_message
+    end
+  end
+
+  test "label refinement cannot override project delivery target" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        strict_label: %{delivery: %{pr_target: "Human Review"}}
+      }
+    )
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      labels: [%{label: "strict", profile: "strict_label"}]
+    })
+
+    issue = %Issue{
+      id: "issue-delivery-override",
+      identifier: "SID-106",
+      title: "Unsafe label delivery override",
+      state: "Todo",
+      project_slug: "project-a",
+      labels: ["strict"]
+    }
+
+    assert {:error, {:refinement_delivery_target_override, "strict_label", "Merging", "Human Review"}} =
+             Config.issue_policy(issue)
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -1296,6 +1596,7 @@ defmodule SymphonyElixir.CoreTest do
         description: "Run and keep workspace",
         state: "In Progress",
         url: "https://example.org/issues/S-99",
+        project_slug: "project",
         labels: ["backend"]
       }
 
@@ -1382,6 +1683,7 @@ defmodule SymphonyElixir.CoreTest do
         description: "Capture codex updates",
         state: "In Progress",
         url: "https://example.org/issues/MT-99",
+        project_slug: "project",
         labels: ["backend"]
       }
 
@@ -1563,7 +1865,8 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-247",
              title: "Continue until done",
              description: "Still active after first turn",
-             state: state
+             state: state,
+             project_slug: "project"
            }
          ]}
       end
@@ -1575,6 +1878,7 @@ defmodule SymphonyElixir.CoreTest do
         description: "Still active after first turn",
         state: "In Progress",
         url: "https://example.org/issues/MT-247",
+        project_slug: "project",
         labels: []
       }
 
@@ -1680,7 +1984,8 @@ defmodule SymphonyElixir.CoreTest do
              identifier: "MT-248",
              title: "Stop at max turns",
              description: "Still active",
-             state: "In Progress"
+             state: "In Progress",
+             project_slug: "project"
            }
          ]}
       end
@@ -1692,6 +1997,7 @@ defmodule SymphonyElixir.CoreTest do
         description: "Still active",
         state: "In Progress",
         url: "https://example.org/issues/MT-248",
+        project_slug: "project",
         labels: []
       }
 

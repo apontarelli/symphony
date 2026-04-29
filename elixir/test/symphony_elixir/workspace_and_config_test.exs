@@ -320,6 +320,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       "assignee" => %{
         "id" => "user-1"
       },
+      "team" => %{
+        "id" => "team-id",
+        "key" => "SID",
+        "name" => "Side Projects"
+      },
+      "project" => %{
+        "id" => "project-id",
+        "slugId" => "project-slug",
+        "name" => "Project Name"
+      },
       "labels" => %{"nodes" => [%{"name" => "Backend"}]},
       "inverseRelations" => %{
         "nodes" => [
@@ -353,6 +363,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+    assert issue.team_id == "team-id"
+    assert issue.team_key == "SID"
+    assert issue.team_name == "Side Projects"
+    assert issue.project_id == "project-id"
+    assert issue.project_slug == "project-slug"
+    assert issue.project_name == "Project Name"
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -552,6 +568,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       identifier: "MT-1003",
       title: "Ready work",
       state: "Todo",
+      project_slug: "project",
       blocked_by: [%{id: "blocker-2", identifier: "MT-1004", state: "Closed"}]
     }
 

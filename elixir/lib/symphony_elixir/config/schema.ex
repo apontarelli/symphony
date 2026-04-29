@@ -10,6 +10,8 @@ defmodule SymphonyElixir.Config.Schema do
   @primary_key false
   @policy_ref_length 12
   @profile_policy_ref_key "policy_ref"
+  @profile_policy_metadata_key "policy_metadata"
+  @reserved_profile_policy_keys MapSet.new([@profile_policy_ref_key, @profile_policy_metadata_key])
   @delivery_pr_target_key "pr_target"
   @delivery_v1_fields MapSet.new([@delivery_pr_target_key])
 
@@ -297,9 +299,20 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_effective_policy(%__MODULE__{}, String.t() | atom() | nil) ::
           {:ok, map()} | {:error, term()}
   def resolve_effective_policy(settings, profile_ref \\ "default") do
+    resolve_effective_policy(settings, profile_ref, [], [])
+  end
+
+  @spec resolve_effective_policy(%__MODULE__{}, String.t() | atom() | nil, [String.t() | atom()], keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_effective_policy(settings, profile_ref, refinement_refs, opts)
+      when is_list(refinement_refs) and is_list(opts) do
     with {:ok, profile_name} <- normalize_profile_reference(profile_ref),
-         {:ok, policy} <- resolve_profile_policy(settings.profiles, profile_name) do
-      {:ok, Map.put(policy, @profile_policy_ref_key, policy_ref(policy))}
+         {:ok, refinement_names} <- normalize_refinement_references(refinement_refs),
+         {:ok, policy} <- resolve_profile_policy(settings.profiles, profile_name, refinement_names, opts) do
+      policy
+      |> Map.put(@profile_policy_ref_key, policy_ref(policy))
+      |> put_policy_metadata(Keyword.get(opts, :metadata, %{}))
+      |> then(&{:ok, &1})
     end
   end
 
@@ -425,17 +438,36 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp validate_profile_shape(name, policy) when is_map(policy) do
-    reserved_errors =
-      if Map.has_key?(policy, @profile_policy_ref_key) do
-        ["#{name}.#{@profile_policy_ref_key} is reserved"]
-      else
-        []
-      end
-
-    reserved_errors ++ validate_profile_delivery_shape(name, Map.get(policy, "delivery"))
+    reserved_profile_field_errors(name, policy) ++ validate_profile_delivery_shape(name, Map.get(policy, "delivery"))
   end
 
   defp validate_profile_shape(name, _policy), do: ["#{name} profile must be a map"]
+
+  defp reserved_profile_field_errors(name, policy) do
+    policy
+    |> Map.keys()
+    |> Enum.flat_map(&reserved_profile_field_error(name, &1))
+  end
+
+  defp reserved_profile_field_error(name, key) do
+    normalized_key = to_string(key)
+    target_key = policy_directive_target_key(normalized_key)
+
+    cond do
+      MapSet.member?(@reserved_profile_policy_keys, normalized_key) ->
+        ["#{name}.#{normalized_key} is reserved"]
+
+      MapSet.member?(@reserved_profile_policy_keys, target_key) ->
+        ["#{name}.#{normalized_key} targets reserved #{target_key}"]
+
+      true ->
+        []
+    end
+  end
+
+  defp policy_directive_target_key("add_" <> target_key), do: target_key
+  defp policy_directive_target_key("append_" <> target_key), do: target_key
+  defp policy_directive_target_key(_key), do: nil
 
   defp validate_profile_delivery_shape(_name, nil), do: []
 
@@ -496,13 +528,32 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_profile_reference(profile_ref), do: {:error, {:invalid_workflow_profile_ref, profile_ref}}
 
+  defp normalize_refinement_references(refinement_refs) when is_list(refinement_refs) do
+    refinement_refs
+    |> Enum.reduce_while({:ok, []}, fn profile_ref, {:ok, acc} ->
+      case normalize_profile_reference(profile_ref) do
+        {:ok, profile_name} -> {:cont, {:ok, [profile_name | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, profile_names} -> {:ok, Enum.reverse(profile_names)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
   defp resolve_profile_policy(profiles, profile_name) when is_map(profiles) do
+    resolve_profile_policy(profiles, profile_name, [], [])
+  end
+
+  defp resolve_profile_policy(profiles, profile_name, refinement_names, opts)
+       when is_map(profiles) and is_list(refinement_names) and is_list(opts) do
     with {:ok, default_policy} <- fetch_profile_policy(profiles, "default"),
          {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
          {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
          :ok <- validate_resolved_delivery(policy, profile_name) do
-      {:ok, policy}
+      apply_refinement_policies(profiles, policy, refinement_names, Keyword.get(opts, :lock_delivery_target))
     end
   end
 
@@ -524,6 +575,17 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp apply_selected_policy(default_effective, selected_policy, profile_name) do
     apply_policy_overrides(default_effective, selected_policy, [profile_name])
+  end
+
+  defp apply_refinement_policies(_profiles, policy, [], _locked_delivery_target), do: {:ok, policy}
+
+  defp apply_refinement_policies(profiles, policy, [profile_name | rest], locked_delivery_target) do
+    with {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
+         {:ok, refined_policy} <- apply_policy_overrides(policy, selected_policy, [profile_name]),
+         :ok <- validate_resolved_delivery(refined_policy, profile_name),
+         :ok <- validate_refinement_delivery_target(refined_policy, profile_name, locked_delivery_target) do
+      apply_refinement_policies(profiles, refined_policy, rest, locked_delivery_target)
+    end
   end
 
   defp apply_policy_overrides(base, overrides, path) when is_map(base) and is_map(overrides) do
@@ -659,6 +721,18 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp valid_pr_target?(value), do: is_binary(value) and String.trim(value) != ""
 
+  defp validate_refinement_delivery_target(_policy, _profile_name, nil), do: :ok
+
+  defp validate_refinement_delivery_target(policy, profile_name, locked_delivery_target) do
+    case get_in(policy, ["delivery", @delivery_pr_target_key]) do
+      ^locked_delivery_target ->
+        :ok
+
+      changed_target ->
+        {:error, {:refinement_delivery_target_override, profile_name, locked_delivery_target, changed_target}}
+    end
+  end
+
   defp policy_ref(policy) do
     :sha256
     |> :crypto.hash(canonical_policy(policy))
@@ -682,6 +756,12 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp canonical_policy(value), do: Jason.encode!(value)
+
+  defp put_policy_metadata(policy, metadata) when is_map(metadata) and map_size(metadata) > 0 do
+    Map.put(policy, @profile_policy_metadata_key, normalize_keys(metadata))
+  end
+
+  defp put_policy_metadata(policy, _metadata), do: policy
 
   defp format_policy_resolution_error({:missing_delivery_pr_target, profile_name}) do
     "#{profile_name}.delivery.pr_target is required in resolved policy"

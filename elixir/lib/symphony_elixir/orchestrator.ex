@@ -64,7 +64,7 @@ defmodule SymphonyElixir.Orchestrator do
       codex_rate_limits: nil
     }
 
-    run_terminal_workspace_cleanup()
+    validate_before_startup_cleanup()
     state = schedule_tick(state, 0)
 
     {:ok, state}
@@ -249,6 +249,18 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, {:invalid_workflow_config, message}} ->
         Logger.error("Invalid WORKFLOW.md config: #{message}")
+        state
+
+      {:error, {:invalid_linear_profile_bindings, message}} ->
+        Logger.error("Invalid Linear profile bindings: #{message}")
+        state
+
+      {:error, {:unknown_linear_profile_binding, source, profile, reason}} ->
+        Logger.error("Invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}")
+        state
+
+      {:error, :missing_linear_catch_all_team_selector} ->
+        Logger.error("Linear catch-all profile binding requires external team_id or team_key")
         state
 
       {:error, {:missing_workflow_file, path, reason}} ->
@@ -562,6 +574,7 @@ defmodule SymphonyElixir.Orchestrator do
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
+      issue_policy_allows_dispatch?(issue) and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
   end
@@ -678,21 +691,35 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    recipient = self()
+    case Config.issue_policy(issue) do
+      {:ok, policy} ->
+        recipient = self()
 
-    case select_worker_host(state, preferred_worker_host) do
-      :no_worker_capacity ->
-        Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+        case select_worker_host(state, preferred_worker_host) do
+          :no_worker_capacity ->
+            Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+            state
+
+          worker_host ->
+            spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, policy)
+        end
+
+      {:skip, reason} ->
+        Logger.info(
+          "Skipping dispatch; no matching Linear profile binding for #{issue_context(issue)} reason=#{inspect(reason)} project_id=#{inspect(issue.project_id)} project_slug=#{inspect(issue.project_slug)}"
+        )
+
         state
 
-      worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+      {:error, reason} ->
+        Logger.error("Skipping dispatch; Linear profile binding failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        state
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, policy) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host, policy: policy)
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
@@ -720,6 +747,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_total_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
+            policy: policy,
             started_at: DateTime.utc_now()
           })
 
@@ -896,6 +924,25 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp validate_before_startup_cleanup do
+    case Config.validate!() do
+      :ok ->
+        run_terminal_workspace_cleanup()
+
+      {:error, {:invalid_linear_profile_bindings, message}} ->
+        Logger.error("Skipping startup terminal workspace cleanup; invalid Linear profile bindings: #{message}")
+
+      {:error, {:unknown_linear_profile_binding, source, profile, reason}} ->
+        Logger.error("Skipping startup terminal workspace cleanup; invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}")
+
+      {:error, :missing_linear_catch_all_team_selector} ->
+        Logger.error("Skipping startup terminal workspace cleanup; Linear catch-all profile binding requires external team_id or team_key")
+
+      {:error, reason} ->
+        Logger.warning("Skipping startup terminal workspace cleanup; config validation failed: #{inspect(reason)}")
+    end
+  end
+
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
@@ -1016,6 +1063,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp worker_slots_available?(%State{} = state) do
     select_worker_host(state, nil) != :no_worker_capacity
+  end
+
+  defp issue_policy_allows_dispatch?(issue) do
+    case Config.issue_policy(issue) do
+      {:ok, _policy} ->
+        true
+
+      {:skip, reason} ->
+        Logger.info(
+          "Skipping dispatch; no matching Linear profile binding for #{issue_context(issue)} reason=#{inspect(reason)} project_id=#{inspect(issue.project_id)} project_slug=#{inspect(issue.project_slug)}"
+        )
+
+        false
+
+      {:error, reason} ->
+        Logger.error("Skipping dispatch; Linear profile binding failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        false
+    end
   end
 
   defp worker_slots_available?(%State{} = state, preferred_worker_host) do
