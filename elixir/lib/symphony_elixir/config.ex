@@ -3,7 +3,9 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `WORKFLOW.md`.
   """
 
+  alias SymphonyElixir.Config.ProfileBindings
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow
 
   @default_prompt_template """
@@ -94,7 +96,9 @@ defmodule SymphonyElixir.Config do
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do
-      validate_semantics(settings)
+      with :ok <- validate_semantics(settings) do
+        ProfileBindings.validate(settings, ProfileBindings.current())
+      end
     end
   end
 
@@ -103,6 +107,18 @@ defmodule SymphonyElixir.Config do
     with {:ok, settings} <- settings() do
       Schema.resolve_effective_policy(settings, profile_ref)
     end
+  end
+
+  @spec issue_policy(Issue.t(), keyword()) :: {:ok, map()} | {:skip, term()} | {:error, term()}
+  def issue_policy(%Issue{} = issue, opts \\ []) do
+    with {:ok, settings} <- settings() do
+      ProfileBindings.select_policy(settings, issue, ProfileBindings.current(), opts)
+    end
+  end
+
+  @spec linear_profile_bindings() :: ProfileBindings.binding_config()
+  def linear_profile_bindings do
+    ProfileBindings.current()
   end
 
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
@@ -132,7 +148,9 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      settings.tracker.kind == "linear" and
+        not is_binary(settings.tracker.project_slug) and
+          not ProfileBindings.dispatch_scope_configured?(ProfileBindings.current()) ->
         {:error, :missing_linear_project_slug}
 
       true ->

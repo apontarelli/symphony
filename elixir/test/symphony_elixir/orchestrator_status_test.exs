@@ -21,6 +21,50 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
+  test "startup terminal workspace cleanup is skipped when external bindings are invalid" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-invalid-binding-cleanup-#{System.unique_integer([:positive])}"
+      )
+
+    issue = %Issue{
+      id: "issue-terminal",
+      identifier: "MT-SKIP",
+      title: "Terminal issue",
+      state: "Closed"
+    }
+
+    try do
+      workspace = Path.join(test_root, issue.identifier)
+      File.mkdir_p!(workspace)
+      File.write!(Path.join(workspace, "marker.txt"), "keep\n")
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        tracker_kind: "memory",
+        workspace_root: test_root,
+        tracker_terminal_states: ["Closed"],
+        poll_interval_ms: 30_000
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      ProfileBindings.set(%{projects: %{}})
+
+      orchestrator_name = Module.concat(__MODULE__, :InvalidBindingCleanupOrchestrator)
+
+      log =
+        capture_log(fn ->
+          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+          GenServer.stop(pid)
+        end)
+
+      assert log =~ "Skipping startup terminal workspace cleanup; invalid Linear profile bindings: projects must be a list"
+      assert File.exists?(Path.join(workspace, "marker.txt"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -941,6 +985,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    before_tick_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
     Process.sleep(100)
     state = :sys.get_state(pid)
@@ -956,9 +1001,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
-    assert remaining_ms <= 10_500
+    retry_delay_ms = due_at_ms - before_tick_ms
+    assert retry_delay_ms >= 9_500
+    assert retry_delay_ms <= 10_500
   end
 
   test "status dashboard renders offline marker to terminal" do

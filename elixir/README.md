@@ -79,6 +79,8 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
+- `--linear-bindings` loads an operator-local YAML file that maps Linear projects to workflow profiles
+- `--profile` selects one workflow profile for the current process, before project/label bindings
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.
@@ -120,6 +122,30 @@ Notes:
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
+- Linear project-to-profile bindings live outside committed `WORKFLOW.md`. Load them with
+  `--linear-bindings /path/to/bindings.yml`:
+
+```yaml
+team_key: SID
+projects:
+  - project_slug: linear-project-slug
+    profile: default
+labels:
+  - label: strict
+    profile: strict
+catch_all:
+  enabled: false
+  profile: default
+allow_default: false
+```
+
+Selection precedence is CLI `--profile`, exact project binding, one matching label refinement within
+that project, catch-all, then `default` only when `allow_default: true` or no external bindings are
+configured. Multiple matches at the same precedence block dispatch. Label refinements can change
+validation/review/prompt policy but cannot change the selected project delivery target. Each
+project binding must use exactly one of `project_id` or `project_slug`.
+- Prompt templates receive the resolved policy as `{{ policy }}`, including `policy.policy_ref` and
+  `policy.policy_metadata` when the runtime selected a binding.
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.
