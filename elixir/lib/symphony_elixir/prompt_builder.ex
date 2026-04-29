@@ -9,6 +9,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
+    policy = prompt_policy(issue, opts)
+
     template =
       Workflow.current()
       |> prompt_template!()
@@ -19,11 +21,35 @@ defmodule SymphonyElixir.PromptBuilder do
       %{
         "attempt" => Keyword.get(opts, :attempt),
         "issue" => issue |> Map.from_struct() |> to_solid_map(),
-        "policy" => Keyword.get(opts, :policy, %{}) |> to_solid_value()
+        "policy" => policy |> to_solid_value(),
+        "policy_json" => Jason.encode!(policy, pretty: true)
       },
       @render_opts
     )
     |> IO.iodata_to_binary()
+  end
+
+  defp prompt_policy(issue, opts) do
+    case Keyword.fetch(opts, :policy) do
+      {:ok, policy} when is_map(policy) ->
+        policy
+
+      _ ->
+        resolve_prompt_policy(issue)
+    end
+  end
+
+  defp resolve_prompt_policy(issue) do
+    case Config.issue_policy(issue) do
+      {:ok, policy} ->
+        policy
+
+      _ ->
+        case Config.effective_policy() do
+          {:ok, policy} -> policy
+          _ -> %{}
+        end
+    end
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)

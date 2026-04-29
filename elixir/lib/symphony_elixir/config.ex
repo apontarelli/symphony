@@ -14,6 +14,11 @@ defmodule SymphonyElixir.Config do
   Identifier: {{ issue.identifier }}
   Title: {{ issue.title }}
 
+  Resolved workflow policy:
+  ```json
+  {{ policy_json }}
+  ```
+
   Body:
   {% if issue.description %}
   {{ issue.description }}

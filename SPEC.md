@@ -481,6 +481,11 @@ Resolved policy requirements:
 
 - `delivery.pr_target` (string)
   - REQUIRED in the resolved effective policy.
+  - Git PR target/base branch, for example `main` or a project integration branch.
+  - Delivery skills MUST use this branch for branch sync, PR creation/update, review gates, and
+    landing guardrails.
+  - When the target is not `main`, v1 MUST NOT automate promotion or merge-forward from that target
+    branch to `main`.
   - The only v1 core delivery field.
 - `delivery.mode`, `delivery.base_ref`, `delivery.allow_main_merge`, and
   `delivery.require_feature_flag`
@@ -506,6 +511,11 @@ Template input variables:
 - `attempt` (integer or null)
   - `null`/absent on first attempt.
   - Integer on retry or continuation run.
+- `policy` (object)
+  - Resolved effective workflow policy for the issue.
+- `policy_json` (string)
+  - JSON rendering of `policy` for prompt templates that need to expose arbitrary profile-specific
+    gates or completion requirements without knowing every policy key.
 
 Fallback prompt behavior:
 
@@ -1291,6 +1301,7 @@ Inputs to prompt rendering:
 - `workflow.prompt_template`
 - normalized `issue` object
 - resolved `policy` object, including `policy_ref` and selection metadata when available
+- `policy_json` JSON string containing the same resolved policy object
 - OPTIONAL `attempt` integer (retry/continuation metadata)
 
 ### 12.2 Rendering Rules

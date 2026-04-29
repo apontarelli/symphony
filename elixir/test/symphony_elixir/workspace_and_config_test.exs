@@ -973,7 +973,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     profiles:
       default:
         delivery:
-          pr_target: Human Review
+          pr_target: main
     ---
     """
 
@@ -1052,7 +1052,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                tracker: %{api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
                codex: %{approval_policy: %{reject: %{sandbox_approval: true}}},
-               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
     assert settings.tracker.api_key == nil
@@ -1066,7 +1066,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{
                tracker: %{api_key: "$#{missing_secret_env}"},
                workspace: %{root: ""},
-               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
     assert settings.tracker.api_key == "fallback-linear-token"
@@ -1114,7 +1114,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{
                workspace: %{root: "~/.symphony-workspaces"},
                codex: %{},
-               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
     assert settings.workspace.root == "~/.symphony-workspaces"

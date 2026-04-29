@@ -105,7 +105,7 @@ codex:
 profiles:
   default:
     delivery:
-      pr_target: Human Review
+      pr_target: main
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -116,8 +116,8 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
-- `profiles.default.delivery.pr_target` is required. Additional profiles may override `default`
-  during effective-policy resolution.
+- `profiles.default.delivery.pr_target` is required and names the Git PR target/base branch.
+  Additional profiles may override `default` during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
@@ -144,8 +144,10 @@ that project, catch-all, then `default` only when `allow_default: true` or no ex
 configured. Multiple matches at the same precedence block dispatch. Label refinements can change
 validation/review/prompt policy but cannot change the selected project delivery target. Each
 project binding must use exactly one of `project_id` or `project_slug`.
-- Prompt templates receive the resolved policy as `{{ policy }}`, including `policy.policy_ref` and
-  `policy.policy_metadata` when the runtime selected a binding.
+- Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
+  including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
+  runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base
+  selection, review gates, and landing guardrails.
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.

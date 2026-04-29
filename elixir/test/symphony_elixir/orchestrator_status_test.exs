@@ -774,7 +774,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       write_holding_codex!(codex_binary, "policy-running")
 
       write_policy_workflow!(workspace_root, codex_binary,
-        target: "Merging",
+        target: "project/old",
         checks: ["old-policy"],
         prompt: "Policy {{ policy.policy_ref }} target {{ policy.delivery.pr_target }}"
       )
@@ -806,23 +806,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       running_entry = state.running[issue.id]
 
       assert running_entry.profile == "strict"
-      assert running_entry.target == "Merging"
+      assert running_entry.target == "project/old"
       assert running_entry.policy_ref == running_entry.policy["policy_ref"]
       assert running_entry.policy["checks"] == ["old-policy"]
 
       assert snapshot_entry.profile == "strict"
-      assert snapshot_entry.target == "Merging"
+      assert snapshot_entry.target == "project/old"
       assert snapshot_entry.policy_ref == running_entry.policy_ref
       assert snapshot_entry.policy == running_entry.policy
 
       write_policy_workflow!(workspace_root, codex_binary,
-        target: "Human Review",
+        target: "project/new",
         checks: ["new-policy"],
         prompt: "Reloaded {{ policy.policy_ref }}"
       )
 
       assert {:ok, future_policy} = Config.issue_policy(%{issue | id: "issue-future"})
-      assert future_policy["delivery"]["pr_target"] == "Human Review"
+      assert future_policy["delivery"]["pr_target"] == "project/new"
       assert future_policy["checks"] == ["new-policy"]
       refute future_policy["policy_ref"] == running_entry.policy_ref
 
@@ -851,7 +851,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       write_holding_codex!(codex_binary, "policy-retry")
 
       write_policy_workflow!(workspace_root, codex_binary,
-        target: "Merging",
+        target: "project/retry-old",
         checks: ["retry-old"],
         prompt: "Policy {{ policy.policy_ref }}"
       )
@@ -876,7 +876,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       original_policy = original_entry.policy
       assert original_entry.profile == "strict"
-      assert original_entry.target == "Merging"
+      assert original_entry.target == "project/retry-old"
 
       Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, original_entry.pid)
 
@@ -887,11 +887,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       assert retry_entry.policy == original_policy
       assert retry_entry.profile == "strict"
-      assert retry_entry.target == "Merging"
+      assert retry_entry.target == "project/retry-old"
       assert retry_entry.policy_ref == original_policy["policy_ref"]
 
       write_policy_workflow!(workspace_root, codex_binary,
-        target: "Human Review",
+        target: "project/retry-new",
         checks: ["retry-new"],
         prompt: "Reloaded {{ policy.policy_ref }}"
       )
@@ -910,7 +910,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       assert retried_entry.policy == original_policy
       assert retried_entry.profile == "strict"
-      assert retried_entry.target == "Merging"
+      assert retried_entry.target == "project/retry-old"
       assert retried_entry.policy_ref == original_policy["policy_ref"]
     after
       File.rm_rf(test_root)
@@ -1818,7 +1818,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       codex_command: "#{codex_binary} app-server",
       poll_interval_ms: 30_000,
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}, checks: ["default"]},
+        default: %{delivery: %{pr_target: "main"}, checks: ["default"]},
         strict: %{delivery: %{pr_target: Keyword.fetch!(opts, :target)}, checks: Keyword.fetch!(opts, :checks)}
       },
       prompt: Keyword.fetch!(opts, :prompt)

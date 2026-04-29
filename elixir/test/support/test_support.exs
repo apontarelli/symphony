@@ -117,7 +117,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
-          profiles: %{default: %{delivery: %{pr_target: "Human Review"}}},
+          profiles: %{default: %{delivery: %{pr_target: "main"}}},
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,

@@ -20,7 +20,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.agent.max_turns == 20
 
     assert {:ok, policy} = Config.effective_policy()
-    assert policy["delivery"]["pr_target"] == "Human Review"
+    assert policy["delivery"]["pr_target"] == "main"
     assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
@@ -113,7 +113,7 @@ defmodule SymphonyElixir.CoreTest do
                "profiles" => %{
                  "default" => %{
                    "delivery" => %{
-                     "pr_target" => "Human Review",
+                     "pr_target" => "main",
                      "mode" => "direct",
                      "base_ref" => "main",
                      "allow_main_merge" => true,
@@ -134,12 +134,12 @@ defmodule SymphonyElixir.CoreTest do
              Schema.parse(%{
                "profiles" => %{
                  "default" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
+                   "delivery" => %{"pr_target" => "main"},
                    "policy_ref" => "manual"
                  },
                  "not_a_map" => "bad",
                  "non_string_pr_target" => %{"delivery" => %{"pr_target" => 123}},
-                 "non_map_delivery" => %{"delivery" => "Human Review"}
+                 "non_map_delivery" => %{"delivery" => "main"}
                }
              })
 
@@ -154,13 +154,13 @@ defmodule SymphonyElixir.CoreTest do
              Schema.parse(%{
                "profiles" => %{
                  "default" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
+                   "delivery" => %{"pr_target" => "main"},
                    "checks" => ["format", "test"],
                    "labels" => %{"tier" => "standard", "team" => "platform"},
                    "limits" => %{"max_turns" => 20}
                  },
                  "expedite" => %{
-                   "delivery" => %{"pr_target" => "Merging"},
+                   "delivery" => %{"pr_target" => "project/integration"},
                    "checks" => ["smoke"],
                    "labels" => %{"tier" => "urgent"}
                  }
@@ -168,7 +168,7 @@ defmodule SymphonyElixir.CoreTest do
              })
 
     assert {:ok, policy} = Schema.resolve_effective_policy(settings, "expedite")
-    assert policy["delivery"] == %{"pr_target" => "Merging"}
+    assert policy["delivery"] == %{"pr_target" => "project/integration"}
     assert policy["checks"] == ["smoke"]
     assert policy["labels"] == %{"tier" => "urgent"}
     assert policy["limits"] == %{"max_turns" => 20}
@@ -180,7 +180,7 @@ defmodule SymphonyElixir.CoreTest do
              Schema.parse(%{
                "profiles" => %{
                  "default" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
+                   "delivery" => %{"pr_target" => "main"},
                    "checks" => ["format"],
                    "labels" => %{"tier" => "standard"},
                    "metadata" => %{"owners" => ["platform"], "priority" => "normal"}
@@ -209,7 +209,7 @@ defmodule SymphonyElixir.CoreTest do
              Schema.parse(%{
                "profiles" => %{
                  "default" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
+                   "delivery" => %{"pr_target" => "main"},
                    "checks" => ["format"],
                    "labels" => %{"tier" => "standard", "team" => "platform"}
                  },
@@ -230,7 +230,7 @@ defmodule SymphonyElixir.CoreTest do
   test "workflow profile resolution rejects unknown profile references" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}}
+        default: %{delivery: %{pr_target: "main"}}
       }
     )
 
@@ -243,7 +243,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "profiles" => %{
-                 "default" => %{"delivery" => %{"pr_target" => "Human Review"}}
+                 "default" => %{"delivery" => %{"pr_target" => "main"}}
                }
              })
 
@@ -255,7 +255,7 @@ defmodule SymphonyElixir.CoreTest do
   test "workflow profile resolution rejects invalid additive directives" do
     baseline = %{
       "default" => %{
-        "delivery" => %{"pr_target" => "Human Review"},
+        "delivery" => %{"pr_target" => "main"},
         "checks" => ["format"],
         "labels" => %{"tier" => "standard"}
       }
@@ -287,7 +287,7 @@ defmodule SymphonyElixir.CoreTest do
       %{
         "profiles" => %{
           "default" => %{
-            "delivery" => %{"pr_target" => "Human Review"},
+            "delivery" => %{"pr_target" => "main"},
             "labels" => %{"team" => "platform", "tier" => "standard"},
             "checks" => ["format", "test"]
           }
@@ -300,7 +300,7 @@ defmodule SymphonyElixir.CoreTest do
           "default" => %{
             "checks" => ["format", "test"],
             "labels" => %{"tier" => "standard", "team" => "platform"},
-            "delivery" => %{"pr_target" => "Human Review"}
+            "delivery" => %{"pr_target" => "main"}
           }
         }
       }
@@ -316,7 +316,7 @@ defmodule SymphonyElixir.CoreTest do
              Schema.parse(%{
                "profiles" => %{
                  "default" => %{
-                   "delivery" => %{"pr_target" => "Merging"},
+                   "delivery" => %{"pr_target" => "project/changed"},
                    "labels" => %{"team" => "platform", "tier" => "standard"},
                    "checks" => ["format", "test"]
                  }
@@ -331,8 +331,8 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, settings} =
              Schema.parse(%{
                "profiles" => %{
-                 "default" => %{"delivery" => %{"pr_target" => "Human Review"}, "checks" => ["format"]},
-                 "project_alpha" => %{"delivery" => %{"pr_target" => "Merging"}, "checks" => ["project"]},
+                 "default" => %{"delivery" => %{"pr_target" => "main"}, "checks" => ["format"]},
+                 "project_alpha" => %{"delivery" => %{"pr_target" => "project/alpha"}, "checks" => ["project"]},
                  "strict_label" => %{"append_checks" => ["dialyzer"]}
                }
              })
@@ -340,7 +340,7 @@ defmodule SymphonyElixir.CoreTest do
     assert {:ok, policy} =
              Schema.resolve_effective_policy(settings, "project_alpha", ["strict_label"], metadata: %{source: "test"})
 
-    assert policy["delivery"]["pr_target"] == "Merging"
+    assert policy["delivery"]["pr_target"] == "project/alpha"
     assert policy["checks"] == ["project", "dialyzer"]
     assert policy["policy_metadata"] == %{"source" => "test"}
 
@@ -351,9 +351,9 @@ defmodule SymphonyElixir.CoreTest do
   test "external Linear project binding selects policy and allows label refinement without changing delivery" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}, checks: ["format"]},
-        project_alpha: %{delivery: %{pr_target: "Merging"}, checks: ["project"]},
-        catch_all: %{delivery: %{pr_target: "Human Review"}, checks: ["catch-all"]},
+        default: %{delivery: %{pr_target: "main"}, checks: ["format"]},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}, checks: ["project"]},
+        catch_all: %{delivery: %{pr_target: "main"}, checks: ["catch-all"]},
         strict_label: %{append_checks: ["dialyzer"], add_review: %{mode: "strict"}}
       }
     )
@@ -376,7 +376,7 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert {:ok, policy} = Config.issue_policy(issue)
-    assert policy["delivery"]["pr_target"] == "Merging"
+    assert policy["delivery"]["pr_target"] == "project/alpha"
     assert policy["checks"] == ["project", "dialyzer"]
     assert policy["review"] == %{"mode" => "strict"}
     assert policy["policy_metadata"]["source"] == "project_binding"
@@ -387,9 +387,9 @@ defmodule SymphonyElixir.CoreTest do
   test "unprojected Linear issues require explicit catch-all binding" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
-        project_alpha: %{delivery: %{pr_target: "Merging"}},
-        catch_all: %{delivery: %{pr_target: "Human Review"}, checks: ["triage"]}
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}},
+        catch_all: %{delivery: %{pr_target: "main"}, checks: ["triage"]}
       }
     )
 
@@ -469,9 +469,9 @@ defmodule SymphonyElixir.CoreTest do
   test "CLI profile override wins for the current process and records metadata" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
-        project_alpha: %{delivery: %{pr_target: "Merging"}},
-        override_profile: %{delivery: %{pr_target: "Human Review"}, checks: ["override"]}
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}},
+        override_profile: %{delivery: %{pr_target: "main"}, checks: ["override"]}
       }
     )
 
@@ -496,16 +496,16 @@ defmodule SymphonyElixir.CoreTest do
 
     ProfileBindings.clear_profile_override()
     assert {:ok, project_policy} = Config.issue_policy(issue)
-    assert project_policy["delivery"]["pr_target"] == "Merging"
+    assert project_policy["delivery"]["pr_target"] == "project/alpha"
     assert project_policy["policy_metadata"]["source"] == "project_binding"
   end
 
   test "ambiguous same-precedence bindings block policy selection and dispatch logs an actionable signal" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
-        project_alpha: %{delivery: %{pr_target: "Merging"}},
-        project_beta: %{delivery: %{pr_target: "Human Review"}}
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}},
+        project_beta: %{delivery: %{pr_target: "main"}}
       }
     )
 
@@ -541,8 +541,8 @@ defmodule SymphonyElixir.CoreTest do
   test "ambiguous label refinements block policy selection" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
-        project_alpha: %{delivery: %{pr_target: "Merging"}},
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}},
         strict_label: %{append_checks: ["dialyzer"]},
         urgent_label: %{append_checks: ["smoke"]}
       }
@@ -601,9 +601,9 @@ defmodule SymphonyElixir.CoreTest do
   test "label refinement cannot override project delivery target" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
-        project_alpha: %{delivery: %{pr_target: "Merging"}},
-        strict_label: %{delivery: %{pr_target: "Human Review"}}
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}},
+        strict_label: %{delivery: %{pr_target: "main"}}
       }
     )
 
@@ -621,7 +621,7 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["strict"]
     }
 
-    assert {:error, {:refinement_delivery_target_override, "strict_label", "Merging", "Human Review"}} =
+    assert {:error, {:refinement_delivery_target_override, "strict_label", "project/alpha", "main"}} =
              Config.issue_policy(issue)
   end
 
@@ -648,7 +648,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
 
     profiles = Map.get(config, "profiles", %{})
-    assert get_in(profiles, ["default", "delivery", "pr_target"]) == "Human Review"
+    assert get_in(profiles, ["default", "delivery", "pr_target"]) == "main"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -1330,6 +1330,27 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
+  test "prompt builder resolves issue policy when no explicit policy option is provided" do
+    workflow_prompt = "Target {{ policy.delivery.pr_target }} json={{ policy_json }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "S-2",
+      title: "Render policy",
+      description: "Use issue routing context",
+      state: "Todo",
+      url: "https://example.org/issues/S-2",
+      project_slug: "project",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Target main"
+    assert prompt =~ ~s("pr_target": "main")
+    assert prompt =~ ~s("policy_ref")
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
@@ -1430,10 +1451,13 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "You are working on a Linear issue."
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
+    assert prompt =~ "Resolved workflow policy:"
+    assert prompt =~ ~s("pr_target": "main")
     assert prompt =~ "Body:"
     assert prompt =~ "Include enough issue context to start working."
     assert Config.workflow_prompt() =~ "{{ issue.identifier }}"
     assert Config.workflow_prompt() =~ "{{ issue.title }}"
+    assert Config.workflow_prompt() =~ "{{ policy_json }}"
     assert Config.workflow_prompt() =~ "{{ issue.description }}"
   end
 
@@ -1504,6 +1528,13 @@ defmodule SymphonyElixir.CoreTest do
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
     assert prompt =~ "You are working on a Linear ticket `MT-616`"
+    assert prompt =~ "Resolved workflow policy:"
+    assert prompt =~ ~s("pr_target": "main")
+    assert prompt =~ "Delivery target rules:"
+    assert prompt =~ "Treat `policy.delivery.pr_target` as the Git PR base branch"
+    assert prompt =~ "If the target is `main`, preserve the existing mainline pull/push/review/land behavior."
+    assert prompt =~ "If the target is not `main`, pull from `origin/<target>`"
+    assert prompt =~ "profile-specific gates and completion requirements"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
@@ -1516,6 +1547,37 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Do not call `gh pr merge` directly"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
+  end
+
+  test "in-repo WORKFLOW.md renders non-main delivery policy context and gates" do
+    workflow_path = Workflow.workflow_file_path()
+    Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+
+    issue = %Issue{
+      identifier: "MT-617",
+      title: "Use project branch target",
+      description: "Render profile-specific policy",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-617/use-project-branch-target",
+      labels: ["workflow"]
+    }
+
+    policy = %{
+      "policy_ref" => "abc123def456",
+      "delivery" => %{"pr_target" => "project/integration"},
+      "checks" => ["mix test", "mix credo"],
+      "completion_requirements" => ["Attach PR to Linear", "Run profile gate"]
+    }
+
+    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+
+    prompt = PromptBuilder.build_prompt(issue, policy: policy)
+
+    assert prompt =~ ~s("pr_target": "project/integration")
+    assert prompt =~ ~s("mix test")
+    assert prompt =~ ~s("Run profile gate")
+    assert prompt =~ "If the target is not `main`, pull from `origin/<target>`"
+    assert prompt =~ "never merge or promote anything to `main` in v1"
   end
 
   test "prompt builder adds continuation guidance for retries" do
