@@ -953,6 +953,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         todo: 1
         "In Progress": 4
         "In Review": 2
+    profiles:
+      default:
+        delivery:
+          pr_target: Human Review
     ---
     """
 
@@ -1030,7 +1034,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{
                tracker: %{api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
-               codex: %{approval_policy: %{reject: %{sandbox_approval: true}}}
+               codex: %{approval_policy: %{reject: %{sandbox_approval: true}}},
+               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
              })
 
     assert settings.tracker.api_key == nil
@@ -1043,7 +1048,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                tracker: %{api_key: "$#{missing_secret_env}"},
-               workspace: %{root: ""}
+               workspace: %{root: ""},
+               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
              })
 
     assert settings.tracker.api_key == "fallback-linear-token"
@@ -1090,7 +1096,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                workspace: %{root: "~/.symphony-workspaces"},
-               codex: %{}
+               codex: %{},
+               profiles: %{default: %{delivery: %{pr_target: "Human Review"}}}
              })
 
     assert settings.workspace.root == "~/.symphony-workspaces"

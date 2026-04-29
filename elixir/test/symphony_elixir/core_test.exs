@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Config.Schema
 
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -17,6 +18,10 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+
+    assert {:ok, policy} = Config.effective_policy()
+    assert policy["delivery"]["pr_target"] == "Human Review"
+    assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -88,6 +93,238 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "workflow profiles require default profile and delivery target" do
+    assert {:error, {:invalid_workflow_config, message}} = Schema.parse(%{"profiles" => %{}})
+    assert message =~ "profiles default profile is required"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{}
+               }
+             })
+
+    assert message =~ "default.delivery.pr_target is required"
+  end
+
+  test "workflow profiles reject non-v1 delivery fields" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{
+                     "pr_target" => "Human Review",
+                     "mode" => "direct",
+                     "base_ref" => "main",
+                     "allow_main_merge" => true,
+                     "require_feature_flag" => false
+                   }
+                 }
+               }
+             })
+
+    assert message =~ "default.delivery.mode is not supported in v1"
+    assert message =~ "default.delivery.base_ref is not supported in v1"
+    assert message =~ "default.delivery.allow_main_merge is not supported in v1"
+    assert message =~ "default.delivery.require_feature_flag is not supported in v1"
+  end
+
+  test "workflow profiles reject malformed profile policy shapes" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "policy_ref" => "manual"
+                 },
+                 "not_a_map" => "bad",
+                 "non_string_pr_target" => %{"delivery" => %{"pr_target" => 123}},
+                 "non_map_delivery" => %{"delivery" => "Human Review"}
+               }
+             })
+
+    assert message =~ "default.policy_ref is reserved"
+    assert message =~ "not_a_map profile must be a map"
+    assert message =~ "non_string_pr_target.delivery.pr_target must be a string"
+    assert message =~ "non_map_delivery.delivery must be a map"
+  end
+
+  test "workflow profile resolution replaces lists and maps by default while preserving untouched defaults" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "checks" => ["format", "test"],
+                   "labels" => %{"tier" => "standard", "team" => "platform"},
+                   "limits" => %{"max_turns" => 20}
+                 },
+                 "expedite" => %{
+                   "delivery" => %{"pr_target" => "Merging"},
+                   "checks" => ["smoke"],
+                   "labels" => %{"tier" => "urgent"}
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings, "expedite")
+    assert policy["delivery"] == %{"pr_target" => "Merging"}
+    assert policy["checks"] == ["smoke"]
+    assert policy["labels"] == %{"tier" => "urgent"}
+    assert policy["limits"] == %{"max_turns" => 20}
+    assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
+  end
+
+  test "workflow profile resolution applies add and append fields explicitly" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "checks" => ["format"],
+                   "labels" => %{"tier" => "standard"},
+                   "metadata" => %{"owners" => ["platform"], "priority" => "normal"}
+                 },
+                 "strict" => %{
+                   "append_checks" => ["dialyzer"],
+                   "add_labels" => %{"profile" => "strict"},
+                   "add_metadata" => %{
+                     "append_owners" => ["security"],
+                     "priority" => "high"
+                   }
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings, "strict")
+    assert policy["checks"] == ["format", "dialyzer"]
+    assert policy["labels"] == %{"tier" => "standard", "profile" => "strict"}
+    assert policy["metadata"] == %{"owners" => ["platform", "security"], "priority" => "high"}
+    refute Map.has_key?(policy, "append_checks")
+    refute Map.has_key?(policy, "add_labels")
+  end
+
+  test "workflow profile resolution applies replacements before additive fields" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "checks" => ["format"],
+                   "labels" => %{"tier" => "standard", "team" => "platform"}
+                 },
+                 "strict" => %{
+                   "append_checks" => ["dialyzer"],
+                   "checks" => ["smoke"],
+                   "add_labels" => %{"profile" => "strict"},
+                   "labels" => %{"tier" => "urgent"}
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings, "strict")
+    assert policy["checks"] == ["smoke", "dialyzer"]
+    assert policy["labels"] == %{"tier" => "urgent", "profile" => "strict"}
+  end
+
+  test "workflow profile resolution rejects unknown profile references" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}}
+      }
+    )
+
+    assert {:error, {:unknown_workflow_profile, "missing", ["default"]}} =
+             Config.effective_policy("missing")
+
+    assert {:error, :missing_default_workflow_profile} =
+             Schema.resolve_effective_policy(%Schema{profiles: %{}}, "default")
+
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{"delivery" => %{"pr_target" => "Human Review"}}
+               }
+             })
+
+    assert {:ok, _policy} = Schema.resolve_effective_policy(settings)
+    assert {:error, :blank_workflow_profile} = Schema.resolve_effective_policy(settings, "")
+    assert {:error, {:invalid_workflow_profile_ref, 123}} = Schema.resolve_effective_policy(settings, 123)
+  end
+
+  test "workflow profile resolution rejects invalid additive directives" do
+    baseline = %{
+      "default" => %{
+        "delivery" => %{"pr_target" => "Human Review"},
+        "checks" => ["format"],
+        "labels" => %{"tier" => "standard"}
+      }
+    }
+
+    cases = [
+      {%{"bad" => %{"add_checks" => %{"extra" => "dialyzer"}}}, "bad.checks cannot be merged with add_* policy field; expected_existing_map"},
+      {%{"bad" => %{"add_labels" => ["strict"]}}, "bad.labels cannot be merged with add_* policy field; expected_map"},
+      {%{"bad" => %{"append_labels" => ["strict"]}}, "bad.labels cannot be merged with append_* policy field; expected_existing_list"},
+      {%{"bad" => %{"append_checks" => "dialyzer"}}, "bad.checks cannot be merged with append_* policy field; expected_list"},
+      {%{"bad" => %{"metadata" => %{"add_flags" => "strict"}}}, "bad.metadata.flags cannot be merged with add_* policy field; expected_map"},
+      {%{"bad" => %{"append_items" => [%{"add_flags" => "strict"}]}}, "bad.items.0.flags cannot be merged with add_* policy field; expected_map"},
+      {%{"bad" => %{"add_delivery" => %{"mode" => "direct"}}}, "bad.delivery.mode not supported in v1"},
+      {%{"bad" => %{"delivery" => %{}}}, "bad.delivery.pr_target is required in resolved policy"}
+    ]
+
+    for {profile_override, expected_message} <- cases do
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{"profiles" => Map.merge(baseline, profile_override)})
+
+      assert message =~ expected_message
+    end
+  end
+
+  test "workflow policy refs are stable for equivalent effective policies" do
+    left =
+      %{
+        "profiles" => %{
+          "default" => %{
+            "delivery" => %{"pr_target" => "Human Review"},
+            "labels" => %{"team" => "platform", "tier" => "standard"},
+            "checks" => ["format", "test"]
+          }
+        }
+      }
+
+    right =
+      %{
+        "profiles" => %{
+          "default" => %{
+            "checks" => ["format", "test"],
+            "labels" => %{"tier" => "standard", "team" => "platform"},
+            "delivery" => %{"pr_target" => "Human Review"}
+          }
+        }
+      }
+
+    assert {:ok, left_settings} = Schema.parse(left)
+    assert {:ok, right_settings} = Schema.parse(right)
+    assert {:ok, left_policy} = Schema.resolve_effective_policy(left_settings, "default")
+    assert {:ok, right_policy} = Schema.resolve_effective_policy(right_settings, nil)
+
+    assert left_policy["policy_ref"] == right_policy["policy_ref"]
+
+    assert {:ok, changed_settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "Merging"},
+                   "labels" => %{"team" => "platform", "tier" => "standard"},
+                   "checks" => ["format", "test"]
+                 }
+               }
+             })
+
+    assert {:ok, changed_policy} = Schema.resolve_effective_policy(changed_settings, "default")
+    refute changed_policy["policy_ref"] == left_policy["policy_ref"]
+  end
+
   test "current WORKFLOW.md file is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
@@ -109,6 +346,9 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+
+    profiles = Map.get(config, "profiles", %{})
+    assert get_in(profiles, ["default", "delivery", "pr_target"]) == "Human Review"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -543,6 +783,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -551,7 +792,7 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    assert_due_in_range(due_at_ms, sent_at_ms, 500, 1_100)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -584,6 +825,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -591,7 +833,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, sent_at_ms, 39_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -623,6 +865,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    sent_at_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -630,7 +873,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, sent_at_ms, 9_000, 10_500)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -750,10 +993,11 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
+  defp assert_due_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_remaining_ms) do
+    delay_ms = due_at_ms - sent_at_ms
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
-    assert remaining_ms >= min_remaining_ms
+    assert delay_ms >= min_delay_ms
     assert remaining_ms <= max_remaining_ms
   end
 

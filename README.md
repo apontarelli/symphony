@@ -3,6 +3,10 @@
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
+Workflow behavior is versioned in [`elixir/WORKFLOW.md`](elixir/WORKFLOW.md), including typed
+profiles with a required `profiles.default.delivery.pr_target` baseline policy for delivery
+handoff.
+
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](.github/media/symphony-demo.mp4)
 
 _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
