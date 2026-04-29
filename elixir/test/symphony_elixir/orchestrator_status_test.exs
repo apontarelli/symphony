@@ -757,6 +757,166 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.codex_total_tokens == 0
   end
 
+  test "dispatch stores resolved policy metadata and keeps running policy stable across reload" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-policy-running-#{System.unique_integer([:positive])}"
+      )
+
+    issue = policy_issue("issue-policy-running", "MT-POLICY")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(test_root)
+      write_holding_codex!(codex_binary, "policy-running")
+
+      write_policy_workflow!(workspace_root, codex_binary,
+        target: "Merging",
+        checks: ["old-policy"],
+        prompt: "Policy {{ policy.policy_ref }} target {{ policy.delivery.pr_target }}"
+      )
+
+      ProfileBindings.set(%{
+        projects: [%{project_slug: "project", profile: "strict"}]
+      })
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      orchestrator_name = Module.concat(__MODULE__, :PolicyRunningOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        stop_orchestrator_and_workers(pid)
+      end)
+
+      assert %{running: [snapshot_entry]} =
+               wait_for_snapshot(
+                 pid,
+                 fn
+                   %{running: [%{issue_id: "issue-policy-running"}]} -> true
+                   _ -> false
+                 end,
+                 1_000
+               )
+
+      state = :sys.get_state(pid)
+      running_entry = state.running[issue.id]
+
+      assert running_entry.profile == "strict"
+      assert running_entry.target == "Merging"
+      assert running_entry.policy_ref == running_entry.policy["policy_ref"]
+      assert running_entry.policy["checks"] == ["old-policy"]
+
+      assert snapshot_entry.profile == "strict"
+      assert snapshot_entry.target == "Merging"
+      assert snapshot_entry.policy_ref == running_entry.policy_ref
+      assert snapshot_entry.policy == running_entry.policy
+
+      write_policy_workflow!(workspace_root, codex_binary,
+        target: "Human Review",
+        checks: ["new-policy"],
+        prompt: "Reloaded {{ policy.policy_ref }}"
+      )
+
+      assert {:ok, future_policy} = Config.issue_policy(%{issue | id: "issue-future"})
+      assert future_policy["delivery"]["pr_target"] == "Human Review"
+      assert future_policy["checks"] == ["new-policy"]
+      refute future_policy["policy_ref"] == running_entry.policy_ref
+
+      reloaded_state = :sys.get_state(pid)
+      assert reloaded_state.running[issue.id].policy_ref == running_entry.policy_ref
+      assert reloaded_state.running[issue.id].policy == running_entry.policy
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "retry queue preserves resolved policy and retry dispatch uses original policy after reload" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-policy-retry-#{System.unique_integer([:positive])}"
+      )
+
+    issue = policy_issue("issue-policy-retry", "MT-RETRY")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(test_root)
+      write_holding_codex!(codex_binary, "policy-retry")
+
+      write_policy_workflow!(workspace_root, codex_binary,
+        target: "Merging",
+        checks: ["retry-old"],
+        prompt: "Policy {{ policy.policy_ref }}"
+      )
+
+      ProfileBindings.set(%{
+        projects: [%{project_slug: "project", profile: "strict"}]
+      })
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+      orchestrator_name = Module.concat(__MODULE__, :PolicyRetryOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn ->
+        stop_orchestrator_and_workers(pid)
+      end)
+
+      original_entry =
+        wait_for_running_entry(pid, issue.id, fn running_entry ->
+          Map.get(running_entry, :retry_attempt) == 0 and is_map(Map.get(running_entry, :policy))
+        end)
+
+      original_policy = original_entry.policy
+      assert original_entry.profile == "strict"
+      assert original_entry.target == "Merging"
+
+      Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, original_entry.pid)
+
+      retry_entry =
+        wait_for_retry_entry(pid, issue.id, fn retry_entry ->
+          Map.get(retry_entry, :attempt) == 1
+        end)
+
+      assert retry_entry.policy == original_policy
+      assert retry_entry.profile == "strict"
+      assert retry_entry.target == "Merging"
+      assert retry_entry.policy_ref == original_policy["policy_ref"]
+
+      write_policy_workflow!(workspace_root, codex_binary,
+        target: "Human Review",
+        checks: ["retry-new"],
+        prompt: "Reloaded {{ policy.policy_ref }}"
+      )
+
+      assert {:ok, reloaded_policy} = Config.issue_policy(issue)
+      refute reloaded_policy["policy_ref"] == original_policy["policy_ref"]
+      assert reloaded_policy["checks"] == ["retry-new"]
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      send(pid, {:retry_issue, issue.id, retry_entry.retry_token})
+
+      retried_entry =
+        wait_for_running_entry(pid, issue.id, fn running_entry ->
+          Map.get(running_entry, :retry_attempt) == 1
+        end)
+
+      assert retried_entry.policy == original_policy
+      assert retried_entry.profile == "strict"
+      assert retried_entry.target == "Merging"
+      assert retried_entry.policy_ref == original_policy["policy_ref"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "orchestrator snapshot includes retry backoff entries" do
     orchestrator_name = Module.concat(__MODULE__, :RetryOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
@@ -1616,6 +1776,112 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end
   end
+
+  defp wait_for_retry_entry(pid, issue_id, predicate, timeout_ms \\ 1_000)
+       when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state_entry(pid, [:retry_attempts, issue_id], predicate, deadline_ms)
+  end
+
+  defp wait_for_running_entry(pid, issue_id, predicate, timeout_ms \\ 1_000)
+       when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state_entry(pid, [:running, issue_id], predicate, deadline_ms)
+  end
+
+  defp do_wait_for_state_entry(pid, path, predicate, deadline_ms) do
+    state = :sys.get_state(pid)
+    entry = state_entry(state, path)
+
+    if is_map(entry) and predicate.(entry) do
+      entry
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        flunk("timed out waiting for orchestrator state entry #{inspect(path)}: #{inspect(entry)}")
+      else
+        Process.sleep(5)
+        do_wait_for_state_entry(pid, path, predicate, deadline_ms)
+      end
+    end
+  end
+
+  defp state_entry(state, [section, issue_id]) when is_atom(section) and is_binary(issue_id) do
+    state
+    |> Map.get(section, %{})
+    |> Map.get(issue_id)
+  end
+
+  defp write_policy_workflow!(workspace_root, codex_binary, opts) do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: workspace_root,
+      codex_command: "#{codex_binary} app-server",
+      poll_interval_ms: 30_000,
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}, checks: ["default"]},
+        strict: %{delivery: %{pr_target: Keyword.fetch!(opts, :target)}, checks: Keyword.fetch!(opts, :checks)}
+      },
+      prompt: Keyword.fetch!(opts, :prompt)
+    )
+  end
+
+  defp policy_issue(issue_id, identifier) do
+    %Issue{
+      id: issue_id,
+      identifier: identifier,
+      title: "Policy carryover",
+      description: "Keep the resolved policy stable",
+      state: "In Progress",
+      project_slug: "project",
+      labels: []
+    }
+  end
+
+  defp write_holding_codex!(path, thread_suffix) do
+    File.write!(path, """
+    #!/bin/sh
+    count=0
+    while IFS= read -r line; do
+      count=$((count + 1))
+      case "$count" in
+        1)
+          printf '%s\\n' '{"id":1,"result":{}}'
+          ;;
+        3)
+          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-#{thread_suffix}"}}}'
+          ;;
+        4)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-#{thread_suffix}"}}}'
+          sleep 30
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(path, 0o755)
+  end
+
+  defp stop_orchestrator_and_workers(pid) when is_pid(pid) do
+    if Process.alive?(pid) do
+      pid
+      |> :sys.get_state()
+      |> stop_state_workers()
+
+      Process.exit(pid, :normal)
+    end
+  end
+
+  defp stop_state_workers(%{running: running}) when is_map(running) do
+    Enum.each(running, fn
+      {_issue_id, %{pid: worker_pid}} when is_pid(worker_pid) ->
+        Task.Supervisor.terminate_child(SymphonyElixir.TaskSupervisor, worker_pid)
+
+      _ ->
+        :ok
+    end)
+  end
+
+  defp stop_state_workers(_state), do: :ok
 
   defp graph_samples_from_rates(rates_per_bucket) do
     bucket_ms = 25_000
