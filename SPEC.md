@@ -565,6 +565,9 @@ Dynamic reload is REQUIRED:
   prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
+- Once an issue dispatch resolves workflow profile policy, that resolved policy MUST be carried by
+  the in-memory running/retry entry for current-process stability. Later reloads MUST NOT mutate an
+  already-running or already-retrying issue's resolved policy.
 - Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
   changes.
 - Extensions that manage their own listeners/resources (for example an HTTP server port change) MAY
@@ -732,6 +735,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
+- v1 does not require recovery of the resolved per-attempt workflow policy after process restart;
+  a recovered future dispatch MAY resolve policy from the current workflow/runtime config.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -793,6 +798,8 @@ Retry entry creation:
 
 - Cancel any existing retry timer for the same issue.
 - Store `attempt`, `identifier`, `error`, `due_at_ms`, and new timer handle.
+- Preserve the resolved workflow policy metadata from the running attempt when available:
+  `profile`, `target`, `policy_ref`, and the resolved `policy` object.
 
 Backoff formula:
 
@@ -1348,6 +1355,8 @@ SHOULD return:
 
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count`
+- running and retry rows SHOULD include resolved workflow policy metadata when available:
+  `profile`, `target`, `policy_ref`, and the resolved `policy` object
 - `retrying` (list of retry queue rows)
 - `codex_totals`
   - `input_tokens`

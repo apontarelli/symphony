@@ -187,6 +187,11 @@ codex:
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
+- A running or retrying issue keeps the resolved workflow profile policy selected at dispatch time.
+  Hot-reloaded workflow/profile changes apply to future dispatches, not to the in-memory policy of
+  already-running or already-retrying issues.
+- v1 does not persist attempt policy in a durable store. After a process restart, any recovered
+  future dispatch resolves policy from the current workflow/runtime config.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
