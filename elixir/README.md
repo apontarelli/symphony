@@ -100,6 +100,10 @@ agent:
   max_turns: 20
 codex:
   command: codex app-server
+profiles:
+  default:
+    delivery:
+      pr_target: Human Review
 ---
 
 You are working on a Linear issue {{ issue.identifier }}.
@@ -110,6 +114,15 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- `profiles.default.delivery.pr_target` is required. Additional profiles may override `default`
+  during effective-policy resolution.
+- Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
+  additions and `add_<field>` for map additions. The resolved policy includes a stable
+  `policy_ref` short hash. Replacement fields are applied before additive directives when both
+  appear in the same profile.
+- The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
+  `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
+  supported core fields.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`

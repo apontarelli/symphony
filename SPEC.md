@@ -333,6 +333,7 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `codex`
+- `profiles`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -453,6 +454,40 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+#### 5.3.7 `profiles` (object)
+
+Profiles define repository-owned workflow policy. A `default` profile is REQUIRED and acts as the
+baseline policy. A runtime MAY resolve one selected profile on top of `default`; v1 does not support
+profile-to-profile inheritance or more than one selected override layer.
+
+Fields:
+
+- `default` (object)
+  - REQUIRED baseline policy.
+- `<profile_name>` (object)
+  - OPTIONAL selected profile override.
+
+Merge rules:
+
+- Scalar, list, and map fields replace by default when present in the selected profile.
+- `append_<field>` appends list values to `<field>`.
+- `add_<field>` merges map values into `<field>`.
+- Replacement fields are applied before `append_*` and `add_*` directives so same-profile merges
+  resolve deterministically.
+- Additive helper fields are directives only and MUST NOT remain in the resolved effective policy.
+
+Resolved policy requirements:
+
+- `delivery.pr_target` (string)
+  - REQUIRED in the resolved effective policy.
+  - The only v1 core delivery field.
+- `delivery.mode`, `delivery.base_ref`, `delivery.allow_main_merge`, and
+  `delivery.require_feature_flag`
+  - Not part of v1 core delivery policy.
+- `policy_ref`
+  - Implementations MUST compute a stable short hash from the resolved effective policy.
+  - The hash MUST be independent of map key order.
 
 ### 5.4 Prompt Template Contract
 
@@ -594,6 +629,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `profiles`: object, see Section 5.3.7; requires `default` plus optional named profiles, resolves
+  with replace-by-default plus explicit `append_*`/`add_*` directives, and requires
+  `delivery.pr_target` plus a stable `policy_ref` hash in the effective policy
 
 ## 7. Orchestration State Machine
 

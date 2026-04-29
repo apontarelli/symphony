@@ -8,6 +8,10 @@ defmodule SymphonyElixir.Config.Schema do
   alias SymphonyElixir.PathSafety
 
   @primary_key false
+  @policy_ref_length 12
+  @profile_policy_ref_key "policy_ref"
+  @delivery_pr_target_key "pr_target"
+  @delivery_v1_fields MapSet.new([@delivery_pr_target_key])
 
   @type t :: %__MODULE__{}
 
@@ -271,6 +275,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    field(:profiles, :map, default: %{})
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -286,6 +291,15 @@ defmodule SymphonyElixir.Config.Schema do
 
       {:error, changeset} ->
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
+    end
+  end
+
+  @spec resolve_effective_policy(%__MODULE__{}, String.t() | atom() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_effective_policy(settings, profile_ref \\ "default") do
+    with {:ok, profile_name} <- normalize_profile_reference(profile_ref),
+         {:ok, policy} <- resolve_profile_policy(settings.profiles, profile_name) do
+      {:ok, Map.put(policy, @profile_policy_ref_key, policy_ref(policy))}
     end
   end
 
@@ -353,7 +367,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [])
+    |> cast(attrs, [:profiles])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -363,6 +377,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> validate_profiles()
   end
 
   defp finalize_settings(settings) do
@@ -384,6 +399,305 @@ defmodule SymphonyElixir.Config.Schema do
     }
 
     %{settings | tracker: tracker, workspace: workspace, codex: codex}
+  end
+
+  defp validate_profiles(%{valid?: false} = changeset), do: changeset
+
+  defp validate_profiles(changeset) do
+    changeset
+    |> get_field(:profiles)
+    |> profile_validation_errors()
+    |> Enum.reduce(changeset, fn message, acc -> add_error(acc, :profiles, message) end)
+  end
+
+  defp profile_validation_errors(profiles) do
+    missing_default_errors =
+      if Map.has_key?(profiles, "default") do
+        []
+      else
+        ["default profile is required"]
+      end
+
+    shape_errors = Enum.flat_map(profiles, fn {name, policy} -> validate_profile_shape(name, policy) end)
+    resolution_errors = validate_resolvable_profiles(profiles, shape_errors)
+
+    missing_default_errors ++ shape_errors ++ resolution_errors
+  end
+
+  defp validate_profile_shape(name, policy) when is_map(policy) do
+    reserved_errors =
+      if Map.has_key?(policy, @profile_policy_ref_key) do
+        ["#{name}.#{@profile_policy_ref_key} is reserved"]
+      else
+        []
+      end
+
+    reserved_errors ++ validate_profile_delivery_shape(name, Map.get(policy, "delivery"))
+  end
+
+  defp validate_profile_shape(name, _policy), do: ["#{name} profile must be a map"]
+
+  defp validate_profile_delivery_shape(_name, nil), do: []
+
+  defp validate_profile_delivery_shape(name, delivery) when is_map(delivery) do
+    unsupported_errors =
+      delivery
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(@delivery_v1_fields, &1))
+      |> Enum.sort()
+      |> Enum.map(fn field -> "#{name}.delivery.#{field} is not supported in v1" end)
+
+    pr_target_errors =
+      case Map.get(delivery, @delivery_pr_target_key) do
+        value when is_binary(value) ->
+          if String.trim(value) == "", do: ["#{name}.delivery.pr_target is required"], else: []
+
+        nil ->
+          []
+
+        _value ->
+          ["#{name}.delivery.pr_target must be a string"]
+      end
+
+    unsupported_errors ++ pr_target_errors
+  end
+
+  defp validate_profile_delivery_shape(name, _delivery), do: ["#{name}.delivery must be a map"]
+
+  defp validate_resolvable_profiles(profiles, shape_errors) do
+    if Map.has_key?(profiles, "default") and shape_errors == [] do
+      profiles
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.flat_map(&profile_resolution_errors(profiles, &1))
+    else
+      []
+    end
+  end
+
+  defp profile_resolution_errors(profiles, profile_name) do
+    case resolve_profile_policy(profiles, profile_name) do
+      {:ok, _policy} -> []
+      {:error, reason} -> [format_policy_resolution_error(reason)]
+    end
+  end
+
+  defp normalize_profile_reference(nil), do: {:ok, "default"}
+
+  defp normalize_profile_reference(profile_ref) when is_atom(profile_ref) or is_binary(profile_ref) do
+    profile_name = to_string(profile_ref)
+
+    if String.trim(profile_name) == "" do
+      {:error, :blank_workflow_profile}
+    else
+      {:ok, profile_name}
+    end
+  end
+
+  defp normalize_profile_reference(profile_ref), do: {:error, {:invalid_workflow_profile_ref, profile_ref}}
+
+  defp resolve_profile_policy(profiles, profile_name) when is_map(profiles) do
+    with {:ok, default_policy} <- fetch_profile_policy(profiles, "default"),
+         {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
+         {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
+         {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
+         :ok <- validate_resolved_delivery(policy, profile_name) do
+      {:ok, policy}
+    end
+  end
+
+  defp fetch_profile_policy(profiles, "default") do
+    case Map.fetch(profiles, "default") do
+      {:ok, policy} -> {:ok, policy}
+      :error -> {:error, :missing_default_workflow_profile}
+    end
+  end
+
+  defp fetch_profile_policy(profiles, profile_name) do
+    case Map.fetch(profiles, profile_name) do
+      {:ok, policy} -> {:ok, policy}
+      :error -> {:error, {:unknown_workflow_profile, profile_name, Map.keys(profiles) |> Enum.sort()}}
+    end
+  end
+
+  defp apply_selected_policy(default_effective, _selected_policy, "default"), do: {:ok, default_effective}
+
+  defp apply_selected_policy(default_effective, selected_policy, profile_name) do
+    apply_policy_overrides(default_effective, selected_policy, [profile_name])
+  end
+
+  defp apply_policy_overrides(base, overrides, path) when is_map(base) and is_map(overrides) do
+    overrides
+    |> Enum.sort_by(fn {raw_key, _value} -> policy_override_sort_key(raw_key) end)
+    |> Enum.reduce_while({:ok, base}, fn {raw_key, value}, {:ok, acc} ->
+      key = to_string(raw_key)
+
+      case apply_policy_override(acc, key, value, path) do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp policy_override_sort_key(raw_key) do
+    key = to_string(raw_key)
+
+    if String.starts_with?(key, "add_") or String.starts_with?(key, "append_") do
+      {1, key}
+    else
+      {0, key}
+    end
+  end
+
+  defp apply_policy_override(acc, key, value, path) do
+    cond do
+      String.starts_with?(key, "add_") ->
+        apply_add_policy_override(acc, key, value, path)
+
+      String.starts_with?(key, "append_") ->
+        apply_append_policy_override(acc, key, value, path)
+
+      true ->
+        apply_replace_policy_override(acc, key, value, path)
+    end
+  end
+
+  defp apply_add_policy_override(acc, key, value, path) do
+    target_key = String.replace_prefix(key, "add_", "")
+    target_path = path ++ [target_key]
+
+    with {:ok, merged} <- add_policy_map(Map.get(acc, target_key, %{}), value, target_path) do
+      {:ok, Map.put(acc, target_key, merged)}
+    end
+  end
+
+  defp apply_append_policy_override(acc, key, value, path) do
+    target_key = String.replace_prefix(key, "append_", "")
+    target_path = path ++ [target_key]
+
+    with {:ok, merged} <- append_policy_list(Map.get(acc, target_key, []), value, target_path) do
+      {:ok, Map.put(acc, target_key, merged)}
+    end
+  end
+
+  defp apply_replace_policy_override(acc, key, value, path) do
+    with {:ok, normalized} <- normalize_policy_value(value, path ++ [key]) do
+      {:ok, Map.put(acc, key, normalized)}
+    end
+  end
+
+  defp normalize_policy_value(value, path) when is_map(value), do: apply_policy_overrides(%{}, value, path)
+
+  defp normalize_policy_value(value, path) when is_list(value) do
+    value
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {entry, index}, {:ok, acc} ->
+      case normalize_policy_value(entry, path ++ [Integer.to_string(index)]) do
+        {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp normalize_policy_value(value, _path), do: {:ok, value}
+
+  defp add_policy_map(existing, value, path) when is_map(existing) and is_map(value) do
+    apply_policy_overrides(existing, value, path)
+  end
+
+  defp add_policy_map(_existing, value, path) when is_map(value) do
+    {:error, {:invalid_policy_add_field, Enum.join(path, "."), :expected_existing_map}}
+  end
+
+  defp add_policy_map(_existing, _value, path) do
+    {:error, {:invalid_policy_add_field, Enum.join(path, "."), :expected_map}}
+  end
+
+  defp append_policy_list(existing, value, path) when is_list(existing) and is_list(value) do
+    case normalize_policy_value(value, path) do
+      {:ok, normalized} -> {:ok, existing ++ normalized}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp append_policy_list(_existing, value, path) when is_list(value) do
+    {:error, {:invalid_policy_append_field, Enum.join(path, "."), :expected_existing_list}}
+  end
+
+  defp append_policy_list(_existing, _value, path) do
+    {:error, {:invalid_policy_append_field, Enum.join(path, "."), :expected_list}}
+  end
+
+  defp validate_resolved_delivery(policy, profile_name) do
+    case Map.get(policy, "delivery") do
+      %{} = delivery ->
+        unsupported_fields =
+          delivery
+          |> Map.keys()
+          |> Enum.reject(&MapSet.member?(@delivery_v1_fields, &1))
+          |> Enum.sort()
+
+        cond do
+          unsupported_fields != [] ->
+            {:error, {:unsupported_delivery_policy_fields, profile_name, unsupported_fields}}
+
+          valid_pr_target?(Map.get(delivery, @delivery_pr_target_key)) ->
+            :ok
+
+          true ->
+            {:error, {:missing_delivery_pr_target, profile_name}}
+        end
+
+      _delivery ->
+        {:error, {:missing_delivery_pr_target, profile_name}}
+    end
+  end
+
+  defp valid_pr_target?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp policy_ref(policy) do
+    :sha256
+    |> :crypto.hash(canonical_policy(policy))
+    |> Base.encode16(case: :lower)
+    |> binary_part(0, @policy_ref_length)
+  end
+
+  defp canonical_policy(value) when is_map(value) do
+    encoded_fields =
+      value
+      |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+      |> Enum.map_join(",", fn {key, field_value} ->
+        Jason.encode!(to_string(key)) <> ":" <> canonical_policy(field_value)
+      end)
+
+    "{" <> encoded_fields <> "}"
+  end
+
+  defp canonical_policy(value) when is_list(value) do
+    "[" <> Enum.map_join(value, ",", &canonical_policy/1) <> "]"
+  end
+
+  defp canonical_policy(value), do: Jason.encode!(value)
+
+  defp format_policy_resolution_error({:missing_delivery_pr_target, profile_name}) do
+    "#{profile_name}.delivery.pr_target is required in resolved policy"
+  end
+
+  defp format_policy_resolution_error({:unsupported_delivery_policy_fields, profile_name, fields}) do
+    formatted_fields = Enum.map_join(fields, ", ", &"#{profile_name}.delivery.#{&1}")
+    "#{formatted_fields} not supported in v1"
+  end
+
+  defp format_policy_resolution_error({:invalid_policy_add_field, path, expected}) do
+    "#{path} cannot be merged with add_* policy field; #{expected}"
+  end
+
+  defp format_policy_resolution_error({:invalid_policy_append_field, path, expected}) do
+    "#{path} cannot be merged with append_* policy field; #{expected}"
   end
 
   defp normalize_keys(value) when is_map(value) do

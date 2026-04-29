@@ -98,6 +98,13 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec effective_policy(String.t() | atom() | nil) :: {:ok, map()} | {:error, term()}
+  def effective_policy(profile_ref \\ "default") do
+    with {:ok, settings} <- settings() do
+      Schema.resolve_effective_policy(settings, profile_ref)
+    end
+  end
+
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do

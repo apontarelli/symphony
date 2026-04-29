@@ -34,6 +34,10 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+profiles:
+  default:
+    delivery:
+      pr_target: Human Review
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`
