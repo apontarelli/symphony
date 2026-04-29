@@ -205,6 +205,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
         state: "running",
         session_id: "thread-1234567890",
         codex_app_server_pid: "4242",
+        profile: "default",
+        target: "Human Review",
         codex_total_tokens: 0,
         runtime_seconds: 0,
         turn_count: 1,
@@ -220,6 +222,8 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
       %{
         issue_id: "issue-1",
         identifier: "MT-000",
+        profile: "default",
+        target: "Human Review",
         attempt: 1,
         due_in_ms: 1_000,
         error: "retry scheduled"

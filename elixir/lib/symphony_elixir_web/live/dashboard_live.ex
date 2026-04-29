@@ -133,6 +133,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <colgroup>
                   <col style="width: 12rem;" />
                   <col style="width: 8rem;" />
+                  <col style="width: 12rem;" />
                   <col style="width: 7.5rem;" />
                   <col style="width: 8.5rem;" />
                   <col />
@@ -142,6 +143,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr>
                     <th>Issue</th>
                     <th>State</th>
+                    <th>Policy</th>
                     <th>Session</th>
                     <th>Runtime / turns</th>
                     <th>Codex update</th>
@@ -160,6 +162,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <span class={state_badge_class(entry.state)}>
                         <%= entry.state %>
                       </span>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span><%= entry.profile || "n/a" %></span>
+                        <span class="muted"><%= entry.target || "n/a" %></span>
+                      </div>
                     </td>
                     <td>
                       <div class="session-stack">
@@ -222,6 +230,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <thead>
                   <tr>
                     <th>Issue</th>
+                    <th>Policy</th>
                     <th>Attempt</th>
                     <th>Due at</th>
                     <th>Error</th>
@@ -233,6 +242,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
+                      </div>
+                    </td>
+                    <td>
+                      <div class="detail-stack">
+                        <span><%= entry.profile || "n/a" %></span>
+                        <span class="muted"><%= entry.target || "n/a" %></span>
                       </div>
                     </td>
                     <td><%= entry.attempt %></td>

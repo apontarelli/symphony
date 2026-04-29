@@ -350,6 +350,13 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
+                 "profile" => "default",
+                 "target" => "Human Review",
+                 "policy_ref" => "policy-http",
+                 "policy" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "policy_ref" => "policy-http"
+                 },
                  "session_id" => "thread-http",
                  "turn_count" => 7,
                  "last_event" => "notification",
@@ -367,7 +374,15 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
-                 "workspace_path" => nil
+                 "workspace_path" => nil,
+                 "profile" => "strict",
+                 "target" => "Merging",
+                 "policy_ref" => "policy-retry",
+                 "policy" => %{
+                   "checks" => ["mix test"],
+                   "delivery" => %{"pr_target" => "Merging"},
+                   "policy_ref" => "policy-retry"
+                 }
                }
              ],
              "codex_totals" => %{
@@ -394,6 +409,13 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => %{
                "worker_host" => nil,
                "workspace_path" => nil,
+               "profile" => "default",
+               "target" => "Human Review",
+               "policy_ref" => "policy-http",
+               "policy" => %{
+                 "delivery" => %{"pr_target" => "Human Review"},
+                 "policy_ref" => "policy-http"
+               },
                "session_id" => "thread-http",
                "turn_count" => 7,
                "state" => "In Progress",
@@ -412,7 +434,21 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     conn = get(build_conn(), "/api/v1/MT-RETRY")
 
-    assert %{"status" => "retrying", "retry" => %{"attempt" => 2, "error" => "boom"}} =
+    assert %{
+             "status" => "retrying",
+             "retry" => %{
+               "attempt" => 2,
+               "error" => "boom",
+               "profile" => "strict",
+               "target" => "Merging",
+               "policy_ref" => "policy-retry",
+               "policy" => %{
+                 "checks" => ["mix test"],
+                 "delivery" => %{"pr_target" => "Merging"},
+                 "policy_ref" => "policy-retry"
+               }
+             }
+           } =
              json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
@@ -542,6 +578,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Operations Dashboard"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
+    assert html =~ "Human Review"
+    assert html =~ "Merging"
     assert html =~ "rendered"
     assert html =~ "Runtime"
     assert html =~ "Live"
@@ -692,6 +730,13 @@ defmodule SymphonyElixir.ExtensionsTest do
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 7,
+          profile: "default",
+          target: "Human Review",
+          policy_ref: "policy-http",
+          policy: %{
+            "delivery" => %{"pr_target" => "Human Review"},
+            "policy_ref" => "policy-http"
+          },
           codex_app_server_pid: nil,
           last_codex_message: "rendered",
           last_codex_timestamp: nil,
@@ -708,6 +753,14 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-RETRY",
           attempt: 2,
           due_in_ms: 2_000,
+          profile: "strict",
+          target: "Merging",
+          policy_ref: "policy-retry",
+          policy: %{
+            "checks" => ["mix test"],
+            "delivery" => %{"pr_target" => "Merging"},
+            "policy_ref" => "policy-retry"
+          },
           error: "boom"
         }
       ],

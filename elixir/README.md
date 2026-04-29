@@ -147,7 +147,14 @@ project binding must use exactly one of `project_id` or `project_slug`.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
   runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base
-  selection, review gates, and landing guardrails.
+  selection, review gates, and landing guardrails. Symphony also appends a compact
+  selected-profile block to the first agent prompt with the exact workpad stamp, profile prompt
+  rules (`prompt.rules`, `prompt_rules`, or `prompt_requirements`), validation requirements
+  (`checks`, `validation`, or `validation_requirements`), and review requirements (`review` or
+  `review_requirements`).
+- The workpad stamp format is
+  `Policy: profile=<name> target=<pr_target> policy_ref=<short-hash>`. Explicit CLI or override
+  metadata appends `override=<source>`; normal project/profile binding selection does not.
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.

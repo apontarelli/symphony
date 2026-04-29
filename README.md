@@ -4,9 +4,10 @@ Symphony turns project work into isolated, autonomous implementation runs, allow
 work instead of supervising coding agents.
 
 Workflow behavior is versioned in [`elixir/WORKFLOW.md`](elixir/WORKFLOW.md), including typed
-profiles with a required `profiles.default.delivery.pr_target` PR target-branch baseline policy.
-Operator-local Linear project bindings can select those profiles at runtime without committing
-project-specific IDs to the workflow file.
+profiles with a required `profiles.default.delivery.pr_target` baseline policy for delivery
+handoff. Operator-local Linear project bindings can select those profiles at runtime without
+committing project-specific IDs to the workflow file. The selected profile and delivery target are
+surfaced in agent prompts, workpads, and dashboards so each run has a compact policy audit trail.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](.github/media/symphony-demo.mp4)
 

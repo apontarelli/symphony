@@ -204,6 +204,120 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(policy, "add_labels")
   end
 
+  test "prompt builder appends selected profile rules and workpad stamp to shared prompt" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Shared repository rule for {{ issue.identifier }}.",
+      profiles: %{
+        default: %{delivery: %{pr_target: "Human Review"}},
+        strict: %{
+          delivery: %{pr_target: "Merging"},
+          prompt: %{rules: ["Use the strict profile harness."]},
+          checks: ["mix test"],
+          review: %{mode: "strict"}
+        }
+      }
+    )
+
+    issue = %Issue{
+      id: "issue-prompt-policy",
+      identifier: "SID-PROMPT",
+      title: "Prompt policy",
+      state: "Todo"
+    }
+
+    assert {:ok, policy} = Config.effective_policy("strict")
+
+    policy =
+      Map.put(policy, "policy_metadata", %{
+        "source" => "project_binding",
+        "profile" => "strict"
+      })
+
+    prompt = PromptBuilder.build_prompt(issue, policy: policy)
+
+    assert prompt =~ "Shared repository rule for SID-PROMPT."
+    assert prompt =~ "## Selected Workflow Profile"
+    assert prompt =~ "Policy: profile=strict target=Merging policy_ref=#{policy["policy_ref"]}"
+    assert prompt =~ "before implementation work starts"
+    assert prompt =~ "Use the strict profile harness."
+    assert prompt =~ "Validation requirements:"
+    assert prompt =~ "checks: mix test"
+    assert prompt =~ "Review requirements:"
+    assert prompt =~ "review:"
+    assert prompt =~ "\"mode\":\"strict\""
+  end
+
+  test "workpad policy stamp stays concise unless an explicit override selected the policy" do
+    base_policy = %{
+      "delivery" => %{"pr_target" => "Human Review"},
+      "policy_ref" => "abc123def456",
+      "policy_metadata" => %{"source" => "project_binding", "profile" => "strict"}
+    }
+
+    assert PromptBuilder.workpad_policy_stamp(base_policy) ==
+             "Policy: profile=strict target=Human Review policy_ref=abc123def456"
+
+    override_policy =
+      put_in(base_policy, ["policy_metadata"], %{
+        "source" => "cli_override",
+        "profile" => "strict",
+        "cli_override" => true
+      })
+
+    assert PromptBuilder.workpad_policy_stamp(override_policy) ==
+             "Policy: profile=strict target=Human Review policy_ref=abc123def456 override=cli_override"
+
+    override_source_policy =
+      put_in(base_policy, ["policy_metadata"], %{
+        "profile" => "strict",
+        "override_source" => "operator_override"
+      })
+
+    assert PromptBuilder.workpad_policy_stamp(override_source_policy) ==
+             "Policy: profile=strict target=Human Review policy_ref=abc123def456 override=operator_override"
+
+    legacy_override_policy =
+      put_in(base_policy, ["policy_metadata"], %{
+        "profile" => "strict",
+        "override" => "env_override"
+      })
+
+    assert PromptBuilder.workpad_policy_stamp(legacy_override_policy) ==
+             "Policy: profile=strict target=Human Review policy_ref=abc123def456 override=env_override"
+
+    assert PromptBuilder.workpad_policy_stamp(%{"delivery" => "unsupported"}) ==
+             "Policy: profile=default target=unknown policy_ref=unknown"
+  end
+
+  test "prompt builder renders alternate profile policy requirement shapes" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "Shared body")
+
+    policy = %{
+      "delivery" => %{"pr_target" => "Human Review"},
+      "policy_ref" => "def456abc123",
+      "prompt_rules" => %{},
+      "prompt_requirements" => :audit,
+      "prompt" => %{"summary" => "Fallback prompt map"},
+      "checks" => [123],
+      "validation" => [],
+      "validation_requirements" => %{},
+      "review" => [],
+      "review_requirements" => ["human signoff"]
+    }
+
+    prompt =
+      PromptBuilder.build_prompt(%Issue{identifier: "SID-ALT", title: "Alt", state: "Todo"},
+        policy: policy
+      )
+
+    assert prompt =~ "Shared body"
+    assert prompt =~ "Policy: profile=default target=Human Review policy_ref=def456abc123"
+    assert prompt =~ "summary: Fallback prompt map"
+    assert prompt =~ "audit"
+    assert prompt =~ "checks: 123"
+    assert prompt =~ "review_requirements: human signoff"
+  end
+
   test "workflow profile resolution applies replacements before additive fields" do
     assert {:ok, settings} =
              Schema.parse(%{
@@ -1395,7 +1509,7 @@ defmodule SymphonyElixir.CoreTest do
       ]
     }
 
-    assert PromptBuilder.build_prompt(issue) == "Ticket MT-701"
+    assert PromptBuilder.build_prompt(issue, policy: %{}) == "Ticket MT-701"
   end
 
   test "prompt builder uses strict variable rendering" do
@@ -1593,7 +1707,7 @@ defmodule SymphonyElixir.CoreTest do
       labels: []
     }
 
-    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+    prompt = PromptBuilder.build_prompt(issue, attempt: 2, policy: %{})
 
     assert prompt == "Retry #2"
   end

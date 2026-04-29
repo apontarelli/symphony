@@ -17,13 +17,14 @@ defmodule SymphonyElixir.StatusDashboard do
   @sparkline_blocks ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
   @running_id_width 8
   @running_stage_width 14
+  @running_policy_width 22
   @running_pid_width 8
   @running_age_width 12
   @running_tokens_width 10
   @running_session_width 14
   @running_event_default_width 44
   @running_event_min_width 12
-  @running_row_chrome_width 10
+  @running_row_chrome_width 11
   @default_terminal_columns 115
 
   @ansi_reset IO.ANSI.reset()
@@ -591,6 +592,7 @@ defmodule SymphonyElixir.StatusDashboard do
     issue = format_cell(running_entry.identifier || "unknown", @running_id_width)
     state = running_entry.state || "unknown"
     state_display = format_cell(to_string(state), @running_stage_width)
+    policy = running_entry |> policy_label() |> format_cell(@running_policy_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
     pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
     total_tokens = running_entry.codex_total_tokens || 0
@@ -618,6 +620,8 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize(issue, @ansi_cyan),
       " ",
       colorize(state_display, status_color),
+      " ",
+      colorize(policy, @ansi_gray),
       " ",
       colorize(pid, @ansi_yellow),
       " ",
@@ -662,14 +666,26 @@ defmodule SymphonyElixir.StatusDashboard do
     attempt = retry_entry.attempt || 0
     due_in_ms = retry_entry.due_in_ms || 0
     error = format_retry_error(retry_entry.error)
+    policy = retry_policy_fields(retry_entry)
 
     "│  #{colorize("↻", @ansi_orange)} " <>
       colorize("#{identifier}", @ansi_red) <>
       " " <>
+      policy <>
       colorize("attempt=#{attempt}", @ansi_yellow) <>
       colorize(" in ", @ansi_dim) <>
       colorize(next_in_words(due_in_ms), @ansi_cyan) <>
       error
+  end
+
+  defp retry_policy_fields(retry_entry) do
+    case {Map.get(retry_entry, :profile), Map.get(retry_entry, :target)} do
+      {nil, nil} ->
+        ""
+
+      {profile, target} ->
+        colorize("profile=#{policy_part(profile)} target=#{policy_part(target)} ", @ansi_gray)
+    end
   end
 
   defp next_in_words(due_in_ms) when is_integer(due_in_ms) do
@@ -716,6 +732,16 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_runtime_and_turns(seconds, _turn_count), do: format_runtime_seconds(seconds)
 
+  defp policy_label(entry) when is_map(entry) do
+    case {Map.get(entry, :profile), Map.get(entry, :target)} do
+      {nil, nil} -> "n/a"
+      {profile, target} -> "#{policy_part(profile)}/#{policy_part(target)}"
+    end
+  end
+
+  defp policy_part(nil), do: "n/a"
+  defp policy_part(value), do: to_string(value)
+
   defp format_count(nil), do: "0"
 
   defp format_count(value) when is_integer(value) do
@@ -741,6 +767,7 @@ defmodule SymphonyElixir.StatusDashboard do
       [
         format_cell("ID", @running_id_width),
         format_cell("STAGE", @running_stage_width),
+        format_cell("PROFILE/TARGET", @running_policy_width),
         format_cell("PID", @running_pid_width),
         format_cell("AGE / TURN", @running_age_width),
         format_cell("TOKENS", @running_tokens_width),
@@ -756,11 +783,12 @@ defmodule SymphonyElixir.StatusDashboard do
     separator_width =
       @running_id_width +
         @running_stage_width +
+        @running_policy_width +
         @running_pid_width +
         @running_age_width +
         @running_tokens_width +
         @running_session_width +
-        running_event_width + 6
+        running_event_width + 7
 
     "│   " <> colorize(String.duplicate("─", separator_width), @ansi_gray)
   end
@@ -777,6 +805,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp fixed_running_width do
     @running_id_width +
       @running_stage_width +
+      @running_policy_width +
       @running_pid_width +
       @running_age_width +
       @running_tokens_width +

@@ -102,6 +102,10 @@ defmodule SymphonyElixirWeb.Presenter do
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
+      profile: Map.get(entry, :profile),
+      target: Map.get(entry, :target),
+      policy_ref: Map.get(entry, :policy_ref),
+      policy: Map.get(entry, :policy),
       session_id: entry.session_id,
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
@@ -124,7 +128,11 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(entry.due_in_ms),
       error: entry.error,
       worker_host: Map.get(entry, :worker_host),
-      workspace_path: Map.get(entry, :workspace_path)
+      workspace_path: Map.get(entry, :workspace_path),
+      profile: Map.get(entry, :profile),
+      target: Map.get(entry, :target),
+      policy_ref: Map.get(entry, :policy_ref),
+      policy: Map.get(entry, :policy)
     }
   end
 
@@ -132,6 +140,10 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
+      profile: Map.get(running, :profile),
+      target: Map.get(running, :target),
+      policy_ref: Map.get(running, :policy_ref),
+      policy: Map.get(running, :policy),
       session_id: running.session_id,
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
@@ -153,7 +165,11 @@ defmodule SymphonyElixirWeb.Presenter do
       due_at: due_at_iso8601(retry.due_in_ms),
       error: retry.error,
       worker_host: Map.get(retry, :worker_host),
-      workspace_path: Map.get(retry, :workspace_path)
+      workspace_path: Map.get(retry, :workspace_path),
+      profile: Map.get(retry, :profile),
+      target: Map.get(retry, :target),
+      policy_ref: Map.get(retry, :policy_ref),
+      policy: Map.get(retry, :policy)
     }
   end
 
