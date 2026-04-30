@@ -3,9 +3,10 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   Executes client-side tool calls requested by Codex app-server turns.
   """
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{Linear.Client, VcsHandoff}
 
   @linear_graphql_tool "linear_graphql"
+  @vcs_handoff_tool "symphony_git_handoff"
   @linear_graphql_description """
   Execute a raw GraphQL query or mutation against Linear using Symphony's configured auth.
   """
@@ -25,12 +26,88 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   }
+  @vcs_handoff_description """
+  Run Symphony's host-owned Git handoff using a validated changed-file manifest.
+  """
+  @vcs_handoff_input_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "required" => [],
+    "properties" => %{
+      "mode" => %{
+        "type" => "string",
+        "enum" => ["preflight", "handoff"],
+        "description" => "Use preflight to check host source/Git metadata writes, or handoff to fetch, commit, push, and optionally publish a PR."
+      },
+      "workspace" => %{
+        "type" => "string",
+        "description" => "Optional workspace path. Defaults to the current Codex session workspace."
+      },
+      "changedFiles" => %{
+        "type" => "array",
+        "items" => %{"type" => "string"},
+        "description" => "Bounded relative path manifest to stage and commit."
+      },
+      "validationEvidence" => %{
+        "type" => "array",
+        "items" => %{"type" => "string"},
+        "description" => "Validation commands or fixture evidence to record in the commit message."
+      },
+      "issueIdentifier" => %{
+        "type" => "string",
+        "description" => "Linear issue identifier. Defaults to the current issue."
+      },
+      "linearIssueId" => %{
+        "type" => "string",
+        "description" => "Linear issue UUID used for PR attachment. Defaults to the current issue."
+      },
+      "commitSummary" => %{
+        "type" => "string",
+        "description" => "Conventional Commit subject text after type/scope."
+      },
+      "commitType" => %{
+        "type" => "string",
+        "description" => "Conventional Commit type. Defaults to feat."
+      },
+      "commitScope" => %{
+        "type" => "string",
+        "description" => "Optional Conventional Commit scope."
+      },
+      "taskBranch" => %{
+        "type" => "string",
+        "description" => "Remote branch to push as HEAD:<taskBranch>."
+      },
+      "baseBranch" => %{
+        "type" => "string",
+        "description" => "PR base branch and remote base verification target. Defaults to main."
+      },
+      "remote" => %{
+        "type" => "string",
+        "description" => "Git remote. Defaults to origin."
+      },
+      "publishPr" => %{
+        "type" => "boolean",
+        "description" => "When true, create or update a GitHub PR and attach it to Linear when possible."
+      },
+      "prTitle" => %{
+        "type" => "string",
+        "description" => "PR title used when publishPr is true."
+      },
+      "prBody" => %{
+        "type" => "string",
+        "description" => "PR body used when publishPr is true."
+      }
+    }
+  }
 
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
       @linear_graphql_tool ->
         execute_linear_graphql(arguments, opts)
+
+      @vcs_handoff_tool ->
+        execute_vcs_handoff(arguments, opts)
 
       other ->
         failure_response(%{
@@ -49,6 +126,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "name" => @linear_graphql_tool,
         "description" => @linear_graphql_description,
         "inputSchema" => @linear_graphql_input_schema
+      },
+      %{
+        "name" => @vcs_handoff_tool,
+        "description" => @vcs_handoff_description,
+        "inputSchema" => @vcs_handoff_input_schema
       }
     ]
   end
@@ -63,6 +145,30 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       {:error, reason} ->
         failure_response(tool_error_payload(reason))
     end
+  end
+
+  defp execute_vcs_handoff(arguments, opts) when is_map(arguments) do
+    handoff_runner = Keyword.get(opts, :vcs_handoff_runner, &VcsHandoff.run/2)
+
+    handoff_opts =
+      opts
+      |> Keyword.take([:workspace, :issue, :linear_client])
+
+    case handoff_runner.(arguments, handoff_opts) do
+      {:ok, response} ->
+        dynamic_tool_response(true, encode_payload(response))
+
+      {:error, reason} ->
+        failure_response(%{"error" => normalize_handoff_error(reason)})
+    end
+  end
+
+  defp execute_vcs_handoff(_arguments, _opts) do
+    failure_response(%{
+      "error" => %{
+        "message" => "`symphony_git_handoff` expects a JSON object."
+      }
+    })
   end
 
   defp normalize_linear_graphql_arguments(arguments) when is_binary(arguments) do
@@ -200,6 +306,15 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         "message" => "Linear GraphQL tool execution failed.",
         "reason" => inspect(reason)
       }
+    }
+  end
+
+  defp normalize_handoff_error(%{"message" => _message} = reason), do: reason
+
+  defp normalize_handoff_error(reason) do
+    %{
+      "message" => "Symphony Git handoff failed.",
+      "reason" => inspect(reason)
     }
   end
 

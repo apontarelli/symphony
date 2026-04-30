@@ -3,23 +3,38 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
-    assert [
-             %{
-               "description" => description,
-               "inputSchema" => %{
-                 "properties" => %{
-                   "query" => _,
-                   "variables" => _
-                 },
-                 "required" => ["query"],
-                 "type" => "object"
+  test "tool_specs advertises dynamic tool input contracts" do
+    specs_by_name = Map.new(DynamicTool.tool_specs(), &{&1["name"], &1})
+
+    assert %{
+             "description" => description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "query" => _,
+                 "variables" => _
                },
-               "name" => "linear_graphql"
+               "required" => ["query"],
+               "type" => "object"
              }
-           ] = DynamicTool.tool_specs()
+           } = specs_by_name["linear_graphql"]
 
     assert description =~ "Linear"
+
+    assert %{
+             "description" => handoff_description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "changedFiles" => _,
+                 "mode" => _,
+                 "validationEvidence" => _,
+                 "taskBranch" => _
+               },
+               "required" => [],
+               "type" => "object"
+             }
+           } = specs_by_name["symphony_git_handoff"]
+
+    assert handoff_description =~ "Git handoff"
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +45,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "symphony_git_handoff"]
              }
            }
 
@@ -63,6 +78,22 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
     assert Jason.decode!(response["output"]) == %{"data" => %{"viewer" => %{"id" => "usr_123"}}}
     assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
+  end
+
+  test "symphony_git_handoff executes host preflight against the session workspace" do
+    workspace = init_git_repo!("dynamic-tool-handoff")
+
+    response = DynamicTool.execute("symphony_git_handoff", %{"mode" => "preflight"}, workspace: workspace)
+
+    assert response["success"] == true
+
+    assert %{
+             "mode" => "preflight",
+             "preflight" => %{
+               "gitMetadataWrite" => %{"capability" => "git_metadata_write"},
+               "sourceTreeWrite" => %{"capability" => "source_tree_write"}
+             }
+           } = Jason.decode!(response["output"])
   end
 
   test "linear_graphql accepts a raw GraphQL query string" do
@@ -306,5 +337,29 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert response["success"] == true
     assert response["output"] == ":ok"
+  end
+
+  defp init_git_repo!(name) do
+    repo =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-dynamic-tool-#{name}-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(repo)
+    git!(repo, ["init", "-b", "main"])
+    git!(repo, ["config", "user.name", "Test User"])
+    git!(repo, ["config", "user.email", "test@example.com"])
+    File.write!(Path.join(repo, "README.md"), "# #{name}\n")
+    git!(repo, ["add", "README.md"])
+    git!(repo, ["commit", "-m", "initial"])
+    repo
+  end
+
+  defp git!(repo, args) do
+    case System.cmd("git", args, cd: repo, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> flunk("git #{Enum.join(args, " ")} failed with #{status}: #{output}")
+    end
   end
 end

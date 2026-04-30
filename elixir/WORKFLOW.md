@@ -193,6 +193,15 @@ Use this only when completion is blocked by missing required tools or missing au
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
 
+## Host-owned Git handoff (required for VCS writes)
+
+- Keep implementation, validation, and review shell turns sandboxed.
+- Use the `symphony_git_handoff` app-server tool for Git write handoff when available.
+- Before implementation or final handoff, call `symphony_git_handoff` with `mode: "preflight"` and record the source-tree/Git-metadata capability result in the workpad.
+- For final handoff, provide a bounded `changedFiles` manifest, validation evidence, Conventional Commit metadata, target branch, base branch, PR title/body, and `publishPr: true`.
+- Do not ask Codex shell turns to run Git write operations such as `git fetch`, `git add`, `git commit`, or `git push` when the host-owned handoff tool is available.
+- Treat host handoff failures as structured blockers: copy the failed capability, command output, and exact retry/unblock condition into the workpad.
+
 ## Step 2: Execution phase (Todo -> In Progress -> Human Review)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.

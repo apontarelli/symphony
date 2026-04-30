@@ -1047,7 +1047,7 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An implementation MAY expose a limited set of client-side tools to the app-server session.
-- Current standardized optional tool: `linear_graphql`.
+- Current standardized optional tools: `linear_graphql`, `symphony_git_handoff`.
 - If implemented, supported tools SHOULD be advertised to the app-server session during startup
   using the protocol mechanism supported by the targeted Codex app-server version.
 - Unsupported tool names SHOULD still return a failure result using the targeted protocol and
@@ -1085,6 +1085,55 @@ Optional client-side tool extension:
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can inspect
   in-session.
+
+`symphony_git_handoff` extension contract:
+
+- Purpose: run the VCS handoff from the Symphony host process instead of from Codex sandbox shell
+  turns.
+- Availability: meaningful for Git workspaces with a configured `origin` remote and a writable
+  host-side Git metadata directory.
+- Preferred preflight input shape:
+
+  ```json
+  {
+    "mode": "preflight"
+  }
+  ```
+
+- Preferred handoff input shape:
+
+  ```json
+  {
+    "mode": "handoff",
+    "changedFiles": ["relative/path.ex"],
+    "validationEvidence": ["cd elixir && mix test"],
+    "issueIdentifier": "SID-115",
+    "commitSummary": "move Git handoff out of Codex sandbox",
+    "commitType": "feat",
+    "commitScope": "vcs",
+    "taskBranch": "feature/sid-115-move-git-handoff",
+    "baseBranch": "main",
+    "publishPr": true,
+    "prTitle": "Move Git handoff out of Codex sandbox",
+    "prBody": "..."
+  }
+  ```
+
+- The tool MUST validate source-tree write access and Git metadata write access separately before
+  handoff, and failure payloads MUST name the failed capability.
+- The tool MUST treat `changedFiles` as the staging contract. Paths MUST be relative workspace
+  paths, present in `git status --porcelain`, and rejected when they include traversal, absolute
+  paths, ignored/generated/log/temp artifacts, or secret-like files.
+- The tool MUST execute fixed command templates with argv arrays. Git command templates include
+  `git fetch origin`, branch/base verification, `git add -- <validated paths>`,
+  `git diff --cached --check`, `git commit -F <message_file>`, and
+  `git push origin HEAD:<taskBranch>`.
+- The tool MUST generate a deterministic Conventional Commit message that records the Linear issue
+  identifier, validation evidence, and staged file manifest.
+- When PR publishing is requested, the tool SHOULD use deterministic GitHub CLI invocations and
+  SHOULD attach the PR to Linear through tracker auth when an issue id is available.
+- Tool output SHOULD include command results, commit SHA, pushed branch, PR URL, Linear attachment
+  response, and structured failure payloads that the agent can copy into the workpad/status trail.
 
 User-input-required policy:
 
