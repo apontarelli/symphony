@@ -459,7 +459,9 @@ fields locally if they want stricter startup checks.
 
 Profiles define repository-owned workflow policy. A `default` profile is REQUIRED and acts as the
 baseline policy. A runtime MAY resolve one selected profile on top of `default`; v1 does not support
-profile-to-profile inheritance or more than one selected override layer.
+profile-to-profile inheritance or more than one selected override layer. Profiles are committed
+repo policy. External tracker routing facts, including Linear project IDs or slugs, are not profile
+schema and SHOULD live in operator-local binding config.
 
 Fields:
 
@@ -467,6 +469,27 @@ Fields:
   - REQUIRED baseline policy.
 - `<profile_name>` (object)
   - OPTIONAL selected profile override.
+
+Examples:
+
+```yaml
+profiles:
+  default:
+    delivery:
+      pr_target: main
+    checks:
+      - mix test
+  project_integration:
+    delivery:
+      pr_target: project/integration
+    checks:
+      - make all
+```
+
+`default.delivery.pr_target: main` means the delivery flow syncs, opens PRs, reviews, and lands
+against `main`. `project_integration.delivery.pr_target: project/integration` means those same v1
+delivery operations target `project/integration`; v1 does not promote or merge-forward that branch
+to `main`.
 
 Merge rules:
 
@@ -613,6 +636,11 @@ Validation checks:
   implementation MAY satisfy this requirement with operator-local project profile bindings instead
   of a committed workflow `project_slug`.
 - `codex.command` is present and non-empty.
+- `profiles.default` is present.
+- Every configured profile resolves to an effective policy with a string `delivery.pr_target`.
+- Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides
+  and external tracker bindings.
+- External binding config with ambiguous exact selectors fails validation before dispatch.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -1275,6 +1303,22 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 
 Linear project/profile bindings are operator-local runtime config, not committed workflow policy.
 They map issue routing context to repository-owned `profiles`.
+
+Example:
+
+```yaml
+team_key: SID
+projects:
+  - project_slug: project-alpha
+    profile: project_integration
+labels:
+  - label: strict
+    profile: strict_review
+catch_all:
+  enabled: false
+  profile: default
+allow_default: false
+```
 
 Selection precedence:
 

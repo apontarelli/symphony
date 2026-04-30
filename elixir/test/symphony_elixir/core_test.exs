@@ -692,6 +692,45 @@ defmodule SymphonyElixir.CoreTest do
              Config.validate!()
   end
 
+  test "duplicate external Linear bindings fail readiness validation" do
+    cases = [
+      {
+        %{
+          projects: [
+            %{project_slug: "project-a", profile: "default"},
+            %{project_slug: "project-a", profile: "strict"}
+          ]
+        },
+        "project bindings contain duplicate selectors: project_slug=project-a"
+      },
+      {
+        %{
+          projects: [
+            %{project_id: "project-id", profile: "default"},
+            %{project_id: "project-id", profile: "strict"}
+          ]
+        },
+        "project bindings contain duplicate selectors: project_id=project-id"
+      },
+      {
+        %{
+          labels: [
+            %{label: "Strict", profile: "default"},
+            %{label: "strict", profile: "strict"}
+          ]
+        },
+        "label bindings contain duplicate selectors: label=strict"
+      }
+    ]
+
+    for {bindings, expected_message} <- cases do
+      ProfileBindings.set(bindings)
+
+      assert {:error, {:invalid_linear_profile_bindings, message}} = Config.validate!()
+      assert message =~ expected_message
+    end
+  end
+
   test "malformed external Linear bindings fail validation" do
     cases = [
       {%{projects: [%{project_id: "project-id", project_slug: "project-a", profile: "default"}]}, "project bindings require exactly one of project_id or project_slug"},
@@ -737,6 +776,27 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:error, {:refinement_delivery_target_override, "strict_label", "project/alpha", "main"}} =
              Config.issue_policy(issue)
+  end
+
+  test "orchestrator fails startup when readiness validation fails" do
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_api_token: nil)
+    System.delete_env("LINEAR_API_KEY")
+    previous_trap_exit = Process.flag(:trap_exit, true)
+
+    on_exit(fn ->
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+      Process.flag(:trap_exit, previous_trap_exit)
+    end)
+
+    log =
+      capture_log(fn ->
+        assert {:error, {:invalid_startup_config, :missing_linear_api_token}} =
+                 Orchestrator.start_link(name: SymphonyElixir.InvalidStartupProbe)
+      end)
+
+    assert log =~ "Startup config validation failed"
+    assert log =~ "missing_linear_api_token"
   end
 
   test "current WORKFLOW.md file is valid and complete" do

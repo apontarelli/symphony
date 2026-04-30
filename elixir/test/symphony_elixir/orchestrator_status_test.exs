@@ -21,7 +21,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
-  test "startup terminal workspace cleanup is skipped when external bindings are invalid" do
+  test "startup fails before terminal workspace cleanup when external bindings are invalid" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -51,14 +51,20 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       ProfileBindings.set(%{projects: %{}})
 
       orchestrator_name = Module.concat(__MODULE__, :InvalidBindingCleanupOrchestrator)
+      previous_trap_exit = Process.flag(:trap_exit, true)
+
+      on_exit(fn ->
+        Process.flag(:trap_exit, previous_trap_exit)
+      end)
 
       log =
         capture_log(fn ->
-          {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-          GenServer.stop(pid)
+          assert {:error, {:invalid_startup_config, {:invalid_linear_profile_bindings, "projects must be a list"}}} =
+                   Orchestrator.start_link(name: orchestrator_name)
         end)
 
-      assert log =~ "Skipping startup terminal workspace cleanup; invalid Linear profile bindings: projects must be a list"
+      assert log =~ "Startup config validation failed"
+      assert log =~ "projects must be a list"
       assert File.exists?(Path.join(workspace, "marker.txt"))
     after
       File.rm_rf(test_root)
@@ -1002,7 +1008,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator triggers an immediate poll cycle shortly after startup" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_kind: "memory",
       poll_interval_ms: 5_000
     )
 
@@ -1054,7 +1060,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator poll cycle resets next refresh countdown after a check" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_kind: "memory",
       poll_interval_ms: 50
     )
 
@@ -1103,7 +1109,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "orchestrator restarts stalled workers with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_api_token: nil,
+      tracker_kind: "memory",
       codex_stall_timeout_ms: 1_000
     )
 

@@ -113,6 +113,28 @@ You are working on a Linear issue {{ issue.identifier }}.
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
 
+Repository-owned profiles live in committed `WORKFLOW.md`. They describe policy available to every
+run of the repo and should not contain Linear project IDs:
+
+```yaml
+profiles:
+  default:
+    delivery:
+      pr_target: main
+    checks:
+      - mix test
+  project_integration:
+    delivery:
+      pr_target: project/integration
+    checks:
+      - make all
+```
+
+The `default` profile is required. `delivery.pr_target` is the only v1 delivery selector: use
+`main` for normal mainline PRs, or a non-main branch such as `project/integration` when work should
+open PRs against a project integration branch. v1 does not automate promotion from a non-main target
+back to `main` after restart or landing.
+
 Notes:
 
 - If a value is missing, defaults are used.
@@ -137,6 +159,18 @@ catch_all:
   enabled: false
   profile: default
 allow_default: false
+```
+
+Use external bindings for operator-local Linear routing facts:
+
+```yaml
+team_key: SID
+projects:
+  - project_slug: project-alpha
+    profile: project_integration
+labels:
+  - label: strict
+    profile: strict_review
 ```
 
 Selection precedence is CLI `--profile`, exact project binding, one matching label refinement within

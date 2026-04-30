@@ -321,6 +321,8 @@ defmodule SymphonyElixir.Config.ProfileBindings do
       &validate_normalized_binding_errors/1,
       &validate_project_binding_shapes/1,
       &validate_label_binding_shapes/1,
+      &validate_unambiguous_project_bindings/1,
+      &validate_unambiguous_label_bindings/1,
       &validate_catch_all_binding_shape/1
     ]
     |> Enum.reduce_while(:ok, fn validator, :ok ->
@@ -355,6 +357,26 @@ defmodule SymphonyElixir.Config.ProfileBindings do
       {:error, {:invalid_linear_profile_bindings, "label bindings require profile and label"}}
     else
       :ok
+    end
+  end
+
+  defp validate_unambiguous_project_bindings(%{projects: projects}) do
+    case duplicate_selectors(projects, &project_binding_selector/1) do
+      [] ->
+        :ok
+
+      selectors ->
+        {:error, {:invalid_linear_profile_bindings, "project bindings contain duplicate selectors: #{Enum.join(selectors, ", ")}"}}
+    end
+  end
+
+  defp validate_unambiguous_label_bindings(%{labels: labels}) do
+    case duplicate_selectors(labels, &label_binding_selector/1) do
+      [] ->
+        :ok
+
+      selectors ->
+        {:error, {:invalid_linear_profile_bindings, "label bindings contain duplicate selectors: #{Enum.join(selectors, ", ")}"}}
     end
   end
 
@@ -435,6 +457,25 @@ defmodule SymphonyElixir.Config.ProfileBindings do
     [bindings.team_id, bindings.team_key]
     |> Enum.count(&is_binary/1)
   end
+
+  defp duplicate_selectors(bindings, selector_fun) do
+    bindings
+    |> Enum.map(selector_fun)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.frequencies()
+    |> Enum.flat_map(fn
+      {selector, count} when count > 1 -> [selector]
+      {_selector, _count} -> []
+    end)
+    |> Enum.sort()
+  end
+
+  defp project_binding_selector(%{project_id: project_id}) when is_binary(project_id), do: "project_id=#{project_id}"
+  defp project_binding_selector(%{project_slug: project_slug}) when is_binary(project_slug), do: "project_slug=#{project_slug}"
+  defp project_binding_selector(_binding), do: nil
+
+  defp label_binding_selector(%{label: label}) when is_binary(label), do: "label=#{label}"
+  defp label_binding_selector(_binding), do: nil
 
   defp binding_summaries(bindings) do
     Enum.map(bindings, fn binding ->

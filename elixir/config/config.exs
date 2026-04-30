@@ -1,5 +1,7 @@
 import Config
 
+config :symphony_elixir, validate_startup: config_env() != :test
+
 config :phoenix, :json_library, Jason
 
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,

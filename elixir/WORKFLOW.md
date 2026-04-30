@@ -35,11 +35,20 @@ codex:
   turn_sandbox_policy:
     type: workspaceWrite
 profiles:
+  # Committed repo profiles define reusable policy only. Keep Linear project IDs
+  # in an operator-local --linear-bindings file, not in WORKFLOW.md.
   default:
     delivery:
       pr_target: main
     checks: []
     completion_requirements: []
+  # Example non-main target profile:
+  #
+  # project_integration:
+  #   delivery:
+  #     pr_target: project/integration
+  #   checks:
+  #     - make all
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

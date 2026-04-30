@@ -27,7 +27,7 @@ defmodule SymphonyElixir.Application do
       {Phoenix.PubSub, name: SymphonyElixir.PubSub},
       {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
       SymphonyElixir.WorkflowStore,
-      SymphonyElixir.Orchestrator,
+      {SymphonyElixir.Orchestrator, validate_startup: Application.get_env(:symphony_elixir, :validate_startup, true)},
       SymphonyElixir.HttpServer,
       SymphonyElixir.StatusDashboard
     ]

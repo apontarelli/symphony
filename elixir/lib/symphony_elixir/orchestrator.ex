@@ -49,26 +49,38 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
-    now_ms = System.monotonic_time(:millisecond)
-    config = Config.settings!()
+  def init(opts) do
+    validate_startup? = Keyword.get(opts, :validate_startup, true)
 
-    state = %State{
-      poll_interval_ms: config.polling.interval_ms,
-      max_concurrent_agents: config.agent.max_concurrent_agents,
-      next_poll_due_at_ms: now_ms,
-      poll_check_in_progress: false,
-      tick_timer_ref: nil,
-      tick_token: nil,
-      codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
-    }
+    case startup_validation(validate_startup?) do
+      :ok ->
+        now_ms = System.monotonic_time(:millisecond)
+        config = Config.settings!()
 
-    validate_before_startup_cleanup()
-    state = schedule_tick(state, 0)
+        state = %State{
+          poll_interval_ms: config.polling.interval_ms,
+          max_concurrent_agents: config.agent.max_concurrent_agents,
+          next_poll_due_at_ms: now_ms,
+          poll_check_in_progress: false,
+          tick_timer_ref: nil,
+          tick_token: nil,
+          codex_totals: @empty_codex_totals,
+          codex_rate_limits: nil
+        }
 
-    {:ok, state}
+        if validate_startup?, do: run_terminal_workspace_cleanup()
+        state = schedule_tick(state, 0)
+
+        {:ok, state}
+
+      {:error, reason} ->
+        Logger.error("Startup config validation failed: #{inspect(reason)}")
+        {:stop, {:invalid_startup_config, reason}}
+    end
   end
+
+  defp startup_validation(true), do: Config.validate!()
+  defp startup_validation(false), do: :ok
 
   @impl true
   def handle_info({:tick, tick_token}, %{tick_token: tick_token} = state)
@@ -958,25 +970,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.warning("Skipping startup terminal workspace cleanup; failed to fetch terminal issues: #{inspect(reason)}")
-    end
-  end
-
-  defp validate_before_startup_cleanup do
-    case Config.validate!() do
-      :ok ->
-        run_terminal_workspace_cleanup()
-
-      {:error, {:invalid_linear_profile_bindings, message}} ->
-        Logger.error("Skipping startup terminal workspace cleanup; invalid Linear profile bindings: #{message}")
-
-      {:error, {:unknown_linear_profile_binding, source, profile, reason}} ->
-        Logger.error("Skipping startup terminal workspace cleanup; invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}")
-
-      {:error, :missing_linear_catch_all_team_selector} ->
-        Logger.error("Skipping startup terminal workspace cleanup; Linear catch-all profile binding requires external team_id or team_key")
-
-      {:error, reason} ->
-        Logger.warning("Skipping startup terminal workspace cleanup; config validation failed: #{inspect(reason)}")
     end
   end
 
