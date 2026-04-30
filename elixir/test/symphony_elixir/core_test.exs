@@ -527,6 +527,32 @@ defmodule SymphonyElixir.CoreTest do
     assert policy["policy_metadata"]["profile"] == "project_alpha"
   end
 
+  test "project binding accepts Linear URL slug when issue exposes slugId suffix" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}}
+      }
+    )
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "symphony-workflow-profiles-792b8faa6174", profile: "project_alpha"}]
+    })
+
+    issue = %Issue{
+      id: "issue-project-suffix",
+      identifier: "SID-111",
+      title: "Project URL slug binding",
+      state: "Todo",
+      project_slug: "792b8faa6174"
+    }
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert policy["delivery"]["pr_target"] == "project/alpha"
+    assert policy["policy_metadata"]["source"] == "project_binding"
+    assert policy["policy_metadata"]["project_slug"] == "symphony-workflow-profiles-792b8faa6174"
+  end
+
   test "unprojected Linear issues require explicit catch-all binding" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{

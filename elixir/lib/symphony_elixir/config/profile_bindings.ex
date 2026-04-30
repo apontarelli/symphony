@@ -332,11 +332,16 @@ defmodule SymphonyElixir.Config.ProfileBindings do
     id_match? =
       is_binary(binding.project_id) and is_binary(issue.project_id) and binding.project_id == issue.project_id
 
-    slug_match? =
-      is_binary(binding.project_slug) and is_binary(issue.project_slug) and binding.project_slug == issue.project_slug
+    slug_match? = project_slug_matches?(binding.project_slug, issue.project_slug)
 
     id_match? or slug_match?
   end
+
+  defp project_slug_matches?(binding_slug, issue_slug) when is_binary(binding_slug) and is_binary(issue_slug) do
+    binding_slug == issue_slug or String.ends_with?(binding_slug, "-#{issue_slug}")
+  end
+
+  defp project_slug_matches?(_binding_slug, _issue_slug), do: false
 
   defp issue_unprojected?(%Issue{project_id: project_id, project_slug: project_slug}) do
     is_nil(project_id) and is_nil(project_slug)
