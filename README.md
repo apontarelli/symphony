@@ -40,6 +40,17 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
+If you want a shell command, put this repository's `bin/` directory on your `PATH` or symlink
+`bin/symphony` into a directory already on your `PATH`. The repo-owned launcher resolves workflow
+paths, wraps the service with `op run` and Portless by default, and rebuilds the Elixir escript
+before launch:
+
+```bash
+symphony my-project
+symphony --workflow /path/to/project/WORKFLOW.md
+symphony --workflow /path/to/project/WORKFLOW.md --no-portless
+```
+
 ---
 
 ## License

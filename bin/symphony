@@ -1,0 +1,375 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  symphony [project-name] [--workflow /path/to/WORKFLOW.md] [options]
+  symphony --workflow /path/to/WORKFLOW.md [options]
+
+Project resolution:
+  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/WORKFLOW.md.
+  --workflow <path>           Uses the explicit workflow path.
+  no project or workflow      Uses ./WORKFLOW.md when present, otherwise the repo workflow.
+
+Options:
+  --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
+  --no-env-file               Do not call `op run`; use the current environment.
+  --port <port>               Dashboard/API port. Defaults to PORT, then 4000.
+  --logs-root <path>          Logs dir. Default: <symphony-elixir-dir>/log.
+  --linear-bindings <path>    Override local Linear profile bindings.
+  --profile <name>            Select one workflow profile for this process.
+  --dev-root <path>           Project root directory. Default: ~/dev.
+  --no-portless               Run directly instead of through Portless.
+  --skip-build                Do not rebuild elixir/bin/symphony before launch.
+  --dry-run                   Print the launch command and exit.
+  -h, --help                  Show this help.
+
+Environment:
+  SYMPHONY_HOME               Symphony Elixir dir. Default: <repo>/elixir.
+  SYMPHONY_DEV_ROOT           Project root directory. Default: ~/dev.
+  SYMPHONY_ENV_FILE           Default env file path.
+  SYMPHONY_PORTLESS_NAME      Override Portless route name.
+  SYMPHONY_SKIP_BUILD=1       Same as --skip-build.
+  PORTLESS=0                  Same as --no-portless.
+
+The env file is resolved by `op run`; keep 1Password refs there, not literal secrets.
+USAGE
+}
+
+die() {
+  printf 'error: %s\n' "$*" >&2
+  exit 2
+}
+
+expand_path() {
+  case "${1:-}" in
+    "~") printf '%s\n' "$HOME" ;;
+    "~/"*) printf '%s/%s\n' "$HOME" "${1#~/}" ;;
+    *) printf '%s\n' "$1" ;;
+  esac
+}
+
+absolute_path() {
+  case "${1:-}" in
+    "") printf '\n' ;;
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$PWD" "$1" ;;
+  esac
+}
+
+require_value() {
+  local flag="$1"
+  local value="${2:-}"
+
+  [[ -n "$value" ]] || die "$flag requires a value"
+}
+
+resolve_repo_root() {
+  local source="${BASH_SOURCE[0]}"
+  local dir
+
+  while [[ -L "$source" ]]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null 2>&1 && pwd)"
+    source="$(readlink "$source")"
+    [[ "$source" = /* ]] || source="$dir/$source"
+  done
+
+  cd -P "$(dirname "$source")/.." >/dev/null 2>&1 && pwd
+}
+
+print_command() {
+  local arg
+
+  for arg in "$@"; do
+    printf '%q ' "$arg"
+  done
+
+  printf '\n'
+}
+
+sanitize_name() {
+  local name="$1"
+  name="${name// /-}"
+  name="${name//\//-}"
+  printf '%s\n' "$name"
+}
+
+run_elixir() {
+  local repo_root="$1"
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local workflow="${SYMPHONY_WORKFLOW:-}"
+  local port="${SYMPHONY_PORT:-${PORT:-4000}}"
+  local logs_root="${SYMPHONY_LOGS_ROOT:-"$symphony_home/log"}"
+  local linear_bindings="${SYMPHONY_LINEAR_BINDINGS:-}"
+  local profile="${SYMPHONY_PROFILE:-}"
+  local args
+
+  [[ -n "$workflow" ]] || die "SYMPHONY_WORKFLOW is required"
+  [[ -f "$workflow" ]] || die "workflow file not found: $workflow"
+  [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
+
+  export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/nix/var/nix/profiles/default/bin:${PATH}"
+
+  command -v mise >/dev/null 2>&1 || {
+    printf 'error: mise not found on PATH\n' >&2
+    printf 'hint: install mise, then rerun symphony\n' >&2
+    exit 127
+  }
+
+  cd "$symphony_home"
+
+  if [[ "${SYMPHONY_SKIP_BUILD:-0}" != "1" ]]; then
+    if [[ ! -d deps ]]; then
+      mise exec -- mix setup
+    fi
+
+    mise exec -- mix escript.build
+  elif [[ ! -x ./bin/symphony ]]; then
+    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
+    printf 'hint: rerun without --skip-build so the launcher can build it\n' >&2
+    exit 127
+  fi
+
+  args=(
+    --i-understand-that-this-will-be-running-without-the-usual-guardrails
+    "$workflow"
+    --port "$port"
+    --logs-root "$logs_root"
+  )
+
+  if [[ -n "$linear_bindings" ]]; then
+    args+=(--linear-bindings "$linear_bindings")
+  fi
+
+  if [[ -n "$profile" ]]; then
+    args+=(--profile "$profile")
+  fi
+
+  exec mise exec -- ./bin/symphony "${args[@]}"
+}
+
+main() {
+  local repo_root
+  repo_root="$(resolve_repo_root)"
+
+  if [[ "${1:-}" == "__run" ]]; then
+    shift
+    run_elixir "$repo_root"
+  fi
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local dev_root="${SYMPHONY_DEV_ROOT:-"$HOME/dev"}"
+  local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
+  local use_env_file=1
+  local use_portless=1
+  local dry_run=0
+  local project=""
+  local workflow=""
+  local port=""
+  local logs_root=""
+  local linear_bindings=""
+  local profile=""
+  local arg
+
+  if [[ "${PORTLESS:-}" == "0" ]]; then
+    use_portless=0
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+
+    case "$arg" in
+      --env-file)
+        require_value "$arg" "${2:-}"
+        env_file="$2"
+        shift 2
+        ;;
+      --no-env-file)
+        use_env_file=0
+        shift
+        ;;
+      --workflow)
+        require_value "$arg" "${2:-}"
+        workflow="$2"
+        shift 2
+        ;;
+      --port)
+        require_value "$arg" "${2:-}"
+        port="$2"
+        shift 2
+        ;;
+      --logs-root)
+        require_value "$arg" "${2:-}"
+        logs_root="$2"
+        shift 2
+        ;;
+      --linear-bindings)
+        require_value "$arg" "${2:-}"
+        linear_bindings="$2"
+        shift 2
+        ;;
+      --profile)
+        require_value "$arg" "${2:-}"
+        profile="$2"
+        shift 2
+        ;;
+      --dev-root)
+        require_value "$arg" "${2:-}"
+        dev_root="$2"
+        shift 2
+        ;;
+      --no-portless)
+        use_portless=0
+        shift
+        ;;
+      --skip-build)
+        export SYMPHONY_SKIP_BUILD=1
+        shift
+        ;;
+      --dry-run)
+        dry_run=1
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      --)
+        shift
+        break
+        ;;
+      -*)
+        die "unknown argument: $arg"
+        ;;
+      *)
+        [[ -z "$project" ]] || die "unexpected extra argument: $arg"
+        project="$arg"
+        shift
+        ;;
+    esac
+  done
+
+  [[ $# -eq 0 ]] || die "unexpected extra argument: $1"
+
+  symphony_home="$(expand_path "$symphony_home")"
+  dev_root="$(expand_path "$dev_root")"
+  env_file="$(expand_path "$env_file")"
+  workflow="$(expand_path "$workflow")"
+  logs_root="$(expand_path "$logs_root")"
+  linear_bindings="$(expand_path "$linear_bindings")"
+
+  symphony_home="$(absolute_path "$symphony_home")"
+  dev_root="$(absolute_path "$dev_root")"
+  env_file="$(absolute_path "$env_file")"
+
+  if [[ -n "$logs_root" ]]; then
+    logs_root="$(absolute_path "$logs_root")"
+  fi
+
+  if [[ -n "$linear_bindings" ]]; then
+    linear_bindings="$(absolute_path "$linear_bindings")"
+  fi
+
+  local project_name=""
+
+  if [[ -n "$workflow" ]]; then
+    workflow="$(absolute_path "$workflow")"
+    project_name="$(basename "$(dirname "$workflow")")"
+  elif [[ -n "$project" ]]; then
+    local expanded_project
+    expanded_project="$(expand_path "$project")"
+
+    if [[ -f "$expanded_project" ]]; then
+      workflow="$(cd "$(dirname "$expanded_project")" >/dev/null 2>&1 && pwd)/$(basename "$expanded_project")"
+      project_name="$(basename "$(dirname "$workflow")")"
+    elif [[ -d "$expanded_project" ]]; then
+      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/WORKFLOW.md"
+      project_name="$(basename "$expanded_project")"
+    else
+      workflow="$dev_root/$project/WORKFLOW.md"
+      project_name="$project"
+    fi
+  elif [[ -f WORKFLOW.md ]]; then
+    workflow="$PWD/WORKFLOW.md"
+    project_name="$(basename "$PWD")"
+  else
+    workflow="$symphony_home/WORKFLOW.md"
+    project_name="symphony"
+  fi
+
+  [[ -f "$workflow" ]] || die "WORKFLOW.md not found: $workflow"
+
+  if [[ -z "$logs_root" ]]; then
+    logs_root="$symphony_home/log"
+  fi
+
+  if [[ "$use_env_file" == "1" ]]; then
+    [[ -f "$env_file" ]] || die "env file not found: $env_file; copy symphony.env.example there or pass --no-env-file"
+    command -v op >/dev/null 2>&1 || {
+      printf 'error: op not found on PATH\n' >&2
+      printf 'hint: install the 1Password CLI or pass --no-env-file\n' >&2
+      exit 127
+    }
+  fi
+
+  if [[ "$use_portless" == "1" ]]; then
+    command -v portless >/dev/null 2>&1 || {
+      printf 'error: portless not found on PATH\n' >&2
+      printf 'hint: install portless or pass --no-portless\n' >&2
+      exit 127
+    }
+  fi
+
+  local runtime_env=(
+    "SYMPHONY_HOME=$symphony_home"
+    "SYMPHONY_WORKFLOW=$workflow"
+    "SYMPHONY_LOGS_ROOT=$logs_root"
+  )
+
+  if [[ -n "$port" ]]; then
+    runtime_env+=("SYMPHONY_PORT=$port")
+  fi
+
+  if [[ -n "$linear_bindings" ]]; then
+    runtime_env+=("SYMPHONY_LINEAR_BINDINGS=$linear_bindings")
+  fi
+
+  if [[ -n "$profile" ]]; then
+    runtime_env+=("SYMPHONY_PROFILE=$profile")
+  fi
+
+  local route="${SYMPHONY_PORTLESS_NAME:-symphony-$(sanitize_name "$project_name")}"
+  local cmd
+
+  if [[ "$use_portless" == "1" ]]; then
+    if [[ "$use_env_file" == "1" ]]; then
+      cmd=(env "${runtime_env[@]}" portless run --name "$route" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
+    else
+      cmd=(env "${runtime_env[@]}" portless run --name "$route" "$repo_root/bin/symphony" __run)
+    fi
+  else
+    if [[ "$use_env_file" == "1" ]]; then
+      cmd=(env "${runtime_env[@]}" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
+    else
+      cmd=(env "${runtime_env[@]}" "$repo_root/bin/symphony" __run)
+    fi
+  fi
+
+  if [[ "$dry_run" == "1" ]]; then
+    if [[ "$use_portless" == "1" ]]; then
+      printf 'cd %q; ' "$symphony_home"
+    fi
+
+    print_command "${cmd[@]}"
+    exit 0
+  fi
+
+  if [[ "$use_portless" == "1" ]]; then
+    cd "$symphony_home"
+  fi
+
+  exec "${cmd[@]}"
+}
+
+main "$@"

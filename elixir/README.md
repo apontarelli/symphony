@@ -65,6 +65,20 @@ mise exec -- mix build
 mise exec -- ./bin/symphony ./WORKFLOW.md
 ```
 
+From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
+It keeps local shell glue in this repo instead of dotfiles, resolves project workflows, loads
+`~/.config/symphony/.env` through `op run`, uses Portless by default, and rebuilds the escript
+before launching:
+
+```bash
+cp ../symphony.env.example ~/.config/symphony/.env
+../bin/symphony my-project
+../bin/symphony --workflow /path/to/project/WORKFLOW.md --no-portless
+```
+
+To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
+symlink `../bin/symphony` into a directory already on `PATH`.
+
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
