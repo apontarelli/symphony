@@ -1304,6 +1304,11 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 Linear project/profile bindings are operator-local runtime config, not committed workflow policy.
 They map issue routing context to repository-owned `profiles`.
 
+Implementations MAY load a default operator-local binding file named
+`linear-profile-bindings.local.yml` from the same directory as the selected `WORKFLOW.md` when no
+explicit binding file is provided. Repositories SHOULD commit a placeholder
+`linear-profile-bindings.example.yml` and ignore the real local binding file.
+
 Example:
 
 ```yaml

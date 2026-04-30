@@ -43,6 +43,7 @@ erl_crash.dump
 .env.*
 .secrets
 .credentials
+linear-profile-bindings.local.yml
 status.txt
 .codex/original-user-prompt.txt
 

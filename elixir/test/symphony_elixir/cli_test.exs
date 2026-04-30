@@ -204,4 +204,90 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "strict"}]}}
     assert_received {:profile, "strict"}
   end
+
+  test "loads default local Linear bindings next to the workflow file" do
+    parent = self()
+    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
+
+    deps = %{
+      file_regular?: fn path ->
+        path in [workflow_path, default_bindings_path]
+      end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_linear_profile_bindings: fn bindings ->
+        send(parent, {:bindings, bindings})
+        :ok
+      end,
+      set_profile_override: fn _profile -> :ok end,
+      load_linear_profile_bindings: fn path ->
+        send(parent, {:bindings_path, path})
+        {:ok, %{"projects" => [%{"project_slug" => "project-a", "profile" => "default"}]}}
+      end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
+    assert_received {:bindings_path, ^default_bindings_path}
+    assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "default"}]}}
+  end
+
+  test "skips default local Linear bindings when the file is absent" do
+    parent = self()
+    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+
+    deps = %{
+      file_regular?: fn path -> path == workflow_path end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_linear_profile_bindings: fn _bindings ->
+        send(parent, :bindings_set)
+        :ok
+      end,
+      set_profile_override: fn _profile -> :ok end,
+      load_linear_profile_bindings: fn _path ->
+        send(parent, :bindings_loaded)
+        {:ok, %{}}
+      end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
+    refute_received :bindings_loaded
+    refute_received :bindings_set
+  end
+
+  test "explicit Linear bindings override the default local bindings path" do
+    parent = self()
+    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+    explicit_path = Path.expand("tmp/ops/bindings.yml")
+    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
+
+    deps = %{
+      file_regular?: fn path ->
+        path in [workflow_path, default_bindings_path]
+      end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_linear_profile_bindings: fn bindings ->
+        send(parent, {:bindings, bindings})
+        :ok
+      end,
+      set_profile_override: fn _profile -> :ok end,
+      load_linear_profile_bindings: fn path ->
+        send(parent, {:bindings_path, path})
+        {:ok, %{"projects" => [%{"project_slug" => "project-explicit", "profile" => "strict"}]}}
+      end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag, "--linear-bindings", explicit_path, workflow_path], deps)
+    assert_received {:bindings_path, ^explicit_path}
+    assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-explicit", "profile" => "strict"}]}}
+    refute_received {:bindings_path, ^default_bindings_path}
+  end
 end

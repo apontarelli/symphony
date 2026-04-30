@@ -7,6 +7,7 @@ defmodule SymphonyElixir.CLI do
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
+  @default_linear_bindings_file "linear-profile-bindings.local.yml"
   @switches [
     {@acknowledgement_switch, :boolean},
     linear_bindings: :string,
@@ -46,18 +47,16 @@ defmodule SymphonyElixir.CLI do
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
-             :ok <- maybe_set_profile_override(opts, deps),
-             :ok <- maybe_load_linear_profile_bindings(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
+             :ok <- maybe_set_profile_override(opts, deps) do
+          run(Path.expand("WORKFLOW.md"), opts, deps)
         end
 
       {opts, [workflow_path], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
-             :ok <- maybe_set_profile_override(opts, deps),
-             :ok <- maybe_load_linear_profile_bindings(opts, deps) do
-          run(workflow_path, deps)
+             :ok <- maybe_set_profile_override(opts, deps) do
+          run(workflow_path, opts, deps)
         end
 
       _ ->
@@ -66,27 +65,35 @@ defmodule SymphonyElixir.CLI do
   end
 
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
-  def run(workflow_path, deps) do
+  def run(workflow_path, deps), do: run(workflow_path, [], deps)
+
+  defp run(workflow_path, opts, deps) do
     expanded_path = Path.expand(workflow_path)
 
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
 
-      case deps.ensure_all_started.() do
-        {:ok, _started_apps} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, "Failed to start Symphony with workflow #{expanded_path}: #{inspect(reason)}"}
+      with :ok <- maybe_load_linear_profile_bindings(opts, expanded_path, deps) do
+        start_runtime(expanded_path, deps)
       end
     else
       {:error, "Workflow file not found: #{expanded_path}"}
     end
   end
 
+  defp start_runtime(workflow_path, deps) do
+    case deps.ensure_all_started.() do
+      {:ok, _started_apps} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, "Failed to start Symphony with workflow #{workflow_path}: #{inspect(reason)}"}
+    end
+  end
+
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--linear-bindings <path>] [--profile <name>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--linear-bindings <path>] [--profile <name>] [path-to-WORKFLOW.md]\n\nIf --linear-bindings is omitted, Symphony loads linear-profile-bindings.local.yml next to WORKFLOW.md when present."
   end
 
   @spec runtime_deps() :: deps()
@@ -202,10 +209,19 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp maybe_load_linear_profile_bindings(opts, deps) do
+  defp maybe_load_linear_profile_bindings(opts, workflow_path, deps) do
     case Keyword.get_values(opts, :linear_bindings) do
       [] ->
-        :ok
+        default_path =
+          workflow_path
+          |> Path.dirname()
+          |> Path.join(@default_linear_bindings_file)
+
+        if deps.file_regular?.(default_path) do
+          load_linear_profile_bindings(default_path, deps)
+        else
+          :ok
+        end
 
       values ->
         path = values |> List.last() |> String.trim()

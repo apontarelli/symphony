@@ -79,7 +79,7 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
-- `--linear-bindings` loads an operator-local YAML file that maps Linear projects to workflow profiles
+- `--linear-bindings` overrides the default local Linear profile binding file path
 - `--profile` selects one workflow profile for the current process, before project/label bindings
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
@@ -144,8 +144,11 @@ Notes:
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
-- Linear project-to-profile bindings live outside committed `WORKFLOW.md`. Load them with
-  `--linear-bindings /path/to/bindings.yml`:
+- Linear project-to-profile bindings live outside committed `WORKFLOW.md`. Copy
+  `linear-profile-bindings.example.yml` to `linear-profile-bindings.local.yml` and fill in your
+  operator-local Linear project slug IDs and optional `pr_target` values. The local file is
+  gitignored and loads automatically when it sits next to `WORKFLOW.md`. Use
+  `--linear-bindings /path/to/bindings.yml` only to override the default lookup path:
 
 ```yaml
 team_key: SID

@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-0c79b11b75ea"
+  project_slug: "symphony-workflow-profiles-792b8faa6174"
   active_states:
     - Todo
     - In Progress
@@ -34,6 +34,7 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+    networkAccess: true
 profiles:
   # Committed repo profiles define reusable policy only. Keep Linear project IDs
   # in an operator-local --linear-bindings file, not in WORKFLOW.md.
