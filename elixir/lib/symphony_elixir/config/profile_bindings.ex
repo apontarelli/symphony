@@ -3,9 +3,13 @@ defmodule SymphonyElixir.Config.ProfileBindings do
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Workflow
 
   @bindings_env_key :linear_profile_bindings
+  @bindings_source_path_env_key :linear_profile_bindings_source_path
+  @bindings_source_explicit_env_key :linear_profile_bindings_source_explicit
   @profile_override_env_key :workflow_profile_override
+  @default_linear_bindings_file "linear-profile-bindings.local.yml"
 
   @type binding_config :: %{
           projects: [map()],
@@ -38,6 +42,31 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   def clear do
     Application.delete_env(:symphony_elixir, @bindings_env_key)
     :ok
+  end
+
+  @spec set_source_path(Path.t(), boolean()) :: :ok
+  def set_source_path(path, explicit? \\ false) when is_binary(path) do
+    Application.put_env(:symphony_elixir, @bindings_source_path_env_key, Path.expand(path))
+    Application.put_env(:symphony_elixir, @bindings_source_explicit_env_key, explicit? == true)
+    :ok
+  end
+
+  @spec clear_source_path() :: :ok
+  def clear_source_path do
+    Application.delete_env(:symphony_elixir, @bindings_source_path_env_key)
+    Application.delete_env(:symphony_elixir, @bindings_source_explicit_env_key)
+    :ok
+  end
+
+  @spec source_path() :: Path.t()
+  def source_path do
+    Application.get_env(:symphony_elixir, @bindings_source_path_env_key) ||
+      default_source_path()
+  end
+
+  @spec source_explicit?() :: boolean()
+  def source_explicit? do
+    Application.get_env(:symphony_elixir, @bindings_source_explicit_env_key, false) == true
   end
 
   @spec set_profile_override(String.t() | nil) :: :ok
@@ -163,6 +192,13 @@ defmodule SymphonyElixir.Config.ProfileBindings do
       loaded: loaded,
       errors: []
     }
+  end
+
+  defp default_source_path do
+    Workflow.workflow_file_path()
+    |> Path.dirname()
+    |> Path.join(@default_linear_bindings_file)
+    |> Path.expand()
   end
 
   defp select_bound_policy(settings, issue, bindings) do
@@ -605,7 +641,7 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   defp normalized_string(_value), do: nil
 
   defp normalize_optional_string_field(binding, key) do
-    if Map.has_key?(binding, key) and not is_binary(Map.get(binding, key)) do
+    if Map.has_key?(binding, key) and not is_nil(Map.get(binding, key)) and not is_binary(Map.get(binding, key)) do
       {:error, "#{key} must be a string"}
     else
       {:ok, normalized_string(Map.get(binding, key))}

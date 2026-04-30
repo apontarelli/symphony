@@ -43,6 +43,8 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :server_port_override)
           Application.delete_env(:symphony_elixir, :linear_profile_bindings)
+          Application.delete_env(:symphony_elixir, :linear_profile_bindings_source_path)
+          Application.delete_env(:symphony_elixir, :linear_profile_bindings_source_explicit)
           Application.delete_env(:symphony_elixir, :workflow_profile_override)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)

@@ -29,6 +29,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, :bindings_set)
         :ok
       end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? ->
+        send(parent, :bindings_source_set)
+        :ok
+      end,
       set_profile_override: fn _profile ->
         send(parent, :profile_set)
         :ok
@@ -53,6 +57,7 @@ defmodule SymphonyElixir.CLITest do
     refute_received :logs_root_set
     refute_received :port_set
     refute_received :bindings_set
+    refute_received :bindings_source_set
     refute_received :profile_set
     refute_received :bindings_loaded
     refute_received :started
@@ -65,6 +70,7 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
@@ -90,6 +96,7 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
@@ -112,6 +119,7 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
@@ -129,6 +137,7 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
@@ -145,6 +154,7 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:error, :boom} end
@@ -162,6 +172,7 @@ defmodule SymphonyElixir.CLITest do
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
@@ -180,6 +191,10 @@ defmodule SymphonyElixir.CLITest do
       set_server_port_override: fn _port -> :ok end,
       set_linear_profile_bindings: fn bindings ->
         send(parent, {:bindings, bindings})
+        :ok
+      end,
+      set_linear_profile_bindings_source_path: fn path, explicit? ->
+        send(parent, {:bindings_source, path, explicit?})
         :ok
       end,
       set_profile_override: fn profile ->
@@ -201,6 +216,7 @@ defmodule SymphonyElixir.CLITest do
 
     assert_received {:bindings_path, expanded_path}
     assert expanded_path == Path.expand("ops/bindings.yml")
+    assert_received {:bindings_source, ^expanded_path, true}
     assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "strict"}]}}
     assert_received {:profile, "strict"}
   end
@@ -221,6 +237,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, {:bindings, bindings})
         :ok
       end,
+      set_linear_profile_bindings_source_path: fn path, explicit? ->
+        send(parent, {:bindings_source, path, explicit?})
+        :ok
+      end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn path ->
         send(parent, {:bindings_path, path})
@@ -230,6 +250,7 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
+    assert_received {:bindings_source, ^default_bindings_path, false}
     assert_received {:bindings_path, ^default_bindings_path}
     assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "default"}]}}
   end
@@ -247,6 +268,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, :bindings_set)
         :ok
       end,
+      set_linear_profile_bindings_source_path: fn path, explicit? ->
+        send(parent, {:bindings_source, path, explicit?})
+        :ok
+      end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn _path ->
         send(parent, :bindings_loaded)
@@ -256,6 +281,8 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
+    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
+    assert_received {:bindings_source, ^default_bindings_path, false}
     refute_received :bindings_loaded
     refute_received :bindings_set
   end
@@ -277,6 +304,10 @@ defmodule SymphonyElixir.CLITest do
         send(parent, {:bindings, bindings})
         :ok
       end,
+      set_linear_profile_bindings_source_path: fn path, explicit? ->
+        send(parent, {:bindings_source, path, explicit?})
+        :ok
+      end,
       set_profile_override: fn _profile -> :ok end,
       load_linear_profile_bindings: fn path ->
         send(parent, {:bindings_path, path})
@@ -286,6 +317,7 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "--linear-bindings", explicit_path, workflow_path], deps)
+    assert_received {:bindings_source, ^explicit_path, true}
     assert_received {:bindings_path, ^explicit_path}
     assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-explicit", "profile" => "strict"}]}}
     refute_received {:bindings_path, ^default_bindings_path}

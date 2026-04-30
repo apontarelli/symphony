@@ -23,6 +23,7 @@ defmodule SymphonyElixir.CLI do
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
           set_linear_profile_bindings: (map() -> :ok | {:error, term()}),
+          set_linear_profile_bindings_source_path: (String.t(), boolean() -> :ok | {:error, term()}),
           set_profile_override: (String.t() | nil -> :ok | {:error, term()}),
           load_linear_profile_bindings: (String.t() -> {:ok, map()} | {:error, term()}),
           ensure_all_started: (-> ensure_started_result())
@@ -104,6 +105,7 @@ defmodule SymphonyElixir.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       set_linear_profile_bindings: &ProfileBindings.set/1,
+      set_linear_profile_bindings_source_path: &ProfileBindings.set_source_path/2,
       set_profile_override: &ProfileBindings.set_profile_override/1,
       load_linear_profile_bindings: &ProfileBindings.load_file/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
@@ -216,6 +218,9 @@ defmodule SymphonyElixir.CLI do
           workflow_path
           |> Path.dirname()
           |> Path.join(@default_linear_bindings_file)
+          |> Path.expand()
+
+        :ok = deps.set_linear_profile_bindings_source_path.(default_path, false)
 
         if deps.file_regular?.(default_path) do
           load_linear_profile_bindings(default_path, deps)
@@ -225,7 +230,9 @@ defmodule SymphonyElixir.CLI do
 
       values ->
         path = values |> List.last() |> String.trim()
-        load_linear_profile_bindings(path, deps)
+        expanded_path = Path.expand(path)
+        :ok = deps.set_linear_profile_bindings_source_path.(expanded_path, true)
+        load_linear_profile_bindings(expanded_path, deps)
     end
   end
 

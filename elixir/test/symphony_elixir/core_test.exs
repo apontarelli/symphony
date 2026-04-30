@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Config.ProfileBindingAdmin
   alias SymphonyElixir.Config.Schema
 
   test "config defaults and validation checks" do
@@ -757,6 +758,104 @@ defmodule SymphonyElixir.CoreTest do
       assert {:error, {:invalid_linear_profile_bindings, message}} = Config.validate!()
       assert message =~ expected_message
     end
+  end
+
+  test "binding admin saves valid project edits while preserving non-project routing" do
+    source_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "ops/bindings.yml")
+    ProfileBindings.set_source_path(source_path, true)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "main"}},
+        strict: %{delivery: %{pr_target: "project/strict"}}
+      }
+    )
+
+    File.mkdir_p!(Path.dirname(source_path))
+    File.write!(source_path, "original: true\n")
+
+    ProfileBindings.set(%{
+      team_key: "SID",
+      projects: [%{project_slug: "alpha", profile: "default"}],
+      labels: [%{label: "Strict", profile: "strict"}],
+      catch_all: %{enabled: true, profile: "default"},
+      allow_default: true
+    })
+
+    assert {:error, {:unknown_linear_profile_binding, :project, "missing", _reason}} =
+             ProfileBindingAdmin.save_project_bindings([
+               %{selector_kind: "project_slug", selector_value: "beta", profile: "missing", pr_target: nil}
+             ])
+
+    assert File.read!(source_path) == "original: true\n"
+    assert [%{project_slug: "alpha"}] = ProfileBindings.current().projects
+
+    assert {:ok, bindings} =
+             ProfileBindingAdmin.save_project_bindings([
+               %{
+                 selector_kind: "project_slug",
+                 selector_value: "beta",
+                 profile: "strict",
+                 pr_target: "project/beta"
+               }
+             ])
+
+    assert bindings.team_key == "SID"
+    assert [%{project_slug: "beta", profile: "strict", pr_target: "project/beta"}] = bindings.projects
+    assert [%{label: "strict", profile: "strict"}] = bindings.labels
+    assert bindings.catch_all == %{enabled: true, profile: "default"}
+    assert bindings.allow_default == true
+
+    persisted = File.read!(source_path)
+    assert persisted =~ ~s(team_key: "SID")
+    assert persisted =~ ~s(project_slug: "beta")
+    assert persisted =~ ~s(pr_target: "project/beta")
+    assert persisted =~ ~s(label: "strict")
+
+    assert ProfileBindings.current().projects == bindings.projects
+  end
+
+  test "linear active project discovery filters project status and deleted records" do
+    page_one = %{
+      "data" => %{
+        "team" => %{
+          "projects" => %{
+            "nodes" => [
+              project_node("active-started", "Active started", "started"),
+              project_node("active-planned", "Active planned", "planned"),
+              project_node("paused", "Paused", "paused"),
+              Map.put(project_node("deleted", "Deleted", "started"), "deletedAt", "2026-04-30T00:00:00Z")
+            ],
+            "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-2"}
+          }
+        }
+      }
+    }
+
+    page_two = %{
+      "data" => %{
+        "team" => %{
+          "projects" => %{
+            "nodes" => [
+              project_node("active-backlog", "Active backlog", "backlog"),
+              project_node("completed", "Completed", "completed")
+            ],
+            "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+          }
+        }
+      }
+    }
+
+    {:ok, projects} =
+      Client.fetch_active_projects_for_test(%{team_id: "team-1"}, fn _query, variables ->
+        case variables do
+          %{after: nil} -> {:ok, page_one}
+          %{after: "cursor-2"} -> {:ok, page_two}
+        end
+      end)
+
+    assert Enum.map(projects, & &1.slug_id) == ["active-started", "active-planned", "active-backlog"]
+    assert Enum.map(projects, & &1.status_type) == ["started", "planned", "backlog"]
   end
 
   test "malformed external Linear bindings fail validation" do
@@ -2630,5 +2729,19 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp project_node(slug_id, name, status_type) do
+    %{
+      "id" => "project-#{slug_id}",
+      "name" => name,
+      "slugId" => slug_id,
+      "archivedAt" => nil,
+      "deletedAt" => nil,
+      "status" => %{
+        "name" => name,
+        "type" => status_type
+      }
+    }
   end
 end

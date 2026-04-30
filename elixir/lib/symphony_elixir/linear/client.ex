@@ -8,6 +8,8 @@ defmodule SymphonyElixir.Linear.Client do
   alias SymphonyElixir.Config.ProfileBindings
 
   @issue_page_size 50
+  @project_page_size 100
+  @active_project_status_types MapSet.new(["backlog", "planned", "started"])
   @max_error_body_log_bytes 1_000
 
   @query_by_project_slug """
@@ -289,6 +291,54 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @projects_by_team_id_query """
+  query SymphonyLinearProjectsByTeamId($teamId: String!, $first: Int!, $after: String) {
+    team(id: $teamId) {
+      projects(first: $first, after: $after, filter: {archivedAt: {null: true}}) {
+        nodes {
+          id
+          name
+          slugId
+          archivedAt
+          status {
+            name
+            type
+          }
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+  """
+
+  @projects_by_team_key_query """
+  query SymphonyLinearProjectsByTeamKey($teamKey: String!, $first: Int!, $after: String) {
+    teams(filter: {key: {eq: $teamKey}}, first: 1) {
+      nodes {
+        projects(first: $first, after: $after, filter: {archivedAt: {null: true}}) {
+          nodes {
+            id
+            name
+            slugId
+            archivedAt
+            status {
+              name
+              type
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  }
+  """
+
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
@@ -333,6 +383,17 @@ defmodule SymphonyElixir.Linear.Client do
         end
     end
   end
+
+  @spec fetch_active_projects(map()) :: {:ok, [map()]} | {:error, term()}
+  def fetch_active_projects(%{team_id: team_id}) when is_binary(team_id) do
+    fetch_active_projects_page(@projects_by_team_id_query, %{teamId: team_id}, nil, [])
+  end
+
+  def fetch_active_projects(%{team_key: team_key}) when is_binary(team_key) do
+    fetch_active_projects_page(@projects_by_team_key_query, %{teamKey: team_key}, nil, [])
+  end
+
+  def fetch_active_projects(_selector), do: {:error, :missing_linear_project_discovery_team_selector}
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
@@ -395,6 +456,22 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
+  @spec fetch_active_projects_for_test(map(), (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+          {:ok, [map()]} | {:error, term()}
+  def fetch_active_projects_for_test(selector, graphql_fun) when is_map(selector) and is_function(graphql_fun, 2) do
+    case selector do
+      %{team_id: team_id} when is_binary(team_id) ->
+        fetch_active_projects_page(@projects_by_team_id_query, %{teamId: team_id}, nil, [], graphql_fun)
+
+      %{team_key: team_key} when is_binary(team_key) ->
+        fetch_active_projects_page(@projects_by_team_key_query, %{teamKey: team_key}, nil, [], graphql_fun)
+
+      _selector ->
+        {:error, :missing_linear_project_discovery_team_selector}
+    end
+  end
+
+  @doc false
   @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -428,6 +505,27 @@ defmodule SymphonyElixir.Linear.Client do
       true ->
         {:error, :missing_linear_project_slug}
     end
+  end
+
+  defp fetch_active_projects_page(query, variables, after_cursor, acc_projects, graphql_fun \\ &graphql/2) do
+    with {:ok, body} <- graphql_fun.(query, Map.merge(variables, %{first: @project_page_size, after: after_cursor})),
+         {:ok, projects, page_info} <- decode_project_page_response(body) do
+      continue_active_projects_page(query, variables, page_info, Enum.reverse(projects, acc_projects), graphql_fun)
+    end
+  end
+
+  defp continue_active_projects_page(query, variables, page_info, acc_projects, graphql_fun) do
+    case next_page_cursor(page_info) do
+      {:ok, next_cursor} -> fetch_active_projects_page(query, variables, next_cursor, acc_projects, graphql_fun)
+      :done -> {:ok, acc_projects_to_result(acc_projects)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp acc_projects_to_result(acc_projects) do
+    acc_projects
+    |> Enum.reverse()
+    |> Enum.uniq_by(& &1.id)
   end
 
   defp do_fetch_by_project_selectors(project_selectors, state_names, assignee_filter) do
@@ -672,6 +770,56 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
+
+  defp decode_project_page_response(%{"errors" => errors}), do: {:error, {:linear_graphql_errors, errors}}
+
+  defp decode_project_page_response(%{"data" => %{"team" => %{"projects" => projects}}}) do
+    decode_projects_connection(projects)
+  end
+
+  defp decode_project_page_response(%{"data" => %{"teams" => %{"nodes" => [%{"projects" => projects} | _rest]}}}) do
+    decode_projects_connection(projects)
+  end
+
+  defp decode_project_page_response(%{"data" => %{"teams" => %{"nodes" => []}}}), do: {:error, :linear_team_not_found}
+  defp decode_project_page_response(_response), do: {:error, :linear_unknown_payload}
+
+  defp decode_projects_connection(%{
+         "nodes" => nodes,
+         "pageInfo" => %{"hasNextPage" => has_next_page, "endCursor" => end_cursor}
+       })
+       when is_list(nodes) do
+    projects =
+      nodes
+      |> Enum.map(&normalize_project/1)
+      |> Enum.reject(&is_nil/1)
+
+    {:ok, projects, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
+  end
+
+  defp decode_projects_connection(_projects), do: {:error, :linear_unknown_payload}
+
+  defp normalize_project(project) when is_map(project) do
+    status_type = normalized_status_type(get_in(project, ["status", "type"]))
+
+    if is_binary(project["archivedAt"]) or is_binary(project["deletedAt"]) or
+         not MapSet.member?(@active_project_status_types, status_type) do
+      nil
+    else
+      %{
+        id: project["id"],
+        name: project["name"],
+        slug_id: project["slugId"],
+        status_name: get_in(project, ["status", "name"]),
+        status_type: status_type
+      }
+    end
+  end
+
+  defp normalize_project(_project), do: nil
+
+  defp normalized_status_type(value) when is_binary(value), do: String.downcase(value)
+  defp normalized_status_type(_value), do: nil
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
