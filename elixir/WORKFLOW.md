@@ -19,10 +19,16 @@ workspace:
   root: ~/code/symphony-workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/openai/symphony .
+    if ! command -v jj >/dev/null 2>&1; then
+      echo 'jj is required for this Symphony workflow' >&2
+      exit 127
+    fi
+    jj git clone https://github.com/openai/symphony .
     if command -v mise >/dev/null 2>&1; then
       cd elixir && mise trust && mise exec -- mix deps.get
     fi
+  before_run: |
+    jj status || true
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
 agent:

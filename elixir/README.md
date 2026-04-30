@@ -112,7 +112,13 @@ workspace:
   root: ~/code/workspaces
 hooks:
   after_create: |
-    git clone git@github.com:your-org/your-repo.git .
+    if ! command -v jj >/dev/null 2>&1; then
+      echo 'jj is required for this Symphony workflow' >&2
+      exit 127
+    fi
+    jj git clone git@github.com:your-org/your-repo.git .
+  before_run: |
+    jj status || true
 agent:
   max_concurrent_agents: 10
   max_turns: 20
@@ -227,8 +233,9 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
-- Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
-  `git clone ... .` there, along with any other setup commands you need.
+- Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
+  turns run in jj-native workspaces and do not need to write Git metadata directly. Use
+  `git clone ... .` only for repos that cannot run under jj compatibility.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
@@ -244,7 +251,13 @@ workspace:
   root: $SYMPHONY_WORKSPACE_ROOT
 hooks:
   after_create: |
-    git clone --depth 1 "$SOURCE_REPO_URL" .
+    if ! command -v jj >/dev/null 2>&1; then
+      echo 'jj is required for this Symphony workflow' >&2
+      exit 127
+    fi
+    jj git clone "$SOURCE_REPO_URL" .
+  before_run: |
+    jj status || true
 codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
