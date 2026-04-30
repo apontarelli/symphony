@@ -152,6 +152,7 @@ team_key: SID
 projects:
   - project_slug: linear-project-slug
     profile: default
+    pr_target: project/integration
 labels:
   - label: strict
     profile: strict
@@ -168,6 +169,7 @@ team_key: SID
 projects:
   - project_slug: project-alpha
     profile: project_integration
+    pr_target: project/alpha
 labels:
   - label: strict
     profile: strict_review
@@ -177,7 +179,8 @@ Selection precedence is CLI `--profile`, exact project binding, one matching lab
 that project, catch-all, then `default` only when `allow_default: true` or no external bindings are
 configured. Multiple matches at the same precedence block dispatch. Label refinements can change
 validation/review/prompt policy but cannot change the selected project delivery target. Each
-project binding must use exactly one of `project_id` or `project_slug`.
+project binding must use exactly one of `project_id` or `project_slug`. Project bindings may set
+`pr_target`; when absent, Symphony uses the selected profile's `delivery.pr_target`.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
   runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base

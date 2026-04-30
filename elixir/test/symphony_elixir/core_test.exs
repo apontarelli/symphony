@@ -474,7 +474,7 @@ defmodule SymphonyElixir.CoreTest do
 
     ProfileBindings.set(%{
       team_key: "SID",
-      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      projects: [%{project_slug: "project-a", profile: "project_alpha", pr_target: "project/binding-alpha"}],
       labels: [%{label: "Strict", profile: "strict_label"}],
       catch_all: %{enabled: true, profile: "catch_all"},
       allow_default: true
@@ -490,12 +490,40 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert {:ok, policy} = Config.issue_policy(issue)
-    assert policy["delivery"]["pr_target"] == "project/alpha"
+    assert policy["delivery"]["pr_target"] == "project/binding-alpha"
     assert policy["checks"] == ["project", "dialyzer"]
     assert policy["review"] == %{"mode" => "strict"}
     assert policy["policy_metadata"]["source"] == "project_binding"
     assert policy["policy_metadata"]["profile"] == "project_alpha"
     assert policy["policy_metadata"]["label_refinement"] == %{"label" => "strict", "profile" => "strict_label"}
+
+    assert PromptBuilder.workpad_policy_stamp(policy) ==
+             "Policy: profile=project_alpha target=project/binding-alpha policy_ref=#{policy["policy_ref"]}"
+  end
+
+  test "project binding delivery target falls back to selected profile when binding target is absent" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "main"}},
+        project_alpha: %{delivery: %{pr_target: "project/alpha"}}
+      }
+    )
+
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "project-a", profile: "project_alpha"}]
+    })
+
+    issue = %Issue{
+      id: "issue-project-a-fallback",
+      identifier: "SID-101B",
+      title: "Project-bound fallback dispatch",
+      state: "Todo",
+      project_slug: "project-a"
+    }
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert policy["delivery"]["pr_target"] == "project/alpha"
+    assert policy["policy_metadata"]["profile"] == "project_alpha"
   end
 
   test "unprojected Linear issues require explicit catch-all binding" do
@@ -736,6 +764,7 @@ defmodule SymphonyElixir.CoreTest do
       {%{projects: [%{project_id: "project-id", project_slug: "project-a", profile: "default"}]}, "project bindings require exactly one of project_id or project_slug"},
       {%{projects: %{}}, "projects must be a list"},
       {%{projects: ["project-a"]}, "projects[0] must be a map"},
+      {%{projects: [%{project_slug: "project-a", profile: "default", pr_target: 123}]}, "projects[0] pr_target must be a string"},
       {%{labels: %{}}, "labels must be a list"},
       {%{labels: ["strict"]}, "labels[0] must be a map"},
       {%{catch_all: []}, "catch_all must be a map or profile string"},
@@ -761,7 +790,7 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     ProfileBindings.set(%{
-      projects: [%{project_slug: "project-a", profile: "project_alpha"}],
+      projects: [%{project_slug: "project-a", profile: "project_alpha", pr_target: "project/binding-alpha"}],
       labels: [%{label: "strict", profile: "strict_label"}]
     })
 
@@ -774,7 +803,7 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["strict"]
     }
 
-    assert {:error, {:refinement_delivery_target_override, "strict_label", "project/alpha", "main"}} =
+    assert {:error, {:refinement_delivery_target_override, "strict_label", "project/binding-alpha", "main"}} =
              Config.issue_policy(issue)
   end
 

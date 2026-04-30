@@ -1311,6 +1311,7 @@ team_key: SID
 projects:
   - project_slug: project-alpha
     profile: project_integration
+    pr_target: project/alpha
 labels:
   - label: strict
     profile: strict_review
@@ -1324,7 +1325,8 @@ Selection precedence:
 
 1. CLI profile override for the current process.
 2. Exact Linear project binding by `project_id` or `project_slug`. Each project binding MUST use
-   exactly one project selector.
+   exactly one project selector. Each project binding MAY set `pr_target`; when absent, resolution
+   falls back to the selected profile's `delivery.pr_target`.
 3. One label refinement within the selected project binding.
 4. Explicit catch-all/team-level binding when enabled and no project binding matches.
 5. `default` profile only when explicitly allowed by runtime bindings, or when no external binding
@@ -1334,7 +1336,7 @@ At any precedence, more than one matching selector MUST block dispatch with an o
 error. Project bindings referencing unknown profiles MUST fail startup/readiness validation.
 Unprojected issues MUST NOT dispatch unless catch-all is enabled. Label refinements MAY adjust
 validation, review, and prompt policy, but MUST NOT change the selected project binding's
-`delivery.pr_target`.
+effective `delivery.pr_target`.
 
 ## 12. Prompt Construction and Context Assembly
 

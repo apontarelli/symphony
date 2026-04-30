@@ -181,6 +181,7 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   defp select_project_policy(settings, issue, bindings, binding) do
     with {:ok, refinement} <- matching_label_refinement(issue, bindings.labels) do
       refinement_profiles = if is_nil(refinement), do: [], else: [refinement.profile]
+      delivery_target = binding.pr_target || base_delivery_target(settings, binding.profile)
 
       metadata =
         %{
@@ -191,7 +192,10 @@ defmodule SymphonyElixir.Config.ProfileBindings do
         }
         |> maybe_put_refinement_metadata(refinement)
 
-      resolve_policy(settings, binding.profile, refinement_profiles, metadata)
+      resolve_policy(settings, binding.profile, refinement_profiles, metadata,
+        delivery_target_override: binding.pr_target,
+        lock_delivery_target: delivery_target
+      )
     end
   end
 
@@ -223,12 +227,18 @@ defmodule SymphonyElixir.Config.ProfileBindings do
     end
   end
 
-  defp resolve_policy(settings, profile, refinement_profiles, metadata) do
-    lock_delivery_target = if refinement_profiles == [], do: nil, else: base_delivery_target(settings, profile)
+  defp resolve_policy(settings, profile, refinement_profiles, metadata, opts \\ []) do
+    lock_delivery_target =
+      if refinement_profiles == [] do
+        nil
+      else
+        Keyword.get(opts, :lock_delivery_target) || base_delivery_target(settings, profile)
+      end
 
     Schema.resolve_effective_policy(settings, profile, refinement_profiles,
       metadata: metadata,
-      lock_delivery_target: lock_delivery_target
+      lock_delivery_target: lock_delivery_target,
+      delivery_target_override: Keyword.get(opts, :delivery_target_override)
     )
   end
 
@@ -478,9 +488,7 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   defp label_binding_selector(_binding), do: nil
 
   defp binding_summaries(bindings) do
-    Enum.map(bindings, fn binding ->
-      Map.take(binding, [:project_id, :project_slug, :label, :profile])
-    end)
+    Enum.map(bindings, &Map.take(&1, [:project_id, :project_slug, :label, :profile, :pr_target]))
   end
 
   defp maybe_put_refinement_metadata(metadata, nil), do: metadata
@@ -511,12 +519,15 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   defp normalize_project_binding(binding) when is_map(binding) do
     binding = normalize_keys(binding)
 
-    {:ok,
-     %{
-       project_id: normalized_string(Map.get(binding, "project_id") || Map.get(binding, "id")),
-       project_slug: normalized_string(Map.get(binding, "project_slug") || Map.get(binding, "slug") || Map.get(binding, "slug_id")),
-       profile: normalized_string(Map.get(binding, "profile") || Map.get(binding, "profile_name"))
-     }}
+    with {:ok, pr_target} <- normalize_optional_string_field(binding, "pr_target") do
+      {:ok,
+       %{
+         project_id: normalized_string(Map.get(binding, "project_id") || Map.get(binding, "id")),
+         project_slug: normalized_string(Map.get(binding, "project_slug") || Map.get(binding, "slug") || Map.get(binding, "slug_id")),
+         profile: normalized_string(Map.get(binding, "profile") || Map.get(binding, "profile_name")),
+         pr_target: pr_target
+       }}
+    end
   end
 
   defp normalize_project_binding(_binding), do: {:error, "must be a map"}
@@ -592,6 +603,14 @@ defmodule SymphonyElixir.Config.ProfileBindings do
   end
 
   defp normalized_string(_value), do: nil
+
+  defp normalize_optional_string_field(binding, key) do
+    if Map.has_key?(binding, key) and not is_binary(Map.get(binding, key)) do
+      {:error, "#{key} must be a string"}
+    else
+      {:ok, normalized_string(Map.get(binding, key))}
+    end
+  end
 
   defp normalize_label(value) when is_binary(value) do
     value

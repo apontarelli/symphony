@@ -1,0 +1,14 @@
+team_key: SID
+projects:
+  - project_slug: project-alpha
+    profile: project_integration
+    pr_target: project/alpha
+  - project_id: 00000000-0000-0000-0000-000000000000
+    profile: default
+labels:
+  - label: strict
+    profile: strict_review
+catch_all:
+  enabled: false
+  profile: default
+allow_default: false

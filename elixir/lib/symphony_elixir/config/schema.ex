@@ -552,6 +552,7 @@ defmodule SymphonyElixir.Config.Schema do
          {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
          {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
+         {:ok, policy} <- apply_delivery_target_override(policy, Keyword.get(opts, :delivery_target_override)),
          :ok <- validate_resolved_delivery(policy, profile_name) do
       apply_refinement_policies(profiles, policy, refinement_names, Keyword.get(opts, :lock_delivery_target))
     end
@@ -575,6 +576,18 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp apply_selected_policy(default_effective, selected_policy, profile_name) do
     apply_policy_overrides(default_effective, selected_policy, [profile_name])
+  end
+
+  defp apply_delivery_target_override(policy, nil), do: {:ok, policy}
+
+  defp apply_delivery_target_override(policy, pr_target) when is_binary(pr_target) do
+    delivery = Map.get(policy, "delivery", %{})
+
+    if is_map(delivery) do
+      {:ok, Map.put(policy, "delivery", Map.put(delivery, @delivery_pr_target_key, pr_target))}
+    else
+      {:ok, Map.put(policy, "delivery", %{@delivery_pr_target_key => pr_target})}
+    end
   end
 
   defp apply_refinement_policies(_profiles, policy, [], _locked_delivery_target), do: {:ok, policy}
