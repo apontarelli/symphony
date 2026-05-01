@@ -342,15 +342,56 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
-             "counts" => %{"running" => 1, "retrying" => 1},
+             "counts" => %{
+               "running" => 1,
+               "retrying" => 1,
+               "work_errors" => 1,
+               "config_warnings" => 0,
+               "stale_warnings" => 0
+             },
+             "project_statuses" => [
+               %{
+                 "id" => "project",
+                 "project" => "project",
+                 "project_slug" => "project",
+                 "project_url" => "https://linear.app/project/project/issues",
+                 "statuses" => ["work_error", "retrying", "active"],
+                 "running" => 1,
+                 "retrying" => 1,
+                 "errors" => 1,
+                 "stale_warnings" => 0,
+                 "config_warnings" => 0,
+                 "profile" => "default",
+                 "pr_target" => "main",
+                 "last_activity_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),
+                 "actions" => [
+                   %{"label" => "Open Linear", "href" => "https://linear.app/project/project/issues"}
+                 ]
+               }
+             ],
+             "work_errors" => [
+               %{
+                 "issue_id" => "issue-retry",
+                 "issue_identifier" => "MT-RETRY",
+                 "project_slug" => "project",
+                 "attempt" => 2,
+                 "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
+                 "error" => "boom"
+               }
+             ],
+             "config_warnings" => [],
+             "stale_warnings" => [],
              "running" => [
                %{
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
+                 "project_slug" => "project",
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "session_id" => "thread-http",
+                 "profile" => "default",
+                 "pr_target" => "main",
                  "turn_count" => 7,
                  "last_event" => "notification",
                  "last_message" => "rendered",
@@ -363,7 +404,10 @@ defmodule SymphonyElixir.ExtensionsTest do
                %{
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
+                 "project_slug" => "project",
                  "attempt" => 2,
+                 "profile" => "default",
+                 "pr_target" => "main",
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
                  "worker_host" => nil,
@@ -376,6 +420,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
+             "token_hotspot" => %{
+               "issue_identifier" => "MT-HTTP",
+               "session_id" => "thread-http",
+               "input_tokens" => 4,
+               "output_tokens" => 8,
+               "total_tokens" => 12
+             },
+             "rate_limits_available" => true,
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
 
@@ -395,6 +447,9 @@ defmodule SymphonyElixir.ExtensionsTest do
                "worker_host" => nil,
                "workspace_path" => nil,
                "session_id" => "thread-http",
+               "project_slug" => "project",
+               "profile" => "default",
+               "pr_target" => "main",
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
@@ -499,14 +554,19 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "/vendor/phoenix_html/phoenix_html.js"
     assert html =~ "/vendor/phoenix/phoenix.js"
     assert html =~ "/vendor/phoenix_live_view/phoenix_live_view.js"
+    assert html =~ "/favicon.ico"
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
     assert dashboard_css =~ ":root {"
     assert dashboard_css =~ ".status-badge-live"
+    assert dashboard_css =~ ".project-table"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+
+    favicon = response(get(build_conn(), "/favicon.ico"), 200)
+    assert favicon =~ "<svg"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -539,15 +599,25 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Operations Dashboard"
+    assert html =~ "Project health"
+    assert html =~ "Project status"
+    assert html =~ "Work errors"
+    assert html =~ "Config warnings"
+    assert html =~ "Stale sessions"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
     assert html =~ "Runtime"
+    assert html =~ "Token usage"
+    assert html =~ "Highest active: MT-HTTP"
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
+    assert html =~ "Profile / target"
+    assert html =~ "Admin"
+    refute html =~ "Operations Dashboard"
+    refute html =~ "Retry queue"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -596,6 +666,148 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
   end
 
+  test "dashboard shows active and idle bound projects and hides empty rate limits" do
+    orchestrator_name = Module.concat(__MODULE__, :IdleDashboardOrchestrator)
+
+    snapshot = %{
+      bound_projects: [
+        %{project_slug: "project", profile: "default", pr_target: "main"},
+        %{project_slug: "idle-project", profile: "maintenance", pr_target: "release"}
+      ],
+      running: [
+        %{
+          issue_id: "issue-active",
+          identifier: "MT-ACTIVE",
+          project_slug: "project",
+          state: "In Progress",
+          session_id: "thread-active",
+          turn_count: 1,
+          codex_app_server_pid: nil,
+          last_codex_message: "working",
+          last_codex_timestamp: DateTime.utc_now(),
+          last_codex_event: :notification,
+          codex_input_tokens: 1,
+          codex_output_tokens: 2,
+          codex_total_tokens: 3,
+          started_at: DateTime.utc_now()
+        }
+      ],
+      retrying: [],
+      codex_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 0},
+      rate_limits: nil
+    }
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+
+    assert html =~ "Project health"
+    assert html =~ "Project status"
+    assert html =~ "project"
+    assert html =~ "MT-ACTIVE"
+    assert html =~ "Active"
+    assert html =~ "idle-project"
+    assert html =~ "Idle"
+    assert html =~ "maintenance"
+    assert html =~ "release"
+    refute html =~ "Rate limits"
+    refute html =~ "<pre class=\"code-panel\">n/a</pre>"
+  end
+
+  test "dashboard hides unavailable n/a rate limit snapshots" do
+    orchestrator_name = Module.concat(__MODULE__, :UnavailableRateLimitDashboardOrchestrator)
+
+    snapshot = %{
+      bound_projects: [%{project_slug: "idle-project", profile: "default", pr_target: "main"}],
+      running: [],
+      retrying: [],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: "n/a"
+    }
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert %{"rate_limits_available" => false} = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    refute html =~ "Rate limits"
+    refute html =~ "<pre class=\"code-panel\">"
+  end
+
+  test "dashboard treats stale active sessions as warnings and hides identification-only rate limits" do
+    orchestrator_name = Module.concat(__MODULE__, :StaleDashboardOrchestrator)
+    stale_at = DateTime.utc_now() |> DateTime.add(-360, :second)
+    started_at = DateTime.utc_now() |> DateTime.add(-420, :second)
+
+    snapshot = %{
+      bound_projects: [
+        %{project_slug: "ops-project", profile: "incident", pr_target: "release"}
+      ],
+      running: [
+        %{
+          issue_id: "issue-stale",
+          identifier: "MT-STALE",
+          project_slug: "ops-project",
+          state: "In Progress",
+          session_id: "thread-stale",
+          turn_count: 3,
+          codex_app_server_pid: nil,
+          last_codex_message: "still working",
+          last_codex_timestamp: stale_at,
+          last_codex_event: :notification,
+          codex_input_tokens: 5,
+          codex_output_tokens: 8,
+          codex_total_tokens: 13,
+          started_at: started_at
+        }
+      ],
+      retrying: [],
+      codex_totals: %{input_tokens: 5, output_tokens: 8, total_tokens: 13, seconds_running: 0},
+      rate_limits: %{"limit_id" => "codex", "primary" => %{}, "secondary" => nil}
+    }
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert state_payload["counts"]["stale_warnings"] == 1
+    assert state_payload["rate_limits_available"] == false
+
+    assert [%{"statuses" => statuses, "profile" => "incident", "pr_target" => "release"}] =
+             state_payload["project_statuses"]
+
+    assert "stale" in statuses
+    assert "active" in statuses
+    assert [%{"profile" => "incident", "pr_target" => "release"}] = state_payload["running"]
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "MT-STALE"
+    assert html =~ "Stale"
+    assert html =~ "incident"
+    assert html =~ "release"
+    refute html =~ "Rate limits"
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
@@ -641,7 +853,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1}
+
+    assert response.body["counts"] == %{
+             "running" => 1,
+             "retrying" => 1,
+             "work_errors" => 1,
+             "config_warnings" => 0,
+             "stale_warnings" => 0
+           }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200

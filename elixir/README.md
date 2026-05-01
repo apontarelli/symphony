@@ -156,6 +156,13 @@ codex:
 The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
+- A compact control panel overview for freshness, running/retrying work, work errors,
+  config warnings, stale sessions, runtime, and token usage
+- A primary project status table that includes active and idle bound projects
+- Running session detail with issue state, profile/target, runtime, last Codex update,
+  copyable session ID, and token split
+- Optional Admin details for binding/profile metadata and rate-limit diagnostics only when
+  upstream rate-limit data is present
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap

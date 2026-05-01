@@ -36,6 +36,7 @@ defmodule SymphonyElixirWeb.Layouts do
             window.liveSocket = liveSocket;
           });
         </script>
+        <link rel="icon" href="/favicon.ico" type="image/svg+xml" />
         <link rel="stylesheet" href="/dashboard.css" />
       </head>
       <body>
