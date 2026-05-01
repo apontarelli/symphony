@@ -58,19 +58,23 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
     current_bindings = ProfileBindings.current()
     project_bindings = draft_projects || current_bindings.projects
     bindings = Map.put(current_bindings, :projects, project_bindings)
-    bound_by_selector = Map.new(project_bindings, &{project_selector_key(&1), &1})
+
+    bound_by_selector =
+      project_bindings
+      |> Enum.flat_map(&project_binding_selector_entries/1)
+      |> Map.new()
 
     discovered_rows =
       Enum.map(discovered_projects, &discovered_project_row(&1, bound_by_selector))
 
     discovered_keys =
-      discovered_rows
-      |> Enum.map(&project_selector_key(%{String.to_atom(&1.selector_kind) => &1.selector_value}))
+      discovered_projects
+      |> Enum.flat_map(&discovered_project_keys/1)
       |> MapSet.new()
 
     bound_only_rows =
       bindings.projects
-      |> Enum.reject(&MapSet.member?(discovered_keys, project_selector_key(&1)))
+      |> Enum.reject(&binding_discovered?(&1, discovered_keys))
       |> Enum.map(&bound_only_project_row/1)
 
     discovered_rows ++ bound_only_rows
@@ -100,7 +104,12 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
 
   defp discovered_project_row(project, bound_by_selector) do
     selector = project_selector(project)
-    binding = Map.get(bound_by_selector, project_selector_key(selector))
+
+    binding =
+      Map.get(bound_by_selector, project_selector_key(selector)) ||
+        binding_by_project_id(project, bound_by_selector) ||
+        binding_by_linear_slug_id(project, bound_by_selector)
+
     slug = project[:slug_id]
 
     %{
@@ -264,7 +273,6 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
   defp project_name_needs_slug?(name, id, slug), do: name in [id, slug] or opaque_project_name?(name)
 
   defp opaque_project_name?(value) when is_binary(value), do: Regex.match?(~r/^[0-9a-f-]{8,}$/i, value)
-  defp opaque_project_name?(_value), do: false
 
   defp active_project?(%{archived?: true}), do: false
   defp active_project?(%{deleted?: true}), do: false
@@ -381,6 +389,37 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
   defp yaml_value(nil), do: "null"
   defp yaml_value(value) when is_binary(value), do: inspect(value)
   defp yaml_value(value), do: inspect(to_string(value))
+
+  defp project_binding_selector_entries(binding) do
+    [{project_selector_key(binding), binding}]
+  end
+
+  defp binding_discovered?(binding, discovered_keys) do
+    binding
+    |> project_binding_selector_entries()
+    |> Enum.any?(fn {key, _binding} -> MapSet.member?(discovered_keys, key) end)
+  end
+
+  defp discovered_project_keys(project) do
+    [
+      project_selector_key(project_selector(project)),
+      project_selector_key(%{project_id: project[:id]}),
+      project_selector_key(%{project_slug: project[:linear_slug_id]})
+    ]
+    |> Enum.reject(&(&1 == {:missing, nil}))
+  end
+
+  defp binding_by_project_id(%{id: id}, bound_by_selector) when is_binary(id) do
+    Map.get(bound_by_selector, project_selector_key(%{project_id: id}))
+  end
+
+  defp binding_by_project_id(_project, _bound_by_selector), do: nil
+
+  defp binding_by_linear_slug_id(%{linear_slug_id: slug_id}, bound_by_selector) when is_binary(slug_id) do
+    Map.get(bound_by_selector, project_selector_key(%{project_slug: slug_id}))
+  end
+
+  defp binding_by_linear_slug_id(_project, _bound_by_selector), do: nil
 
   defp project_selector(%{slug_id: slug_id}) when is_binary(slug_id), do: %{project_slug: slug_id}
   defp project_selector(%{id: id}), do: %{project_id: id}

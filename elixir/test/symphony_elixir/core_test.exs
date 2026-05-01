@@ -946,8 +946,50 @@ defmodule SymphonyElixir.CoreTest do
              "symphony-completed"
            ]
 
+    assert Enum.map(projects, & &1.linear_slug_id) == [
+             "active-started",
+             "active-planned",
+             "paused",
+             "active-backlog",
+             "completed"
+           ]
+
     assert Enum.map(projects, & &1.status_type) == ["started", "planned", "paused", "backlog", "completed"]
     assert Enum.map(projects, & &1.active?) == [true, true, false, true, false]
+  end
+
+  test "binding admin repairs legacy id-as-slug project rows from discovery" do
+    ProfileBindings.set(%{
+      projects: [%{project_slug: "a7882a898255", profile: "strict", pr_target: "main"}]
+    })
+
+    rows =
+      ProfileBindingAdmin.project_rows([
+        %{
+          id: "a7882a898255",
+          name: "Quant Integration",
+          slug_id: "quant-integration-4a22",
+          linear_slug_id: "a7882a898255",
+          url: "https://linear.app/acme/project/quant-integration-4a22",
+          status_name: "Started",
+          status_type: "started",
+          archived?: false,
+          deleted?: false
+        }
+      ])
+
+    assert [
+             %{
+               name: "Quant Integration",
+               slug_id: "quant-integration-4a22",
+               selector_kind: "project_slug",
+               selector_value: "quant-integration-4a22",
+               bound?: true,
+               status_label: "Automated",
+               profile: "strict",
+               pr_target: "main"
+             }
+           ] = rows
   end
 
   test "malformed external Linear bindings fail validation" do
@@ -1030,7 +1072,7 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert is_binary(Map.get(tracker, "project_slug"))
+    refute Map.has_key?(tracker, "project_slug")
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 

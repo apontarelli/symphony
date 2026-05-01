@@ -84,7 +84,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   def handle_event("save_bindings", %{"projects" => project_params}, socket) do
-    projects = ProfileBindingAdmin.parse_project_params(project_params)
+    projects = socket.assigns.draft_projects || ProfileBindingAdmin.parse_project_params(project_params)
 
     case ProfileBindingAdmin.save_project_bindings(projects) do
       {:ok, _bindings} ->
@@ -899,10 +899,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp project_search_rows(projects, draft_projects, query, status_filter) do
     current_rows = admin_project_rows(projects, nil)
     draft_rows = admin_project_rows(projects, draft_projects)
-    current_bound_keys = current_rows |> Enum.filter(& &1.bound?) |> Enum.map(& &1.selector_key) |> MapSet.new()
+
+    retained_bound_keys =
+      (current_rows ++ draft_rows)
+      |> Enum.filter(& &1.bound?)
+      |> Enum.map(& &1.selector_key)
+      |> MapSet.new()
 
     draft_rows
-    |> Enum.filter(&(MapSet.member?(current_bound_keys, &1.selector_key) or project_row_matches?(&1, query, status_filter)))
+    |> Enum.filter(&(MapSet.member?(retained_bound_keys, &1.selector_key) or project_row_matches?(&1, query, status_filter)))
     |> Enum.sort_by(fn row -> {if(row.bound?, do: 0, else: 1), String.downcase(row.name || "")} end)
   end
 

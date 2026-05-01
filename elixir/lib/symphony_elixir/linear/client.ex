@@ -819,7 +819,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_project(project) when is_map(project) do
     status_type = normalized_status_type(get_in(project, ["status", "type"]))
-    slug = project_url_slug(project["url"]) || project["slugId"]
+    linear_slug_id = normalized_string(project["slugId"])
+    slug = project_url_slug(project["url"]) || linear_slug_id
 
     if is_binary(project["deletedAt"]) do
       nil
@@ -828,6 +829,7 @@ defmodule SymphonyElixir.Linear.Client do
         id: project["id"],
         name: project["name"],
         slug_id: slug,
+        linear_slug_id: linear_slug_id,
         url: project["url"],
         archived?: is_binary(project["archivedAt"]),
         deleted?: false,

@@ -4,6 +4,7 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.Config.ProfileBindings
 
   @stale_after_seconds 5 * 60
   @default_profile "default"
@@ -342,8 +343,6 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp normalized_string(_value), do: nil
 
-  defp human_project_name(nil), do: nil
-
   defp human_project_name(value) when is_binary(value) do
     value
     |> String.replace(~r/-[0-9a-f]{8,}$/i, "")
@@ -567,25 +566,55 @@ defmodule SymphonyElixirWeb.Presenter do
   defp config_warning_payloads do
     case Config.settings() do
       {:ok, settings} ->
-        tracker = settings.tracker
-
-        [
-          is_nil(tracker.kind) && config_warning("missing_tracker_kind", "Tracker kind is not configured."),
-          tracker.kind not in [nil, "linear", "memory"] &&
-            config_warning("unsupported_tracker_kind", "Tracker kind `#{tracker.kind}` is not supported."),
-          (tracker.kind == "linear" and not is_binary(tracker.api_key)) &&
-            config_warning("missing_linear_api_token", "Linear API token is not configured."),
-          (tracker.kind == "linear" and not is_binary(tracker.project_slug)) &&
-            config_warning("missing_linear_project_slug", "Linear project slug is not configured.")
-        ]
-        |> Enum.reject(&(&1 in [false, nil]))
+        settings.tracker
+        |> tracker_config_warnings()
 
       {:error, reason} ->
         [config_warning("workflow_config", "Workflow config could not be loaded: #{inspect(reason)}.")]
     end
   end
 
+  defp tracker_config_warnings(tracker) do
+    [
+      missing_tracker_kind_warning(tracker),
+      unsupported_tracker_kind_warning(tracker),
+      missing_linear_api_token_warning(tracker),
+      missing_linear_project_scope_warning(tracker)
+    ]
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp missing_tracker_kind_warning(%{kind: nil}), do: config_warning("missing_tracker_kind", "Tracker kind is not configured.")
+  defp missing_tracker_kind_warning(_tracker), do: nil
+
+  defp unsupported_tracker_kind_warning(%{kind: kind}) when kind not in [nil, "linear", "memory"] do
+    config_warning("unsupported_tracker_kind", "Tracker kind `#{kind}` is not supported.")
+  end
+
+  defp unsupported_tracker_kind_warning(_tracker), do: nil
+
+  defp missing_linear_api_token_warning(%{kind: "linear", api_key: api_key}) when not is_binary(api_key) do
+    config_warning("missing_linear_api_token", "Linear API token is not configured.")
+  end
+
+  defp missing_linear_api_token_warning(_tracker), do: nil
+
+  defp missing_linear_project_scope_warning(%{kind: "linear", project_slug: project_slug}) when not is_binary(project_slug) do
+    if linear_dispatch_scope_configured?() do
+      nil
+    else
+      config_warning("missing_linear_project_slug", "Linear project slug is not configured.")
+    end
+  end
+
+  defp missing_linear_project_scope_warning(_tracker), do: nil
+
   defp config_warning(code, message), do: %{code: code, message: message}
+
+  defp linear_dispatch_scope_configured? do
+    Config.linear_profile_bindings()
+    |> ProfileBindings.dispatch_scope_configured?()
+  end
 
   defp token_hotspot_payload([]), do: nil
 

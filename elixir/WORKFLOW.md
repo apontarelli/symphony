@@ -1,7 +1,6 @@
 ---
 tracker:
   kind: linear
-  project_slug: "symphony-workflow-profiles-792b8faa6174"
   active_states:
     - Todo
     - In Progress

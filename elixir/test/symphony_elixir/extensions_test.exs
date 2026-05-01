@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixirWeb.DashboardLive
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -352,7 +353,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "project_statuses" => [
                %{
                  "id" => "project",
-                 "project" => "project",
+                 "project" => "Project",
                  "project_slug" => "project",
                  "project_url" => "https://linear.app/project/project/issues",
                  "statuses" => ["work_error", "retrying", "active"],
@@ -635,11 +636,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     {:ok, view, html} = live(build_conn(), "/")
-    assert html =~ "Project health"
     assert html =~ "Project status"
     assert html =~ "Work errors"
-    assert html =~ "Config warnings"
-    assert html =~ "Stale sessions"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "Human Review"
@@ -653,7 +651,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
     assert html =~ "Profile / target"
-    assert html =~ "Admin"
+    assert html =~ "Automation scope"
     refute html =~ "Operations Dashboard"
     refute html =~ "Retry queue"
     refute html =~ "data-runtime-clock="
@@ -746,7 +744,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     {:ok, _view, html} = live(build_conn(), "/")
 
-    assert html =~ "Project health"
     assert html =~ "Project status"
     assert html =~ "project"
     assert html =~ "MT-ACTIVE"
@@ -784,6 +781,60 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     refute html =~ "Rate limits"
     refute html =~ "<pre class=\"code-panel\">"
+  end
+
+  test "dashboard save persists server draft instead of stale submitted project rows" do
+    source_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "linear-profile-bindings.local.yml")
+    ProfileBindings.set_source_path(source_path)
+    File.write!(source_path, "projects: []\n")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "main"}},
+        selected: %{delivery: %{pr_target: "project/selected"}}
+      }
+    )
+
+    ProfileBindings.set(%{
+      team_key: "HAR",
+      projects: [%{project_slug: "old-project", profile: "default", pr_target: "main"}]
+    })
+
+    socket = %Phoenix.LiveView.Socket{
+      assigns: %{
+        __changed__: %{},
+        draft_projects: [
+          %{
+            selector_kind: "project_slug",
+            selector_value: "selected-project-a123",
+            profile: "selected",
+            pr_target: "project/selected"
+          }
+        ],
+        payload: %{running: []}
+      }
+    }
+
+    stale_submit = %{
+      "projects" => %{
+        "0" => %{
+          "include" => "true",
+          "selector_kind" => "project_slug",
+          "selector_value" => "old-project",
+          "profile" => "default",
+          "pr_target_mode" => "main"
+        }
+      }
+    }
+
+    assert {:noreply, _socket} = DashboardLive.handle_event("save_bindings", stale_submit, socket)
+
+    assert [%{project_slug: "selected-project-a123", profile: "selected", pr_target: "project/selected"}] =
+             ProfileBindings.current().projects
+
+    persisted = File.read!(source_path)
+    assert persisted =~ ~s(project_slug: "selected-project-a123")
+    refute persisted =~ "old-project"
   end
 
   test "dashboard treats stale active sessions as warnings and hides identification-only rate limits" do
