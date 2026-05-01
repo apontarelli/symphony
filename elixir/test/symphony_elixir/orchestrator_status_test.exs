@@ -143,12 +143,207 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
+    assert snapshot_entry.last_codex_progress_timestamp == now
 
     assert snapshot_entry.last_codex_message == %{
              event: :notification,
              message: %{method: "some-event"},
              timestamp: now
            }
+  end
+
+  test "repeated non-progress error notifications do not refresh stall protection" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000
+    )
+
+    issue_id = "issue-noise-stall"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-NOISE",
+      title: "Noise stall test",
+      description: "Repeated generic errors should not mask a stalled run",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-NOISE"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :NoiseStallOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_progress_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-noise-turn-noise",
+      last_codex_message: nil,
+      last_codex_timestamp: stale_progress_at,
+      last_codex_progress_timestamp: stale_progress_at,
+      last_codex_event: :session_started,
+      started_at: stale_progress_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    fresh_noise_at = DateTime.utc_now()
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "error", "params" => %{"message" => "temporary upstream error"}},
+         timestamp: fresh_noise_at
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :notification,
+         payload: %{"method" => "item/started", "params" => %{"item" => %{"type" => "reasoning"}}},
+         timestamp: fresh_noise_at
+       }}
+    )
+
+    snapshot_before_tick = GenServer.call(pid, :snapshot)
+    assert %{running: [running_before_tick]} = snapshot_before_tick
+    assert running_before_tick.last_codex_timestamp == fresh_noise_at
+    assert running_before_tick.last_codex_progress_timestamp == stale_progress_at
+
+    send(pid, :tick)
+    send(pid, :run_poll_cycle)
+    _snapshot_after_tick = GenServer.call(pid, :snapshot)
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+
+    assert %{
+             attempt: 1,
+             identifier: "MT-NOISE",
+             error: "stalled for " <> _,
+             session_id: "thread-noise-turn-noise"
+           } = state.retry_attempts[issue_id]
+  end
+
+  test "orchestrator retry status keeps codex error loop session and signature context" do
+    issue_id = "issue-error-loop-status"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-LOOP",
+      title: "Error loop status test",
+      description: "Expose failed session context while retrying",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-LOOP"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :ErrorLoopStatusOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    process_ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_progress_timestamp: nil,
+      last_codex_event: nil,
+      last_codex_error_signature: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    now = DateTime.utc_now()
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :session_started,
+         session_id: "thread-loop-turn-loop",
+         timestamp: now
+       }}
+    )
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :codex_error_loop,
+         session_id: "thread-loop-turn-loop",
+         signature: "remote_compaction_failed:property_name_above_max_length",
+         timestamp: now
+       }}
+    )
+
+    running_snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [running_entry_snapshot]} = running_snapshot
+    assert running_entry_snapshot.session_id == "thread-loop-turn-loop"
+    assert running_entry_snapshot.last_codex_error_signature == "remote_compaction_failed:property_name_above_max_length"
+
+    send(pid, {:DOWN, process_ref, :process, self(), :boom})
+
+    retry_snapshot = GenServer.call(pid, :snapshot)
+    assert %{retrying: [retry_entry]} = retry_snapshot
+    assert retry_entry.session_id == "thread-loop-turn-loop"
+    assert retry_entry.last_error_signature == "remote_compaction_failed:property_name_above_max_length"
+
+    rendered =
+      StatusDashboard.format_snapshot_content_for_test(
+        {:ok,
+         %{
+           running: [],
+           retrying: [retry_entry],
+           codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+           rate_limits: nil
+         }},
+        0.0
+      )
+
+    assert rendered =~ "thre...n-loop"
+    assert rendered =~ "sig=remote_compaction_failed:property_name_above_max_length"
   end
 
   test "orchestrator snapshot tracks codex thread totals and app-server pid" do

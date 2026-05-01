@@ -234,7 +234,9 @@ Fields:
 - `codex_app_server_pid` (string or null)
 - `last_codex_event` (string/enum or null)
 - `last_codex_timestamp` (timestamp or null)
+- `last_codex_progress_timestamp` (timestamp or null)
 - `last_codex_message` (summarized payload)
+- `last_codex_error_signature` (compact string or null)
 - `codex_input_tokens` (integer)
 - `codex_output_tokens` (integer)
 - `codex_total_tokens` (integer)
@@ -869,8 +871,12 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - `last_codex_progress_timestamp` if meaningful progress has been seen,
+  - otherwise `last_codex_timestamp` if any event has been seen, else
   - `started_at`
+- Generic non-progress notifications such as repeated `error` or `item/started` frames update
+  `last_codex_timestamp` for observability but MUST NOT refresh
+  `last_codex_progress_timestamp`.
 - If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
 - If `stall_timeout_ms <= 0`, skip stall detection entirely.
 
@@ -1097,6 +1103,7 @@ Important emitted events include, for example:
 - `turn_failed`
 - `turn_cancelled`
 - `turn_ended_with_error`
+- `codex_error_loop`
 - `turn_input_required`
 - `approval_auto_approved`
 - `unsupported_tool_call`
@@ -1926,6 +1933,8 @@ function dispatch_issue(issue, state, attempt):
     last_codex_message: null,
     last_codex_event: null,
     last_codex_timestamp: null,
+    last_codex_progress_timestamp: null,
+    last_codex_error_signature: null,
     codex_input_tokens: 0,
     codex_output_tokens: 0,
     codex_total_tokens: 0,

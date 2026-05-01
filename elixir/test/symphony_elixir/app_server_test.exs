@@ -1205,6 +1205,164 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server aborts repeated SID-92 compaction error loops with structured context" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-compaction-loop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "SID-92")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      error_message =
+        "remote compaction failed: Failed to run pre-sampling compact: " <>
+          "property_name_above_max_length: Invalid property name in 'input[48].arguments'"
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-92"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-92"}}}'
+            for i in 1 2 3 4; do
+              printf '%s\\n' "error: #{error_message}" >&2
+              printf '%s\\n' "{\\"method\\":\\"error\\",\\"params\\":{\\"message\\":\\"#{error_message}\\"}}"
+              printf '%s\\n' '{"method":"item/started","params":{"item":{"type":"reasoning","text":"retrying compact"}}}'
+            done
+            sleep 1
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_turn_timeout_ms: 5_000
+      )
+
+      issue = %Issue{
+        id: "issue-compaction-loop",
+        identifier: "SID-92",
+        title: "Compaction loop",
+        description: "Repeated compaction errors should fail with a retryable structured reason",
+        state: "In Progress",
+        url: "https://example.org/issues/SID-92"
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:error, {:codex_error_loop, context}} =
+               AppServer.run(workspace, "Reproduce SID-92 loop", issue, on_message: on_message)
+
+      assert context.issue_id == "issue-compaction-loop"
+      assert context.issue_identifier == "SID-92"
+      assert context.session_id == "thread-92-turn-92"
+      assert context.thread_id == "thread-92"
+      assert context.turn_id == "turn-92"
+      assert context.signature == "remote_compaction_failed:property_name_above_max_length"
+      assert context.count >= 3
+      assert context.last_message =~ "Invalid property name"
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :codex_error_loop,
+                         session_id: "thread-92-turn-92",
+                         signature: "remote_compaction_failed:property_name_above_max_length"
+                       }}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server aborts repeated fatal non-json stream output without waiting for turn timeout" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-fatal-stream-loop-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-94")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-94"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-94"}}}'
+            for i in 1 2 3 4; do
+              printf '%s\\n' 'fatal: app-server transport failed during remote compact retry' >&2
+            done
+            sleep 1
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_turn_timeout_ms: 5_000
+      )
+
+      issue = %Issue{
+        id: "issue-fatal-stream-loop",
+        identifier: "MT-94",
+        title: "Fatal stream loop",
+        description: "Repeated fatal non-json output should fail in bounded count",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-94"
+      }
+
+      assert {:error, {:codex_error_loop, context}} =
+               AppServer.run(workspace, "Handle fatal stream loop", issue)
+
+      assert context.session_id == "thread-94-turn-94"
+      assert context.source == :stream
+      assert String.starts_with?(context.signature, "fatal_stream:")
+      assert context.count == 3
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server emits malformed events for JSON-like protocol lines that fail to decode" do
     test_root =
       Path.join(

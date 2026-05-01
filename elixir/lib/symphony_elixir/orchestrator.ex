@@ -171,6 +171,8 @@ defmodule SymphonyElixir.Orchestrator do
                 retry_metadata_from_running(running_entry, %{
                   identifier: running_entry.identifier,
                   error: "agent exited: #{inspect(reason)}",
+                  session_id: running_entry_session_id(running_entry),
+                  last_error_signature: Map.get(running_entry, :last_codex_error_signature),
                   worker_host: Map.get(running_entry, :worker_host),
                   workspace_path: Map.get(running_entry, :workspace_path)
                 })
@@ -515,7 +517,9 @@ defmodule SymphonyElixir.Orchestrator do
         next_attempt,
         retry_metadata_from_running(running_entry, %{
           identifier: identifier,
-          error: "stalled for #{elapsed_ms}ms without codex activity"
+          error: "stalled for #{elapsed_ms}ms without codex progress",
+          session_id: running_entry_session_id(running_entry),
+          last_error_signature: Map.get(running_entry, :last_codex_error_signature)
         })
       )
     else
@@ -536,7 +540,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp last_activity_timestamp(running_entry) when is_map(running_entry) do
-    Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
+    Map.get(running_entry, :last_codex_progress_timestamp) ||
+      Map.get(running_entry, :last_codex_timestamp) ||
+      Map.get(running_entry, :started_at)
   end
 
   defp last_activity_timestamp(_running_entry), do: nil
@@ -765,7 +771,9 @@ defmodule SymphonyElixir.Orchestrator do
             session_id: nil,
             last_codex_message: nil,
             last_codex_timestamp: nil,
+            last_codex_progress_timestamp: nil,
             last_codex_event: nil,
+            last_codex_error_signature: nil,
             codex_app_server_pid: nil,
             codex_input_tokens: 0,
             codex_output_tokens: 0,
@@ -844,6 +852,8 @@ defmodule SymphonyElixir.Orchestrator do
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
     identifier = pick_retry_identifier(issue_id, previous_retry, metadata)
     error = pick_retry_error(previous_retry, metadata)
+    session_id = pick_retry_session_id(previous_retry, metadata)
+    last_error_signature = pick_retry_last_error_signature(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
     policy = pick_retry_policy(previous_retry, metadata)
@@ -872,6 +882,8 @@ defmodule SymphonyElixir.Orchestrator do
             due_at_ms: due_at_ms,
             identifier: identifier,
             error: error,
+            session_id: session_id,
+            last_error_signature: last_error_signature,
             worker_host: worker_host,
             workspace_path: workspace_path,
             policy: policy,
@@ -888,6 +900,8 @@ defmodule SymphonyElixir.Orchestrator do
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
+          session_id: Map.get(retry_entry, :session_id),
+          last_error_signature: Map.get(retry_entry, :last_error_signature),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           policy: Map.get(retry_entry, :policy),
@@ -1031,6 +1045,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp pick_retry_error(previous_retry, metadata) do
     metadata[:error] || Map.get(previous_retry, :error)
+  end
+
+  defp pick_retry_session_id(previous_retry, metadata) do
+    metadata[:session_id] || Map.get(previous_retry, :session_id)
+  end
+
+  defp pick_retry_last_error_signature(previous_retry, metadata) do
+    metadata[:last_error_signature] || Map.get(previous_retry, :last_error_signature)
   end
 
   defp pick_retry_worker_host(previous_retry, metadata) do
@@ -1255,6 +1277,7 @@ defmodule SymphonyElixir.Orchestrator do
           policy_ref: Map.get(metadata, :policy_ref),
           policy: Map.get(metadata, :policy),
           session_id: metadata.session_id,
+          last_codex_progress_timestamp: Map.get(metadata, :last_codex_progress_timestamp),
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
@@ -1264,6 +1287,7 @@ defmodule SymphonyElixir.Orchestrator do
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
           last_codex_event: metadata.last_codex_event,
+          last_codex_error_signature: Map.get(metadata, :last_codex_error_signature),
           runtime_seconds: running_seconds(metadata.started_at, now)
         }
       end)
@@ -1277,6 +1301,8 @@ defmodule SymphonyElixir.Orchestrator do
           due_in_ms: max(0, due_at_ms - now_ms),
           identifier: Map.get(retry, :identifier),
           error: Map.get(retry, :error),
+          session_id: Map.get(retry, :session_id),
+          last_error_signature: Map.get(retry, :last_error_signature),
           worker_host: Map.get(retry, :worker_host),
           workspace_path: Map.get(retry, :workspace_path),
           profile: Map.get(retry, :profile),
@@ -1325,13 +1351,17 @@ defmodule SymphonyElixir.Orchestrator do
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    last_progress_timestamp = progress_timestamp_for_update(running_entry, update, token_delta)
+    last_error_signature = codex_error_signature_for_update(running_entry, update)
 
     {
       Map.merge(running_entry, %{
         last_codex_timestamp: timestamp,
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
+        last_codex_progress_timestamp: last_progress_timestamp,
         last_codex_event: event,
+        last_codex_error_signature: last_error_signature,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
@@ -1384,9 +1414,97 @@ defmodule SymphonyElixir.Orchestrator do
   defp summarize_codex_update(update) do
     %{
       event: update[:event],
-      message: update[:payload] || update[:raw],
+      message: update[:payload] || update[:raw] || error_message_from_update(update),
       timestamp: update[:timestamp]
     }
+  end
+
+  defp progress_timestamp_for_update(running_entry, update, token_delta) do
+    if codex_progress_update?(update, token_delta) do
+      update[:timestamp]
+    else
+      Map.get(running_entry, :last_codex_progress_timestamp)
+    end
+  end
+
+  defp codex_progress_update?(%{event: event}, _token_delta)
+       when event in [
+              :session_started,
+              :turn_completed,
+              :turn_failed,
+              :turn_cancelled,
+              :turn_ended_with_error,
+              :turn_input_required,
+              :approval_auto_approved,
+              :approval_required,
+              :tool_input_auto_answered,
+              :tool_call_completed,
+              :tool_call_failed,
+              :unsupported_tool_call,
+              :codex_error_loop,
+              :startup_failed
+            ],
+       do: true
+
+  defp codex_progress_update?(update, token_delta) do
+    token_delta_has_progress?(token_delta) or codex_progress_method?(update_payload_method(update))
+  end
+
+  defp token_delta_has_progress?(%{input_tokens: input, output_tokens: output, total_tokens: total}) do
+    Enum.any?([input, output, total], &(&1 > 0))
+  end
+
+  defp codex_progress_method?(method)
+       when method in [
+              "thread/started",
+              "turn/started",
+              "turn/completed",
+              "turn/failed",
+              "turn/cancelled",
+              "item/completed",
+              "item/tool/call",
+              "item/commandExecution/requestApproval",
+              "item/fileChange/requestApproval",
+              "item/tool/requestUserInput",
+              "codex/event/task_started",
+              "codex/event/exec_command_begin",
+              "codex/event/exec_command_end",
+              "codex/event/agent_message_delta",
+              "thread/tokenUsage/updated"
+            ],
+       do: true
+
+  defp codex_progress_method?(_method), do: false
+
+  defp update_payload_method(update) when is_map(update) do
+    payload = update[:payload] || Map.get(update, "payload") || update
+
+    if is_map(payload) do
+      Map.get(payload, "method") || Map.get(payload, :method)
+    else
+      nil
+    end
+  end
+
+  defp codex_error_signature_for_update(running_entry, update) do
+    codex_error_context_from_update(update)
+    |> case do
+      %{signature: signature} when is_binary(signature) -> signature
+      %{"signature" => signature} when is_binary(signature) -> signature
+      _ -> update[:signature] || Map.get(update, :signature) || Map.get(running_entry, :last_codex_error_signature)
+    end
+  end
+
+  defp codex_error_context_from_update(%{reason: {:codex_error_loop, context}}) when is_map(context), do: context
+  defp codex_error_context_from_update(%{details: {:codex_error_loop, context}}) when is_map(context), do: context
+  defp codex_error_context_from_update(%{event: :codex_error_loop} = update), do: update
+  defp codex_error_context_from_update(_update), do: nil
+
+  defp error_message_from_update(update) do
+    case codex_error_context_from_update(update) do
+      nil -> update[:reason]
+      context -> %{reason: update[:reason], signature: context[:signature] || context["signature"]}
+    end
   end
 
   defp schedule_tick(%State{} = state, delay_ms) when is_integer(delay_ms) and delay_ms >= 0 do

@@ -178,6 +178,8 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: entry.codex_total_tokens
       }
     }
+    |> put_if_present(:last_progress_at, iso8601(Map.get(entry, :last_codex_progress_timestamp)))
+    |> put_if_present(:last_error_signature, Map.get(entry, :last_codex_error_signature))
   end
 
   defp retry_entry_payload(entry, projects_by_slug, default_project_slug) do
@@ -199,6 +201,8 @@ defmodule SymphonyElixirWeb.Presenter do
       policy_ref: Map.get(entry, :policy_ref),
       policy: Map.get(entry, :policy)
     }
+    |> put_if_present(:session_id, Map.get(entry, :session_id))
+    |> put_if_present(:last_error_signature, Map.get(entry, :last_error_signature))
   end
 
   defp running_issue_payload(running) do
@@ -224,6 +228,8 @@ defmodule SymphonyElixirWeb.Presenter do
         total_tokens: running.codex_total_tokens
       }
     }
+    |> put_if_present(:last_progress_at, iso8601(Map.get(running, :last_codex_progress_timestamp)))
+    |> put_if_present(:last_error_signature, Map.get(running, :last_codex_error_signature))
   end
 
   defp retry_issue_payload(retry) do
@@ -240,6 +246,8 @@ defmodule SymphonyElixirWeb.Presenter do
       policy_ref: Map.get(retry, :policy_ref),
       policy: Map.get(retry, :policy)
     }
+    |> put_if_present(:session_id, Map.get(retry, :session_id))
+    |> put_if_present(:last_error_signature, Map.get(retry, :last_error_signature))
   end
 
   defp bound_project_payloads(snapshot) do
@@ -673,6 +681,9 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp summarize_message(nil), do: nil
   defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+
+  defp put_if_present(payload, _key, nil), do: payload
+  defp put_if_present(payload, key, value), do: Map.put(payload, key, value)
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
     DateTime.utc_now()

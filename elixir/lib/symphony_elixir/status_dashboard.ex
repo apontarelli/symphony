@@ -667,6 +667,8 @@ defmodule SymphonyElixir.StatusDashboard do
     due_in_ms = retry_entry.due_in_ms || 0
     error = format_retry_error(retry_entry.error)
     policy = retry_policy_fields(retry_entry)
+    session = format_retry_session(Map.get(retry_entry, :session_id))
+    signature = format_retry_signature(Map.get(retry_entry, :last_error_signature))
 
     "│  #{colorize("↻", @ansi_orange)} " <>
       colorize("#{identifier}", @ansi_red) <>
@@ -675,7 +677,9 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize("attempt=#{attempt}", @ansi_yellow) <>
       colorize(" in ", @ansi_dim) <>
       colorize(next_in_words(due_in_ms), @ansi_cyan) <>
-      error
+      error <>
+      session <>
+      signature
   end
 
   defp retry_policy_fields(retry_entry) do
@@ -716,6 +720,27 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_retry_error(_), do: ""
+
+  defp format_retry_session(session_id) when is_binary(session_id) do
+    " " <> colorize("session=#{compact_session_id(session_id)}", @ansi_dim)
+  end
+
+  defp format_retry_session(_session_id), do: ""
+
+  defp format_retry_signature(signature) when is_binary(signature) do
+    sanitized =
+      signature
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim()
+
+    if sanitized == "" do
+      ""
+    else
+      " " <> colorize("sig=#{truncate(sanitized, 64)}", @ansi_dim)
+    end
+  end
+
+  defp format_retry_signature(_signature), do: ""
 
   defp format_runtime_seconds(seconds) when is_integer(seconds) do
     mins = div(seconds, 60)
@@ -1173,6 +1198,13 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp humanize_codex_event(:unsupported_tool_call, _message, payload),
     do: humanize_dynamic_tool_event("unsupported dynamic tool call rejected", payload)
+
+  defp humanize_codex_event(:codex_error_loop, message, _payload) do
+    case map_value(message, ["signature", :signature]) do
+      signature when is_binary(signature) -> "codex error loop: #{signature}"
+      _ -> "codex error loop"
+    end
+  end
 
   defp humanize_codex_event(:turn_ended_with_error, message, _payload), do: "turn ended with error: #{format_reason(message)}"
   defp humanize_codex_event(:startup_failed, message, _payload), do: "startup failed: #{format_reason(message)}"
