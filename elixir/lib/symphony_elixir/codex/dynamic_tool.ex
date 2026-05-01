@@ -177,10 +177,15 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp tool_error_payload({:linear_api_status, status}) do
+    tool_error_payload({:linear_api_status, status, []})
+  end
+
+  defp tool_error_payload({:linear_api_status, status, errors}) do
     %{
       "error" => %{
-        "message" => "Linear GraphQL request failed with HTTP #{status}.",
-        "status" => status
+        "message" => linear_status_error_message(status, errors),
+        "status" => status,
+        "linear_errors" => errors
       }
     }
   end
@@ -202,6 +207,12 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   end
+
+  defp linear_status_error_message(status, [%{message: message} | _errors]) when is_binary(message) do
+    "Linear GraphQL request failed with HTTP #{status}: #{message}"
+  end
+
+  defp linear_status_error_message(status, _errors), do: "Linear GraphQL request failed with HTTP #{status}."
 
   defp supported_tool_names do
     Enum.map(tool_specs(), & &1["name"])

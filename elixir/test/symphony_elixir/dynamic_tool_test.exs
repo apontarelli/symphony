@@ -259,6 +259,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(status_error["output"]) == %{
              "error" => %{
                "message" => "Linear GraphQL request failed with HTTP 503.",
+               "linear_errors" => [],
                "status" => 503
              }
            }

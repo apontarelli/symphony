@@ -841,7 +841,62 @@ defmodule SymphonyElixir.CoreTest do
     assert ProfileBindings.current().projects == bindings.projects
   end
 
-  test "linear active project discovery filters project status and deleted records" do
+  test "binding admin parses pr target presets without changing binding schema" do
+    parsed =
+      ProfileBindingAdmin.parse_project_params(%{
+        "0" => %{
+          "include" => "true",
+          "selector_kind" => "project_slug",
+          "selector_value" => "project-alpha",
+          "profile" => "default",
+          "pr_target_mode" => "generated"
+        },
+        "1" => %{
+          "include" => "true",
+          "selector_kind" => "project_slug",
+          "selector_value" => "project-beta",
+          "profile" => "strict",
+          "pr_target_mode" => "custom",
+          "pr_target_custom" => "release/beta"
+        },
+        "2" => %{
+          "include" => "true",
+          "selector_kind" => "project_slug",
+          "selector_value" => "project-gamma",
+          "profile" => "default",
+          "pr_target_mode" => "profile"
+        },
+        "3" => %{
+          "selector_kind" => "project_slug",
+          "selector_value" => "ignored",
+          "profile" => "default",
+          "pr_target_mode" => "main"
+        }
+      })
+
+    assert [
+             %{
+               selector_kind: "project_slug",
+               selector_value: "project-alpha",
+               profile: "default",
+               pr_target: "project/project-alpha"
+             },
+             %{
+               selector_kind: "project_slug",
+               selector_value: "project-beta",
+               profile: "strict",
+               pr_target: "release/beta"
+             },
+             %{
+               selector_kind: "project_slug",
+               selector_value: "project-gamma",
+               profile: "default",
+               pr_target: nil
+             }
+           ] = Enum.sort_by(parsed, & &1.selector_value)
+  end
+
+  test "linear project discovery keeps status metadata and filters deleted records" do
     page_one = %{
       "data" => %{
         "team" => %{
@@ -873,15 +928,26 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     {:ok, projects} =
-      Client.fetch_active_projects_for_test(%{team_id: "team-1"}, fn _query, variables ->
+      Client.fetch_active_projects_for_test(%{team_id: "team-1"}, fn query, variables ->
+        assert query =~ "$teamId: ID!"
+        refute query =~ "filter: {archivedAt"
+
         case variables do
           %{after: nil} -> {:ok, page_one}
           %{after: "cursor-2"} -> {:ok, page_two}
         end
       end)
 
-    assert Enum.map(projects, & &1.slug_id) == ["active-started", "active-planned", "active-backlog"]
-    assert Enum.map(projects, & &1.status_type) == ["started", "planned", "backlog"]
+    assert Enum.map(projects, & &1.slug_id) == [
+             "symphony-active-started",
+             "symphony-active-planned",
+             "symphony-paused",
+             "symphony-active-backlog",
+             "symphony-completed"
+           ]
+
+    assert Enum.map(projects, & &1.status_type) == ["started", "planned", "paused", "backlog", "completed"]
+    assert Enum.map(projects, & &1.active?) == [true, true, false, true, false]
   end
 
   test "malformed external Linear bindings fail validation" do
@@ -2765,6 +2831,7 @@ defmodule SymphonyElixir.CoreTest do
       "id" => "project-#{slug_id}",
       "name" => name,
       "slugId" => slug_id,
+      "url" => "https://linear.app/side-projects/project/symphony-#{slug_id}",
       "archivedAt" => nil,
       "deletedAt" => nil,
       "status" => %{

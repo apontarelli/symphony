@@ -292,13 +292,14 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @projects_by_team_id_query """
-  query SymphonyLinearProjectsByTeamId($teamId: String!, $first: Int!, $after: String) {
+  query SymphonyLinearProjectsByTeamId($teamId: ID!, $first: Int!, $after: String) {
     team(id: $teamId) {
-      projects(first: $first, after: $after, filter: {archivedAt: {null: true}}) {
+      projects(first: $first, after: $after) {
         nodes {
           id
           name
           slugId
+          url
           archivedAt
           status {
             name
@@ -318,11 +319,12 @@ defmodule SymphonyElixir.Linear.Client do
   query SymphonyLinearProjectsByTeamKey($teamKey: String!, $first: Int!, $after: String) {
     teams(filter: {key: {eq: $teamKey}}, first: 1) {
       nodes {
-        projects(first: $first, after: $after, filter: {archivedAt: {null: true}}) {
+        projects(first: $first, after: $after) {
           nodes {
             id
             name
             slugId
+            url
             archivedAt
             status {
               name
@@ -411,7 +413,7 @@ defmodule SymphonyElixir.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error, {:linear_api_status, response.status}}
+        {:error, {:linear_api_status, response.status, graphql_error_messages(response.body)}}
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
@@ -706,6 +708,22 @@ defmodule SymphonyElixir.Linear.Client do
     |> truncate_error_body()
   end
 
+  defp graphql_error_messages(%{"errors" => errors}) when is_list(errors) do
+    errors
+    |> Enum.flat_map(fn
+      %{"message" => message, "extensions" => %{"code" => code}} when is_binary(message) and is_binary(code) ->
+        [%{code: code, message: message}]
+
+      %{"message" => message} when is_binary(message) ->
+        [%{message: message}]
+
+      _error ->
+        []
+    end)
+  end
+
+  defp graphql_error_messages(_body), do: []
+
   defp truncate_error_body(body) when is_binary(body) do
     if byte_size(body) > @max_error_body_log_bytes do
       binary_part(body, 0, @max_error_body_log_bytes) <> "...<truncated>"
@@ -801,15 +819,19 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_project(project) when is_map(project) do
     status_type = normalized_status_type(get_in(project, ["status", "type"]))
+    slug = project_url_slug(project["url"]) || project["slugId"]
 
-    if is_binary(project["archivedAt"]) or is_binary(project["deletedAt"]) or
-         not MapSet.member?(@active_project_status_types, status_type) do
+    if is_binary(project["deletedAt"]) do
       nil
     else
       %{
         id: project["id"],
         name: project["name"],
-        slug_id: project["slugId"],
+        slug_id: slug,
+        url: project["url"],
+        archived?: is_binary(project["archivedAt"]),
+        deleted?: false,
+        active?: is_nil(project["archivedAt"]) and MapSet.member?(@active_project_status_types, status_type),
         status_name: get_in(project, ["status", "name"]),
         status_type: status_type
       }
@@ -818,8 +840,35 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp normalize_project(_project), do: nil
 
+  defp project_url_slug(url) when is_binary(url) do
+    url
+    |> URI.parse()
+    |> Map.get(:path)
+    |> case do
+      path when is_binary(path) ->
+        path
+        |> String.split("/", trim: true)
+        |> List.last()
+        |> normalized_string()
+
+      _path ->
+        nil
+    end
+  end
+
+  defp project_url_slug(_url), do: nil
+
   defp normalized_status_type(value) when is_binary(value), do: String.downcase(value)
   defp normalized_status_type(_value), do: nil
+
+  defp normalized_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalized_string(_value), do: nil
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do

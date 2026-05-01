@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
   alias SymphonyElixir.Config.ProfileBindings
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
+  @active_project_status_types MapSet.new(["backlog", "planned", "started"])
 
   @spec facts() :: map()
   def facts do
@@ -50,29 +51,17 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
   end
 
   @spec project_rows([map()]) :: [map()]
-  def project_rows(discovered_projects) when is_list(discovered_projects) do
-    bindings = ProfileBindings.current()
-    bound_by_selector = Map.new(bindings.projects, &{project_selector_key(&1), &1})
+  def project_rows(discovered_projects), do: project_rows(discovered_projects, nil)
+
+  @spec project_rows([map()], [map()] | nil) :: [map()]
+  def project_rows(discovered_projects, draft_projects) when is_list(discovered_projects) do
+    current_bindings = ProfileBindings.current()
+    project_bindings = draft_projects || current_bindings.projects
+    bindings = Map.put(current_bindings, :projects, project_bindings)
+    bound_by_selector = Map.new(project_bindings, &{project_selector_key(&1), &1})
 
     discovered_rows =
-      discovered_projects
-      |> Enum.map(fn project ->
-        selector = project_selector(project)
-        binding = Map.get(bound_by_selector, project_selector_key(selector))
-
-        %{
-          id: project[:id],
-          name: project[:name],
-          slug_id: project[:slug_id],
-          status_name: project[:status_name],
-          status_type: project[:status_type],
-          selector_kind: selector_kind(selector),
-          selector_value: selector_value(selector),
-          bound?: not is_nil(binding),
-          profile: (binding && binding.profile) || "default",
-          pr_target: (binding && binding.pr_target) || nil
-        }
-      end)
+      Enum.map(discovered_projects, &discovered_project_row(&1, bound_by_selector))
 
     discovered_keys =
       discovered_rows
@@ -82,20 +71,7 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
     bound_only_rows =
       bindings.projects
       |> Enum.reject(&MapSet.member?(discovered_keys, project_selector_key(&1)))
-      |> Enum.map(fn binding ->
-        %{
-          id: binding.project_id,
-          name: binding.project_slug || binding.project_id || "Bound project",
-          slug_id: binding.project_slug,
-          status_name: "bound only",
-          status_type: "unknown",
-          selector_kind: selector_kind(binding),
-          selector_value: selector_value(binding),
-          bound?: true,
-          profile: binding.profile || "default",
-          pr_target: binding.pr_target
-        }
-      end)
+      |> Enum.map(&bound_only_project_row/1)
 
     discovered_rows ++ bound_only_rows
   end
@@ -111,7 +87,7 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
             selector_kind: normalized_string(Map.get(params, "selector_kind")),
             selector_value: normalized_string(Map.get(params, "selector_value")),
             profile: normalized_string(Map.get(params, "profile")),
-            pr_target: normalized_string(Map.get(params, "pr_target"))
+            pr_target: pr_target_from_params(params)
           }
         ]
       else
@@ -121,6 +97,54 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
   end
 
   def parse_project_params(_params), do: []
+
+  defp discovered_project_row(project, bound_by_selector) do
+    selector = project_selector(project)
+    binding = Map.get(bound_by_selector, project_selector_key(selector))
+    slug = project[:slug_id]
+
+    %{
+      id: project[:id],
+      name: project_name(project, slug),
+      slug_id: slug,
+      project_url: project[:url],
+      status_label: project_status_label(project, binding),
+      status_detail: project_status_detail(project),
+      status_type: normalized_string(project[:status_type]),
+      active?: active_project?(project),
+      deleted?: project[:deleted?] == true,
+      selector_kind: selector_kind(selector),
+      selector_value: selector_value(selector),
+      selector_key: project_selector_key(selector),
+      bound?: not is_nil(binding),
+      profile: (binding && binding.profile) || "default",
+      pr_target: (binding && binding.pr_target) || nil
+    }
+    |> put_pr_target_fields()
+  end
+
+  defp bound_only_project_row(binding) do
+    slug_or_id = binding.project_slug || binding.project_id
+
+    %{
+      id: binding.project_id,
+      name: human_project_name(slug_or_id) || "Bound project",
+      slug_id: binding.project_slug,
+      project_url: nil,
+      status_label: "Needs attention",
+      status_detail: "Saved locally but not returned by Linear discovery.",
+      status_type: "unknown",
+      active?: true,
+      deleted?: false,
+      selector_kind: selector_kind(binding),
+      selector_value: selector_value(binding),
+      selector_key: project_selector_key(binding),
+      bound?: true,
+      profile: binding.profile || "default",
+      pr_target: binding.pr_target
+    }
+    |> put_pr_target_fields()
+  end
 
   defp workflow_facts({:ok, settings}, bindings) do
     %{
@@ -208,6 +232,92 @@ defmodule SymphonyElixir.Config.ProfileBindingAdmin do
 
   defp maybe_put_pr_target(binding, nil), do: binding
   defp maybe_put_pr_target(binding, pr_target), do: Map.put(binding, :pr_target, pr_target)
+
+  defp project_status_label(_project, binding) when not is_nil(binding), do: "Automated"
+  defp project_status_label(_project, _binding), do: "Not automated"
+
+  defp project_status_detail(%{status_name: status_name, status_type: status_type}) do
+    [status_name, status_type]
+    |> Enum.map(&normalized_string/1)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> case do
+      [] -> "Linear status unavailable."
+      values -> "Linear: #{Enum.join(values, " / ")}"
+    end
+  end
+
+  defp project_status_detail(_project), do: "Linear status unavailable."
+
+  defp project_name(project, slug) do
+    raw_name = normalized_string(project[:name])
+    slug_name = human_project_name(slug)
+
+    if project_name_needs_slug?(raw_name, project[:id], slug) do
+      slug_name || slug || raw_name || project[:id] || "Linear project"
+    else
+      raw_name
+    end
+  end
+
+  defp project_name_needs_slug?(nil, _id, _slug), do: true
+  defp project_name_needs_slug?(name, id, slug), do: name in [id, slug] or opaque_project_name?(name)
+
+  defp opaque_project_name?(value) when is_binary(value), do: Regex.match?(~r/^[0-9a-f-]{8,}$/i, value)
+  defp opaque_project_name?(_value), do: false
+
+  defp active_project?(%{archived?: true}), do: false
+  defp active_project?(%{deleted?: true}), do: false
+
+  defp active_project?(%{status_type: status_type}) do
+    MapSet.member?(@active_project_status_types, normalized_string(status_type))
+  end
+
+  defp active_project?(_project), do: false
+
+  defp put_pr_target_fields(row) do
+    generated_target = generated_pr_target(row.selector_kind, row.selector_value)
+    {mode, custom_value} = pr_target_mode(row.pr_target, generated_target)
+
+    row
+    |> Map.put(:generated_pr_target, generated_target)
+    |> Map.put(:pr_target_mode, mode)
+    |> Map.put(:pr_target_custom, custom_value)
+  end
+
+  defp pr_target_from_params(params) do
+    selector_kind = normalized_string(Map.get(params, "selector_kind"))
+    selector_value = normalized_string(Map.get(params, "selector_value"))
+
+    case normalized_string(Map.get(params, "pr_target_mode")) do
+      "profile" -> nil
+      "main" -> "main"
+      "generated" -> generated_pr_target(selector_kind, selector_value)
+      "custom" -> normalized_string(Map.get(params, "pr_target_custom")) || normalized_string(Map.get(params, "pr_target"))
+      _mode -> normalized_string(Map.get(params, "pr_target"))
+    end
+  end
+
+  defp pr_target_mode(nil, _generated_target), do: {"profile", nil}
+  defp pr_target_mode("main", _generated_target), do: {"main", nil}
+  defp pr_target_mode(target, target), do: {"generated", nil}
+  defp pr_target_mode(target, _generated_target), do: {"custom", target}
+
+  defp generated_pr_target("project_slug", selector_value) when is_binary(selector_value), do: "project/#{selector_value}"
+  defp generated_pr_target(_selector_kind, _selector_value), do: nil
+
+  defp human_project_name(nil), do: nil
+
+  defp human_project_name(value) when is_binary(value) do
+    value
+    |> String.replace(~r/-[0-9a-f]{8,}$/i, "")
+    |> String.replace(["-", "_"], " ")
+    |> String.trim()
+    |> case do
+      "" -> nil
+      normalized -> String.capitalize(normalized)
+    end
+  end
 
   defp write_bindings(path, bindings) when is_binary(path) do
     with :ok <- File.mkdir_p(Path.dirname(path)) do
