@@ -48,6 +48,18 @@ profiles:
       pr_target: main
     checks: []
     completion_requirements: []
+  skill_authoring:
+    delivery:
+      pr_target: main
+    codex:
+      approval_policy: never
+      thread_sandbox: danger-full-access
+      turn_sandbox_policy:
+        type: dangerFullAccess
+    prompt:
+      rules:
+        - This ticket may create or edit repo-owned agent skills under `.agents/`.
+        - Keep global Codex defaults sandboxed; use this profile only for explicit skill-authoring work.
   # Example non-main target profile:
   #
   # project_integration:

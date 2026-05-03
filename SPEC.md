@@ -486,6 +486,14 @@ profiles:
       pr_target: project/integration
     checks:
       - make all
+  skill_authoring:
+    delivery:
+      pr_target: main
+    codex:
+      approval_policy: never
+      thread_sandbox: danger-full-access
+      turn_sandbox_policy:
+        type: dangerFullAccess
 ```
 
 `default.delivery.pr_target: main` means the delivery flow syncs, opens PRs, reviews, and lands
@@ -518,6 +526,13 @@ Resolved policy requirements:
 - `policy_ref`
   - Implementations MUST compute a stable short hash from the resolved effective policy.
   - The hash MUST be independent of map key order.
+- `codex` (object)
+  - OPTIONAL selected-profile override for Codex runtime policy.
+  - Supported v1 fields: `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`.
+  - Implementations MUST apply these overrides before starting the Codex thread/turn for the
+    selected issue, after global `codex` defaults are loaded.
+  - Intended for narrowly routed work such as repo skill authoring that requires elevated writes
+    to protected agent-instruction paths.
 
 ### 5.4 Prompt Template Contract
 

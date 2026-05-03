@@ -229,6 +229,9 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
+  `turn_sandbox_policy` overrides. Use this sparingly for scoped work like repo skill authoring
+  that needs to edit protected `.agents/` paths; keep the global `codex` defaults sandboxed.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue

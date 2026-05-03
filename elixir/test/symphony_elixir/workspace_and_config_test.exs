@@ -1109,6 +1109,33 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
   end
 
+  test "codex runtime settings honor selected profile sandbox overrides" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      profiles: %{
+        default: %{delivery: %{pr_target: "main"}},
+        skill_authoring: %{
+          delivery: %{pr_target: "main"},
+          codex: %{
+            approval_policy: "never",
+            thread_sandbox: "danger-full-access",
+            turn_sandbox_policy: %{type: "dangerFullAccess"}
+          }
+        }
+      }
+    )
+
+    assert {:ok, policy} = Config.effective_policy("skill_authoring")
+
+    assert {:ok, runtime_settings} =
+             Config.codex_runtime_settings(nil, policy: policy)
+
+    assert runtime_settings == %{
+             approval_policy: "never",
+             thread_sandbox: "danger-full-access",
+             turn_sandbox_policy: %{"type" => "dangerFullAccess"}
+           }
+  end
+
   test "schema keeps workspace roots raw while sandbox helpers expand only for local use" do
     assert {:ok, settings} =
              Schema.parse(%{

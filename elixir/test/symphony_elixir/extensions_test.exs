@@ -398,7 +398,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "policy_ref" => "policy-http"
                  },
                  "session_id" => "thread-http",
-                 "profile" => "default",
                  "pr_target" => "main",
                  "turn_count" => 7,
                  "last_event" => "notification",
@@ -414,7 +413,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_identifier" => "MT-RETRY",
                  "project_slug" => "project",
                  "attempt" => 2,
-                 "profile" => "default",
                  "pr_target" => "main",
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
@@ -471,7 +469,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                },
                "session_id" => "thread-http",
                "project_slug" => "project",
-               "profile" => "default",
                "pr_target" => "main",
                "turn_count" => 7,
                "state" => "In Progress",

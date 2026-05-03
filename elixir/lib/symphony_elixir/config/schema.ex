@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Config.Schema do
   @reserved_profile_policy_keys MapSet.new([@profile_policy_ref_key, @profile_policy_metadata_key])
   @delivery_pr_target_key "pr_target"
   @delivery_v1_fields MapSet.new([@delivery_pr_target_key])
+  @profile_codex_v1_fields MapSet.new(["approval_policy", "thread_sandbox", "turn_sandbox_policy"])
 
   @type t :: %__MODULE__{}
 
@@ -438,7 +439,9 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp validate_profile_shape(name, policy) when is_map(policy) do
-    reserved_profile_field_errors(name, policy) ++ validate_profile_delivery_shape(name, Map.get(policy, "delivery"))
+    reserved_profile_field_errors(name, policy) ++
+      validate_profile_delivery_shape(name, Map.get(policy, "delivery")) ++
+      validate_profile_codex_shape(name, Map.get(policy, "codex"))
   end
 
   defp validate_profile_shape(name, _policy), do: ["#{name} profile must be a map"]
@@ -495,6 +498,48 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp validate_profile_delivery_shape(name, _delivery), do: ["#{name}.delivery must be a map"]
+
+  defp validate_profile_codex_shape(_name, nil), do: []
+
+  defp validate_profile_codex_shape(name, codex) when is_map(codex) do
+    unsupported_errors =
+      codex
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(@profile_codex_v1_fields, &1))
+      |> Enum.sort()
+      |> Enum.map(fn field -> "#{name}.codex.#{field} is not supported in v1" end)
+
+    field_errors =
+      [
+        validate_profile_codex_approval_policy(name, Map.get(codex, "approval_policy")),
+        validate_profile_codex_thread_sandbox(name, Map.get(codex, "thread_sandbox")),
+        validate_profile_codex_turn_sandbox_policy(name, Map.get(codex, "turn_sandbox_policy"))
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    unsupported_errors ++ field_errors
+  end
+
+  defp validate_profile_codex_shape(name, _codex), do: ["#{name}.codex must be a map"]
+
+  defp validate_profile_codex_approval_policy(_name, nil), do: nil
+
+  defp validate_profile_codex_approval_policy(_name, value) when is_binary(value) or is_map(value), do: nil
+
+  defp validate_profile_codex_approval_policy(name, _value), do: "#{name}.codex.approval_policy must be a string or map"
+
+  defp validate_profile_codex_thread_sandbox(_name, nil), do: nil
+
+  defp validate_profile_codex_thread_sandbox(_name, value) when is_binary(value), do: nil
+
+  defp validate_profile_codex_thread_sandbox(name, _value), do: "#{name}.codex.thread_sandbox must be a string"
+
+  defp validate_profile_codex_turn_sandbox_policy(_name, nil), do: nil
+
+  defp validate_profile_codex_turn_sandbox_policy(_name, value) when is_map(value), do: nil
+
+  defp validate_profile_codex_turn_sandbox_policy(name, _value),
+    do: "#{name}.codex.turn_sandbox_policy must be a map"
 
   defp validate_resolvable_profiles(profiles, shape_errors) do
     if Map.has_key?(profiles, "default") and shape_errors == [] do

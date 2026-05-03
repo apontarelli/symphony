@@ -140,7 +140,23 @@ defmodule SymphonyElixir.CoreTest do
                  },
                  "not_a_map" => "bad",
                  "non_string_pr_target" => %{"delivery" => %{"pr_target" => 123}},
-                 "non_map_delivery" => %{"delivery" => "main"}
+                 "non_map_delivery" => %{"delivery" => "main"},
+                 "unsupported_codex" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "codex" => %{"command" => "codex app-server"}
+                 },
+                 "non_map_codex" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "codex" => "danger"
+                 },
+                 "malformed_codex_fields" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "codex" => %{
+                     "approval_policy" => 123,
+                     "thread_sandbox" => 123,
+                     "turn_sandbox_policy" => "dangerFullAccess"
+                   }
+                 }
                }
              })
 
@@ -148,6 +164,11 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "not_a_map profile must be a map"
     assert message =~ "non_string_pr_target.delivery.pr_target must be a string"
     assert message =~ "non_map_delivery.delivery must be a map"
+    assert message =~ "unsupported_codex.codex.command is not supported in v1"
+    assert message =~ "non_map_codex.codex must be a map"
+    assert message =~ "malformed_codex_fields.codex.approval_policy must be a string or map"
+    assert message =~ "malformed_codex_fields.codex.thread_sandbox must be a string"
+    assert message =~ "malformed_codex_fields.codex.turn_sandbox_policy must be a map"
   end
 
   test "workflow profile resolution replaces lists and maps by default while preserving untouched defaults" do

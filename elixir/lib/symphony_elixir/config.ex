@@ -130,17 +130,65 @@ defmodule SymphonyElixir.Config do
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
     with {:ok, settings} <- settings() do
-      with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
+      with {:ok, codex_policy_overrides} <- policy_codex_overrides(Keyword.get(opts, :policy)),
+           {:ok, turn_sandbox_policy} <-
+             runtime_turn_sandbox_policy(settings, workspace, opts, codex_policy_overrides),
+           {:ok, approval_policy} <- runtime_approval_policy(settings.codex.approval_policy, codex_policy_overrides),
+           {:ok, thread_sandbox} <- runtime_thread_sandbox(settings.codex.thread_sandbox, codex_policy_overrides) do
         {:ok,
          %{
-           approval_policy: settings.codex.approval_policy,
-           thread_sandbox: settings.codex.thread_sandbox,
+           approval_policy: approval_policy,
+           thread_sandbox: thread_sandbox,
            turn_sandbox_policy: turn_sandbox_policy
          }}
       end
     end
   end
+
+  defp policy_codex_overrides(nil), do: {:ok, %{}}
+
+  defp policy_codex_overrides(%{"codex" => codex}) when is_map(codex), do: {:ok, normalize_map_keys(codex)}
+  defp policy_codex_overrides(%{codex: codex}) when is_map(codex), do: {:ok, normalize_map_keys(codex)}
+
+  defp policy_codex_overrides(%{"codex" => nil}), do: {:ok, %{}}
+  defp policy_codex_overrides(%{codex: nil}), do: {:ok, %{}}
+
+  defp policy_codex_overrides(%{"codex" => codex}), do: {:error, {:invalid_policy_codex, codex}}
+  defp policy_codex_overrides(%{codex: codex}), do: {:error, {:invalid_policy_codex, codex}}
+  defp policy_codex_overrides(policy) when is_map(policy), do: {:ok, %{}}
+  defp policy_codex_overrides(_policy), do: {:ok, %{}}
+
+  defp runtime_turn_sandbox_policy(settings, workspace, opts, codex_policy_overrides) do
+    case Map.fetch(codex_policy_overrides, "turn_sandbox_policy") do
+      {:ok, %{} = policy} -> {:ok, normalize_map_keys(policy)}
+      {:ok, nil} -> Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts)
+      {:ok, policy} -> {:error, {:invalid_policy_codex_turn_sandbox_policy, policy}}
+      :error -> Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts)
+    end
+  end
+
+  defp runtime_approval_policy(default_approval_policy, codex_policy_overrides) do
+    case Map.fetch(codex_policy_overrides, "approval_policy") do
+      {:ok, value} when is_binary(value) or is_map(value) -> {:ok, normalize_map_keys(value)}
+      {:ok, value} -> {:error, {:invalid_policy_codex_approval_policy, value}}
+      :error -> {:ok, default_approval_policy}
+    end
+  end
+
+  defp runtime_thread_sandbox(default_thread_sandbox, codex_policy_overrides) do
+    case Map.fetch(codex_policy_overrides, "thread_sandbox") do
+      {:ok, value} when is_binary(value) -> {:ok, value}
+      {:ok, value} -> {:error, {:invalid_policy_codex_thread_sandbox, value}}
+      :error -> {:ok, default_thread_sandbox}
+    end
+  end
+
+  defp normalize_map_keys(value) when is_map(value) do
+    Map.new(value, fn {key, field_value} -> {to_string(key), normalize_map_keys(field_value)} end)
+  end
+
+  defp normalize_map_keys(value) when is_list(value), do: Enum.map(value, &normalize_map_keys/1)
+  defp normalize_map_keys(value), do: value
 
   defp validate_semantics(settings) do
     cond do

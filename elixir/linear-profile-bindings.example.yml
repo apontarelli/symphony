@@ -6,6 +6,8 @@ projects:
 labels:
   - label: strict
     profile: default
+  - label: skill-authoring
+    profile: skill_authoring
 catch_all:
   enabled: false
   profile: default
