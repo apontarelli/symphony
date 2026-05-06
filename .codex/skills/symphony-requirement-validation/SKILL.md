@@ -23,6 +23,11 @@ implementation tickets.
 If any blocker is non-terminal, update the `## Codex Workpad` with the blocker
 list and stop without changing code or moving the Requirement to `Done`.
 
+If the Requirement has no blocking implementation issues but appears to have
+supporting implementation work, treat that as a setup defect: record the missing
+`blocks` relationship in the workpad and do not silently validate from prose
+links alone.
+
 ## Workflow
 
 1. Fetch the Requirement issue, its project, blocking implementation issues, and

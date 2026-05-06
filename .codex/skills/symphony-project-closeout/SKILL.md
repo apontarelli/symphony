@@ -15,12 +15,17 @@ repo knowledge.
 ## Preconditions
 
 - Closeout ticket belongs to a Linear Project.
+- Closeout ticket has label `Project Closeout`.
 - Requirement issues for the project are `Done`, `Canceled`, or explicitly
   deferred with reason.
 - Closeout ticket is blocked by unresolved Requirement issues when possible.
 
 If Requirements are still unresolved, update the workpad with the blocking list
 and stop.
+
+If unresolved Requirement issues are present but do not block the closeout
+ticket, treat that as a setup defect: record the missing `blocks` relationship
+in the workpad before stopping.
 
 ## Workflow
 
