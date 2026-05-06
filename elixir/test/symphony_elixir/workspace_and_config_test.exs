@@ -575,6 +575,111 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "issue ticket kind is derived from generic Symphony labels" do
+    assert Issue.ticket_kind(%Issue{labels: [" Requirement "]}) == :requirement
+    assert Issue.requirement?(%Issue{labels: ["requirement"]})
+
+    assert Issue.ticket_kind(%Issue{labels: ["Project Closeout"]}) == :project_closeout
+    assert Issue.ticket_kind(%Issue{labels: ["project-closeout"]}) == :project_closeout
+    assert Issue.ticket_kind(%Issue{labels: ["project_closeout"]}) == :project_closeout
+
+    assert Issue.ticket_kind(%Issue{labels: ["backend", nil, ""]}) == :implementation
+    assert Issue.ticket_kind(%Issue{labels: nil}) == :implementation
+  end
+
+  test "requirement issue with non-terminal implementation blockers is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "requirement-1",
+      identifier: "MT-1100",
+      title: "Validate requirements workflow",
+      state: "In Review",
+      labels: ["Requirement"],
+      project_slug: "project",
+      blocked_by: [%{id: "implementation-1", identifier: "MT-1101", state: "In Progress"}]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "requirement issue in review with terminal implementation blockers is dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "requirement-2",
+      identifier: "MT-1102",
+      title: "Validate completed requirement",
+      state: "In Review",
+      labels: ["Requirement"],
+      project_slug: "project",
+      blocked_by: [%{id: "implementation-2", identifier: "MT-1103", state: "Done"}]
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "requirement issue is not dispatch-eligible before validation review state" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "requirement-3",
+      identifier: "MT-1104",
+      title: "Accepted requirement",
+      state: "Todo",
+      labels: ["Requirement"],
+      project_slug: "project",
+      blocked_by: []
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "plain implementation issue is not dispatch-eligible from requirement review state" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "implementation-3",
+      identifier: "MT-1105",
+      title: "Implementation waiting for human review",
+      state: "In Review",
+      project_slug: "project",
+      blocked_by: []
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
     stale_issue = %Issue{
       id: "blocked-2",

@@ -4,6 +4,7 @@ tracker:
   active_states:
     - Todo
     - In Progress
+    - In Review
     - Merging
     - Rework
   terminal_states:
@@ -150,6 +151,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `symphony-push`: publish the branch, create/update the PR, attach it to Linear, and move ready work to `Human Review`.
 - `symphony-land`: when ticket reaches `Merging`, run the land loop until the PR is merged.
 - `symphony-debug`: investigate stuck runs, retries, daemon failures, or tool/runtime blockers.
+- `symphony-requirement-validation`: validate `Requirement` issues after supporting implementation tickets are terminal.
+- `symphony-project-closeout`: close PDR Projects after requirements are resolved and durable docs are reconciled.
 
 ## Status map
 
@@ -157,10 +160,22 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
+- `In Review` -> Requirement validation only; non-Requirement implementation tickets are not dispatched from this state.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `symphony-land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
+
+## Ticket class routing
+
+- `Requirement` label -> validation artifact, not an implementation ticket.
+  - Implementation tickets that satisfy a Requirement must `block` that Requirement in Linear.
+  - Symphony dispatches a Requirement only from `In Review` and only after all blocking implementation tickets are terminal.
+  - On dispatch, open and follow `symphony-requirement-validation`; do not create code changes, commits, branches, or PRs unless the Requirement itself explicitly calls for a documentation-only repair.
+- `Project Closeout` label -> project cleanup ticket.
+  - Closeout tickets should be blocked by the project's Requirement issues and completed last.
+  - On dispatch, open and follow `symphony-project-closeout`.
+  - Closeout may edit repo docs and create a PR when durable docs, strategy, runbooks, or operator workflow docs need updates.
 
 ## Step 0: Determine current ticket state and route
 
@@ -168,6 +183,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 2. Read the current state.
 3. Route to the matching flow:
    - `Backlog` -> do not modify issue content/state; stop and wait for human to move it to `Todo`.
+   - `In Review` with `Requirement` label -> run `symphony-requirement-validation`.
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.

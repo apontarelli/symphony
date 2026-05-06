@@ -670,7 +670,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear` unless external Linear
   project bindings define the dispatch scope
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "In Review"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
@@ -825,8 +825,13 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
+- Ticket-class state gate passes:
+  - Requirement issues are dispatched only from `In Review`.
+  - Non-Requirement issues are not dispatched from `In Review`.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Blocker rule for Requirement issues passes:
+  - Requirement issues are not dispatched when any blocker is non-terminal.
 
 Sorting order (stable intent):
 
@@ -2144,6 +2149,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
+- Requirement issues are eligible only from `In Review` after all implementation blockers are terminal
+- Non-Requirement issues are not eligible from `In Review`
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace

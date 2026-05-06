@@ -206,6 +206,12 @@ configured. Multiple matches at the same precedence block dispatch. Label refine
 validation/review/prompt policy but cannot change the selected project delivery target. Each
 project binding must use exactly one of `project_id` or `project_slug`. Project bindings may set
 `pr_target`; when absent, Symphony uses the selected profile's `delivery.pr_target`.
+- Ticket class labels have generic Symphony behavior independent of project profile routing:
+  - `Requirement` issues are validation artifacts. They are dispatched only from `In Review` and
+    only after all blocking implementation issues are terminal.
+  - `Project Closeout` issues use the project closeout workflow and should be blocked by unresolved
+    Requirement issues.
+  - Plain implementation tickets are not dispatched from `In Review`.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
   runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base

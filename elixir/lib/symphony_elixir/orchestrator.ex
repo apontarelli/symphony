@@ -601,7 +601,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_blocked_for_dispatch?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -645,7 +645,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       active_issue_state?(state_name, active_states) and
-      !terminal_issue_state?(state_name, terminal_states)
+      !terminal_issue_state?(state_name, terminal_states) and
+      issue_kind_dispatch_state?(issue)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
@@ -655,6 +656,22 @@ defmodule SymphonyElixir.Orchestrator do
        do: assigned_to_worker
 
   defp issue_routable_to_worker?(_issue), do: true
+
+  defp issue_kind_dispatch_state?(%Issue{state: state_name} = issue) when is_binary(state_name) do
+    normalized_state = normalize_issue_state(state_name)
+
+    case Issue.ticket_kind(issue) do
+      :requirement -> normalized_state == "in review"
+      _kind -> normalized_state != "in review"
+    end
+  end
+
+  defp issue_kind_dispatch_state?(_issue), do: false
+
+  defp issue_blocked_for_dispatch?(%Issue{} = issue, terminal_states) do
+    todo_issue_blocked_by_non_terminal?(issue, terminal_states) or
+      requirement_issue_blocked_by_non_terminal?(issue, terminal_states)
+  end
 
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
@@ -672,6 +689,23 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  defp requirement_issue_blocked_by_non_terminal?(%Issue{blocked_by: blockers} = issue, terminal_states)
+       when is_list(blockers) do
+    Issue.requirement?(issue) and non_terminal_blocker?(blockers, terminal_states)
+  end
+
+  defp requirement_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  defp non_terminal_blocker?(blockers, terminal_states) when is_list(blockers) do
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !terminal_issue_state?(blocker_state, terminal_states)
+
+      _ ->
+        true
+    end)
+  end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1569,7 +1603,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_blocked_for_dispatch?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
