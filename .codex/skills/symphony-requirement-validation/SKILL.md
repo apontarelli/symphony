@@ -16,7 +16,7 @@ implementation tickets.
 ## Preconditions
 
 - Current issue has label `Requirement`.
-- Current issue is in `In Review`.
+- Current issue was dispatched from `Todo`.
 - Supporting implementation issues block this Requirement in Linear.
 - All blocking implementation issues are terminal.
 
@@ -52,8 +52,8 @@ links alone.
 
 ## Failure Modes
 
-- Evidence missing: keep or move to `In Review`, record exact missing evidence.
-- Acceptance not met: move to `Rework` or leave in `In Review` with a concise
+- Evidence missing: keep or move to `Todo`, record exact missing evidence.
+- Acceptance not met: move to `Rework` or leave in `Todo` with a concise
   workpad note, then create/identify follow-up implementation work.
 - Scope changed: update the Requirement or Project PDR before validating a new
   interpretation.

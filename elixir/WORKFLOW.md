@@ -160,7 +160,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `In Review` -> Requirement validation only; non-Requirement implementation tickets are not dispatched from this state.
+- `In Review` -> human/PR review; issues are not dispatched from this state by the general worker loop.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `symphony-land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
@@ -170,7 +170,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - `Requirement` label -> validation artifact, not an implementation ticket.
   - Implementation tickets that satisfy a Requirement must `block` that Requirement in Linear.
-  - Symphony dispatches a Requirement only from `In Review` and only after all blocking implementation tickets are terminal.
+  - Symphony dispatches a Requirement from `Todo` only after all blocking implementation tickets are terminal.
   - On dispatch, open and follow `symphony-requirement-validation`; do not create code changes, commits, branches, or PRs unless the Requirement itself explicitly calls for a documentation-only repair.
 - `Project Closeout` label -> project cleanup ticket.
   - Closeout tickets should be blocked by the project's Requirement issues and completed last.
@@ -183,8 +183,8 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 2. Read the current state.
 3. Route to the matching flow:
    - `Backlog` -> do not modify issue content/state; stop and wait for human to move it to `Todo`.
-   - `In Review` with `Requirement` label -> run `symphony-requirement-validation`.
    - `Todo` -> immediately move to `In Progress`, then ensure bootstrap workpad comment exists (create if missing), then start execution flow.
+     - With `Requirement` label -> run `symphony-requirement-validation`.
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.

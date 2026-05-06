@@ -657,14 +657,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
-  defp issue_kind_dispatch_state?(%Issue{state: state_name} = issue) when is_binary(state_name) do
-    normalized_state = normalize_issue_state(state_name)
-
-    case Issue.ticket_kind(issue) do
-      :requirement -> normalized_state == "in review"
-      _kind -> normalized_state != "in review"
-    end
-  end
+  defp issue_kind_dispatch_state?(%Issue{state: state_name}) when is_binary(state_name),
+    do: normalize_issue_state(state_name) != "in review"
 
   defp issue_kind_dispatch_state?(_issue), do: false
 
