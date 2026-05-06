@@ -670,7 +670,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear` unless external Linear
   project bindings define the dispatch scope
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "In Review"]`
+- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Merging", "Rework"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
@@ -825,8 +825,6 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
-- Ticket-class state gate passes:
-  - Issues in `In Review` are not dispatched by the general worker loop.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
 - Blocker rule for Requirement issues passes:
@@ -2150,7 +2148,6 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
 - Requirement issues are eligible from `Todo` after all implementation blockers are terminal
-- No issues are eligible from `In Review` in the general worker loop
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace

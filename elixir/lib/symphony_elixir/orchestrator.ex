@@ -645,8 +645,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       active_issue_state?(state_name, active_states) and
-      !terminal_issue_state?(state_name, terminal_states) and
-      issue_kind_dispatch_state?(issue)
+      !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
@@ -656,11 +655,6 @@ defmodule SymphonyElixir.Orchestrator do
        do: assigned_to_worker
 
   defp issue_routable_to_worker?(_issue), do: true
-
-  defp issue_kind_dispatch_state?(%Issue{state: state_name}) when is_binary(state_name),
-    do: normalize_issue_state(state_name) != "in review"
-
-  defp issue_kind_dispatch_state?(_issue), do: false
 
   defp issue_blocked_for_dispatch?(%Issue{} = issue, terminal_states) do
     todo_issue_blocked_by_non_terminal?(issue, terminal_states) or

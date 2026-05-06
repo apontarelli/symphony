@@ -211,7 +211,6 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
     all blocking implementation issues are terminal.
   - `Project Closeout` issues use the project closeout workflow and should be blocked by unresolved
     Requirement issues.
-  - Issues in `In Review` are not dispatched by the general worker loop.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
   runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base

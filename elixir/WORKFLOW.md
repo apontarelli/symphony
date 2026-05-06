@@ -4,7 +4,6 @@ tracker:
   active_states:
     - Todo
     - In Progress
-    - In Review
     - Merging
     - Rework
   terminal_states:
@@ -160,7 +159,6 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
   - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
 - `In Progress` -> implementation actively underway.
-- `In Review` -> human/PR review; issues are not dispatched from this state by the general worker loop.
 - `Human Review` -> PR is attached and validated; waiting on human approval.
 - `Merging` -> approved by human; execute the `symphony-land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.

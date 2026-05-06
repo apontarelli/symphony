@@ -15,7 +15,7 @@ defmodule SymphonyElixir.CoreTest do
 
     config = Config.settings!()
     assert config.polling.interval_ms == 30_000
-    assert config.tracker.active_states == ["Todo", "In Progress", "In Review"]
+    assert config.tracker.active_states == ["Todo", "In Progress", "Merging", "Rework"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
@@ -1237,7 +1237,7 @@ defmodule SymphonyElixir.CoreTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
       )
 
@@ -1300,7 +1300,7 @@ defmodule SymphonyElixir.CoreTest do
     try do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"]
       )
 
@@ -1364,7 +1364,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         tracker_kind: "memory",
         workspace_root: test_root,
-        tracker_active_states: ["Todo", "In Progress", "In Review"],
+        tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"],
         tracker_terminal_states: ["Closed", "Cancelled", "Canceled", "Duplicate"],
         poll_interval_ms: 30_000
       )

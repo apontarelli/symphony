@@ -588,7 +588,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "requirement issue with non-terminal implementation blockers is not dispatch-eligible" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
 
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -602,7 +602,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       id: "requirement-1",
       identifier: "MT-1100",
       title: "Validate requirements workflow",
-      state: "In Review",
+      state: "Todo",
       labels: ["Requirement"],
       project_slug: "project",
       blocked_by: [%{id: "implementation-1", identifier: "MT-1101", state: "In Progress"}]
@@ -612,7 +612,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "requirement issue in todo with terminal implementation blockers is dispatch-eligible" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
 
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -633,53 +633,6 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
-  end
-
-  test "requirement issue is not dispatch-eligible from review state" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
-
-    state = %Orchestrator.State{
-      max_concurrent_agents: 3,
-      running: %{},
-      claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: "requirement-3",
-      identifier: "MT-1104",
-      title: "Accepted requirement",
-      state: "In Review",
-      labels: ["Requirement"],
-      project_slug: "project",
-      blocked_by: [%{id: "implementation-4", identifier: "MT-1106", state: "Done"}]
-    }
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-  end
-
-  test "plain implementation issue is not dispatch-eligible from requirement review state" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "In Review"])
-
-    state = %Orchestrator.State{
-      max_concurrent_agents: 3,
-      running: %{},
-      claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: "implementation-3",
-      identifier: "MT-1105",
-      title: "Implementation waiting for human review",
-      state: "In Review",
-      project_slug: "project",
-      blocked_by: []
-    }
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
@@ -1076,7 +1029,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents_by_state:
         todo: 1
         "In Progress": 4
-        "In Review": 2
+        Merging: 2
     profiles:
       default:
         delivery:
@@ -1089,7 +1042,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().agent.max_concurrent_agents == 10
     assert Config.max_concurrent_agents_for_state("Todo") == 1
     assert Config.max_concurrent_agents_for_state("In Progress") == 4
-    assert Config.max_concurrent_agents_for_state("In Review") == 2
+    assert Config.max_concurrent_agents_for_state("Merging") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
 
