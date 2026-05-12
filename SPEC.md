@@ -828,8 +828,9 @@ An issue is dispatch-eligible only if all are true:
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
 - Blocker rule for Requirement issues passes:
-  - Requirement issues are not dispatched when any blocker is non-terminal.
-  - Requirement issues with no blockers dispatch to the validation skill, which treats missing implementation blockers as a setup defect unless the Requirement is explicitly standalone.
+  - Requirement issues require at least one blocking implementation issue.
+  - All blockers must be terminal.
+  - Zero blockers is a plan/setup defect, not dispatch-eligible.
 
 Sorting order (stable intent):
 

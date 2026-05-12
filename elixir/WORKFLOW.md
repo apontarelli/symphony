@@ -168,8 +168,10 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - `Requirement` label -> validation artifact, not an implementation ticket.
   - Implementation tickets that satisfy a Requirement must `block` that Requirement in Linear.
+  - Docs-only work must be a separate implementation ticket blocking the Requirement.
   - Symphony dispatches a Requirement from `Todo` only after all blocking implementation tickets are terminal.
-  - On dispatch, open and follow `symphony-requirement-validation`; do not create code changes, commits, branches, or PRs unless the Requirement itself explicitly calls for a documentation-only repair.
+  - Requirement tickets never create code/docs PRs directly.
+  - On dispatch, open and follow `symphony-requirement-validation`; validate the terminal blockers and record the validation outcome.
 - `Project Closeout` label -> project cleanup ticket.
   - Closeout tickets should be blocked by the project's Requirement issues and completed last.
   - On dispatch, open and follow `symphony-project-closeout`.

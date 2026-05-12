@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  @typep dispatch_block_reason :: :blocked_by_non_terminal | :requirement_missing_blockers
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -349,8 +350,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec dispatch_block_reason_for_test(Issue.t()) :: dispatch_block_reason() | nil
+  def dispatch_block_reason_for_test(%Issue{} = issue) do
+    issue_dispatch_block_reason(issue, terminal_state_set())
+  end
+
+  @doc false
   @spec revalidate_issue_for_dispatch_for_test(Issue.t(), ([String.t()] -> term())) ::
-          {:ok, Issue.t()} | {:skip, Issue.t() | :missing} | {:error, term()}
+          {:ok, Issue.t()}
+          | {:skip, Issue.t(), dispatch_block_reason() | nil}
+          | {:skip, :missing}
+          | {:error, term()}
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
     revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
@@ -601,7 +611,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !issue_blocked_for_dispatch?(issue, terminal_states) and
+      is_nil(issue_dispatch_block_reason(issue, terminal_states)) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       available_slots(state) > 0 and
@@ -656,9 +666,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_routable_to_worker?(_issue), do: true
 
-  defp issue_blocked_for_dispatch?(%Issue{} = issue, terminal_states) do
-    todo_issue_blocked_by_non_terminal?(issue, terminal_states) or
-      requirement_issue_blocked_by_non_terminal?(issue, terminal_states)
+  defp issue_dispatch_block_reason(%Issue{} = issue, terminal_states) do
+    cond do
+      requirement_issue_missing_blockers?(issue) ->
+        :requirement_missing_blockers
+
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) or
+          requirement_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        :blocked_by_non_terminal
+
+      true ->
+        nil
+    end
   end
 
   defp todo_issue_blocked_by_non_terminal?(
@@ -684,6 +703,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp requirement_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  defp requirement_issue_missing_blockers?(%Issue{blocked_by: []} = issue), do: Issue.requirement?(issue)
+  defp requirement_issue_missing_blockers?(_issue), do: false
 
   defp non_terminal_blocker?(blockers, terminal_states) when is_list(blockers) do
     Enum.any?(blockers, fn
@@ -732,8 +754,10 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
         state
 
-      {:skip, %Issue{} = refreshed_issue} ->
-        Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
+      {:skip, %Issue{} = refreshed_issue, reason} ->
+        Logger.info(
+          "Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} reason=#{inspect(reason)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}"
+        )
 
         state
 
@@ -843,7 +867,7 @@ defmodule SymphonyElixir.Orchestrator do
         if retry_candidate_issue?(refreshed_issue, terminal_states) do
           {:ok, refreshed_issue}
         else
-          {:skip, refreshed_issue}
+          {:skip, refreshed_issue, issue_dispatch_block_reason(refreshed_issue, terminal_states)}
         end
 
       {:ok, []} ->
@@ -1591,7 +1615,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !issue_blocked_for_dispatch?(issue, terminal_states)
+      is_nil(issue_dispatch_block_reason(issue, terminal_states))
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do

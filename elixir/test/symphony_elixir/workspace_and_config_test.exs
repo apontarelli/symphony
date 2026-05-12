@@ -609,6 +609,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert Orchestrator.dispatch_block_reason_for_test(issue) == :blocked_by_non_terminal
   end
 
   test "requirement issue in todo with terminal implementation blockers is dispatch-eligible" do
@@ -633,6 +634,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert is_nil(Orchestrator.dispatch_block_reason_for_test(issue))
+  end
+
+  test "requirement issue without implementation blockers is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "requirement-3",
+      identifier: "MT-1104",
+      title: "Validate unplanned requirement",
+      state: "Todo",
+      labels: ["Requirement"],
+      project_slug: "project",
+      blocked_by: []
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+    assert Orchestrator.dispatch_block_reason_for_test(issue) == :requirement_missing_blockers
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do
@@ -654,7 +681,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     fetcher = fn ["blocked-2"] -> {:ok, [refreshed_issue]} end
 
-    assert {:skip, %Issue{} = skipped_issue} =
+    assert {:skip, %Issue{} = skipped_issue, :blocked_by_non_terminal} =
              Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
 
     assert skipped_issue.identifier == "MT-1005"
