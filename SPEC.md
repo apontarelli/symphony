@@ -333,6 +333,7 @@ Top-level keys:
 - `hooks`
 - `agent`
 - `codex`
+- `review_routing` (OPTIONAL extension; see Section 5.6)
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -499,6 +500,206 @@ Dispatch gating behavior:
 - Workflow file read/YAML errors block new dispatches until fixed.
 - Template errors fail only the affected run attempt.
 
+### 5.6 Review Routing and Autonomy Policy Extension
+
+This extension defines how a completed coding-agent run chooses its next route. It is a workflow
+policy contract, not a scheduler dispatch rule: the core orchestrator still only decides whether an
+issue is active, terminal, blocked in memory, running, claimed, or retry-queued. Tracker writes and
+PR actions remain agent/tooling responsibilities unless an implementation explicitly adds
+first-class write APIs.
+
+Implementations MAY store this policy directly in `WORKFLOW.md` front matter under
+`review_routing`. Workflow-generation systems MAY instead store the same object in
+`symphony.yml` and render the effective policy into the generated `WORKFLOW.md` prompt. If both
+exist, the effective `WORKFLOW.md` policy wins for the running agent because it is the prompt and
+runtime contract visible in the repository copy.
+
+#### 5.6.1 Route Types
+
+Every completed run MUST choose exactly one completion route:
+
+- `auto_land`
+  - Work is complete, validation is green, required review feedback is resolved, and the effective
+    autonomy policy allows the agent to publish and land without additional human approval.
+  - This route MUST NOT be used when required checks are missing, code review is unresolved,
+    product/visual review is required, a decision is needed, or a blocker exists.
+- `human_review`
+  - Work is complete enough for a PR-style human engineering review, but policy, risk, or explicit
+    workflow requirements do not allow auto-landing.
+  - This route is one possible route, not the universal successful default.
+- `decision_needed`
+  - The agent has enough context to present a bounded operator choice, but no safe default exists
+    or the selected default would materially change product, architecture, data, cost, security, or
+    delivery scope.
+- `product_visual_review`
+  - Work is complete enough for product or visual acceptance, and the changed surface requires
+    screenshots, videos, design artifacts, or a hands-on product/UX decision before engineering
+    handoff or landing.
+- `blocked`
+  - The run cannot satisfy required acceptance or validation because required credentials,
+    permissions, external services, secrets, tools, or authoritative requirements are missing.
+  - GitHub access alone SHOULD NOT be classified as `blocked` until documented fallback publish and
+    review strategies have been attempted.
+
+Implementations MAY map multiple route types onto the same tracker state when the tracker does not
+have dedicated states. For example, a Linear workflow with only `Human Review` can place
+`human_review`, `decision_needed`, `product_visual_review`, and `blocked` in `Human Review` while
+the workpad records the exact route. `auto_land` SHOULD land or move to an implementation-defined
+merge state only after the policy gates below are satisfied.
+
+#### 5.6.2 Route Evidence Payload
+
+The agent MUST record a route evidence payload in the durable work record, PR metadata, or another
+reviewer-visible artifact before taking the route. The payload MUST contain:
+
+- `route.type`: one of the route types in Section 5.6.1.
+- `risk_class`: `low`, `medium`, `high`, or `critical`.
+- `changed_surfaces`: non-empty list describing touched areas, for example:
+  - `docs`
+  - `tests`
+  - `app_code`
+  - `workflow_config`
+  - `ci_or_release`
+  - `production_web_ui`
+  - `local_non_production_tool`
+  - `auth_or_permissions`
+  - `billing_or_money_movement`
+  - `persistence_or_migration`
+- `checks`: list of checks that were run or intentionally not run. Each check entry SHOULD include:
+  - name or command
+  - status: `pass`, `fail`, `skipped`, or `blocked`
+  - scope
+  - relevant log excerpt or artifact link when useful
+- `code_review`: review result for automated or human review available before routing:
+  - status: `pass`, `fix_required`, `blocked`, or `not_run`
+  - reviewer or tool name
+  - unresolved findings count
+  - links or references to blocking findings when present
+- `visual_qa`: REQUIRED when `changed_surfaces` includes product/visual UI surfaces:
+  - required: boolean
+  - artifacts: screenshots, videos, traces, or design links
+  - coverage: viewport/device/user path summary
+  - gaps: any missing visual evidence
+- `escalation_reason`: null for `auto_land`; otherwise a concise reason why the route is not
+  `auto_land`.
+- `decision_request`: REQUIRED for `decision_needed`; null otherwise.
+- `feedback_loop`: REQUIRED when a PR exists:
+  - PR review comments checked
+  - inline review comments checked
+  - review summaries/states checked
+  - unresolved actionable comments count
+  - rework disposition
+
+The payload SHOULD be machine-readable where practical, but a structured Markdown section is
+acceptable for prompt-only workflow implementations.
+
+#### 5.6.3 Project Criticality and Autonomy Policy
+
+`symphony.yml` expresses project-level criticality and autonomy posture with this shape:
+
+```yaml
+project:
+  criticality: local_non_production
+autonomy:
+  posture: auto_land_when_green
+  max_auto_land_risk: low
+  require_human_review_for:
+    - auth_or_permissions
+    - billing_or_money_movement
+    - persistence_or_migration
+  require_product_visual_review_for:
+    - production_web_ui
+review_routing:
+  default_route_by_criticality:
+    local_non_production: auto_land
+    internal: auto_land
+    production_web: human_review
+    production_critical: human_review
+```
+
+Field contract:
+
+- `project.criticality`
+  - Allowed values: `local_non_production`, `internal`, `production_web`,
+    `production_critical`.
+  - Default: `local_non_production` for self-contained local tooling and non-production workflow
+    modules.
+  - Production user-facing applications SHOULD set `production_web`.
+  - Systems with regulated, financial, security-sensitive, or operationally critical effects SHOULD
+    set `production_critical`.
+- `autonomy.posture`
+  - Allowed values:
+    - `auto_land_when_green`: permit `auto_land` when evidence is complete and risk is within
+      `max_auto_land_risk`.
+    - `human_review_when_green`: require `human_review` after green validation unless a narrower
+      workflow rule overrides it.
+    - `decision_gated`: route to `decision_needed` for any material ambiguity before review or
+      landing.
+    - `manual_only`: never auto-land; route complete work to `human_review` or
+      `product_visual_review`.
+  - Default: `auto_land_when_green`.
+- `autonomy.max_auto_land_risk`
+  - Default: `low`.
+  - `auto_land` is allowed only when `risk_class` is at or below this value and no required review
+    gate is missing.
+- `autonomy.require_human_review_for`
+  - Changed-surface names that force `human_review`.
+  - Defaults SHOULD include `auth_or_permissions`, `billing_or_money_movement`, and
+    `persistence_or_migration`.
+- `autonomy.require_product_visual_review_for`
+  - Changed-surface names that force `product_visual_review`.
+  - Defaults SHOULD include `production_web_ui`.
+- `review_routing.default_route_by_criticality`
+  - Maps project criticality to the preferred route when evidence is green and no stronger gate
+    applies.
+  - Defaults MUST allow `auto_land` for `local_non_production` and `internal` projects so human
+    review is not required for every successful run.
+  - Defaults MUST NOT auto-land `production_web` or `production_critical` projects unless the
+    project explicitly changes the mapping and the route evidence remains green.
+
+Route selection order:
+
+1. If a required tool, secret, permission, or authoritative requirement is missing, route
+   `blocked`.
+2. If unresolved actionable PR review feedback exists, move or keep the issue in `Rework` and do
+   not choose a final completion route.
+3. If an operator decision is needed, route `decision_needed`.
+4. If product/visual review is required, route `product_visual_review`.
+5. If human review is required by changed surface, criticality, risk, or posture, route
+   `human_review`.
+6. If validation and review evidence are green and autonomy permits it, route `auto_land`.
+
+#### 5.6.4 Decision Requests
+
+Agents SHOULD ask Antonio or the configured operator for input only when the choice is material and
+cannot be safely resolved by repository policy, ticket text, or existing product/architecture
+doctrine.
+
+Decision prompts MUST be bounded:
+
+- Ask one concise question.
+- Present two or three mutually exclusive options.
+- Mark exactly one option as recommended when the agent has a defensible preference.
+- For each option, include the concrete tradeoff or consequence.
+- State the default action the agent will take if the workflow policy allows autonomous defaulting.
+
+Agents MUST NOT use `decision_needed` for ordinary implementation uncertainty that can be resolved
+by reading code, running validation, or choosing the smallest behavior-preserving path.
+
+#### 5.6.5 Reviewer Feedback Re-Entry
+
+PR-style feedback re-enters the Symphony workflow through `Rework`:
+
+- Before final routing, the agent MUST inspect top-level PR comments, inline review comments, and
+  review summary states when a PR exists.
+- Every actionable comment is blocking until addressed in code/docs/tests or answered with explicit
+  justified pushback on the thread.
+- If actionable feedback appears after handoff, the issue SHOULD move to `Rework`.
+- In `Rework`, the next agent attempt MUST treat the work as a fresh execution attempt: re-read the
+  issue, PR feedback, workpad, current branch state, and policy before editing.
+- Antonio SHOULD NOT need to take over the workspace locally to route reviewer feedback back into
+  implementation.
+
 ## 6. Configuration Specification
 
 ### 6.1 Configuration Resolution Pipeline
@@ -600,6 +801,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `codex.turn_timeout_ms`: integer, default `3600000`
 - `codex.read_timeout_ms`: integer, default `5000`
 - `codex.stall_timeout_ms`: integer, default `300000`
+- `review_routing`: OPTIONAL completion routing extension; see Section 5.6
+- `symphony.yml`: OPTIONAL workflow-generation policy source for project criticality and autonomy
+  posture; if used, render the effective policy into the generated workflow prompt
 
 ## 7. Orchestration State Machine
 
@@ -1101,6 +1305,10 @@ User-input-required policy:
 - A conforming implementation MAY fail the run, surface the request to an operator, satisfy it
   through an approved operator channel, or auto-resolve it according to its documented policy.
 - The example high-trust behavior above fails user-input-required turns immediately.
+- Workflow-level decision requests are distinct from low-level protocol user-input-required events.
+  When the agent can complete its turn and the remaining need is a bounded operator/product choice,
+  the workflow SHOULD use the `decision_needed` route from Section 5.6 instead of leaving the
+  app-server session waiting for input.
 
 ### 10.6 Timeouts and Error Mapping
 
@@ -1219,6 +1427,12 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - The service remains a scheduler/runner and tracker reader.
 - Workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
+- Completion routing from Section 5.6 is part of the workflow policy layer. The orchestrator is not
+  required to decide whether a completed run should auto-land, request human review, ask for a
+  decision, request product/visual review, or stop blocked unless the implementation explicitly
+  adds first-class tracker/PR write APIs.
+- Reviewer feedback SHOULD re-enter through tracker state, normally by moving the issue to `Rework`
+  so the next agent attempt can address PR comments without requiring local operator takeover.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
@@ -1964,6 +2178,16 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Per-state concurrency override map normalizes state names and ignores invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
+- If the review-routing extension is implemented:
+  - `symphony.yml` project criticality defaults are loaded or rendered into the workflow prompt
+  - `autonomy.posture` defaults allow auto-land for green low-risk local/non-production work
+  - production web and production-critical projects default to review-gated routes
+  - invalid route names or criticality values produce a validation error or explicit prompt-level
+    failure
+  - route evidence payloads require checks, code-review status, risk class, changed surfaces, and
+    escalation reason
+  - product/visual surfaces require visual QA artifact fields before `product_visual_review` or
+    `auto_land`
 
 ### 17.2 Workspace Manager and Safety
 
@@ -2028,6 +2252,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Unsupported dynamic tool calls are rejected without stalling the session
 - User input requests are handled according to the implementation's documented policy and do not
   stall indefinitely
+- Workflow decision requests use the `decision_needed` route and include a bounded option set
+  instead of leaving the app-server turn waiting for operator input
 - Usage and rate-limit telemetry exposed by the targeted protocol is extracted
 - Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
   targeted protocol
@@ -2050,6 +2276,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   not affect correctness
 - If humanized event summaries are implemented, they cover key wrapper/agent event classes without
   changing orchestrator behavior
+- If completion routing is implemented, route evidence is operator-visible in the work record, PR,
+  or status surface.
 
 ### 17.7 CLI and Host Lifecycle
 
@@ -2108,6 +2336,8 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
+- Review-routing extension supports the route/evidence/autonomy contract in Section 5.6, including
+  `symphony.yml` policy generation when that source is used.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.

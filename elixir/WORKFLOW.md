@@ -107,10 +107,11 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 - `Backlog` -> out of scope for this workflow; do not modify.
 - `Todo` -> queued; immediately transition to `In Progress` before active work.
-  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, return to `Human Review`).
+  - Special case: if a PR is already attached, treat as feedback/rework loop (run full PR feedback sweep, address or explicitly push back, revalidate, then select the final route).
 - `In Progress` -> implementation actively underway.
-- `Human Review` -> PR is attached and validated; waiting on human approval.
-- `Merging` -> approved by human; execute the `land` skill flow (do not call `gh pr merge` directly).
+- `Human Review` -> PR is attached and validated, or the selected route is `human_review`,
+  `decision_needed`, `product_visual_review`, or `blocked`; waiting on human approval/input.
+- `Merging` -> approved by human or selected by a valid `auto_land` route; execute the `land` skill flow (do not call `gh pr merge` directly).
 - `Rework` -> reviewer requested changes; planning + implementation required.
 - `Done` -> terminal state; no further action required.
 
@@ -169,7 +170,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## PR feedback sweep protocol (required)
 
-When a ticket has an attached PR, run this protocol before moving to `Human Review`:
+When a ticket has an attached PR, run this protocol before selecting a final route:
 
 1. Identify the PR number from issue links/attachments.
 2. Gather feedback from all channels:
@@ -195,7 +196,82 @@ Use this only when completion is blocked by missing required tools or missing au
   - exact human action needed to unblock.
 - Keep the brief concise and action-oriented; do not add extra top-level comments outside the workpad.
 
-## Step 2: Execution phase (Todo -> In Progress -> Human Review)
+## Completion route contract
+
+After implementation, validation, quality gates, and PR feedback sweep, choose exactly one route and
+record the route evidence in the workpad before changing Linear state:
+
+- `auto_land`: complete, green, low-enough risk, all review feedback resolved, and the effective
+  autonomy policy allows landing without more human input.
+- `human_review`: complete enough for engineering review, but policy, risk, or workflow gates do
+  not allow auto-land.
+- `decision_needed`: a material product/technical/delivery choice remains and no safe default is
+  available from repo policy or issue context.
+- `product_visual_review`: a product or visual surface requires acceptance with screenshots,
+  videos, design links, or a hands-on walkthrough before review or landing.
+- `blocked`: required auth, permissions, secrets, external services, tools, or authoritative
+  requirements are missing after documented fallbacks.
+
+Route evidence must include:
+
+- route type;
+- risk class: `low`, `medium`, `high`, or `critical`;
+- changed surfaces, including whether they touch production web UI, auth/permissions,
+  billing/money movement, persistence/migrations, workflow config, docs, tests, or local
+  non-production tooling;
+- checks run and their pass/fail/skipped/blocked status;
+- code-review result, including unresolved findings count;
+- visual QA artifacts when product/visual surfaces changed;
+- escalation reason for every non-`auto_land` route;
+- PR feedback sweep result when a PR exists.
+
+Project criticality and autonomy policy may be expressed in `symphony.yml` and rendered into the
+workflow prompt:
+
+```yaml
+project:
+  criticality: local_non_production
+autonomy:
+  posture: auto_land_when_green
+  max_auto_land_risk: low
+  require_human_review_for:
+    - auth_or_permissions
+    - billing_or_money_movement
+    - persistence_or_migration
+  require_product_visual_review_for:
+    - production_web_ui
+review_routing:
+  default_route_by_criticality:
+    local_non_production: auto_land
+    internal: auto_land
+    production_web: human_review
+    production_critical: human_review
+```
+
+Defaults:
+
+- Local/non-production and internal projects can auto-land green low-risk work by default.
+- Production web and production-critical projects default to review-gated routes unless the project
+  explicitly opts into narrower auto-land rules.
+- Human review is one route, not the universal successful default.
+
+Decision requests:
+
+- Ask only when the choice is material and cannot be resolved by reading the repo, issue, or durable
+  docs.
+- Ask one concise question with two or three mutually exclusive options.
+- Mark one recommended option when there is a defensible default.
+- Include the concrete tradeoff for each option.
+
+Reviewer feedback loop:
+
+- PR-style feedback re-enters through `Rework`.
+- Every actionable top-level comment, inline comment, or review summary remains blocking until it is
+  addressed in code/docs/tests or answered with explicit justified pushback.
+- Antonio should not need to take over the local workspace to route review feedback back into
+  implementation.
+
+## Step 2: Execution phase (Todo -> In Progress -> final route)
 
 1.  Determine current repo state (`branch`, `git status`, `HEAD`) and verify the kickoff `pull` sync result is already recorded in the workpad before implementation continues.
 2.  If current issue state is `Todo`, move it to `In Progress`; otherwise leave the current state unchanged.
@@ -216,36 +292,39 @@ Use this only when completion is blocked by missing required tools or missing au
     - Document these temporary proof steps and outcomes in the workpad `Validation`/`Notes` sections so reviewers can follow the evidence.
     - If app-touching, run `launch-app` validation and capture/upload media via `github-pr-media` before handoff.
 6.  Re-check all acceptance criteria and close any gaps.
-7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
-8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
+7.  Before every publish or route attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
+8.  If the route publishes completed code/docs changes, attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
-9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
+    - If the selected route is `blocked` or pre-PR `decision_needed`, route evidence must state why PR metadata does not apply.
+9.  If a branch/PR exists, merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
-    - Add final handoff notes (commit + validation summary) in the same workpad comment.
+    - Add final route notes (commit + validation summary + route evidence) in the same workpad comment.
     - Do not include PR URL in the workpad comment; keep PR linkage on the issue via attachment/link fields.
     - Add a short `### Confusions` section at the bottom when any part of task execution was unclear/confusing, with concise bullets.
     - Do not post any additional completion summary comment.
-11. Before moving to `Human Review`, poll PR feedback and checks:
+11. Before selecting the final route, poll PR feedback and checks:
     - Read the PR `Manual QA Plan` comment (when present) and use it to sharpen UI/runtime test coverage for the current change.
     - Run the full PR feedback sweep protocol.
     - Confirm PR checks are passing (green) after the latest changes.
     - Confirm every required ticket-provided validation/test-plan item is explicitly marked complete in the workpad.
     - Repeat this check-address-verify loop until no outstanding comments remain and checks are fully passing.
     - Re-open and refresh the workpad before state transition so `Plan`, `Acceptance Criteria`, and `Validation` exactly match completed work.
-12. Only then move issue to `Human Review`.
+12. Only then select and execute the route:
+    - `auto_land`: run the configured land flow only when policy and evidence allow it.
+    - `human_review`, `decision_needed`, `product_visual_review`, or `blocked`: move to `Human Review` with the exact route and evidence in the workpad.
     - Exception: if blocked by missing required non-GitHub tools/auth per the blocked-access escape hatch, move to `Human Review` with the blocker brief and explicit unblock actions.
 13. For `Todo` tickets that already had a PR attached at kickoff:
     - Ensure all existing PR feedback was reviewed and resolved, including inline review comments (code changes or explicit, justified pushback response).
     - Ensure branch was pushed with any required updates.
-    - Then move to `Human Review`.
+    - Then select and execute the final route.
 
 ## Step 3: Human Review and merge handling
 
 1. When the issue is in `Human Review`, do not code or change ticket content.
 2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
-4. If approved, human moves the issue to `Merging`.
+4. If approved, or if `auto_land` has already selected the merge route, the issue moves to `Merging`.
 5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
 6. After merge is complete, move the issue to `Done`.
 
@@ -261,15 +340,17 @@ Use this only when completion is blocked by missing required tools or missing au
    - Create a new bootstrap `## Codex Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
 
-## Completion bar before Human Review
+## Completion bar before final route
 
 - Step 1/2 checklist is fully complete and accurately reflected in the single workpad comment.
 - Acceptance criteria and required ticket-provided validation items are complete.
 - Validation/tests are green for the latest commit.
-- PR feedback sweep is complete and no actionable comments remain.
-- PR checks are green, branch is pushed, and PR is linked on the issue.
-- Required PR metadata is present (`symphony` label).
+- If a PR exists or the selected route publishes completed code/docs changes, PR feedback sweep is complete and no actionable comments remain.
+- If a PR exists or the selected route publishes completed code/docs changes, PR checks are green, branch is pushed, and PR is linked on the issue.
+- If a PR exists or the selected route publishes completed code/docs changes, required PR metadata is present (`symphony` label).
+- If no PR exists for `blocked` or pre-PR `decision_needed`, route evidence explains why PR checks and metadata do not apply.
 - If app-touching, runtime validation/media requirements from `App runtime validation (required)` are complete.
+- Route evidence is recorded in the workpad and supports the selected route.
 
 ## Guardrails
 
@@ -285,7 +366,9 @@ Use this only when completion is blocked by missing required tools or missing au
   title/description/acceptance criteria, same-project assignment, a `related`
   link to the current issue, and `blockedBy` when the follow-up depends on the
   current issue.
-- Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
+- Do not select a final route unless the `Completion bar before final route` is satisfied.
+- Do not move to `Human Review` unless the selected route is `human_review`,
+  `decision_needed`, `product_visual_review`, or `blocked`.
 - In `Human Review`, do not make changes; wait and poll.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
