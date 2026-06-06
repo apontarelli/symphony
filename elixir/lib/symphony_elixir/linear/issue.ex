@@ -57,6 +57,25 @@ defmodule SymphonyElixir.Linear.Issue do
     labels
   end
 
+  @spec routable?(t(), [String.t()]) :: boolean()
+  def routable?(%__MODULE__{assigned_to_worker: true, labels: labels}, required_labels)
+      when is_list(labels) and is_list(required_labels) do
+    issue_labels =
+      labels
+      |> Enum.map(&normalize_label/1)
+      |> Enum.reject(&is_nil/1)
+      |> MapSet.new()
+
+    Enum.all?(required_labels, fn required_label ->
+      case normalize_label(required_label) do
+        nil -> false
+        label -> MapSet.member?(issue_labels, label)
+      end
+    end)
+  end
+
+  def routable?(%__MODULE__{}, _required_labels), do: false
+
   @spec ticket_kind(t()) :: ticket_kind()
   def ticket_kind(%__MODULE__{labels: labels}) when is_list(labels) do
     normalized_labels =

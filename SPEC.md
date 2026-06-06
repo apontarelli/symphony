@@ -361,6 +361,11 @@ Fields:
   - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
 - `project_slug` (string)
   - REQUIRED for dispatch when `tracker.kind == "linear"`.
+- `required_labels` (list of strings)
+  - Default: `[]`.
+  - An issue MUST contain every configured label to dispatch or continue.
+  - Matching ignores case and surrounding whitespace.
+  - A blank configured label matches no issue.
 - `active_states` (list of strings)
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
@@ -670,6 +675,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear` unless external Linear
   project bindings define the dispatch scope
+- `tracker.required_labels`: list of strings, default `[]`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Merging", "Rework"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
@@ -821,6 +827,8 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- It is routed to this worker by the configured assignee and contains every label in
+  `tracker.required_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1268,6 +1276,8 @@ Linear-specific requirements for `tracker.kind == "linear"`:
 - External project bindings MAY define one or more Linear `project_id` or `project_slug` selectors
   outside `WORKFLOW.md`; candidate polling filters each bound project, or filters a configured team
   when catch-all matching is enabled
+- Candidate and issue-state refresh queries include issue labels. Required label filtering happens
+  after normalization so refresh can observe label removal and stop or release existing work.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -1287,6 +1297,7 @@ Candidate issue normalization SHOULD produce fields listed in Section 4.1.1.
 
 Additional normalization details:
 
+- Label names are trimmed and lowercased.
 - `labels` -> lowercase strings
 - `project_id`, `project_slug`, and `project_name` -> copied from the Linear `project` object when
   present

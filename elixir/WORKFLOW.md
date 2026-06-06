@@ -1,6 +1,7 @@
 ---
 tracker:
   kind: linear
+  required_labels: []
   active_states:
     - Todo
     - In Progress

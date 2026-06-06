@@ -165,6 +165,9 @@ back to `main` after restart or landing.
 Notes:
 
 - If a value is missing, defaults are used.
+- `tracker.required_labels` is optional. When set, an issue must have every configured label to
+  dispatch or continue running. Label matching ignores case and surrounding whitespace. A blank
+  configured label matches no issue.
 - `profiles.default.delivery.pr_target` is required and names the Git PR target/base branch.
   Additional profiles may override `default` during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
