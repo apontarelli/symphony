@@ -55,6 +55,27 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     refute Regex.match?(~r/`symphony-[a-z-]+`/, resolution.rendered)
   end
 
+  test "manifest prompt metadata does not require optional workflow modules" do
+    assert {:ok, resolution} = ModuleRegistry.prompt_module_resolution(%{"workflow" => %{"preset" => "default"}})
+
+    assert resolution.module_names == @default_module_ids
+    assert resolution.rendered =~ "Resolved modules: linear-operation@v1"
+    refute resolution.rendered =~ "product_visual_review@v1"
+  end
+
+  test "manifest prompt metadata reports selected prompt module config errors" do
+    manifest = %{
+      "workflow" => %{"preset" => "default", "modules" => ["product_visual_review"]},
+      "runtime" => %{
+        "workflow_modules" => %{
+          "product_visual_review" => %{"route_policy" => "invalid"}
+        }
+      }
+    }
+
+    assert {:error, "route_policy is invalid"} = ModuleRegistry.prompt_module_resolution(manifest)
+  end
+
   test "loaded workflows carry registry-backed prompt metadata" do
     assert {:ok, workflow} = Workflow.current()
 
@@ -66,6 +87,9 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
   test "core module registry reports unknown module ids" do
     assert {:error, %{path: "workflow.modules[0]", message: "unknown module: missing-module"}} =
              ModuleRegistry.module_defaults("missing-module", 0)
+
+    assert {:error, %{path: "workflow.modules[0]", message: "unknown module: missing-module"}} =
+             ModuleRegistry.module_config("missing-module", 0, %{})
   end
 
   test "default preset compiles a self-contained core workflow prompt" do

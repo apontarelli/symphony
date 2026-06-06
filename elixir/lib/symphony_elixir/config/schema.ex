@@ -274,6 +274,31 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule WorkflowModules do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReview
+
+    @primary_key false
+
+    @type t :: %__MODULE__{
+            product_visual_review: ProductVisualReview.t()
+          }
+
+    embedded_schema do
+      embeds_one(:product_visual_review, ProductVisualReview, on_replace: :update, defaults_to_struct: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [])
+      |> cast_embed(:product_visual_review, with: &ProductVisualReview.changeset/2)
+    end
+  end
+
   embedded_schema do
     embeds_one(:tracker, Tracker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:polling, Polling, on_replace: :update, defaults_to_struct: true)
@@ -286,6 +311,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
     field(:policy_metadata, :map, default: %{})
+    embeds_one(:workflow_modules, WorkflowModules, on_replace: :update, defaults_to_struct: true)
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -403,6 +429,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:workflow_modules, with: &WorkflowModules.changeset/2)
     |> validate_profiles()
   end
 

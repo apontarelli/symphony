@@ -159,6 +159,8 @@ defmodule SymphonyElixir.TestSupport do
           server_port: nil,
           server_host: nil,
           project_repository: "https://example.com/project.git",
+          workflow_module_ids: [],
+          workflow_modules_product_visual_review: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -200,6 +202,8 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     project_repository = Keyword.get(config, :project_repository)
+    workflow_module_ids = Keyword.get(config, :workflow_module_ids)
+    workflow_modules_product_visual_review = Keyword.get(config, :workflow_modules_product_visual_review)
     prompt = Keyword.get(config, :prompt)
 
     runtime_sections =
@@ -234,7 +238,8 @@ defmodule SymphonyElixir.TestSupport do
         "profiles: #{yaml_value(profiles)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        server_yaml(server_port, server_host)
+        server_yaml(server_port, server_host),
+        workflow_modules_yaml(workflow_modules_product_visual_review)
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
 
@@ -244,8 +249,7 @@ defmodule SymphonyElixir.TestSupport do
         "  slug: #{yaml_value(tracker_project_slug)}",
         "  name: #{yaml_value("project")}",
         "  repository: #{yaml_value(project_repository)}",
-        "workflow:",
-        "  preset: \"default\"",
+        workflow_yaml(workflow_module_ids),
         "harness:",
         "  codex_home: #{yaml_value(harness_codex_home)}",
         "runtime:",
@@ -278,6 +282,21 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp workflow_yaml(module_ids) when module_ids in [nil, []] do
+    "workflow:\n  preset: \"default\""
+  end
+
+  defp workflow_yaml(module_ids) when is_list(module_ids) do
+    [
+      "workflow:",
+      "  preset: \"default\"",
+      "  modules:",
+      Enum.map(module_ids, &"    - #{yaml_value(&1)}")
+    ]
+    |> List.flatten()
+    |> Enum.join("\n")
+  end
 
   defp hooks_yaml(nil, nil, nil, nil, timeout_ms) do
     "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}\n  after_create: null"
@@ -330,6 +349,16 @@ defmodule SymphonyElixir.TestSupport do
       host && "  host: #{yaml_value(host)}"
     ]
     |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp workflow_modules_yaml(nil), do: nil
+
+  defp workflow_modules_yaml(product_visual_review) when is_map(product_visual_review) do
+    [
+      "workflow_modules:",
+      "  product_visual_review: #{yaml_value(product_visual_review)}"
+    ]
     |> Enum.join("\n")
   end
 

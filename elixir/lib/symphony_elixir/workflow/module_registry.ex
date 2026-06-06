@@ -1,6 +1,9 @@
 defmodule SymphonyElixir.Workflow.ModuleRegistry do
   @moduledoc false
 
+  alias SymphonyElixir.WorkflowModules.ProductVisualReview
+  alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
+
   @terminal_states ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
   @registry_pin "core-workflow-modules@v1"
   @compatibility %{
@@ -43,6 +46,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
         }
 
   @runtime_module_ids ["repo.docs", "validation.commands", "tracker.linear", "workspace", "codex.harness", "delivery.github_pr"]
+  @manifest_prompt_module_ids ["product_visual_review"]
 
   @core_module_ids [
     "linear-operation",
@@ -222,6 +226,18 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       ],
       content: nil,
       description: "operator-visible status and dashboard evidence"
+    },
+    %{
+      id: "product_visual_review",
+      version: "v1",
+      summary: "Product-facing visual QA routing and evidence.",
+      default?: false,
+      compatibility: @compatibility,
+      pins: %{registry: @registry_pin, module: "product_visual_review@v1"},
+      config: %{},
+      prompt_sections: [],
+      content: nil,
+      description: "product-facing visual QA routing and evidence"
     },
     %{
       id: "linear-operation",
@@ -561,8 +577,12 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   @spec module_config(String.t(), non_neg_integer(), map()) :: {:ok, map()} | {:error, diagnostic()}
   def module_config(name, index, manifest) when is_binary(name) and is_integer(index) and index >= 0 do
-    with {:ok, defaults} <- module_defaults(name, index) do
+    with {:ok, defaults} <- module_defaults(name, index),
+         [] <- module_manifest_diagnostics(name, manifest) do
       {:ok, deep_merge(defaults.config, module_manifest_config(name, manifest))}
+    else
+      {:error, diagnostic} -> {:error, diagnostic}
+      [diagnostic | _rest] -> {:error, diagnostic}
     end
   end
 
@@ -596,7 +616,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           {:ok, %{prompt: String.t(), workflow_module_resolution: prompt_module_resolution()}} | {:error, term()}
   def compile_manifest(%{"workflow" => %{"preset" => preset_name}} = manifest) do
     with {:ok, preset_defaults} <- preset(preset_name),
-         {:ok, resolution} <- prompt_module_resolution_for_preset(preset_defaults) do
+         {:ok, resolution} <- prompt_module_resolution_for_manifest(preset_defaults, manifest) do
       {:ok,
        %{
          prompt: render_core_prompt(preset_defaults, resolution.modules, manifest),
@@ -609,14 +629,18 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   def default_prompt_module_resolution, do: prompt_module_resolution_for_core_modules(@core_module_ids)
 
   @spec prompt_module_resolution(map()) :: {:ok, prompt_module_resolution()} | {:error, term()}
-  def prompt_module_resolution(%{"workflow" => %{"preset" => preset_name}}) do
+  def prompt_module_resolution(%{"workflow" => %{"preset" => preset_name}} = manifest) do
     with {:ok, preset_defaults} <- preset(preset_name) do
-      prompt_module_resolution_for_preset(preset_defaults)
+      prompt_module_resolution_for_manifest(preset_defaults, manifest)
     end
   end
 
-  defp prompt_module_resolution_for_preset(%{core_modules: module_ids}) when is_list(module_ids) do
-    prompt_module_resolution_for_core_modules(module_ids)
+  defp prompt_module_resolution_for_manifest(%{core_modules: module_ids}, manifest) when is_list(module_ids) do
+    module_ids = module_ids ++ manifest_prompt_module_ids(manifest)
+
+    with {:ok, modules} <- fetch_prompt_modules(module_ids, manifest) do
+      {:ok, build_prompt_module_resolution(modules)}
+    end
   end
 
   defp prompt_module_resolution_for_core_modules(module_ids) do
@@ -624,6 +648,12 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       {:ok, build_prompt_module_resolution(modules)}
     end
   end
+
+  defp manifest_prompt_module_ids(%{"workflow" => %{"modules" => modules}}) when is_list(modules) do
+    Enum.filter(modules, &(&1 in @manifest_prompt_module_ids))
+  end
+
+  defp manifest_prompt_module_ids(_manifest), do: []
 
   defp fetch_core_modules(module_ids) do
     Enum.reduce_while(module_ids, {:ok, []}, fn module_id, {:ok, modules} ->
@@ -641,6 +671,39 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     |> case do
       {:ok, modules} -> {:ok, Enum.reverse(modules)}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_prompt_modules(module_ids, manifest) do
+    Enum.reduce_while(module_ids, {:ok, []}, fn module_id, {:ok, modules} ->
+      case fetch_prompt_module(module_id, manifest) do
+        {:ok, module} -> {:cont, {:ok, [module | modules]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, modules} -> {:ok, Enum.reverse(modules)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_prompt_module("product_visual_review", manifest) do
+    @module_by_id
+    |> Map.fetch!("product_visual_review")
+    |> product_visual_review_module(manifest)
+  end
+
+  defp fetch_prompt_module(module_id, _manifest) do
+    {:ok, Map.fetch!(@module_by_id, module_id)}
+  end
+
+  defp product_visual_review_module(module, manifest) do
+    with {:ok, config} <- product_visual_review_config(manifest) do
+      content =
+        ProductVisualReview.prompt_section(config) ||
+          "Product visual review is disabled by workflow module configuration."
+
+      {:ok, %{module | config: product_visual_review_config_map(config), content: content}}
     end
   end
 
@@ -814,7 +877,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   defp module_title(id) do
     id
-    |> String.split("-")
+    |> String.split(~r/[-_]/)
     |> Enum.map_join(" ", &title_word/1)
   end
 
@@ -899,6 +962,13 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     ["Validation commands:" | Enum.map(commands, &"- #{&1["name"]}: #{&1["command"]}")]
   end
 
+  defp module_manifest_diagnostics("product_visual_review", manifest) do
+    case product_visual_review_config(manifest) do
+      {:ok, _config} -> []
+      {:error, message} -> [%{path: "runtime.workflow_modules.product_visual_review", message: message}]
+    end
+  end
+
   defp module_manifest_diagnostics(_name, _manifest), do: []
 
   defp module_manifest_config("tracker.linear", manifest) do
@@ -915,7 +985,42 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     end
   end
 
+  defp module_manifest_config("product_visual_review", manifest) do
+    {:ok, config} = product_visual_review_config(manifest)
+    %{"workflow_modules" => %{"product_visual_review" => product_visual_review_config_map(config)}}
+  end
+
   defp module_manifest_config(_name, _manifest), do: %{}
+
+  defp product_visual_review_config(manifest) do
+    attrs =
+      %{"enabled" => true}
+      |> deep_merge(get_in(manifest, ["runtime", "workflow_modules", "product_visual_review"]) || %{})
+
+    %ProductVisualReviewConfig{}
+    |> ProductVisualReviewConfig.changeset(attrs)
+    |> Ecto.Changeset.apply_action(:validate)
+    |> case do
+      {:ok, config} -> {:ok, config}
+      {:error, changeset} -> {:error, format_changeset_errors(changeset)}
+    end
+  end
+
+  defp product_visual_review_config_map(%ProductVisualReviewConfig{} = config) do
+    config
+    |> Map.from_struct()
+    |> Map.new(fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp format_changeset_errors(changeset) do
+    changeset
+    |> Ecto.Changeset.traverse_errors(fn {message, opts} ->
+      Enum.reduce(opts, message, fn {key, value}, acc ->
+        String.replace(acc, "%{#{key}}", to_string(value))
+      end)
+    end)
+    |> Enum.map_join(", ", fn {field, messages} -> "#{field} #{Enum.join(messages, ", ")}" end)
+  end
 
   defp shell_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"

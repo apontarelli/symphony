@@ -2263,6 +2263,41 @@ API design notes:
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
 
+### 13.8 OPTIONAL Workflow Modules Extension
+
+Implementations MAY support prompt-level workflow modules that add specialized handoff or
+validation routing without changing the core orchestration state machine. These modules are selected
+through `workflow.modules` and configured through `runtime.workflow_modules`.
+
+Extension config:
+
+- `runtime.workflow_modules.product_visual_review.enabled` (boolean, default `false`)
+  - When true and `product_visual_review` is selected in `workflow.modules`, the first-turn agent
+    prompt includes the `product_visual_review` module.
+- `runtime.workflow_modules.product_visual_review.project_kind` (`web`, `mobile`, or `desktop`, default
+  `web`)
+  - Selects the app family used to phrase visual QA evidence instructions.
+- `runtime.workflow_modules.product_visual_review.route_policy` (`auto`, `required`, `recommended`, or
+  `off`, default `auto`)
+  - `auto` routes when changed files or issue labels indicate product-facing work.
+  - `required` always requires the visual QA checks before handoff.
+  - `recommended` asks the agent to consider the module but allows explicit skip evidence.
+  - `off` disables the module.
+- `runtime.workflow_modules.product_visual_review.changed_file_triggers` (list of glob-like strings,
+  OPTIONAL)
+  - Matching final-diff paths require product visual review in `auto`.
+- `runtime.workflow_modules.product_visual_review.issue_label_triggers` (list of strings, OPTIONAL)
+  - Matching issue labels recommend product visual review in `auto`.
+- `runtime.workflow_modules.product_visual_review.checks` (list of check ids, OPTIONAL)
+  - Check ids SHOULD be stable across app kinds, for example `viewport_screenshots`,
+    `responsive_states`, `interaction_smoke`, and `product_design_notes`.
+- `runtime.workflow_modules.product_visual_review.artifacts` (list of artifact ids, OPTIONAL)
+  - Artifact ids describe handoff evidence such as screenshot/media references, interaction notes,
+    and product/design review notes.
+
+When this extension is enabled, backend, infra, docs, or test-only work SHOULD record that
+`product_visual_review` was skipped rather than paying visual QA runtime cost by default.
+
 ## 14. Failure Model and Recovery Strategy
 
 ### 14.1 Failure Classes
@@ -2887,6 +2922,9 @@ Use the same validation profiles as Section 17:
 - `review_routing` policy extension compiles into resolved profile policy, produces route evidence
   from Section 11.7, and covers auto-land, human-review, decision, product/visual-review, blocked,
   and PR-feedback Rework paths in tests.
+- `product_visual_review` selected through `workflow.modules` adds product/design QA routing to
+  first-turn prompts and keeps the classification testable through route policy, project kind,
+  changed-file triggers, issue-label triggers, checks, and artifact ids.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.
