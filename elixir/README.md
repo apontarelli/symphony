@@ -151,6 +151,19 @@ Pass a custom manifest path to `./bin/symphony` when starting the service:
 
 If no path is passed, Symphony uses `./symphony.yml`.
 
+`project.criticality` and `project.deployment_coupling` describe how risky the project is to land
+automatically. Local, prototype, and internal work default to permissive auto-land policy; production
+or production-web coupled work defaults to strict policy.
+
+`auto_land.posture` can be `off`, `permissive`, or `strict`. When omitted, Symphony derives the
+posture from project criticality and deployment coupling. `auto_land.required_checks` adds evidence
+requirements to the posture defaults: permissive policy requires tests, quality gates, automated
+review, route classification, and sync evidence; strict policy also requires recovery evidence.
+
+`auto_land.force_human_review_labels` always routes matching issues to human review, even when
+evidence is otherwise sufficient. `auto_land.dry_run` defaults to `true` and must remain true in v1;
+Symphony can classify and record an auto-land decision without merging for real.
+
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)

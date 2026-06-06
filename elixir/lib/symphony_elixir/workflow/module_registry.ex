@@ -55,6 +55,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     "pull-sync",
     "quality-gates",
     "automated-review",
+    "auto-land-routing",
     "land-merge",
     "rework",
     "requirement-validation",
@@ -424,6 +425,32 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       outstanding actionable feedback remains.
       """,
       description: "Pre-handoff automated review and finding triage"
+    },
+    %{
+      id: "auto-land-routing",
+      version: "v1",
+      summary: "Dry-run auto-land classification before final ticket routing.",
+      default?: true,
+      compatibility: @compatibility,
+      pins: %{registry: @registry_pin, module: "auto-land-routing@v1"},
+      config: %{},
+      prompt_sections: [],
+      content: """
+      Before final routing, run Auto-land route classification with the current workflow policy,
+      issue labels, validation evidence, PR checks, automated review result, and sync result.
+
+      Record structured completion evidence for the handoff route classifier: validation checks,
+      quality gates, automated review, route classification, sync evidence, issue labels, and any
+      project-specific required auto-land checks. Record the selected handoff route in the workpad.
+      When a PR exists, also record the decision in a PR handoff comment or existing PR handoff
+      location.
+
+      Treat dry-run auto-land as a visibility route: record that Symphony selected dry-run
+      auto-land, move the issue to Human Review for v1 visibility, and do not merge. In v1,
+      no merge or landing command is allowed from auto-land. If the decision selects human_review, rework,
+      or blocked, move the issue to the selected state after recording diagnostics.
+      """,
+      description: "Dry-run auto-land classification before final ticket routing"
     },
     %{
       id: "land-merge",

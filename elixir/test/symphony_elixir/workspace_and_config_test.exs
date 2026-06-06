@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
+  alias SymphonyElixir.Config.Schema.{AutoLand, Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -1055,6 +1055,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "auto-land config normalizes optional tokens and token lists" do
+    changeset =
+      AutoLand.changeset(%AutoLand{}, %{
+        "posture" => " ",
+        "required_checks" => [nil, " Tests ", "tests", ""],
+        "force_human_review_labels" => [" Manual-Review ", "manual-review", ""]
+      })
+
+    assert {:ok, auto_land} = Changeset.apply_action(changeset, :validate)
+    assert auto_land.posture == nil
+    assert auto_land.required_checks == ["tests"]
+    assert auto_land.force_human_review_labels == ["manual-review"]
+  end
+
+  test "auto-land config rejects real landing until integration exists" do
+    changeset = AutoLand.changeset(%AutoLand{}, %{"dry_run" => false})
+
+    assert {:dry_run, {"must be true until landing integration is enabled", _metadata}} =
+             List.keyfind(changeset.errors, :dry_run, 0)
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do

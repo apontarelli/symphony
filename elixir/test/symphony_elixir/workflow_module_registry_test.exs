@@ -10,6 +10,7 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     "pull-sync",
     "quality-gates",
     "automated-review",
+    "auto-land-routing",
     "land-merge",
     "rework",
     "requirement-validation",
@@ -18,7 +19,7 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
   ]
 
   test "core module registry exposes v1 default modules with metadata" do
-    assert length(ModuleRegistry.core_modules()) == 11
+    assert length(ModuleRegistry.core_modules()) == length(@default_module_ids)
     assert Enum.map(ModuleRegistry.core_modules(), & &1.id) == @default_module_ids
 
     for workflow_module <- ModuleRegistry.core_modules() do
@@ -101,6 +102,8 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "### Linear Operation"
     assert prompt =~ "### VCS Commit Push"
     assert prompt =~ "### Project Closeout"
+    assert prompt =~ "### Auto Land Routing"
+    assert prompt =~ "structured completion evidence"
     assert prompt =~ "<host>:<abs-workdir>@<short-sha>"
     assert prompt =~ "### Acceptance Criteria"
     assert prompt =~ "### Confusions"

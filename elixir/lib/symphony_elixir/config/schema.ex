@@ -234,6 +234,116 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Project do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @criticalities ~w(local prototype internal production)
+    @deployment_couplings ~w(none local preview staging production production_web)
+
+    embedded_schema do
+      field(:criticality, :string, default: "internal")
+      field(:deployment_coupling, :string, default: "local")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:criticality, :deployment_coupling], empty_values: [])
+      |> update_change(:criticality, &normalize_token/1)
+      |> update_change(:deployment_coupling, &normalize_token/1)
+      |> validate_inclusion(:criticality, @criticalities)
+      |> validate_inclusion(:deployment_coupling, @deployment_couplings)
+    end
+
+    defp normalize_token(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> String.downcase()
+    end
+  end
+
+  defmodule AutoLand do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @postures ~w(off permissive strict)
+    @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
+
+    embedded_schema do
+      field(:posture, :string)
+      field(:required_checks, {:array, :string}, default: [])
+      field(:force_human_review_labels, {:array, :string}, default: @default_force_human_review_labels)
+      field(:failure_state, :string, default: "Rework")
+      field(:blocked_state, :string, default: "Human Review")
+      field(:dry_run, :boolean, default: true)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :posture,
+          :required_checks,
+          :force_human_review_labels,
+          :failure_state,
+          :blocked_state,
+          :dry_run
+        ],
+        empty_values: []
+      )
+      |> update_change(:posture, &normalize_optional_token/1)
+      |> update_change(:required_checks, &normalize_token_list/1)
+      |> update_change(:force_human_review_labels, &normalize_token_list/1)
+      |> validate_posture()
+      |> validate_v1_dry_run()
+    end
+
+    defp validate_posture(changeset) do
+      validate_change(changeset, :posture, fn
+        :posture, posture ->
+          if posture in @postures do
+            []
+          else
+            [posture: "is invalid"]
+          end
+      end)
+    end
+
+    defp validate_v1_dry_run(changeset) do
+      if get_change(changeset, :dry_run) == false do
+        add_error(changeset, :dry_run, "must be true until landing integration is enabled")
+      else
+        changeset
+      end
+    end
+
+    defp normalize_optional_token(nil), do: nil
+
+    defp normalize_optional_token(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> String.downcase()
+      |> case do
+        "" -> nil
+        normalized -> normalized
+      end
+    end
+
+    defp normalize_token_list(values) when is_list(values) do
+      values
+      |> Enum.map(&normalize_optional_token/1)
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+    end
+  end
+
   defmodule Observability do
     @moduledoc false
     use Ecto.Schema
@@ -307,6 +417,8 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:project, Project, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:auto_land, AutoLand, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
@@ -427,6 +539,8 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:project, with: &Project.changeset/2)
+    |> cast_embed(:auto_land, with: &AutoLand.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:workflow_modules, with: &WorkflowModules.changeset/2)
