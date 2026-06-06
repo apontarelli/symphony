@@ -346,6 +346,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "counts" => %{
                "running" => 1,
                "retrying" => 1,
+               "blocked" => 1,
                "work_errors" => 1,
                "config_warnings" => 0,
                "stale_warnings" => 0
@@ -428,6 +429,30 @@ defmodule SymphonyElixir.ExtensionsTest do
                  }
                }
              ],
+             "blocked" => [
+               %{
+                 "issue_id" => "issue-blocked",
+                 "issue_identifier" => "MT-BLOCKED",
+                 "project_slug" => "project",
+                 "state" => "In Progress",
+                 "error" => "codex turn requires operator input",
+                 "worker_host" => "dm-dev2",
+                 "workspace_path" => "/workspaces/MT-BLOCKED",
+                 "profile" => "strict",
+                 "target" => "Human Review",
+                 "policy_ref" => "policy-blocked",
+                 "policy" => %{
+                   "delivery" => %{"pr_target" => "Human Review"},
+                   "policy_ref" => "policy-blocked"
+                 },
+                 "session_id" => "thread-blocked",
+                 "pr_target" => "main",
+                 "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
+                 "last_event" => "turn_input_required",
+                 "last_message" => "turn blocked: waiting for user input",
+                 "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
+               }
+             ],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -479,6 +504,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "tokens" => %{"input_tokens" => 4, "output_tokens" => 8, "total_tokens" => 12}
              },
              "retry" => nil,
+             "blocked" => nil,
              "logs" => %{"codex_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
@@ -503,6 +529,21 @@ defmodule SymphonyElixir.ExtensionsTest do
              }
            } =
              json_response(conn, 200)
+
+    conn = get(build_conn(), "/api/v1/MT-BLOCKED")
+
+    assert %{
+             "status" => "blocked",
+             "last_error" => "codex turn requires operator input",
+             "blocked" => %{
+               "session_id" => "thread-blocked",
+               "state" => "In Progress",
+               "profile" => "strict",
+               "target" => "Human Review",
+               "policy_ref" => "policy-blocked",
+               "error" => "codex turn requires operator input"
+             }
+           } = json_response(conn, 200)
 
     conn = get(build_conn(), "/api/v1/MT-MISSING")
 
@@ -637,9 +678,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Work errors"
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
+    assert html =~ "MT-BLOCKED"
     assert html =~ "Human Review"
     assert html =~ "Merging"
     assert html =~ "rendered"
+    assert html =~ "turn blocked: waiting for user input"
     assert html =~ "Runtime"
     assert html =~ "Token usage"
     assert html =~ "Highest active: MT-HTTP"
@@ -943,6 +986,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert response.body["counts"] == %{
              "running" => 1,
              "retrying" => 1,
+             "blocked" => 1,
              "work_errors" => 1,
              "config_warnings" => 0,
              "stale_warnings" => 0
@@ -1029,6 +1073,32 @@ defmodule SymphonyElixir.ExtensionsTest do
             "policy_ref" => "policy-retry"
           },
           error: "boom"
+        }
+      ],
+      blocked: [
+        %{
+          issue_id: "issue-blocked",
+          identifier: "MT-BLOCKED",
+          state: "In Progress",
+          error: "codex turn requires operator input",
+          worker_host: "dm-dev2",
+          workspace_path: "/workspaces/MT-BLOCKED",
+          profile: "strict",
+          target: "Human Review",
+          policy_ref: "policy-blocked",
+          policy: %{
+            "delivery" => %{"pr_target" => "Human Review"},
+            "policy_ref" => "policy-blocked"
+          },
+          session_id: "thread-blocked",
+          blocked_at: DateTime.utc_now(),
+          last_codex_event: :turn_input_required,
+          last_codex_message: %{
+            event: :turn_input_required,
+            message: %{"method" => "turn/input_required"},
+            timestamp: DateTime.utc_now()
+          },
+          last_codex_timestamp: DateTime.utc_now()
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

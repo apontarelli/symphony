@@ -1367,6 +1367,195 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert retry_delay_ms <= 10_500
   end
 
+  test "orchestrator blocks failed workers after app-server reports input required" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-input-required"
+    issue = %Issue{id: issue_id, identifier: "MT-INPUT", title: "Needs input", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-INPUT",
+      issue: issue,
+      session_id: "thread-input-turn-input",
+      last_codex_message: %{
+        event: :turn_input_required,
+        message: %{"method" => "turn/input_required"},
+        timestamp: started_at
+      },
+      last_codex_timestamp: started_at,
+      last_codex_event: :turn_input_required,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), {:shutdown, :input_required}})
+    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "codex turn requires operator input"))
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-INPUT",
+             error: "codex turn requires operator input"
+           } = blocked_entry
+  end
+
+  test "orchestrator blocks normal worker exits after input required completion" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-input-required-normal"
+    issue = %Issue{id: issue_id, identifier: "MT-INPUT-NORMAL", title: "Needs input", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :InputRequiredNormalBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    ref = make_ref()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-INPUT-NORMAL",
+      issue: issue,
+      session_id: "thread-input-normal",
+      completion: %{outcome: :input_required},
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "codex turn requires operator input"))
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute MapSet.member?(state.completed, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-INPUT-NORMAL",
+             error: "codex turn requires operator input"
+           } = blocked_entry
+  end
+
+  test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000
+    )
+
+    issue_id = "issue-mcp-elicitation-stall"
+    issue = %Issue{id: issue_id, identifier: "MT-MCP", title: "MCP input", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :McpElicitationBlockOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: "MT-MCP",
+      issue: issue,
+      worker_host: "dm-dev2",
+      workspace_path: "/workspaces/MT-MCP",
+      session_id: "thread-mcp-turn-mcp",
+      last_codex_message: %{
+        event: :notification,
+        message: %{"method" => "mcpServer/elicitation/request"},
+        timestamp: stale_activity_at
+      },
+      last_codex_timestamp: stale_activity_at,
+      last_codex_event: :notification,
+      started_at: stale_activity_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "codex MCP elicitation requires operator input"))
+    state = :sys.get_state(pid)
+
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+
+    assert %{
+             identifier: "MT-MCP",
+             error: "codex MCP elicitation requires operator input",
+             worker_host: "dm-dev2",
+             workspace_path: "/workspaces/MT-MCP"
+           } = blocked_entry
+
+    assert %{
+             blocked: [
+               %{
+                 identifier: "MT-MCP",
+                 error: "codex MCP elicitation requires operator input"
+               }
+             ]
+           } =
+             Orchestrator.snapshot(orchestrator_name, 1_000)
+  end
+
   test "status dashboard renders offline marker to terminal" do
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
@@ -1988,6 +2177,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        when is_function(predicate, 1) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state_entry(pid, [:running, issue_id], predicate, deadline_ms)
+  end
+
+  defp wait_for_blocked_entry(pid, issue_id, predicate, timeout_ms \\ 1_000)
+       when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state_entry(pid, [:blocked, issue_id], predicate, deadline_ms)
   end
 
   defp do_wait_for_state_entry(pid, path, predicate, deadline_ms) do
