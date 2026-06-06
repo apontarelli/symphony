@@ -2563,8 +2563,10 @@ defmodule SymphonyElixir.CoreTest do
                )
 
       trace = File.read!(trace_file)
+      {:ok, canonical_workspace_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+      expected_codex_home = Path.join([canonical_workspace_root, ".symphony", "codex_home"])
 
-      assert trace =~ "CODEX_HOME:#{empty_codex_home}"
+      assert trace =~ "CODEX_HOME:#{expected_codex_home}"
       assert trace =~ "Resolved modules: linear-operation@v1"
       assert trace =~ "Policy hash: sha256:"
 
@@ -2572,6 +2574,7 @@ defmodule SymphonyElixir.CoreTest do
                ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
 
       refute File.exists?(Path.join(empty_codex_home, "skills"))
+      refute File.exists?(Path.join(expected_codex_home, "skills"))
     after
       File.rm_rf(test_root)
     end

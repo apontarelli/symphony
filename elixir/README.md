@@ -278,6 +278,15 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
+  it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
+  - Symphony owns the generated harness `AGENTS.md` in that home.
+  - The target repository cwd is still the issue workspace, so repo-local `AGENTS.md` files and docs
+    layer after the harness global instructions.
+  - `SYMPHONY_CODEX_HOME` overrides the generated path for local development and tests.
+  - Worker machines still provide the Codex executable and authentication material. When
+    `~/.codex/auth.json` exists for the worker user, Symphony links it into the harness home; it does
+    not copy Symphony skills into `~/.agents` or `~/.codex`.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
