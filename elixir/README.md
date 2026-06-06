@@ -239,6 +239,9 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
+- Workflows that run package managers or other commands that resolve external hosts should set
+  `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
+  by the Codex turn sandbox.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped work like repo skill authoring
   that needs to edit protected `.agents/` paths; keep the global `codex` defaults sandboxed.
