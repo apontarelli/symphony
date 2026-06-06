@@ -32,6 +32,11 @@ issue claimed and exposes it as blocked in the runtime state, JSON API, and dash
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 Linear issue can become a dispatch candidate again after restart.
 
+Completed or blocked worker runs also record a structured handoff route decision in runtime state.
+The route captures the selected Linear target state, recommendation, evidence, and available
+artifacts so operators can inspect why work is headed to Human Review, Rework, product review, or a
+decision-needed handoff.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

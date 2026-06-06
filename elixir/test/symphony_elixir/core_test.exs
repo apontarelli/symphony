@@ -1730,9 +1730,93 @@ defmodule SymphonyElixir.CoreTest do
 
     refute Map.has_key?(state.running, issue_id)
     assert MapSet.member?(state.completed, issue_id)
+
+    assert %{
+             route: "human_review",
+             target_state: "Human Review",
+             summary: "Human review required for risky or policy-protected work."
+           } = state.handoff_routes[issue_id]
+
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
     assert_due_in_range(due_at_ms, sent_at_ms, 500, 1_100)
+  end
+
+  test "normal worker exit persists route decision from completion metadata" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-route-completion"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RouteCompletionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-ROUTE",
+      issue: %Issue{id: issue_id, identifier: "MT-ROUTE", state: "In Progress"},
+      session_id: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.utc_now(),
+         payload: %{
+           "params" => %{
+             "completion" => %{
+               checks: [%{name: "mix test", status: :passed}],
+               review: %{status: :decision_needed},
+               changed_surfaces: [:domain],
+               decision: %{
+                 question: "Choose handoff route",
+                 recommendation: "Keep Human Review for v1",
+                 options: [
+                   %{id: "hold", label: "Keep Human Review", description: "Conservative route."}
+                 ]
+               }
+             }
+           }
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert %{
+             route: "decision_needed",
+             target_state: "Human Review",
+             summary: "Choose handoff route",
+             recommendation: "Keep Human Review for v1",
+             options: [%{id: "hold", label: "Keep Human Review"}]
+           } = state.handoff_routes[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, route_comment}
+    assert route_comment =~ "### Handoff Route"
+    assert route_comment =~ "decision_needed"
+    assert route_comment =~ "Keep Human Review"
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1936,8 +2020,10 @@ defmodule SymphonyElixir.CoreTest do
   defp assert_due_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_remaining_ms) do
     delay_ms = due_at_ms - sent_at_ms
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+    measured_min_remaining_ms = max(1, min_delay_ms - 500)
 
     assert delay_ms >= min_delay_ms
+    assert remaining_ms >= measured_min_remaining_ms
     assert remaining_ms <= max_remaining_ms
   end
 

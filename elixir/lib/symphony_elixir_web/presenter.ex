@@ -54,6 +54,7 @@ defmodule SymphonyElixirWeb.Presenter do
           retrying: retrying,
           blocked: blocked,
           token_hotspot: token_hotspot_payload(running),
+          handoff_routes: Enum.map(Map.get(snapshot, :handoff_routes, []), &handoff_route_payload/1),
           codex_totals: snapshot.codex_totals,
           rate_limits: snapshot.rate_limits,
           rate_limits_available: meaningful_rate_limits?(snapshot.rate_limits)
@@ -242,6 +243,8 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event_at: iso8601(entry.last_codex_timestamp)
     }
   end
+
+  defp handoff_route_payload(route) when is_map(route), do: route
 
   defp running_issue_payload(running) do
     %{
