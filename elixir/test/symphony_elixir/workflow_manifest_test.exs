@@ -110,6 +110,68 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Use the dashboard and status APIs as operator-visible evidence"
   end
 
+  test "review routing compiles into resolved policy and prompt context" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+      delivery:
+        pr_target: main
+      review_routing:
+        project_criticality: local_non_production
+        autonomy_posture: balanced
+        auto_land:
+          enabled: true
+          max_risk_class: low
+        product_visual_review:
+          required_artifacts:
+            - screenshots_or_recording
+            - manual_qa_notes
+      """)
+
+    assert {:ok, %{config: config, prompt: compiled_prompt}} = Manifest.load(path)
+
+    expected_review_routing = %{
+      "project_criticality" => "local_non_production",
+      "autonomy_posture" => "balanced",
+      "auto_land" => %{"enabled" => true, "max_risk_class" => "low"},
+      "product_visual_review" => %{
+        "required_artifacts" => ["screenshots_or_recording", "manual_qa_notes"]
+      }
+    }
+
+    assert config["manifest"]["review_routing"] == expected_review_routing
+    assert get_in(config, ["profiles", "default", "review_routing"]) == expected_review_routing
+    assert compiled_prompt =~ "Review routing:"
+    assert compiled_prompt =~ "autonomy_posture: balanced"
+
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    System.put_env("LINEAR_API_KEY", "manifest-token")
+    Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    assert {:ok, policy} = Config.effective_policy()
+    assert policy["review_routing"] == expected_review_routing
+    assert is_binary(policy["policy_ref"])
+
+    prompt =
+      PromptBuilder.build_prompt(%Issue{
+        identifier: "SID-295",
+        title: "Specify review routing contracts",
+        description: "Route evidence",
+        state: "In Progress",
+        labels: ["workflow"],
+        url: "https://linear.app/example/SID-295"
+      })
+
+    assert prompt =~ "review_routing:"
+    assert prompt =~ "autonomy_posture: balanced"
+    assert prompt =~ "max_risk_class: low"
+  end
+
   test "legacy manifest vocabulary is rejected instead of translated" do
     path =
       write_manifest!("""
@@ -235,6 +297,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       workflow:
         preset: 123
         modules: codex
+      review_routing: true
       harness:
         codex_home: []
       bindings:
@@ -264,6 +327,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert %{path: "automation.review", message: "must be a map"} in diagnostics
     assert %{path: "workflow.preset", message: "must be a string"} in diagnostics
     assert %{path: "workflow.modules", message: "must be a list"} in diagnostics
+    assert %{path: "review_routing", message: "must be a map"} in diagnostics
     assert %{path: "harness.codex_home", message: "must be a string"} in diagnostics
     assert %{path: "bindings.local_file", message: "must be a string"} in diagnostics
     assert %{path: "bindings.require_local", message: "must be a boolean"} in diagnostics

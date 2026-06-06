@@ -755,6 +755,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     automation = manifest["automation"]
     completion_requirements = automation["completion_requirements"]
     review = Map.get(automation, "review")
+    review_routing = Map.get(manifest, "review_routing")
     vcs = manifest["vcs"]
     delivery = manifest["delivery"]
     workflow = manifest["workflow"]
@@ -774,6 +775,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       prompt_command_section(validation_commands),
       prompt_list_section("Completion requirements", completion_requirements),
       prompt_review_section(review),
+      prompt_review_routing_section(review_routing),
       prompt_manifest_module_section(workflow),
       ""
     ]
@@ -833,10 +835,23 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp prompt_map_section(title, values) do
     lines =
       values
-      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> prompt_map_entries()
       |> Enum.map(fn {key, value} -> "- #{key}: #{prompt_value(value)}" end)
 
     [title <> ":" | lines]
+  end
+
+  defp prompt_map_entries(values, prefix \\ nil) do
+    values
+    |> Enum.sort_by(fn {key, _value} -> to_string(key) end)
+    |> Enum.flat_map(fn {key, value} ->
+      path = if prefix, do: "#{prefix}.#{key}", else: to_string(key)
+
+      case value do
+        map when is_map(map) and map_size(map) > 0 -> prompt_map_entries(map, path)
+        _value -> [{path, value}]
+      end
+    end)
   end
 
   defp prompt_value(value) when is_binary(value), do: value
@@ -870,6 +885,12 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
         |> Enum.sort_by(fn {key, _value} -> key end)
         |> Enum.map(fn {key, value} -> "- #{key}: #{prompt_value(value)}" end)
     ]
+  end
+
+  defp prompt_review_routing_section(nil), do: []
+
+  defp prompt_review_routing_section(review_routing) do
+    prompt_map_section("Review routing", review_routing)
   end
 
   defp prompt_command_section([]), do: ["Validation commands:", "- Use the repo-local validation gate that matches the changed surface."]

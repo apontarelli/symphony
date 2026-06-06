@@ -421,6 +421,7 @@ Optional manifest fields:
 - `automation.review` (object)
 - `workflow.preset` (string, default `default`)
 - `workflow.modules` (list of strings, appended to preset modules)
+- `review_routing` (object)
 
 Manifest resolution rules:
 
@@ -433,7 +434,7 @@ Manifest resolution rules:
 - The default `workspace` module compiles `project.repository` into an `after_create` hook when the
   repository field is present.
 - The resolved runtime `config` includes daemon config plus manifest metadata, `checks`,
-  `completion_requirements`, `delivery`, and `policy_metadata`.
+  `completion_requirements`, `delivery`, `profiles`, and `policy_metadata`.
 - The resolved `prompt_template` is generated from registry-owned prompt sections and manifest
   facts; target repositories do not commit full prompt prose in the manifest.
 
@@ -468,6 +469,12 @@ workflow:
   preset: default
   modules:
     - observability
+review_routing:
+  project_criticality: local_non_production
+  autonomy_posture: balanced
+  auto_land:
+    enabled: true
+    max_risk_class: low
 ```
 
 ### 5.3 Manifest Field Semantics
@@ -571,6 +578,64 @@ resolved effective policy and MUST NOT be supplied by the manifest.
 A preset is a Symphony-owned bundle of default workflow modules, module ordering, policy defaults,
 checks, completion requirements, and transition defaults for a common app/workflow shape. Presets
 MUST be deterministic for a given preset ref and implementation version.
+
+#### 5.3.8 `review_routing` (object, OPTIONAL extension)
+
+`review_routing` describes the policy used by the workflow prompt and agent tooling to choose a
+completion route after implementation and validation. It compiles into the resolved profile policy
+and therefore participates in prompt rendering, `policy_ref`, and policy tests. It is not part of
+the scheduler's dispatch eligibility rules unless an implementation explicitly promotes it into
+typed runtime config.
+
+Fields:
+
+- `project_criticality` (string)
+  - Default: `local_non_production`.
+  - Allowed values:
+    - `local_non_production`: local tools, prototypes, internal docs, or work whose failure does not
+      affect production users.
+    - `internal_production`: production automation or operator tooling that affects internal users
+      or durable internal state.
+    - `production_web`: shipped web/product surfaces visible to external users.
+    - `regulated_or_high_risk`: auth, billing, payments, permissions, security, migrations, data
+      integrity, or other work where an incorrect merge can create external harm.
+- `autonomy_posture` (string)
+  - Default: `balanced`.
+  - Allowed values:
+    - `auto_land_allowed`: low-risk validated changes MAY choose `auto_land` without human review.
+    - `balanced`: low-risk `local_non_production` changes MAY choose `auto_land`; production or
+      high-risk changes require a review route.
+    - `review_required`: completed work MUST route to `human_review` or
+      `product_visual_review`.
+    - `decision_required`: completed work MUST route to `decision_needed` unless it is blocked.
+- `default_route` (string, OPTIONAL)
+  - One of the route types in Section 11.7.
+  - If absent, route selection is derived from `project_criticality`, `autonomy_posture`, risk class,
+    changed surfaces, validation evidence, and reviewer feedback.
+- `auto_land` (object, OPTIONAL)
+  - `enabled` (boolean, default `true` when `autonomy_posture == "auto_land_allowed"` or when
+    `project_criticality == "local_non_production"` and `autonomy_posture == "balanced"`;
+    otherwise `false`)
+  - `max_risk_class` (string, default `low`)
+  - `allowed_surfaces` (list of strings, OPTIONAL)
+  - `blocked_surfaces` (list of strings, default includes `auth`, `billing`, `payments`,
+    `permissions`, `security`, `migrations`, `production_data`, and `external_user_ui`)
+- `product_visual_review` (object, OPTIONAL)
+  - `required_for_surfaces` (list of strings, default includes `external_user_ui`, `visual_design`,
+    and `production_web`)
+  - `required_artifacts` (list of strings, default includes `screenshots_or_recording`,
+    `viewport_coverage`, and `manual_qa_notes`)
+- `human_review` (object, OPTIONAL)
+  - `required_for_risk_classes` (list of strings, default includes `medium`, `high`)
+- `decision_needed` (object, OPTIONAL)
+  - `max_options` (integer, default `3`)
+  - `require_recommended_option` (boolean, default `true`)
+
+Auto-land must not be impossible by default. A conforming default policy allows `auto_land` for a
+validated, low-risk `local_non_production` change when checks pass, automated review finds no
+blocking issues, no product/visual review is required, and no required external permission is
+missing. Production web and high-risk projects can still opt into stricter routing through
+`project_criticality`, `autonomy_posture`, or explicit route requirements.
 
 ### 5.4 Workflow Module Semantics
 
@@ -799,6 +864,8 @@ Profile policy:
 
 - `automation.profile`: string, default `default`
 - Resolved profile policy MUST include `delivery.pr_target`.
+- `review_routing`: object, OPTIONAL route policy compiled from the manifest into the resolved
+  profile policy.
 - Selected-profile `codex` overrides MAY set `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` before the Codex thread/turn starts.
 - Implementations MUST compute a stable `policy_ref` hash from the resolved effective policy.
@@ -1728,6 +1795,143 @@ error. Project bindings referencing unknown profiles MUST fail startup/readiness
 Unprojected issues MUST NOT dispatch unless catch-all is enabled. Label refinements MAY adjust
 validation, review, and prompt policy, but MUST NOT change the selected project binding's
 effective `delivery.pr_target`.
+
+### 11.7 Completion Route Contract
+
+After implementation, validation, and automated review, the workflow MUST choose exactly one
+completion route. Route selection is agent/tooling policy, not scheduler dispatch policy, unless an
+implementation explicitly moves it into runtime code.
+
+Route types:
+
+- `auto_land`
+  - Use when policy allows the agent to publish, merge/land, and complete the ticket without
+    additional human approval.
+  - Allowed only when all required checks pass, automated review has no blocking findings, PR or
+    merge checks are green if a PR is used, no actionable reviewer feedback is outstanding, and the
+    risk/surface evidence stays within the configured auto-land envelope.
+- `human_review`
+  - Use when work is complete and validated, but policy or risk requires Antonio or another human to
+    review before merge/land.
+  - This is one route, not the universal default.
+- `decision_needed`
+  - Use when implementation can proceed only after a product, architecture, policy, or tradeoff
+    decision that the agent cannot safely infer.
+  - The agent MUST present two or three mutually exclusive options, put the recommended option
+    first, state the impact/tradeoff of each option in one short sentence, and keep any free-form
+    escape hatch separate from the option list.
+- `product_visual_review`
+  - Use when the changed surface needs product or visual approval after technical validation,
+    especially production web UI, branding, interaction design, visual regressions, or user-facing
+    copy where screenshots/recordings materially affect review.
+  - The route MUST include the relevant visual QA artifacts or explain why they cannot be captured.
+- `blocked`
+  - Use when a true blocker prevents completion: missing required auth, permissions, secrets,
+    unavailable required tools, impossible repository state, or required external context after
+    documented fallbacks are exhausted.
+  - The route MUST state the exact missing item, why it blocks acceptance/validation, and the
+    smallest unblock action.
+
+Required route evidence payload:
+
+```json
+{
+  "route": {
+    "type": "auto_land | human_review | decision_needed | product_visual_review | blocked",
+    "selected_at": "ISO-8601 timestamp",
+    "policy_ref": "implementation-defined policy id or digest",
+    "reason": "short route rationale"
+  },
+  "risk": {
+    "class": "low | medium | high | critical",
+    "project_criticality": "local_non_production | internal_production | production_web | regulated_or_high_risk",
+    "changed_surfaces": ["docs", "workflow", "backend", "external_user_ui"],
+    "external_side_effects": false
+  },
+  "evidence": {
+    "checks": [
+      {"name": "mix test", "status": "passed", "details": "summary or artifact ref"}
+    ],
+    "code_review": {
+      "mode": "automated | human | mixed | not_applicable",
+      "status": "passed | fix_required | comments_addressed | blocked",
+      "findings": []
+    },
+    "pr": {
+      "url": "optional",
+      "base": "main",
+      "checks_status": "passed | failed | pending | not_applicable"
+    },
+    "pr_feedback": {
+      "status": "none | addressed | pushback_posted | outstanding | not_applicable",
+      "pr_number": 123,
+      "checked_at": "ISO-8601 timestamp",
+      "top_level_comments": {
+        "checked": true,
+        "source": "gh pr view --comments",
+        "unresolved_actionable_count": 0
+      },
+      "inline_review_comments": {
+        "checked": true,
+        "source": "gh api repos/<owner>/<repo>/pulls/<pr>/comments",
+        "unresolved_actionable_count": 0
+      },
+      "review_summaries": {
+        "checked": true,
+        "source": "gh pr view --json reviews",
+        "unresolved_actionable_count": 0
+      }
+    },
+    "visual_qa": {
+      "required": false,
+      "artifacts": [],
+      "notes": "optional"
+    },
+    "escalation_reason": "required for non-auto_land routes",
+    "unblock_action": "required for blocked"
+  }
+}
+```
+
+Evidence rules:
+
+- `checks` MUST name every required ticket/workflow validation gate that was run or explain why it
+  could not run.
+- `code_review.status` MUST be `passed` or `comments_addressed` before `auto_land`,
+  `human_review`, or `product_visual_review`.
+- `risk.changed_surfaces` MUST be concrete enough for tests to assert route decisions, for example
+  `docs`, `tests`, `workflow`, `backend`, `auth`, `billing`, `database`, `external_user_ui`,
+  `visual_design`, `deployment`, or `operator_runbook`.
+- `pr_feedback` MUST record whether top-level PR comments, inline review comments, and review
+  summaries were checked. When a PR exists, each channel MUST include source evidence and unresolved
+  actionable counts before route completion.
+- `pr_feedback.status` MUST be `none`, `addressed`, or `pushback_posted` before `auto_land`,
+  `human_review`, or `product_visual_review`.
+- `visual_qa.required` MUST be true for `product_visual_review` and for production web UI changes
+  unless the policy explicitly exempts that surface.
+- `escalation_reason` is REQUIRED for `human_review`, `decision_needed`,
+  `product_visual_review`, and `blocked`.
+
+Baseline route decision matrix:
+
+| Project criticality | Low-risk docs/tests/local tooling | Backend/workflow behavior | Production web UI | Auth/billing/data/security |
+|---|---|---|---|---|
+| `local_non_production` | `auto_land` when checks/review pass | `human_review` for medium+ risk | `product_visual_review` if user-facing | `human_review` or `blocked` |
+| `internal_production` | `human_review` unless explicitly auto-land allowed | `human_review` | `product_visual_review` | `human_review` or `blocked` |
+| `production_web` | `human_review` | `human_review` | `product_visual_review` | `human_review` or `blocked` |
+| `regulated_or_high_risk` | `human_review` | `human_review` | `product_visual_review` | `human_review` or `blocked` |
+
+Reviewer feedback re-entry:
+
+- When a PR or review surface has actionable comments, the route is not complete until every
+  comment is addressed in code/docs/tests or receives an explicit justified pushback.
+- If new reviewer feedback arrives after `human_review` or `product_visual_review`, the tracker
+  issue SHOULD move to `Rework`.
+- A Rework run MUST read top-level PR comments, inline review comments, and review summaries before
+  editing, then update the single workpad checklist with each actionable item and its disposition.
+- Antonio does not need to take over locally for PR-style feedback loops; the next agent run owns
+  applying changes, replying with justified pushback when appropriate, revalidating, pushing, and
+  selecting a new completion route.
 
 ## 12. Prompt Construction and Context Assembly
 
@@ -2680,6 +2884,9 @@ Use the same validation profiles as Section 17:
   host, and exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
+- `review_routing` policy extension compiles into resolved profile policy, produces route evidence
+  from Section 11.7, and covers auto-land, human-review, decision, product/visual-review, blocked,
+  and PR-feedback Rework paths in tests.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.

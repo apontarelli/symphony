@@ -203,7 +203,8 @@ defmodule SymphonyElixir.PromptBuilder do
   defp review_requirement_items(policy) do
     [
       named_policy_value("review", policy_value(policy, "review")),
-      named_policy_value("review_requirements", policy_value(policy, "review_requirements"))
+      named_policy_value("review_requirements", policy_value(policy, "review_requirements")),
+      named_policy_value("review_routing", policy_value(policy, "review_routing"))
     ]
     |> policy_items()
   end

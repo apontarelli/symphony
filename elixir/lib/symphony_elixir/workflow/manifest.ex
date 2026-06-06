@@ -159,6 +159,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {validation, validation_errors} = normalize_validation(Map.get(raw, "validation"))
     {automation, automation_errors} = normalize_automation(Map.get(raw, "automation"))
     {workflow, workflow_errors} = normalize_workflow(Map.get(raw, "workflow"))
+    {review_routing, review_routing_errors} = normalize_review_routing(Map.get(raw, "review_routing"))
     {harness, harness_errors} = normalize_harness(Map.get(raw, "harness"))
     {bindings, bindings_errors} = normalize_bindings(Map.get(raw, "bindings"))
     {runtime, runtime_errors} = normalize_runtime(Map.get(raw, "runtime"))
@@ -174,6 +175,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
         validation_errors ++
         automation_errors ++
         workflow_errors ++
+        review_routing_errors ++
         harness_errors ++
         bindings_errors ++
         runtime_errors ++
@@ -190,6 +192,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
           "validation" => validation,
           "automation" => automation,
           "workflow" => workflow,
+          "review_routing" => review_routing,
           "harness" => harness,
           "bindings" => bindings,
           "runtime" => runtime
@@ -348,6 +351,10 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_workflow(_raw), do: {%{"preset" => "default", "modules" => []}, [type_error("workflow", "must be a map")]}
 
+  defp normalize_review_routing(nil), do: {nil, []}
+  defp normalize_review_routing(raw) when is_map(raw), do: {normalize_keys(raw), []}
+  defp normalize_review_routing(_raw), do: {nil, [type_error("review_routing", "must be a map")]}
+
   defp workflow_modules(raw) do
     case indexed_string_list_field(raw, "modules", "workflow.modules", default: []) do
       {modules, errors} ->
@@ -436,12 +443,13 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "manifest" => manifest_policy_inputs(manifest)
     }
     |> maybe_put("review", Map.get(manifest["automation"], "review"))
+    |> maybe_put("review_routing", Map.get(manifest, "review_routing"))
   end
 
   defp manifest_policy_inputs(manifest) do
     manifest
     |> public_manifest()
-    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "harness", "bindings"])
+    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "review_routing", "harness", "bindings"])
   end
 
   defp public_manifest(manifest) do
