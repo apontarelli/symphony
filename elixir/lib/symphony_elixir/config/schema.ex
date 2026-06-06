@@ -285,6 +285,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
+    field(:policy_metadata, :map, default: %{})
   end
 
   @spec parse(map()) :: {:ok, %__MODULE__{}} | {:error, {:invalid_workflow_config, String.t()}}
@@ -316,9 +317,14 @@ defmodule SymphonyElixir.Config.Schema do
     with {:ok, profile_name} <- normalize_profile_reference(profile_ref),
          {:ok, refinement_names} <- normalize_refinement_references(refinement_refs),
          {:ok, policy} <- resolve_profile_policy(settings.profiles, profile_name, refinement_names, opts) do
+      metadata =
+        settings.policy_metadata
+        |> normalize_policy_metadata()
+        |> Map.merge(Keyword.get(opts, :metadata, %{}) |> normalize_policy_metadata())
+
       policy
       |> Map.put(@profile_policy_ref_key, policy_ref(policy))
-      |> put_policy_metadata(Keyword.get(opts, :metadata, %{}))
+      |> put_policy_metadata(metadata)
       |> then(&{:ok, &1})
     end
   end
@@ -387,7 +393,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:profiles])
+    |> cast(attrs, [:profiles, :policy_metadata])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -826,6 +832,9 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp put_policy_metadata(policy, _metadata), do: policy
+
+  defp normalize_policy_metadata(metadata) when is_map(metadata), do: normalize_keys(metadata)
+  defp normalize_policy_metadata(_metadata), do: %{}
 
   defp format_policy_resolution_error({:missing_delivery_pr_target, profile_name}) do
     "#{profile_name}.delivery.pr_target is required in resolved policy"

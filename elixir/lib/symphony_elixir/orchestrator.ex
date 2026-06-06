@@ -280,58 +280,20 @@ defmodule SymphonyElixir.Orchestrator do
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
     else
-      {:error, :missing_linear_api_token} ->
-        Logger.error("Linear API token missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_linear_project_slug} ->
-        Logger.error("Linear project slug missing in WORKFLOW.md")
-        state
-
-      {:error, :missing_tracker_kind} ->
-        Logger.error("Tracker kind missing in WORKFLOW.md")
-
-        state
-
-      {:error, {:unsupported_tracker_kind, kind}} ->
-        Logger.error("Unsupported tracker kind in WORKFLOW.md: #{inspect(kind)}")
-
-        state
-
-      {:error, {:invalid_workflow_config, message}} ->
-        Logger.error("Invalid WORKFLOW.md config: #{message}")
-        state
-
-      {:error, {:invalid_linear_profile_bindings, message}} ->
-        Logger.error("Invalid Linear profile bindings: #{message}")
-        state
-
-      {:error, {:unknown_linear_profile_binding, source, profile, reason}} ->
-        Logger.error("Invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}")
-        state
-
-      {:error, :missing_linear_catch_all_team_selector} ->
-        Logger.error("Linear catch-all profile binding requires external team_id or team_key")
-        state
-
-      {:error, {:missing_workflow_file, path, reason}} ->
-        Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
-        state
-
-      {:error, :workflow_front_matter_not_a_map} ->
-        Logger.error("Failed to parse WORKFLOW.md: workflow front matter must decode to a map")
-        state
-
-      {:error, {:workflow_parse_error, reason}} ->
-        Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
-        state
-
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error(dispatch_error_message(reason))
         state
 
       false ->
         state
+    end
+  end
+
+  defp dispatch_error_message(reason) do
+    if Config.config_error?(reason) do
+      Config.format_error(reason)
+    else
+      "Failed to fetch from Linear: #{inspect(reason)}"
     end
   end
 

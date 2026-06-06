@@ -197,6 +197,22 @@ defmodule SymphonyElixir.CoreTest do
     assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
   end
 
+  test "workflow profile resolution ignores malformed policy metadata" do
+    settings = %Schema{
+      profiles: %{
+        "default" => %{
+          "delivery" => %{"pr_target" => "main"}
+        }
+      },
+      policy_metadata: "not-a-map"
+    }
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings)
+    assert policy["delivery"] == %{"pr_target" => "main"}
+    assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
+    refute Map.has_key?(policy, "policy_metadata")
+  end
+
   test "workflow profile resolution applies add and append fields explicitly" do
     assert {:ok, settings} =
              Schema.parse(%{
@@ -1082,9 +1098,14 @@ defmodule SymphonyElixir.CoreTest do
     assert log =~ "missing_linear_api_token"
   end
 
-  test "current WORKFLOW.md file is valid and complete" do
+  test "current symphony.yml manifest is valid and complete" do
     original_workflow_path = Workflow.workflow_file_path()
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+
     on_exit(fn -> Workflow.set_workflow_file_path(original_workflow_path) end)
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+
+    System.put_env("LINEAR_API_KEY", "manifest-token")
     Workflow.clear_workflow_file_path()
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
@@ -1093,7 +1114,7 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    refute Map.has_key?(tracker, "project_slug")
+    assert Map.get(tracker, "project_slug") == "symphony"
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
@@ -1110,8 +1131,18 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(profiles, ["default", "delivery", "pr_target"]) == "main"
 
     assert String.trim(prompt) != ""
+    assert prompt =~ "You are working on a Linear issue for Symphony."
+    assert prompt =~ "Workflow modules:"
+    assert prompt =~ "Validation gates:\n- test: mise exec -- mix test"
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
+
+    assert {:ok, policy} = Config.effective_policy()
+    assert is_binary(policy["policy_ref"])
+    assert policy["checks"] == [%{"name" => "test", "command" => "mise exec -- mix test"}]
+    assert policy["completion_requirements"] == ["Run the strongest feasible validation gate before handoff."]
+    assert policy["delivery"] == %{"pr_target" => "main"}
+    assert policy["policy_metadata"]["project_slug"] == "symphony"
   end
 
   test "linear api token resolves from LINEAR_API_KEY env var" do
@@ -1148,7 +1179,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.settings!().tracker.assignee == env_assignee
   end
 
-  test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
+  test "workflow file path defaults to symphony.yml in the current working directory when app env is unset" do
     original_workflow_path = Workflow.workflow_file_path()
 
     on_exit(fn ->
@@ -1157,11 +1188,40 @@ defmodule SymphonyElixir.CoreTest do
 
     Workflow.clear_workflow_file_path()
 
-    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "WORKFLOW.md")
+    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "symphony.yml")
+  end
+
+  test "workflow load defaults to symphony.yml when app env is unset" do
+    original_workflow_path = Workflow.workflow_file_path()
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+    end)
+
+    workflow_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-manifest-precedence-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(workflow_root)
+    Workflow.clear_workflow_file_path()
+
+    try do
+      write_manifest_file!(Path.join(workflow_root, "symphony.yml"),
+        tracker_project_slug: "manifest-repo",
+        project_repository: "github.com/example/manifest-repo"
+      )
+
+      File.cd!(workflow_root, fn ->
+        assert {:ok, %{config: config}} = Workflow.load()
+        assert config["tracker"]["project_slug"] == "manifest-repo"
+        assert config["manifest"]["project"]["slug"] == "manifest-repo"
+      end)
+    after
+      File.rm_rf(workflow_root)
+    end
   end
 
   test "workflow file path resolves from app env when set" do
-    app_workflow_path = "/tmp/app/WORKFLOW.md"
+    app_workflow_path = "/tmp/app/symphony.yml"
 
     on_exit(fn ->
       Workflow.clear_workflow_file_path()
@@ -1170,29 +1230,6 @@ defmodule SymphonyElixir.CoreTest do
     Workflow.set_workflow_file_path(app_workflow_path)
 
     assert Workflow.workflow_file_path() == app_workflow_path
-  end
-
-  test "workflow load accepts prompt-only files without front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "PROMPT_ONLY_WORKFLOW.md")
-    File.write!(workflow_path, "Prompt only\n")
-
-    assert {:ok, %{config: %{}, prompt: "Prompt only", prompt_template: "Prompt only"}} =
-             Workflow.load(workflow_path)
-  end
-
-  test "workflow load accepts unterminated front matter with an empty prompt" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "UNTERMINATED_WORKFLOW.md")
-    File.write!(workflow_path, "---\ntracker:\n  kind: linear\n")
-
-    assert {:ok, %{config: %{"tracker" => %{"kind" => "linear"}}, prompt: "", prompt_template: ""}} =
-             Workflow.load(workflow_path)
-  end
-
-  test "workflow load rejects non-map front matter" do
-    workflow_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "INVALID_FRONT_MATTER_WORKFLOW.md")
-    File.write!(workflow_path, "---\n- not-a-map\n---\nPrompt body\n")
-
-    assert {:error, :workflow_front_matter_not_a_map} = Workflow.load(workflow_path)
   end
 
   test "SymphonyElixir.start_link delegates to the orchestrator" do
@@ -2093,49 +2130,52 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "in-repo WORKFLOW.md renders correctly" do
+  test "in-repo symphony.yml renders generated prompt correctly" do
     workflow_path = Workflow.workflow_file_path()
-    Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    Workflow.set_workflow_file_path(Path.expand("symphony.yml", File.cwd!()))
+    System.put_env("LINEAR_API_KEY", "manifest-token")
 
     issue = %Issue{
       identifier: "MT-616",
-      title: "Use rich templates for WORKFLOW.md",
+      title: "Use generated manifests",
       description: "Render with rich template variables",
       state: "In Progress",
-      url: "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd",
+      url: "https://example.org/issues/MT-616/use-generated-manifests",
       labels: ["templating", "workflow"]
     }
 
-    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(workflow_path)
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+    end)
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
-    assert prompt =~ "Resolved workflow policy:"
-    assert prompt =~ ~s("pr_target": "main")
-    assert prompt =~ "Delivery target rules:"
-    assert prompt =~ "Treat `policy.delivery.pr_target` as the Git PR base branch"
-    assert prompt =~ "If the target is `main`, preserve the existing mainline pull/push/review/land behavior."
-    assert prompt =~ "If the target is not `main`, pull from `origin/<target>`"
-    assert prompt =~ "profile-specific gates and completion requirements"
+    assert prompt =~ "You are working on a Linear issue for Symphony."
+    assert prompt =~ "Project slug: symphony"
+    assert prompt =~ "Repository: https://github.com/openai/symphony"
+    assert prompt =~ "Workflow modules:"
+    assert prompt =~ "Use Linear as the tracker"
+    assert prompt =~ "Run Codex with the configured runtime settings"
+    assert prompt =~ "Validation gates:\n- test: mise exec -- mix test"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
-    assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
+    assert prompt =~ "Title: Use generated manifests"
     assert prompt =~ "Current status: In Progress"
-    assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
-    assert prompt =~ "`symphony-quality-gates` and `symphony-review` completed"
-    assert prompt =~ "run `symphony-land` in a loop until the PR is merged"
-    assert prompt =~ "Do not call `gh pr merge` directly"
+    assert prompt =~ "https://example.org/issues/MT-616/use-generated-manifests"
     assert prompt =~ "Continuation context:"
-    assert prompt =~ "retry attempt #2"
+    assert prompt =~ "retry attempt 2"
+    assert prompt =~ "## Selected Workflow Profile"
+    assert prompt =~ "Workpad stamp: `Policy: profile=default target=main policy_ref="
+    assert prompt =~ "checks: {"
+    assert prompt =~ "mise exec -- mix test"
+    assert prompt =~ "completion_requirements: Run the strongest feasible validation gate before handoff."
   end
 
-  test "in-repo WORKFLOW.md renders non-main delivery policy context and gates" do
+  test "prompt renders non-main delivery policy context and gates" do
     workflow_path = Workflow.workflow_file_path()
-    Workflow.set_workflow_file_path(Path.expand("WORKFLOW.md", File.cwd!()))
+    Workflow.set_workflow_file_path(Path.expand("symphony.yml", File.cwd!()))
 
     issue = %Issue{
       identifier: "MT-617",
@@ -2157,11 +2197,11 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, policy: policy)
 
-    assert prompt =~ ~s("pr_target": "project/integration")
-    assert prompt =~ ~s("mix test")
-    assert prompt =~ ~s("Run profile gate")
-    assert prompt =~ "If the target is not `main`, pull from `origin/<target>`"
-    assert prompt =~ "never merge or promote anything to `main` in v1"
+    assert prompt =~ "Workpad stamp: `Policy: profile=default target=project/integration policy_ref=abc123def456`"
+    assert prompt =~ "checks: mix test"
+    assert prompt =~ "checks: mix credo"
+    assert prompt =~ "completion_requirements: Attach PR to Linear"
+    assert prompt =~ "completion_requirements: Run profile gate"
   end
 
   test "prompt builder adds continuation guidance for retries" do

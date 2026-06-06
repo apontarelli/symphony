@@ -37,13 +37,13 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
+3. Add a `symphony.yml` manifest to your repo.
 4. Ensure the global `symphony-linear`, `symphony-commit`, `symphony-pull`,
    `symphony-quality-gates`, `symphony-review`, `symphony-push`, `symphony-land`, and
    `symphony-debug` skills are available to Codex.
    - `symphony-linear` expects Symphony's `linear_graphql` app-server tool for raw Linear
      GraphQL operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
+5. Customize the manifest for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
@@ -69,7 +69,7 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony
 ```
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
@@ -80,7 +80,7 @@ before launching:
 ```bash
 cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony my-project
-../bin/symphony --workflow /path/to/project/WORKFLOW.md --no-portless
+../bin/symphony --workflow /path/to/project/symphony.yml --no-portless
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
@@ -88,13 +88,13 @@ symlink `../bin/symphony` into a directory already on `PATH`.
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+Pass a custom manifest path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony /path/to/custom/symphony.yml
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+If no path is passed, Symphony uses `./symphony.yml`.
 
 Optional flags:
 
@@ -103,64 +103,52 @@ Optional flags:
 - `--linear-bindings` overrides the default local Linear profile binding file path
 - `--profile` selects one workflow profile for the current process, before project/label bindings
 
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
+modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.
 
-Minimal example:
-
-```md
----
-tracker:
-  kind: linear
-  project_slug: "..."
-workspace:
-  root: ~/code/workspaces
-hooks:
-  after_create: |
-    if ! command -v jj >/dev/null 2>&1; then
-      echo 'jj is required for this Symphony workflow' >&2
-      exit 127
-    fi
-    jj git clone git@github.com:your-org/your-repo.git .
-  before_run: |
-    jj status || true
-agent:
-  max_concurrent_agents: 10
-  max_turns: 20
-codex:
-  command: codex app-server
-profiles:
-  default:
-    delivery:
-      pr_target: main
----
-
-You are working on a Linear issue {{ issue.identifier }}.
-
-Title: {{ issue.title }} Body: {{ issue.description }}
-```
-
-Repository-owned profiles live in committed `WORKFLOW.md`. They describe policy available to every
-run of the repo and should not contain Linear project IDs:
+Minimal manifest example:
 
 ```yaml
-profiles:
-  default:
-    delivery:
-      pr_target: main
-    checks:
-      - mix test
-  project_integration:
-    delivery:
-      pr_target: project/integration
-    checks:
-      - make all
+project:
+  slug: "..."
+  repository: git@github.com:your-org/your-repo.git
+app:
+  kind: web
+docs:
+  entry_points:
+    - README.md
+vcs:
+  kind: git
+  default_branch: main
+validation:
+  gates:
+    - name: tests
+      command: make test
+workflow:
+  preset: default
 ```
 
-The `default` profile is required. `delivery.pr_target` is the only v1 delivery selector: use
-`main` for normal mainline PRs, or a non-main branch such as `project/integration` when work should
-open PRs against a project integration branch. v1 does not automate promotion from a non-main target
-back to `main` after restart or landing.
+The default manifest `workspace` module uses `project.repository` to populate new issue workspaces
+with `git clone --depth 1 <repository> .`.
+
+Repository-owned profile overrides can live under `runtime.profiles` in committed `symphony.yml`.
+They describe policy available to every run of the repo and should not contain Linear project IDs:
+
+```yaml
+runtime:
+  profiles:
+    project_integration:
+      delivery:
+        pr_target: project/integration
+      checks:
+        - make all
+```
+
+The `default` profile is compiled from manifest delivery, validation, and autonomy fields.
+`delivery.pr_target` is the only v1 delivery selector: use `main` for normal mainline PRs, or a
+non-main branch such as `project/integration` when work should open PRs against a project integration
+branch. v1 does not automate promotion from a non-main target back to `main` after restart or
+landing.
 
 Notes:
 
@@ -168,17 +156,17 @@ Notes:
 - `tracker.required_labels` is optional. When set, an issue must have every configured label to
   dispatch or continue running. Label matching ignores case and surrounding whitespace. A blank
   configured label matches no issue.
-- `profiles.default.delivery.pr_target` is required and names the Git PR target/base branch.
-  Additional profiles may override `default` during effective-policy resolution.
+- `delivery.pr_target` names the Git PR target/base branch. Additional profiles may override the
+  compiled `default` profile during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
-- Linear project-to-profile bindings live outside committed `WORKFLOW.md`. Copy
-  `linear-profile-bindings.example.yml` to `linear-profile-bindings.local.yml` and fill in your
-  operator-local Linear project slug IDs and optional `pr_target` values. The local file is
-  gitignored and loads automatically when it sits next to `WORKFLOW.md`. Use
-  `--linear-bindings /path/to/bindings.yml` only to override the default lookup path:
+- Linear project-to-profile bindings live outside committed `symphony.yml`. Copy
+`linear-profile-bindings.example.yml` to `linear-profile-bindings.local.yml` and fill in your
+operator-local Linear project slug IDs and optional `pr_target` values. The local file is
+gitignored and loads automatically when it sits next to the selected manifest. Use
+`--linear-bindings /path/to/bindings.yml` only to override the default lookup path:
 
 ```yaml
 team_key: SID
@@ -281,7 +269,7 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
-- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
+- If the selected workflow file is missing or invalid at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - A running or retrying issue keeps the resolved workflow profile policy selected at dispatch time.
@@ -313,7 +301,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `symphony.yml`: in-repo manifest used by local runs
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
@@ -348,7 +336,7 @@ the transport representative without depending on long-lived external machines.
 
 Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
 
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
+The live test creates a temporary Linear project and issue, writes a temporary `symphony.yml`, runs
 a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
 Linear issue, then marks the project completed so the run remains visible in Linear.
 

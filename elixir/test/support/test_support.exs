@@ -23,9 +23,18 @@ defmodule SymphonyElixir.TestSupport do
       alias SymphonyElixir.Workspace
 
       import SymphonyElixir.TestSupport,
-        only: [write_workflow_file!: 1, write_workflow_file!: 2, restore_env: 2, stop_default_http_server: 0]
+        only: [
+          write_workflow_file!: 1,
+          write_workflow_file!: 2,
+          write_manifest_file!: 1,
+          write_manifest_file!: 2,
+          restore_env: 2,
+          stop_default_http_server: 0
+        ]
 
       setup do
+        SymphonyElixir.TestSupport.ensure_application_started!()
+
         workflow_root =
           Path.join(
             System.tmp_dir!(),
@@ -33,7 +42,7 @@ defmodule SymphonyElixir.TestSupport do
           )
 
         File.mkdir_p!(workflow_root)
-        workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+        workflow_file = Path.join(workflow_root, "symphony.yml")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
@@ -57,8 +66,12 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def write_workflow_file!(path, overrides \\ []) do
-    workflow = workflow_content(overrides)
-    File.write!(path, workflow)
+    write_manifest_file!(path, overrides)
+  end
+
+  def write_manifest_file!(path, overrides \\ []) do
+    manifest = workflow_content(overrides)
+    File.write!(path, manifest)
 
     if Process.whereis(SymphonyElixir.WorkflowStore) do
       try do
@@ -74,8 +87,21 @@ defmodule SymphonyElixir.TestSupport do
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
 
+  def ensure_application_started! do
+    case Application.ensure_all_started(:symphony_elixir) do
+      {:ok, _started_apps} -> :ok
+      {:error, reason} -> raise "failed to start symphony_elixir application: #{inspect(reason)}"
+    end
+  end
+
   def stop_default_http_server do
-    case Enum.find(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+    children =
+      case Process.whereis(SymphonyElixir.Supervisor) do
+        pid when is_pid(pid) -> Supervisor.which_children(pid)
+        nil -> []
+      end
+
+    case Enum.find(children, fn
            {SymphonyElixir.HttpServer, _pid, _type, _modules} -> true
            _child -> false
          end) do
@@ -131,6 +157,7 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          project_repository: "https://example.com/project.git",
           prompt: @workflow_prompt
         ],
         overrides
@@ -170,11 +197,11 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    project_repository = Keyword.get(config, :project_repository)
     prompt = Keyword.get(config, :prompt)
 
-    sections =
+    runtime_sections =
       [
-        "---",
         "tracker:",
         "  kind: #{yaml_value(tracker_kind)}",
         "  endpoint: #{yaml_value(tracker_endpoint)}",
@@ -205,9 +232,21 @@ defmodule SymphonyElixir.TestSupport do
         "profiles: #{yaml_value(profiles)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        server_yaml(server_port, server_host),
-        "---",
-        prompt
+        server_yaml(server_port, server_host)
+      ]
+      |> Enum.reject(&(&1 in [nil, ""]))
+
+    sections =
+      [
+        "project:",
+        "  slug: #{yaml_value(tracker_project_slug)}",
+        "  name: #{yaml_value("project")}",
+        "  repository: #{yaml_value(project_repository)}",
+        "workflow:",
+        "  preset: \"default\"",
+        "runtime:",
+        indent_block(Enum.join(runtime_sections, "\n"), 2),
+        prompt_template_yaml(prompt)
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
 
@@ -236,7 +275,9 @@ defmodule SymphonyElixir.TestSupport do
 
   defp yaml_value(value), do: yaml_value(to_string(value))
 
-  defp hooks_yaml(nil, nil, nil, nil, timeout_ms), do: "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}"
+  defp hooks_yaml(nil, nil, nil, nil, timeout_ms) do
+    "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}\n  after_create: null"
+  end
 
   defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
     [
@@ -288,6 +329,7 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
+  defp hook_entry("after_create", nil), do: "  after_create: null"
   defp hook_entry(_name, nil), do: nil
 
   defp hook_entry(name, command) when is_binary(command) do
@@ -297,5 +339,19 @@ defmodule SymphonyElixir.TestSupport do
       |> Enum.map_join("\n", &("    " <> &1))
 
     "  #{name}: |\n#{indented}"
+  end
+
+  defp prompt_template_yaml(nil), do: nil
+
+  defp prompt_template_yaml(prompt) when is_binary(prompt) do
+    "prompt_template: |\n" <> indent_block(prompt, 2)
+  end
+
+  defp indent_block(text, spaces) when is_binary(text) do
+    prefix = String.duplicate(" ", spaces)
+
+    text
+    |> String.split("\n", trim: false)
+    |> Enum.map_join("\n", &(prefix <> &1))
   end
 end
