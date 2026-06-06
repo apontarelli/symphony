@@ -24,8 +24,10 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It lets target repositories commit a thin `symphony.yml` manifest while Symphony owns the
+  workflow modules, compiled workflow generation, and harness runtime policy.
+- It preserves project-specific documentation, setup, and style ownership in the target repository
+  instead of copying Symphony orchestration policy into each repo.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -37,7 +39,7 @@ Important boundary:
 
 - Symphony is a scheduler/runner and tracker reader.
 - Ticket writes (state transitions, comments, PR links) are typically performed by the coding agent
-  using tools available in the workflow/runtime environment.
+  using tools available in the compiled workflow runtime environment.
 - A successful run can end at a workflow-defined handoff state (for example `Human Review`), not
   necessarily `Done`.
 
@@ -50,7 +52,10 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Resolve a repository-owned `symphony.yml` manifest through Symphony-owned workflow modules into a
+  compiled workflow used at runtime.
+- Launch Codex with a dedicated harness `CODEX_HOME` while layering target repo `AGENTS.md` and other
+  repo-local docs after the harness global instructions.
 - Expose operator-visible observability (at minimum structured logs).
 - Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
   in-memory scheduler state is not restored.
@@ -61,7 +66,7 @@ Important boundary:
 - Prescribing a specific dashboard or terminal UI implementation.
 - General-purpose workflow engine or distributed job scheduler.
 - Built-in business logic for how to edit tickets, PRs, or comments. (That logic lives in the
-  workflow prompt and agent tooling.)
+  compiled workflow prompt and agent tooling.)
 - Mandating strong sandbox controls beyond what the coding agent and host OS provide.
 - Mandating a single default approval, sandbox, or operator-confirmation posture for all
   implementations.
@@ -70,76 +75,100 @@ Important boundary:
 
 ### 3.1 Main Components
 
-1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
-   - Parses YAML front matter and prompt body.
-   - Returns `{config, prompt_template}`.
+1. `Manifest Loader`
+   - Reads the target repository `symphony.yml`.
+   - Parses the v1 manifest vocabulary.
+   - Returns a normalized manifest object.
 
-2. `Config Layer`
-   - Exposes typed getters for workflow config values.
+2. `Workflow Module Registry`
+   - Owns Symphony workflow modules and presets.
+   - Resolves preset-selected modules, explicitly selected modules, module pins, and module
+     overrides.
+   - Provides module schemas, prompt/policy renderers, checks, and workflow transition fragments.
+
+3. `Workflow Compiler`
+   - Compiles the normalized manifest plus selected workflow modules into a runtime compiled
+     workflow.
+   - Returns prompt templates, policies, checks, completion requirements, workflow transitions, tool
+     guidance, and harness launch instructions.
+
+4. `Config Layer`
+   - Exposes typed getters for compiled workflow and deployment config values.
    - Applies defaults and environment variable indirection.
    - Performs validation used by the orchestrator before dispatch.
 
-3. `Issue Tracker Client`
+5. `Issue Tracker Client`
    - Fetches candidate issues in active states.
    - Fetches current states for specific issue IDs (reconciliation).
    - Fetches terminal-state issues during startup cleanup.
    - Normalizes tracker payloads into a stable issue model.
 
-4. `Orchestrator`
+6. `Orchestrator`
    - Owns the poll tick.
    - Owns the in-memory runtime state.
    - Decides which issues to dispatch, retry, stop, or release.
    - Tracks session metrics and retry queue state.
 
-5. `Workspace Manager`
+7. `Workspace Manager`
    - Maps issue identifiers to workspace paths.
    - Ensures per-issue workspace directories exist.
    - Runs workspace lifecycle hooks.
    - Cleans workspaces for terminal issues.
 
-6. `Agent Runner`
+8. `Agent Runner`
    - Creates workspace.
-   - Builds prompt from issue + workflow template.
-   - Launches the coding agent app-server client.
+   - Builds prompt from issue + compiled workflow template.
+   - Launches the coding agent app-server client with the harness `CODEX_HOME`.
    - Streams agent updates back to the orchestrator.
 
-7. `Status Surface` (OPTIONAL)
+9. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
-8. `Logging`
+10. `Logging`
    - Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
 
 Symphony is easiest to port when kept in these layers:
 
-1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
-   - Team-specific rules for ticket handling, validation, and handoff.
+1. `Manifest Layer` (target repo-defined)
+   - `symphony.yml` project identity, app kind, preset, selected modules, validation gates, VCS
+     posture, docs entry points, autonomy policy, and optional module pins/overrides.
+   - Target repo docs, commands, setup, style, and domain conventions remain repo-owned.
 
-2. `Configuration Layer` (typed getters)
-   - Parses front matter into typed runtime settings.
+2. `Module Policy Layer` (Symphony-defined)
+   - Presets and workflow modules render prompt fragments, policies, tool-use guidance, CLI checks,
+     completion requirements, and workflow transitions.
+   - Modules are versioned and may be pinned by the manifest.
+
+3. `Compilation Layer`
+   - Combines the manifest, preset defaults, selected modules, service deployment config, and issue
+     policy profile into one compiled workflow object.
+   - Produces runtime/export artifacts. Rendered Markdown, when generated, is an output, not the
+     committed source of truth.
+
+4. `Configuration Layer` (typed getters)
+   - Parses the compiled workflow and deployment config into typed runtime settings.
    - Handles defaults, environment tokens, and path normalization.
 
-3. `Coordination Layer` (orchestrator)
+5. `Coordination Layer` (orchestrator)
    - Polling loop, issue eligibility, concurrency, retries, reconciliation.
 
-4. `Execution Layer` (workspace + agent subprocess)
+6. `Execution Layer` (workspace + agent subprocess)
    - Filesystem lifecycle, workspace preparation, coding-agent protocol.
 
-5. `Integration Layer` (Linear adapter)
+7. `Integration Layer` (Linear adapter)
    - API calls and normalization for tracker data.
 
-6. `Observability Layer` (logs + OPTIONAL status surface)
+8. `Observability Layer` (logs + OPTIONAL status surface)
    - Operator visibility into orchestrator and agent behavior.
 
 ### 3.3 External Dependencies
 
-- Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
+- Issue tracker API (Linear for `runtime.tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
-- OPTIONAL workspace population tooling (for example Git CLI, if used).
+- OPTIONAL workspace population tooling (for example Git or Jujutsu CLI, if used).
 - Coding-agent executable that supports the targeted Codex app-server mode.
 - Host environment authentication for the issue tracker and coding agent.
 
@@ -176,18 +205,59 @@ Fields:
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
-#### 4.1.2 Workflow Definition
+#### 4.1.2 Manifest
 
-Parsed `WORKFLOW.md` payload:
+Parsed `symphony.yml` payload committed by the target repository.
 
-- `config` (map)
-  - YAML front matter root object.
+Fields are defined in Section 5. The manifest selects project identity, app kind, preset, modules,
+validation gates, VCS posture, docs entry points, autonomy policy, and optional module
+pins/overrides. It is intentionally thin and SHOULD NOT contain generated prompt text, copied
+workflow policy, secrets, or host-specific runtime state.
+
+#### 4.1.3 Workflow Module
+
+Symphony-owned unit of reusable delivery behavior.
+
+Logical fields:
+
+- `id` (string)
+- `version` or `ref` (string)
+- `inputs_schema` (object, OPTIONAL)
+- `provided_fragments` (set of fragment types)
+  - Examples: prompt fragments, policy fragments, tool-use guidance, CLI checks, completion
+    requirements, workflow transitions.
+- `dependencies` (list of module IDs, OPTIONAL)
+- `conflicts` (list of module IDs, OPTIONAL)
+
+#### 4.1.4 Compiled Workflow
+
+Runtime workflow object produced from the manifest and selected workflow modules.
+
+Logical fields:
+
+- `policy_ref` (string)
+  - Stable digest or reference for the compiled policy.
+- `policy_metadata` (map)
+  - Includes source manifest path/ref, selected preset, selected modules, and profile metadata.
 - `prompt_template` (string)
-  - Markdown body after front matter, trimmed.
+- `checks` (list of check objects)
+- `completion_requirements` (list of requirement objects)
+- `delivery` (map)
+  - Example: `pr_target`.
+- `transitions` (map)
+  - Workflow state names and allowed handoff/land/rework behavior.
+- `tools` (map/list)
+  - Tool-use guidance and optional client-side tools.
+- `harness` (map)
+  - Harness `CODEX_HOME`, global instruction path, app-server launch policy, and instruction
+    layering rules.
+- `runtime` (map)
+  - Typed runtime settings consumed by the scheduler, workspace manager, and agent runner.
 
-#### 4.1.3 Service Config (Typed View)
+#### 4.1.5 Service Config (Typed View)
 
-Typed runtime values derived from `WorkflowDefinition.config` plus environment resolution.
+Typed runtime values derived from the compiled workflow plus service deployment config and
+environment resolution.
 
 Examples:
 
@@ -198,7 +268,7 @@ Examples:
 - coding-agent executable/args/timeouts
 - workspace hooks
 
-#### 4.1.4 Workspace
+#### 4.1.6 Workspace
 
 Filesystem workspace assigned to one issue identifier.
 
@@ -208,7 +278,7 @@ Fields (logical):
 - `workspace_key` (sanitized issue identifier)
 - `created_now` (boolean, used to gate `after_create` hook)
 
-#### 4.1.5 Run Attempt
+#### 4.1.7 Run Attempt
 
 One execution attempt for one issue.
 
@@ -222,7 +292,7 @@ Fields (logical):
 - `status`
 - `error` (OPTIONAL)
 
-#### 4.1.6 Live Session (Agent Session Metadata)
+#### 4.1.8 Live Session (Agent Session Metadata)
 
 State tracked while a coding-agent subprocess is running.
 
@@ -246,7 +316,7 @@ Fields:
 - `turn_count` (integer)
   - Number of coding-agent turns started within the current worker lifetime.
 
-#### 4.1.7 Retry Entry
+#### 4.1.9 Retry Entry
 
 Scheduled retry state for an issue.
 
@@ -259,7 +329,7 @@ Fields:
 - `timer_handle` (runtime-specific timer reference)
 - `error` (string or null)
 
-#### 4.1.8 Orchestrator Runtime State
+#### 4.1.10 Orchestrator Runtime State
 
 Single authoritative in-memory state owned by the orchestrator.
 
@@ -288,153 +358,487 @@ Fields:
 - `Session ID`
   - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
 
-## 5. Workflow Specification (Repository Contract)
+## 5. Manifest and Workflow Module Specification
 
-### 5.1 File Discovery and Path Resolution
+### 5.1 Source-of-Truth Model
 
-Workflow file path precedence:
+Target repositories commit a thin `symphony.yml` manifest. Symphony owns presets, workflow modules,
+compiled workflow generation, and the harness runtime policy.
 
-1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+Source-of-truth rules:
+
+- `symphony.yml` is the committed target-repo entry point for Symphony v1.
+- Workflow modules and presets are authored, versioned, and distributed by Symphony.
+- The compiled workflow is a runtime artifact produced from the manifest, selected modules, service
+  deployment config, and selected workflow profile.
+- Target repo docs remain authoritative for project style, setup, domain language, app-specific
+  commands, architecture, and design conventions.
+- Target repo `AGENTS.md` layers after the harness global `AGENTS.md`; it does not replace or
+  duplicate Symphony workflow modules.
+- `WORKFLOW.md` is not the committed source of truth in v1. If a rendered Markdown workflow exists,
+  it is generated runtime/export output for inspection, debugging, or compatibility. It MUST NOT be
+  the setup path that target repos copy and customize.
+
+Compatibility note:
+
+- Existing reference implementations MAY keep a hand-authored Markdown workflow while migrating, but
+  v1 conformance requires the manifest-plus-compiled-workflow model above.
+
+### 5.2 Manifest Discovery and File Format
+
+Manifest path precedence:
+
+1. Explicit application/runtime setting, such as a CLI `--manifest` argument or configured manifest
+   path.
+2. Default: `symphony.yml` in the target repository root.
 
 Loader behavior:
 
-- If the file cannot be read, return `missing_workflow_file` error.
-- The workflow file is expected to be repository-owned and version-controlled.
+- If the file cannot be read, return `missing_manifest_file`.
+- The manifest MUST parse as YAML.
+- The YAML root MUST be a map/object.
+- Unknown top-level keys SHOULD produce an operator-visible warning and be ignored for forward
+  compatibility unless the implementation chooses a stricter validation mode.
 
-### 5.2 File Format
+The manifest is data only. It SHOULD NOT contain long prompt bodies, copied workpad procedures,
+generated Markdown, host-specific absolute paths, or secrets.
 
-`WORKFLOW.md` is a Markdown file with OPTIONAL YAML front matter.
-
-Design note:
-
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
-
-Parsing rules:
-
-- If file starts with `---`, parse lines until the next `---` as YAML front matter.
-- Remaining lines become the prompt body.
-- If front matter is absent, treat the entire file as prompt body and use an empty config map.
-- YAML front matter MUST decode to a map/object; non-map YAML is an error.
-- Prompt body is trimmed before use.
-
-Returned workflow object:
-
-- `config`: front matter root object (not nested under a `config` key).
-- `prompt_template`: trimmed Markdown body.
-
-### 5.3 Front Matter Schema
+### 5.3 Manifest Schema
 
 Top-level keys:
 
-- `tracker`
-- `polling`
-- `workspace`
-- `hooks`
-- `agent`
-- `codex`
+- `version`
+- `project`
+- `app`
+- `preset`
+- `modules`
+- `validation`
+- `vcs`
+- `docs`
+- `autonomy`
 - `profiles`
+- `module_pins`
+- `overrides`
 
-Unknown keys SHOULD be ignored for forward compatibility.
+Minimal example:
 
-Note:
+```yaml
+version: 1
+project:
+  id: hard-sets
+  name: Hard Sets
+  tracker:
+    kind: linear
+    project_slug: hard-sets-premium-v1
+app:
+  kind: web
+preset: web-app
+modules:
+  - linear-workpad
+  - github-pr
+validation:
+  gates:
+    - id: check
+      command: bun run check
+      required: true
+vcs:
+  kind: jj
+  pr_target: main
+  branch_prefix: ticket/
+docs:
+  entry_points:
+    agents: AGENTS.md
+    setup: README.md
+    architecture: docs/README.md
+autonomy:
+  mode: unattended
+  ask_for_human: blockers_only
+module_pins:
+  linear-workpad: 883bf519122b
+overrides:
+  linear-workpad:
+    workpad_heading: "## Codex Workpad"
+```
 
-- The workflow front matter is extensible. Extensions MAY define additional top-level keys without
-  changing the core schema above.
-- Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
-  apply dynamically or require restart.
+#### 5.3.1 `version`
 
-#### 5.3.1 `tracker` (object)
+- `version` (integer)
+  - REQUIRED.
+  - Current supported value: `1`.
+
+#### 5.3.2 `project`
+
+Project identity fields:
+
+- `id` (string)
+  - REQUIRED.
+  - Stable Symphony-facing project key.
+  - SHOULD be lowercase kebab-case.
+- `name` (string)
+  - OPTIONAL human-readable name.
+- `repository` (string)
+  - OPTIONAL repository URL or implementation-defined repository identity.
+- `tracker` (object, OPTIONAL)
+  - `kind` (string), currently `linear` when present.
+  - `project_slug` (string), REQUIRED for dispatch when tracker project routing is not supplied by
+    deployment config.
+  - `team_key` (string, OPTIONAL).
+
+The manifest MAY identify tracker routing, but it MUST NOT contain tracker API tokens.
+
+#### 5.3.3 `app`
 
 Fields:
 
 - `kind` (string)
-  - REQUIRED for dispatch.
-  - Current supported value: `linear`
-- `endpoint` (string)
-  - Default for `tracker.kind == "linear"`: `https://api.linear.app/graphql`
-- `api_key` (string)
-  - MAY be a literal token or `$VAR_NAME`.
-  - Canonical environment variable for `tracker.kind == "linear"`: `LINEAR_API_KEY`.
-  - If `$VAR_NAME` resolves to an empty string, treat the key as missing.
-- `project_slug` (string)
-  - REQUIRED for dispatch when `tracker.kind == "linear"`.
-- `required_labels` (list of strings)
+  - REQUIRED.
+  - Standard values: `web`, `api`, `service`, `cli`, `library`, `mobile`, `monorepo`, `docs`,
+    `other`.
+- `language` (string or list, OPTIONAL)
+- `frameworks` (list of strings, OPTIONAL)
+- `packages` (map or list, OPTIONAL)
+  - Implementation-defined package/workspace hints for monorepos.
+
+`app.kind` is an input to preset/module defaults; target repo docs remain the authority for exact
+setup commands and architectural style.
+
+#### 5.3.4 `preset`
+
+- `preset` (string)
+  - REQUIRED.
+  - Selects a named Symphony preset.
+
+A preset is a Symphony-owned bundle of default workflow modules, module ordering, policy defaults,
+checks, completion requirements, and transition defaults for a common app/workflow shape. Presets
+MUST be deterministic for a given preset ref and implementation version.
+
+Examples of preset names:
+
+- `default`
+- `docs-only`
+- `web-app`
+- `backend-service`
+- `library`
+- `symphony-internal`
+
+#### 5.3.5 `modules`
+
+- `modules` (list, OPTIONAL)
   - Default: `[]`.
-  - An issue MUST contain every configured label to dispatch or continue.
-  - Matching ignores case and surrounding whitespace.
-  - A blank configured label matches no issue.
-- `active_states` (list of strings)
-  - Default: `Todo`, `In Progress`
-- `terminal_states` (list of strings)
-  - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+  - Each entry MAY be a string module ID or an object.
 
-#### 5.3.2 `polling` (object)
+Object form:
 
-Fields:
-
-- `interval_ms` (integer)
-  - Default: `30000`
-  - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
-
-#### 5.3.3 `workspace` (object)
+```yaml
+modules:
+  - id: github-pr
+    enabled: true
+    config:
+      label: symphony
+```
 
 Fields:
 
-- `root` (path string or `$VAR`)
-  - Default: `<system-temp>/symphony_workspaces`
-  - `~` is expanded.
-  - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
-  - The effective workspace root is normalized to an absolute path before use.
+- `id` (string)
+  - REQUIRED in object form.
+- `enabled` (boolean)
+  - Default: `true`.
+  - `false` disables a preset-selected module when the module allows disabling.
+- `config` (object)
+  - Module-specific configuration validated against that module's schema.
 
-#### 5.3.4 `hooks` (object)
+Manifest-selected modules augment or override the preset module set according to module semantics.
+The compiler MUST reject unknown modules unless the implementation explicitly supports deferred
+module installation.
 
-Fields:
-
-- `after_create` (multiline shell script string, OPTIONAL)
-  - Runs only when a workspace directory is newly created.
-  - Failure aborts workspace creation.
-- `before_run` (multiline shell script string, OPTIONAL)
-  - Runs before each agent attempt after workspace preparation and before launching the coding
-    agent.
-  - Failure aborts the current attempt.
-- `after_run` (multiline shell script string, OPTIONAL)
-  - Runs after each agent attempt (success, failure, timeout, or cancellation) once the workspace
-    exists.
-  - Failure is logged but ignored.
-- `before_remove` (multiline shell script string, OPTIONAL)
-  - Runs before workspace deletion if the directory exists.
-  - Failure is logged but ignored; cleanup still proceeds.
-- `timeout_ms` (integer, OPTIONAL)
-  - Default: `60000`
-  - Applies to all workspace hooks.
-  - Invalid values fail configuration validation.
-  - Changes SHOULD be re-applied at runtime for future hook executions.
-
-#### 5.3.5 `agent` (object)
+#### 5.3.6 `validation`
 
 Fields:
 
-- `max_concurrent_agents` (integer)
-  - Default: `10`
-  - Changes SHOULD be re-applied at runtime and affect subsequent dispatch decisions.
-- `max_turns` (positive integer)
-  - Default: `20`
-  - Limits the number of coding-agent turns within one worker session.
-  - Invalid values fail configuration validation.
-- `max_retry_backoff_ms` (integer)
-  - Default: `300000` (5 minutes)
-  - Changes SHOULD be re-applied at runtime and affect future retry scheduling.
-- `max_concurrent_agents_by_state` (map `state_name -> positive integer`)
-  - Default: empty map.
-  - State keys are normalized (`lowercase`) for lookup.
-  - Invalid entries (non-positive or non-numeric) are ignored.
+- `gates` (list of objects, OPTIONAL)
+  - Declares project-specific validation gates that modules may reference or require.
 
-#### 5.3.6 `codex` (object)
+Gate object fields:
+
+- `id` (string), REQUIRED.
+- `command` (string), REQUIRED unless a module supplies the command by `id`.
+- `required` (boolean), default `true`.
+- `working_directory` (string), OPTIONAL repo-relative path.
+- `profile` (string), OPTIONAL; examples: `default`, `docs`, `release`.
+- `when` (string or list, OPTIONAL)
+  - Implementation-defined selector for diff scope, app kind, labels, or module conditions.
+
+Validation gates are project-specific command facts. Symphony modules decide when those gates are
+required by a workflow profile.
+
+#### 5.3.7 `vcs`
 
 Fields:
+
+- `kind` (string)
+  - OPTIONAL. Standard values: `jj`, `git`.
+  - When absent, implementations MAY auto-detect.
+- `pr_target` (string)
+  - OPTIONAL. Default: `main`.
+- `branch_prefix` (string)
+  - OPTIONAL. Default: implementation-defined, usually `ticket/`.
+- `commit_style` (string)
+  - OPTIONAL. Standard value: `conventional`.
+- `push_policy` (string)
+  - OPTIONAL. Standard values: `on_handoff`, `manual`, `disabled`.
+
+The compiled workflow uses `delivery.pr_target` as the PR base branch for a run. When the target is
+not `main`, implementations MUST avoid merging or promoting anything to `main` as part of v1.
+
+#### 5.3.8 `docs`
+
+Fields:
+
+- `entry_points` (map, OPTIONAL)
+  - Values are repo-relative paths or lists of repo-relative paths.
+  - Standard keys: `agents`, `setup`, `architecture`, `product`, `design`, `commands`, `runbook`,
+    `contracts`.
+- `source_of_truth` (map, OPTIONAL)
+  - Human-readable routing notes for where project-specific facts live.
+
+The manifest points to docs; it does not copy their content. Repo-local docs remain authoritative for
+project style, setup, command syntax, domain language, product/design constraints, and architecture.
+
+#### 5.3.9 `autonomy`
+
+Fields:
+
+- `mode` (string)
+  - OPTIONAL. Standard values: `unattended`, `assisted`.
+  - Default: `unattended`.
+- `ask_for_human` (string)
+  - OPTIONAL. Standard values: `blockers_only`, `on_ambiguity`, `never`.
+  - Default: `blockers_only` for unattended runs.
+- `external_side_effects` (string)
+  - OPTIONAL. Standard values: `ticket_authorized`, `explicit_approval`, `disabled`.
+- `destructive_ops` (string)
+  - OPTIONAL. Standard values: `explicit_approval`, `disabled`.
+
+Autonomy policy constrains workflow modules and prompt rendering. It does not override stricter
+service deployment, Codex approval, sandbox, or host controls.
+
+#### 5.3.10 `module_pins`
+
+- `module_pins` (map `module_id -> ref`, OPTIONAL)
+  - Pins a module to a version, digest, git ref, registry ref, or implementation-defined immutable
+    reference.
+
+Pins MUST be reflected in compiled workflow metadata and in `policy_ref` calculation.
+
+#### 5.3.11 `overrides`
+
+- `overrides` (map `module_id -> object`, OPTIONAL)
+  - Module-specific override config.
+  - Overrides are applied after preset defaults and before compilation.
+  - Overrides MUST validate against the owning module schema.
+
+Implementations SHOULD reject overrides for modules that are neither selected by the preset nor
+selected by the manifest.
+
+### 5.4 Workflow Module Semantics
+
+A workflow module is a Symphony-owned unit of delivery behavior. Modules use existing agentic
+runtime terms directly: they may render prompt fragments, policies, tool-use guidance, CLI checks,
+completion requirements, and workflow transitions.
+
+Module outputs MAY include:
+
+- `prompt_fragments`
+  - Text or template fragments used to build `compiled_workflow.prompt_template`.
+- `policies`
+  - Structured rules for workpad handling, VCS posture, validation requirements, review, handoff,
+    or landing.
+- `tool_guidance`
+  - Tool preference, tool prohibition, or tool-specific operating rules.
+- `checks`
+  - CLI checks and classification rules such as docs-only gates or test-change gates.
+- `completion_requirements`
+  - Required evidence before handoff.
+- `transitions`
+  - State routing and handoff/merge/rework rules.
+- `harness`
+  - Harness `CODEX_HOME` files, global instructions, or Codex launch policy fragments.
+
+Module resolution rules:
+
+- The selected preset contributes an ordered module set.
+- Manifest `modules` entries add, configure, disable, or replace modules according to module
+  contracts.
+- Module dependencies are resolved before dependents.
+- Module conflicts fail compilation unless a preset or override defines a deterministic resolution.
+- Module pins select the exact module ref used for compilation.
+- Module output order MUST be deterministic and recorded in compiled workflow metadata.
+
+### 5.5 Compiled Workflow Generation
+
+Compilation pipeline:
+
+1. Select and parse the manifest.
+2. Validate the manifest schema.
+3. Resolve the preset.
+4. Resolve preset modules, manifest-selected modules, pins, dependencies, conflicts, and overrides.
+5. Load service deployment config needed for host-specific runtime values.
+6. Render module fragments into a compiled workflow.
+7. Validate the compiled workflow schema.
+8. Compute `policy_ref` from the normalized manifest, module refs, deployment profile inputs, and
+   rendered policy content.
+9. Write OPTIONAL runtime/export artifacts if configured.
+
+Rendered Markdown:
+
+- A compiler MAY render Markdown for debugging, human inspection, or compatibility with a legacy
+  runner.
+- Rendered Markdown MUST include provenance showing the manifest path/ref, preset, module refs, and
+  `policy_ref`.
+- Rendered Markdown MUST be treated as generated output. Target repos MUST NOT copy it as their
+  committed Symphony source of truth.
+
+### 5.6 Manifest and Module Error Surface
+
+Error classes:
+
+- `missing_manifest_file`
+- `manifest_parse_error`
+- `manifest_root_not_a_map`
+- `unsupported_manifest_version`
+- `invalid_manifest_config`
+- `preset_not_found`
+- `module_not_found`
+- `module_pin_not_found`
+- `module_dependency_error`
+- `module_conflict_error`
+- `module_config_error`
+- `compiled_workflow_error`
+- `template_parse_error`
+- `template_render_error`
+
+Dispatch gating behavior:
+
+- Manifest read/YAML/schema errors block new dispatches until fixed.
+- Preset/module resolution and compilation errors block new dispatches until fixed.
+- Template rendering errors fail only the affected run attempt unless they are detected during
+  compiled workflow validation.
+
+## 6. Compiled Workflow and Runtime Configuration
+
+### 6.1 Compiled Workflow Contract
+
+The compiled workflow is the runtime object consumed by the orchestrator, workspace manager, agent
+runner, and publishing/review/landing modules. It is generated by Symphony and is not edited by the
+target repository.
+
+Required top-level fields:
+
+- `policy_ref` (string)
+- `policy_metadata` (object)
+- `prompt_template` (string)
+- `checks` (list)
+- `completion_requirements` (list)
+- `delivery` (object)
+- `transitions` (object)
+- `tools` (object or list)
+- `harness` (object)
+- `runtime` (object)
+- `docs` (object)
+
+Minimal shape:
+
+```json
+{
+  "policy_ref": "883bf519122b",
+  "policy_metadata": {
+    "source": "manifest",
+    "manifest_path": "symphony.yml",
+    "preset": "default",
+    "modules": [
+      {"id": "linear-workpad", "ref": "883bf519122b"}
+    ]
+  },
+  "prompt_template": "You are working on a Linear ticket {{ issue.identifier }}...",
+  "checks": [],
+  "completion_requirements": [],
+  "delivery": {"pr_target": "main"},
+  "transitions": {},
+  "tools": {},
+  "harness": {
+    "codex_home": "/path/to/symphony/harness/codex-home",
+    "global_agents_md": "AGENTS.md",
+    "instruction_layers": ["harness_global", "target_repo", "compiled_workflow", "issue"]
+  },
+  "runtime": {},
+  "docs": {
+    "entry_points": {"agents": "AGENTS.md", "setup": "README.md"}
+  }
+}
+```
+
+### 6.2 Runtime Configuration Resolution Pipeline
+
+Configuration is resolved in this order:
+
+1. Select the target repo manifest path.
+2. Parse and validate the manifest.
+3. Resolve presets, modules, pins, and overrides.
+4. Merge service deployment config for host-specific values such as workspace root, credentials,
+   Codex executable, harness `CODEX_HOME`, logs, ports, and worker hosts.
+5. Compile the workflow.
+6. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
+7. Coerce and validate typed runtime values.
+
+Environment variables do not globally override manifest or compiled workflow values. They are used
+only when a config value explicitly references them or when service deployment config declares them
+as the source for secrets.
+
+Value coercion semantics:
+
+- Path fields support:
+  - `~` home expansion
+  - `$VAR` expansion for env-backed path values
+  - Relative target-repo doc paths resolve relative to the target repo root
+  - Relative runtime paths resolve according to the owning field contract
+- Shell command strings remain shell command strings. Do not rewrite URIs or arbitrary command text
+  as paths.
+
+### 6.3 Runtime Config Fields Summary
+
+This section is intentionally redundant so a coding agent can implement the config layer quickly.
+Extension fields are documented in the extension section that defines them. Core conformance does
+not require recognizing or validating extension fields unless that extension is implemented.
+
+Tracker:
+
+- `runtime.tracker.kind`: string, REQUIRED for dispatch, currently `linear`
+- `runtime.tracker.endpoint`: string, default `https://api.linear.app/graphql` when
+  `runtime.tracker.kind=linear`
+- `runtime.tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when
+  `runtime.tracker.kind=linear`
+- `runtime.tracker.project_slug`: string, REQUIRED when `runtime.tracker.kind=linear`
+- `runtime.tracker.required_labels`: list of strings, default `[]`
+- `runtime.tracker.active_states`: list of strings, default
+  `["Todo", "In Progress", "Merging", "Rework"]`
+- `runtime.tracker.terminal_states`: list of strings, default
+  `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+
+Scheduler and workspace:
+
+- `runtime.polling.interval_ms`: integer, default `30000`
+- `runtime.workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `runtime.hooks.after_create`: shell script or null
+- `runtime.hooks.before_run`: shell script or null
+- `runtime.hooks.after_run`: shell script or null
+- `runtime.hooks.before_remove`: shell script or null
+- `runtime.hooks.timeout_ms`: integer, default `60000`
+- `runtime.agent.max_concurrent_agents`: integer, default `10`
+- `runtime.agent.max_turns`: integer, default `20`
+- `runtime.agent.max_retry_backoff_ms`: integer, default `300000` (5m)
+- `runtime.agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+
+Codex:
 
 For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
 `turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
@@ -444,104 +848,76 @@ hand-maintained enum in this spec. To inspect the installed Codex schema, run
 by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate these
 fields locally if they want stricter startup checks.
 
-- `command` (string shell command)
-  - Default: `codex app-server`
-  - The runtime launches this command via `bash -lc` in the workspace directory.
-  - The launched process MUST speak a compatible app-server protocol over stdio.
-- `approval_policy` (Codex `AskForApproval` value)
-  - Default: implementation-defined.
-- `thread_sandbox` (Codex `SandboxMode` value)
-  - Default: implementation-defined.
-- `turn_sandbox_policy` (Codex `SandboxPolicy` value)
-  - Default: implementation-defined.
-- `turn_timeout_ms` (integer)
-  - Default: `3600000` (1 hour)
-- `read_timeout_ms` (integer)
-  - Default: `5000`
-- `stall_timeout_ms` (integer)
-  - Default: `300000` (5 minutes)
-  - If `<= 0`, stall detection is disabled.
+- `runtime.codex.command`: shell command string, default `codex app-server`
+- `runtime.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
+- `runtime.codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
+- `runtime.codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
+- `runtime.codex.turn_timeout_ms`: integer, default `3600000`
+- `runtime.codex.read_timeout_ms`: integer, default `5000`
+- `runtime.codex.stall_timeout_ms`: integer, default `300000`
 
-#### 5.3.7 `profiles` (object)
+Delivery and docs:
 
-Profiles define repository-owned workflow policy. A `default` profile is REQUIRED and acts as the
-baseline policy. A runtime MAY resolve one selected profile on top of `default`; v1 does not support
-profile-to-profile inheritance or more than one selected override layer. Profiles are committed
-repo policy. External tracker routing facts, including Linear project IDs or slugs, are not profile
-schema and SHOULD live in operator-local binding config.
+- `delivery.pr_target`: string, default `main`
+- `checks`: list of compiled validation checks
+- `completion_requirements`: list of compiled handoff requirements
+- `docs.entry_points`: resolved repo-relative doc paths from the manifest
 
-Fields:
+Profile policy:
 
-- `default` (object)
-  - REQUIRED baseline policy.
-- `<profile_name>` (object)
-  - OPTIONAL selected profile override.
+- `profiles` (object, OPTIONAL)
+  - Declares repository-owned workflow policy profiles in the manifest.
+  - `default` is REQUIRED when `profiles` is present and acts as the baseline policy.
+  - A runtime MAY resolve one selected profile on top of `default`; v1 does not support
+    profile-to-profile inheritance or more than one selected override layer.
+  - External tracker routing facts, including Linear project IDs or slugs, are not profile schema
+    and SHOULD live in operator-local binding config.
+- Resolved profile policy MUST include `delivery.pr_target`.
+- Selected-profile `codex` overrides MAY set `approval_policy`, `thread_sandbox`, and
+  `turn_sandbox_policy` before the Codex thread/turn starts.
+- Implementations MUST compute a stable `policy_ref` hash from the resolved effective policy.
+- When `delivery.pr_target` is not `main`, v1 MUST NOT automate promotion or merge-forward from that
+  target branch to `main`.
 
-Examples:
+### 6.4 Harness `CODEX_HOME` and Instruction Layering
 
-```yaml
-profiles:
-  default:
-    delivery:
-      pr_target: main
-    checks:
-      - mix test
-  project_integration:
-    delivery:
-      pr_target: project/integration
-    checks:
-      - make all
-  skill_authoring:
-    delivery:
-      pr_target: main
-    codex:
-      approval_policy: never
-      thread_sandbox: danger-full-access
-      turn_sandbox_policy:
-        type: dangerFullAccess
-```
+Symphony MUST launch Codex with a dedicated harness `CODEX_HOME` for unattended workflow runs.
 
-`default.delivery.pr_target: main` means the delivery flow syncs, opens PRs, reviews, and lands
-against `main`. `project_integration.delivery.pr_target: project/integration` means those same v1
-delivery operations target `project/integration`; v1 does not promote or merge-forward that branch
-to `main`.
+Harness model:
 
-Merge rules:
+- The harness `CODEX_HOME` is owned by Symphony, not by the target repository and not by the
+  operator's ambient `~/.codex`.
+- The harness contains Symphony global `AGENTS.md`, runtime config, hooks, prompts, module-rendered
+  support files, and any Symphony-managed skills/plugins required for the run.
+- Generated harness files SHOULD be outside the target repo workspace or in an implementation-owned
+  runtime directory inside the workspace root. They MUST NOT be committed as target repo source.
+- The target repo remains readable/writable as the issue workspace according to sandbox policy.
 
-- Scalar, list, and map fields replace by default when present in the selected profile.
-- `append_<field>` appends list values to `<field>`.
-- `add_<field>` merges map values into `<field>`.
-- Replacement fields are applied before `append_*` and `add_*` directives so same-profile merges
-  resolve deterministically.
-- Additive helper fields are directives only and MUST NOT remain in the resolved effective policy.
+Instruction layering order:
 
-Resolved policy requirements:
+1. Harness global `AGENTS.md`
+   - Defines Symphony workflow obligations, unattended behavior, Linear workpad policy, module
+     policy, and tool/runtime guardrails.
+2. Target repo instructions
+   - Repo-local `AGENTS.md` and project docs define project style, setup, commands, domain language,
+     product/design constraints, and architecture.
+3. Compiled workflow prompt
+   - Per-run workflow prompt rendered from selected modules and manifest data.
+4. Issue context
+   - Tracker issue title, description, labels, policy profile, and run metadata.
 
-- `delivery.pr_target` (string)
-  - REQUIRED in the resolved effective policy.
-  - Git PR target/base branch, for example `main` or a project integration branch.
-  - Delivery skills MUST use this branch for branch sync, PR creation/update, review gates, and
-    landing guardrails.
-  - When the target is not `main`, v1 MUST NOT automate promotion or merge-forward from that target
-    branch to `main`.
-  - The only v1 core delivery field.
-- `delivery.mode`, `delivery.base_ref`, `delivery.allow_main_merge`, and
-  `delivery.require_feature_flag`
-  - Not part of v1 core delivery policy.
-- `policy_ref`
-  - Implementations MUST compute a stable short hash from the resolved effective policy.
-  - The hash MUST be independent of map key order.
-- `codex` (object)
-  - OPTIONAL selected-profile override for Codex runtime policy.
-  - Supported v1 fields: `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`.
-  - Implementations MUST apply these overrides before starting the Codex thread/turn for the
-    selected issue, after global `codex` defaults are loaded.
-  - Intended for narrowly routed work such as repo skill authoring that requires elevated writes
-    to protected agent-instruction paths.
+Layering invariants:
 
-### 5.4 Prompt Template Contract
+- Harness instructions own orchestration behavior.
+- Target repo docs own project-specific engineering behavior.
+- Modules SHOULD route agents to target repo docs instead of duplicating those docs in generated
+  workflow text.
+- Target repo `AGENTS.md` can be stricter about repo commands and style, but it MUST NOT be required
+  to carry Symphony workpad, handoff, or lifecycle doctrine.
 
-The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
+### 6.5 Prompt Template Contract
+
+The compiled workflow provides the per-issue `prompt_template`.
 
 Rendering requirements:
 
@@ -561,86 +937,49 @@ Template input variables:
 - `policy_json` (string)
   - JSON rendering of `policy` for prompt templates that need to expose arbitrary profile-specific
     gates or completion requirements without knowing every policy key.
+- `compiled_workflow` (object, OPTIONAL)
+  - Implementations MAY expose selected metadata such as `policy_ref`, `delivery`, `checks`, and
+    `completion_requirements`.
 
 Fallback prompt behavior:
 
-- If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
+- If the compiled workflow prompt template is empty, the runtime MAY use a minimal default prompt
   (`You are working on an issue from Linear.`).
-- Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
-  back to a prompt.
+- Manifest, module, compile, or template errors are configuration/validation errors and SHOULD NOT
+  silently fall back to a prompt.
 
-### 5.5 Workflow Validation and Error Surface
-
-Error classes:
-
-- `missing_workflow_file`
-- `workflow_parse_error`
-- `workflow_front_matter_not_a_map`
-- `template_parse_error` (during prompt rendering)
-- `template_render_error` (unknown variable/filter, invalid interpolation)
-
-Dispatch gating behavior:
-
-- Workflow file read/YAML errors block new dispatches until fixed.
-- Template errors fail only the affected run attempt.
-
-## 6. Configuration Specification
-
-### 6.1 Configuration Resolution Pipeline
-
-Configuration is resolved in this order:
-
-1. Select the workflow file path (explicit runtime setting, otherwise cwd default).
-2. Parse YAML front matter into a raw config map.
-3. Apply built-in defaults for missing OPTIONAL fields.
-4. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
-5. Coerce and validate typed values.
-
-Environment variables do not globally override YAML values. They are used only when a config value
-explicitly references them.
-
-Value coercion semantics:
-
-- Path/command fields support:
-  - `~` home expansion
-  - `$VAR` expansion for env-backed path values
-  - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
-    arbitrary shell command strings.
-- Relative `workspace.root` values resolve relative to the directory containing the selected
-  `WORKFLOW.md`.
-
-### 6.2 Dynamic Reload Semantics
+### 6.6 Dynamic Reload Semantics
 
 Dynamic reload is REQUIRED:
 
-- The software MUST detect `WORKFLOW.md` changes.
-- On change, it MUST re-read and re-apply workflow config and prompt template without restart.
-- The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
-  prompt content for future runs).
+- The software MUST detect manifest, selected module, and relevant deployment config changes.
+- On change, it MUST recompile and re-apply the compiled workflow without restart.
+- The software MUST attempt to adjust live behavior to the new compiled workflow (for example
+  polling cadence, concurrency limits, active/terminal states, codex settings, workspace
+  paths/hooks, checks, and prompt content for future runs).
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
 - Once an issue dispatch resolves workflow profile policy, that resolved policy MUST be carried by
   the in-memory running/retry entry for current-process stability. Later reloads MUST NOT mutate an
   already-running or already-retrying issue's resolved policy.
-- Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
-  changes.
+- Implementations are not REQUIRED to restart in-flight agent sessions automatically when compiled
+  workflow changes.
 - Extensions that manage their own listeners/resources (for example an HTTP server port change) MAY
   require restart unless the implementation explicitly supports live rebind.
 - Implementations SHOULD also re-validate/reload defensively during runtime operations (for example
   before dispatch) in case filesystem watch events are missed.
-- Invalid reloads MUST NOT crash the service; keep operating with the last known good effective
-  configuration and emit an operator-visible error.
+- Invalid reloads MUST NOT crash the service; keep operating with the last known good compiled
+  workflow and emit an operator-visible error.
 
-### 6.3 Dispatch Preflight Validation
+### 6.7 Dispatch Preflight Validation
 
 This validation is a scheduler preflight run before attempting to dispatch new work. It validates
-the workflow/config needed to poll and launch workers, not a full audit of all possible workflow
-behavior.
+the manifest, compiled workflow, and runtime config needed to poll and launch workers, not a full
+audit of all possible workflow behavior.
 
 Startup validation:
 
-- Validate configuration before starting the scheduling loop.
+- Validate manifest and compiled workflow before starting the scheduling loop.
 - If startup validation fails, fail startup and emit an operator-visible error.
 
 Per-tick dispatch validation:
@@ -651,54 +990,21 @@ Per-tick dispatch validation:
 
 Validation checks:
 
-- Workflow file can be loaded and parsed.
-- `tracker.kind` is present and supported.
-- `tracker.api_key` is present after `$` resolution.
-- `tracker.project_slug` is present when REQUIRED by the selected tracker kind. A Linear
+- Manifest can be loaded and parsed.
+- Preset and selected modules can resolve.
+- Compiled workflow can be produced and validated.
+- `runtime.tracker.kind` is present and supported.
+- `runtime.tracker.api_key` is present after `$` resolution.
+- `runtime.tracker.project_slug` is present when REQUIRED by the selected tracker kind. A Linear
   implementation MAY satisfy this requirement with operator-local project profile bindings instead
-  of a committed workflow `project_slug`.
-- `codex.command` is present and non-empty.
-- `profiles.default` is present.
-- Every configured profile resolves to an effective policy with a string `delivery.pr_target`.
+  of a committed manifest `project_slug`.
+- `runtime.codex.command` is present and non-empty.
+- `harness.codex_home` and harness global instructions are available.
+- If profiles are configured, `profiles.default` is present and every selected profile resolves to an
+  effective policy with a string `delivery.pr_target`.
 - Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides
   and external tracker bindings.
 - External binding config with ambiguous exact selectors fails validation before dispatch.
-
-### 6.4 Core Config Fields Summary (Cheat Sheet)
-
-This section is intentionally redundant so a coding agent can implement the config layer quickly.
-Extension fields are documented in the extension section that defines them. Core conformance does
-not require recognizing or validating extension fields unless that extension is implemented.
-
-- `tracker.kind`: string, REQUIRED, currently `linear`
-- `tracker.endpoint`: string, default `https://api.linear.app/graphql` when `tracker.kind=linear`
-- `tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when `tracker.kind=linear`
-- `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear` unless external Linear
-  project bindings define the dispatch scope
-- `tracker.required_labels`: list of strings, default `[]`
-- `tracker.active_states`: list of strings, default `["Todo", "In Progress", "Merging", "Rework"]`
-- `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
-- `polling.interval_ms`: integer, default `30000`
-- `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
-- `hooks.after_create`: shell script or null
-- `hooks.before_run`: shell script or null
-- `hooks.after_run`: shell script or null
-- `hooks.before_remove`: shell script or null
-- `hooks.timeout_ms`: integer, default `60000`
-- `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_turns`: integer, default `20`
-- `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
-- `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `codex.turn_timeout_ms`: integer, default `3600000`
-- `codex.read_timeout_ms`: integer, default `5000`
-- `codex.stall_timeout_ms`: integer, default `300000`
-- `profiles`: object, see Section 5.3.7; requires `default` plus optional named profiles, resolves
-  with replace-by-default plus explicit `append_*`/`add_*` directives, and requires
-  `delivery.pr_target` plus a stable `policy_ref` hash in the effective policy
 
 ## 7. Orchestration State Machine
 
@@ -733,7 +1039,7 @@ Important nuance:
 - The worker MAY continue through multiple back-to-back coding-agent turns before it exits.
 - After each normal turn completion, the worker re-checks the tracker issue state.
 - If the issue is still in an active state, the worker SHOULD start another turn on the same live
-  coding-agent thread in the same workspace, up to `agent.max_turns`.
+  coding-agent thread in the same workspace, up to `runtime.agent.max_turns`.
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
@@ -797,7 +1103,8 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - Reconciliation runs before dispatch on every tick.
 - Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
 - v1 does not require recovery of the resolved per-attempt workflow policy after process restart;
-  a recovered future dispatch MAY resolve policy from the current workflow/runtime config.
+  a recovered future dispatch MAY resolve policy from the current compiled workflow and runtime
+  config.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -807,7 +1114,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
 At startup, the service validates config, performs startup cleanup, schedules an immediate tick, and
 then repeats every `polling.interval_ms`.
 
-The effective poll interval SHOULD be updated when workflow config changes are re-applied.
+The effective poll interval SHOULD be updated when compiled workflow config changes are re-applied.
 
 Tick sequence:
 
@@ -826,9 +1133,9 @@ first.
 An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
-- Its state is in `active_states` and not in `terminal_states`.
+- Its state is in `runtime.tracker.active_states` and not in `runtime.tracker.terminal_states`.
 - It is routed to this worker by the configured assignee and contains every label in
-  `tracker.required_labels`.
+  `runtime.tracker.required_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -854,7 +1161,7 @@ Global limit:
 
 Per-state limit:
 
-- `max_concurrent_agents_by_state[state]` if present (state key normalized)
+- `runtime.agent.max_concurrent_agents_by_state[state]` if present (state key normalized)
 - otherwise fallback to global limit
 
 The runtime counts issues by their current tracked state in the `running` map.
@@ -871,7 +1178,7 @@ Retry entry creation:
 Backoff formula:
 
 - Normal continuation retries after a clean worker exit use a short fixed delay of `1000` ms.
-- Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), agent.max_retry_backoff_ms)`.
+- Failure-driven retries use `delay = min(10000 * 2^(attempt - 1), runtime.agent.max_retry_backoff_ms)`.
 - Power is capped by the configured max retry backoff (default `300000` / 5m).
 
 Retry handling behavior:
@@ -904,8 +1211,8 @@ Part A: Stall detection
 - Generic non-progress notifications such as repeated `error` or `item/started` frames update
   `last_codex_timestamp` for observability but MUST NOT refresh
   `last_codex_progress_timestamp`.
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `stall_timeout_ms <= 0`, skip stall detection entirely.
+- If `elapsed_ms > runtime.codex.stall_timeout_ms`, terminate the worker and queue a retry.
+- If `runtime.codex.stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
 
@@ -932,11 +1239,11 @@ This prevents stale terminal workspaces from accumulating after restarts.
 
 Workspace root:
 
-- `workspace.root` (normalized absolute path)
+- `runtime.workspace.root` (normalized absolute path)
 
 Per-issue workspace path:
 
-- `<workspace.root>/<sanitized_issue_identifier>`
+- `<runtime.workspace.root>/<sanitized_issue_identifier>`
 
 Workspace persistence:
 
@@ -981,10 +1288,10 @@ Failure handling:
 
 Supported hooks:
 
-- `hooks.after_create`
-- `hooks.before_run`
-- `hooks.after_run`
-- `hooks.before_remove`
+- `runtime.hooks.after_create`
+- `runtime.hooks.before_run`
+- `runtime.hooks.after_run`
+- `runtime.hooks.before_remove`
 
 Execution contract:
 
@@ -992,7 +1299,7 @@ Execution contract:
   `cwd`.
 - On POSIX systems, `sh -lc <script>` (or a stricter equivalent such as `bash -lc <script>`) is a
   conforming default.
-- Hook timeout uses `hooks.timeout_ms`; default: `60000 ms`.
+- Hook timeout uses `runtime.hooks.timeout_ms`; default: `60000 ms`.
 - Log hook start, failures, and timeouts.
 
 Failure semantics:
@@ -1042,9 +1349,10 @@ Protocol source of truth:
 
 Subprocess launch parameters:
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
+- Command: `runtime.codex.command`
+- Invocation: `bash -lc <runtime.codex.command>`
 - Working directory: workspace path
+- Environment: harness `CODEX_HOME`
 - Transport/framing: the protocol transport required by the targeted Codex app-server version
 
 Notes:
@@ -1177,7 +1485,8 @@ Optional client-side tool extension:
 
 - Purpose: execute a raw GraphQL query or mutation against Linear using Symphony's configured
   tracker auth for the current session.
-- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
+- Availability: only meaningful when `runtime.tracker.kind == "linear"` and valid Linear auth is
+  configured.
 - Preferred input shape:
 
   ```json
@@ -1196,8 +1505,8 @@ Optional client-side tool extension:
 - Execute one GraphQL operation per tool call.
 - If the provided document contains multiple operations, reject the tool call as invalid input.
 - `operationName` selection is intentionally out of scope for this extension.
-- Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config; do
-  not require the coding agent to read raw tokens from disk.
+- Reuse the configured Linear endpoint and auth from the active Symphony runtime config; do not
+  require the coding agent to read raw tokens from disk.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
   - top-level GraphQL `errors` present -> `success=false`, but preserve the GraphQL response body
@@ -1218,9 +1527,9 @@ User-input-required policy:
 
 Timeouts:
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `runtime.codex.read_timeout_ms`: request/response timeout during startup and sync requests
+- `runtime.codex.turn_timeout_ms`: total turn stream timeout
+- `runtime.codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
 
@@ -1241,7 +1550,7 @@ The `Agent Runner` wraps workspace + prompt + app-server client.
 Behavior:
 
 1. Create/reuse workspace for issue.
-2. Build prompt from workflow template.
+2. Build prompt from the compiled workflow template.
 3. Start app-server session.
 4. Forward app-server events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
@@ -1267,17 +1576,19 @@ An implementation MUST support these tracker adapter operations:
 
 ### 11.2 Query Semantics (Linear)
 
-Linear-specific requirements for `tracker.kind == "linear"`:
+Linear-specific requirements for `runtime.tracker.kind == "linear"`:
 
-- `tracker.kind == "linear"`
+- `runtime.tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
-- `tracker.project_slug` maps to Linear project `slugId` for legacy single-project polling
+- `runtime.tracker.project_slug` maps to Linear project `slugId` for legacy single-project polling.
 - External project bindings MAY define one or more Linear `project_id` or `project_slug` selectors
-  outside `WORKFLOW.md`; candidate polling filters each bound project, or filters a configured team
+  outside the manifest; candidate polling filters each bound project, or filters a configured team
   when catch-all matching is enabled
 - Candidate and issue-state refresh queries include issue labels. Required label filtering happens
   after normalization so refresh can observe label removal and stop or release existing work.
+- Candidate issue query filters single-project polling using `project: { slugId: { eq:
+  $projectSlug } }`.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -1329,9 +1640,9 @@ Orchestrator behavior on tracker errors:
 Symphony does not require first-class tracker write APIs in the orchestrator.
 
 - Ticket mutations (state transitions, comments, PR metadata) are typically handled by the coding
-  agent using tools defined by the workflow prompt.
+  agent using tools defined by the compiled workflow prompt.
 - The service remains a scheduler/runner and tracker reader.
-- Workflow-specific success often means "reached the next handoff state" (for example
+- Compiled workflow-specific success often means "reached the next handoff state" (for example
   `Human Review`) rather than tracker terminal state `Done`.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
@@ -1342,8 +1653,8 @@ Linear project/profile bindings are operator-local runtime config, not committed
 They map issue routing context to repository-owned `profiles`.
 
 Implementations MAY load a default operator-local binding file named
-`linear-profile-bindings.local.yml` from the same directory as the selected `WORKFLOW.md` when no
-explicit binding file is provided. Repositories SHOULD commit a placeholder
+`linear-profile-bindings.local.yml` from the same directory as the selected `symphony.yml` manifest
+when no explicit binding file is provided. Repositories SHOULD commit a placeholder
 `linear-profile-bindings.example.yml` and ignore the real local binding file.
 
 Example:
@@ -1386,7 +1697,7 @@ effective `delivery.pr_target`.
 
 Inputs to prompt rendering:
 
-- `workflow.prompt_template`
+- `compiled_workflow.prompt_template`
 - normalized `issue` object
 - resolved `policy` object, including `policy_ref` and selection metadata when available
 - `policy_json` JSON string containing the same resolved policy object
@@ -1402,7 +1713,7 @@ Inputs to prompt rendering:
 
 ### 12.3 Retry/Continuation Semantics
 
-`attempt` SHOULD be passed to the template because the workflow prompt can provide different
+`attempt` SHOULD be passed to the template because the compiled workflow prompt can provide different
 instructions for:
 
 - first run (`attempt` null or absent)
@@ -1531,20 +1842,20 @@ If implemented:
 
 Extension config:
 
-- `server.port` (integer, OPTIONAL)
+- `runtime.server.port` (integer, OPTIONAL)
   - Enables the HTTP server extension.
   - `0` requests an ephemeral port for local development and tests.
-  - CLI `--port` overrides `server.port` when both are present.
+  - CLI `--port` overrides `runtime.server.port` when both are present.
 
 Enablement (extension):
 
 - Start the HTTP server when a CLI `--port` argument is provided.
-- Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
-- The `server` top-level key is owned by this extension.
-- Positive `server.port` values bind that port.
+- Start the HTTP server when `runtime.server.port` is present in the compiled workflow.
+- The `runtime.server` key is owned by this extension.
+- Positive `runtime.server.port` values bind that port.
 - Implementations SHOULD bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly
   configured otherwise.
-- Changes to HTTP listener settings (for example `server.port`) do not need to hot-rebind;
+- Changes to HTTP listener settings (for example `runtime.server.port`) do not need to hot-rebind;
   restart-required behavior is conformant.
 
 #### 13.7.1 Human-Readable Dashboard (`/`)
@@ -1698,10 +2009,15 @@ API design notes:
 
 ### 14.1 Failure Classes
 
-1. `Workflow/Config Failures`
-   - Missing `WORKFLOW.md`
-   - Invalid YAML front matter
+1. `Manifest/Module/Config Failures`
+   - Missing `symphony.yml`
+   - Invalid manifest YAML
+   - Unsupported manifest version
+   - Missing preset or workflow module
+   - Module pin, dependency, conflict, or override validation failure
+   - Compiled workflow validation failure
    - Unsupported tracker kind or missing tracker credentials/project slug
+   - Missing harness `CODEX_HOME` or harness global instructions
    - Missing coding-agent executable
 
 2. `Workspace Failures`
@@ -1770,14 +2086,16 @@ After restart:
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes are detected and re-applied automatically without restart according to
-  Section 6.2.
+- Editing target repo `symphony.yml` for project-owned manifest selections.
+- Updating Symphony workflow modules, presets, or service deployment config for Symphony-owned
+  runtime policy and host-specific settings.
+- Manifest, module, and relevant deployment config changes are detected and recompiled/re-applied
+  automatically without restart according to Section 6.6.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
 - Restarting the service for process recovery or deployment (not as the normal path for applying
-  workflow config changes).
+  manifest or compiled workflow changes).
 
 ## 15. Security and Operational Safety
 
@@ -1810,13 +2128,14 @@ RECOMMENDED additional hardening for ports:
 
 ### 15.3 Secret Handling
 
-- Support `$VAR` indirection in workflow config.
+- Support `$VAR` indirection in manifest, compiled workflow, and deployment config fields that
+  explicitly allow environment-backed values.
 - Do not log API tokens or secret env values.
 - Validate presence of secrets without printing them.
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
+Workspace hooks are arbitrary shell scripts from the compiled workflow.
 
 Implications:
 
@@ -1861,7 +2180,8 @@ treat harness hardening as part of the core safety model rather than an optional
 function start_service():
   configure_logging()
   start_observability_outputs()
-  start_workflow_watch(on_change=reload_and_reapply_workflow)
+  start_manifest_watch(on_change=recompile_and_reapply_workflow)
+  start_module_watch(on_change=recompile_and_reapply_workflow)
 
   state = {
     poll_interval_ms: get_config_poll_interval_ms(),
@@ -1995,16 +2315,19 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(workspace=workspace.path)
+  session = app_server.start_session(
+    workspace=workspace.path,
+    codex_home=compiled_workflow.harness.codex_home
+  )
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
     fail_worker("agent session startup error")
 
-  max_turns = config.agent.max_turns
+  max_turns = compiled_workflow.runtime.agent.max_turns
   turn_number = 1
 
   while true:
-    prompt = build_turn_prompt(workflow_template, issue, attempt, turn_number, max_turns)
+    prompt = build_turn_prompt(compiled_workflow.prompt_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
       app_server.stop_session(session)
       run_hook_best_effort("after_run", workspace.path)
@@ -2110,26 +2433,37 @@ Validation profiles:
 Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bullets that begin with
 `If ... is implemented` are `Extension Conformance`.
 
-### 17.1 Workflow and Config Parsing
+### 17.1 Manifest, Module, and Config Parsing
 
-- Workflow file path precedence:
-  - explicit runtime path is used when provided
-  - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
-- Workflow file changes are detected and trigger re-read/re-apply without restart
-- Invalid workflow reload keeps last known good effective configuration and emits an
+- Manifest path precedence:
+  - explicit manifest path is used when provided
+  - target repo root default is `symphony.yml` when no explicit manifest path is provided
+- Manifest, module, and relevant deployment config changes trigger recompile/re-apply without
+  restart
+- Invalid manifest/module reload keeps the last known good compiled workflow and emits an
   operator-visible error
-- Missing `WORKFLOW.md` returns typed error
-- Invalid YAML front matter returns typed error
-- Front matter non-map returns typed error
+- Missing `symphony.yml` returns typed error
+- Invalid manifest YAML returns typed error
+- Manifest root non-map returns typed error
+- Unsupported manifest version returns typed error
+- `project.id`, `app.kind`, and `preset` validation fails when any required value is missing
+- Preset resolution is deterministic
+- Module selection combines preset modules, manifest-selected modules, pins, and overrides
+- Unknown modules, invalid module pins, dependency failures, conflicts, and override schema errors
+  return typed errors
+- `policy_ref` changes when normalized manifest, selected module refs, profile inputs, or rendered
+  policy content change
 - Config defaults apply when OPTIONAL values are missing
-- `tracker.kind` validation enforces currently supported kind (`linear`)
-- `tracker.api_key` works (including `$VAR` indirection)
+- `runtime.tracker.kind` validation enforces currently supported kind (`linear`)
+- `runtime.tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
-- `~` path expansion works
-- `codex.command` is preserved as a shell command string
-- Per-state concurrency override map normalizes state names and ignores invalid values
-- Prompt template renders `issue` and `attempt`
+- `~` path expansion works for fields that explicitly allow path expansion
+- `runtime.codex.command` is preserved as a shell command string
+- Per-state concurrency override map normalizes state names and rejects invalid values
+- Compiled prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
+- If rendered Markdown export is implemented, it is generated from the compiled workflow and is not
+  required as target repo source
 
 ### 17.2 Workspace Manager and Safety
 
@@ -2170,7 +2504,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Reconciliation with no running issues is a no-op
 - Normal worker exit schedules a short continuation retry (attempt 1)
 - Abnormal worker exit increments retries with 10s-based exponential backoff
-- Retry backoff cap uses configured `agent.max_retry_backoff_ms`
+- Retry backoff cap uses configured `runtime.agent.max_retry_backoff_ms`
 - Retry queue entries include attempt, due time, identifier, and error
 - Stall detection kills stalled sessions and schedules retry
 - Slot exhaustion requeues retries with explicit error reason
@@ -2180,7 +2514,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.5 Coding-Agent App-Server Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
+- Launch command uses workspace cwd and invokes `bash -lc <runtime.codex.command>`
+- Launch uses the harness `CODEX_HOME` and does not rely on the operator's ambient `~/.codex`
 - Session startup follows the targeted Codex app-server protocol.
 - Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
   them.
@@ -2220,9 +2555,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI or host config accepts an explicit manifest path argument (`path-to-symphony.yml`) or
+  equivalent setting
+- CLI or host config uses `<target-repo>/symphony.yml` when no explicit manifest path is provided
+- CLI or host config errors on nonexistent explicit manifest path or missing default
+  `symphony.yml`
+- CLI or host config accepts or derives the harness `CODEX_HOME`
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2250,20 +2588,26 @@ Use the same validation profiles as Section 17:
 
 ### 18.1 REQUIRED for Conformance
 
-- Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- Manifest path selection supports explicit runtime path and target repo root default
+- `symphony.yml` loader with v1 YAML object schema
+- Workflow module registry with presets, selected modules, pins, dependencies, conflicts, and
+  overrides
+- Workflow compiler that produces `policy_ref`, prompt template, checks, completion requirements,
+  transitions, tools, delivery config, harness config, runtime config, and docs routing
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
+- Dynamic manifest/module/deployment config watch/recompile/re-apply
+- Dedicated harness `CODEX_HOME` with harness global `AGENTS.md`
+- Target repo `AGENTS.md` and docs layering after harness global instructions
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
-- Hook timeout config (`hooks.timeout_ms`, default `60000`)
+- Hook timeout config (`runtime.hooks.timeout_ms`, default `60000`)
 - Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- Codex launch command config (`runtime.codex.command`, default `codex app-server`)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
-- Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
+- Configurable retry backoff cap (`runtime.agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
 - Workspace cleanup for terminal issues (startup sweep + active transition)
 - Structured logs with `issue_id`, `issue_identifier`, and `session_id`
@@ -2271,12 +2615,12 @@ Use the same validation profiles as Section 17:
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
-- HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
-  exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
+- HTTP server extension honors CLI `--port` over `runtime.server.port`, uses a safe default bind
+  host, and exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
   app-server session using configured Symphony auth.
 - TODO: Persist retry queue and session metadata across process restarts.
-- TODO: Make observability settings configurable in workflow front matter without prescribing UI
+- TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead
   of only via agent tools.
@@ -2285,7 +2629,8 @@ Use the same validation profiles as Section 17:
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
 - Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
-- Verify hook execution and workflow path resolution on the target host OS/shell environment.
+- Verify hook execution, manifest path resolution, module resolution, and harness `CODEX_HOME` on
+  the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
 
@@ -2308,7 +2653,7 @@ Extension config:
 - `worker.ssh_hosts` provides the candidate SSH destinations for remote execution.
 - Each worker run is assigned to one host at a time, and that host becomes part of the run's
   effective execution identity along with the issue workspace.
-- `workspace.root` is interpreted on the remote host, not on the orchestrator host.
+- `runtime.workspace.root` is interpreted on the remote host, not on the orchestrator host.
 - The coding-agent app-server is launched over SSH stdio instead of as a local subprocess, so the
   orchestrator still owns the session lifecycle even though commands execute remotely.
 - Continuation turns inside one worker lifetime SHOULD stay on the same host and workspace.
