@@ -423,6 +423,14 @@ pre,
   letter-spacing: 0;
 }
 
+.issue-id-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: currentColor;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+
 .issue-link,
 .table-action {
   font-size: 0.86rem;

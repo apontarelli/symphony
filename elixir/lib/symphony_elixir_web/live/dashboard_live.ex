@@ -505,7 +505,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <% else %>
               <ul class="signal-list">
                 <li :for={entry <- @payload.work_errors}>
-                  <span class="issue-id"><%= entry.issue_identifier %></span>
+                  <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
                   <span class="muted">attempt <%= entry.attempt %></span>
                   <span><%= entry.error %></span>
                 </li>
@@ -580,7 +580,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={entry <- @payload.running}>
                     <td data-label="Issue">
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
                       </div>
                     </td>
@@ -684,7 +684,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   <tr :for={entry <- @payload.blocked}>
                     <td data-label="Issue">
                       <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
+                        <.issue_identifier identifier={entry.issue_identifier} url={entry.issue_url} />
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
                       </div>
                     </td>
@@ -747,6 +747,42 @@ defmodule SymphonyElixirWeb.DashboardLive do
     |> Presenter.state_payload(snapshot_timeout_ms())
     |> put_project_groups()
   end
+
+  attr(:identifier, :string, required: true)
+  attr(:url, :string, default: nil)
+
+  defp issue_identifier(assigns) do
+    assigns = assign(assigns, :href, external_issue_url(assigns.url))
+
+    ~H"""
+    <%= if @href do %>
+      <a
+        class="issue-id issue-id-link"
+        href={@href}
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label={"Open #{@identifier} in the issue tracker"}
+      ><%= @identifier %></a>
+    <% else %>
+      <span class="issue-id"><%= @identifier %></span>
+    <% end %>
+    """
+  end
+
+  defp external_issue_url(url) when is_binary(url) do
+    url = String.trim(url)
+
+    case URI.parse(url) do
+      %URI{scheme: scheme, host: host}
+      when scheme in ["http", "https"] and is_binary(host) and host != "" ->
+        url
+
+      _ ->
+        nil
+    end
+  end
+
+  defp external_issue_url(_url), do: nil
 
   defp put_project_groups(%{error: _error} = payload), do: payload
   defp put_project_groups(payload), do: Map.put(payload, :project_groups, project_groups(payload))

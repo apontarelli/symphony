@@ -167,6 +167,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      issue_url: Map.get(entry, :issue_url),
       project_slug: project_slug,
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
@@ -199,6 +200,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      issue_url: Map.get(entry, :issue_url),
       project_slug: project_slug,
       attempt: entry.attempt,
       profile: entry_project_profile(entry, project),
@@ -222,6 +224,7 @@ defmodule SymphonyElixirWeb.Presenter do
     %{
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
+      issue_url: Map.get(entry, :issue_url),
       project_slug: project_slug,
       state: entry.state,
       error: entry.error,
@@ -576,6 +579,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{
         issue_id: retry.issue_id,
         issue_identifier: retry.issue_identifier,
+        issue_url: Map.get(retry, :issue_url),
         project_slug: retry.project_slug,
         attempt: retry.attempt,
         error: retry.error,
