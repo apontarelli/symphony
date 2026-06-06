@@ -372,6 +372,22 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+## Incident-triggered issues
+
+Project-owned monitoring can hand normalized production failure signals to Symphony with
+`mix incident.linear_issue`. Dry-run is the default and prints the proposed Linear issue body for
+inspection without calling Linear:
+
+```bash
+mix incident.linear_issue --payload /path/to/signal.json
+```
+
+Create mode requires `--create --acknowledge-project-opt-in`, resolves a `Backlog` or explicit
+`Todo` Linear state plus labels, and scans a bounded set of recently updated project issues for the
+correlation marker before creating new work. See
+[`docs/incident_linear_issue.md`](docs/incident_linear_issue.md) for the payload contract, supported
+signal sources, dedupe behavior, and monitoring ownership boundary.
+
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:

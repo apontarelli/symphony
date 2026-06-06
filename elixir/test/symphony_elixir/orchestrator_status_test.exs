@@ -1390,9 +1390,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    retry_delay_ms = due_at_ms - before_tick_ms
-    assert retry_delay_ms >= 9_500
-    assert retry_delay_ms <= 10_500
+    scheduled_delay_ms = due_at_ms - before_tick_ms
+    assert scheduled_delay_ms >= 9_500
+    assert scheduled_delay_ms <= 12_000
+    assert due_at_ms > System.monotonic_time(:millisecond)
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do

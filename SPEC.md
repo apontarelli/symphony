@@ -1995,6 +1995,31 @@ Reviewer feedback re-entry:
   applying changes, replying with justified pushback when appropriate, revalidating, pushing, and
   selecting a new completion route.
 
+### 11.8 Incident Signal Intake Extension (OPTIONAL)
+
+Implementations MAY provide an explicit project-owned path for turning external production failure
+signals into tracker issues. This extension is outside the orchestrator polling loop.
+
+If implemented:
+
+- Supported sources SHOULD be enumerated rather than accepting arbitrary source names. The Elixir
+  prototype supports `github_actions`, `sentry`, `posthog`, and `project_webhook`.
+- The normalized payload SHOULD include title, severity, affected project, signal source, non-empty
+  evidence-link strings, reproduction notes, diagnostic notes, suggested owner, and suggested agent
+  route.
+- Issue creation MUST be opt-in and MUST NOT be enabled by merely starting the orchestrator.
+- Dry-run SHOULD be the default so operators can inspect the generated issue body without tracker
+  writes.
+- Duplicate suppression SHOULD use a deterministic source/project correlation key and a bounded
+  tracker scan. Candidate scan limits MUST stay positive and bounded. It MUST NOT require a universal
+  incident database.
+- Created issues SHOULD target `Backlog` by default, MAY target `Todo` only through explicit
+  configuration, MUST reject terminal states, and SHOULD include explicit labels before any agent
+  dispatch path can pick them up.
+- Project-specific monitoring remains responsible for alert thresholds, source credentials,
+  webhook hosting, and source-specific payload normalization. Symphony owns only the shared intake
+  contract and bounded tracker issue creation behavior.
+
 ## 12. Prompt Construction and Context Assembly
 
 ### 12.1 Inputs
@@ -2848,6 +2873,10 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Issue state refresh by ID returns minimal normalized issues
 - Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
+- If incident signal intake is implemented, dry-run validates the normalized fake payload, generated
+  issue body, labels, target state, and correlation marker without creating tracker work
+- If incident signal intake is implemented, duplicate suppression detects a matching bounded
+  correlation marker before create mode attempts a new issue
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -2987,6 +3016,8 @@ Use the same validation profiles as Section 17:
 - `product_visual_review` selected through `workflow.modules` adds product/design QA routing to
   first-turn prompts and keeps the classification testable through route policy, project kind,
   changed-file triggers, issue-label triggers, checks, and artifact ids.
+- Incident signal intake extension defaults to dry-run, requires explicit project opt-in for create
+  mode, documents project-monitoring ownership, and performs bounded duplicate suppression.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.
