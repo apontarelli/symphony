@@ -37,16 +37,14 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
-   - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
-     operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+3. Commit a thin `symphony.yml` in the target repo. The manifest selects Symphony-owned workflow
+   modules and records repo-specific facts such as docs entry points, VCS posture, delivery target,
+   and narrow runtime overrides.
+4. Run `symphony workflow check` from the target repo root to validate the manifest and resolved
+   module metadata before starting the daemon.
+5. When creating a workflow based on this repo, note that it depends on non-standard Linear issue
+   statuses: "Rework", "Human Review", and "Merging". You can customize them in Team Settings →
+   Workflow in Linear.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -67,50 +65,59 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+SYMPHONY_BIN="$PWD/bin/symphony"
+cd /path/to/target-repo
+"$SYMPHONY_BIN" workflow check
+"$SYMPHONY_BIN" --i-understand-that-this-will-be-running-without-the-usual-guardrails
 ```
 
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
+Target repositories author `symphony.yml`. The manifest stays intentionally thin:
 
-```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+```yaml
+version: 1
+project:
+  name: Example App
+  app_kind: web
+workflow:
+  preset: core
+  modules:
+    - core_delivery
+docs:
+  entrypoints:
+    - README.md
+    - AGENTS.md
+vcs:
+  mode: jj
+delivery:
+  pr_target: main
+runtime:
+  tracker:
+    project_slug: "linear-project-slug"
+  workspace:
+    root: ~/code/symphony-workspaces
+  hooks:
+    after_create: |
+      git clone git@github.com:your-org/your-repo.git .
 ```
 
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+Run the check command from the target repo root:
+
+```bash
+symphony workflow check
+```
+
+`workflow check` resolves the selected modules, validates docs entry points, compiles runtime config,
+and prints resolved module metadata plus a deterministic policy hash.
 
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
 
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
-
-Minimal example:
-
-```md
----
-tracker:
-  kind: linear
-  project_slug: "..."
-workspace:
-  root: ~/code/workspaces
-hooks:
-  after_create: |
-    git clone git@github.com:your-org/your-repo.git .
-agent:
-  max_concurrent_agents: 10
-  max_turns: 20
-codex:
-  command: codex app-server
----
-
-You are working on a Linear issue {{ issue.identifier }}.
-
-Title: {{ issue.title }} Body: {{ issue.description }}
-```
+Legacy `WORKFLOW.md` files remain supported as an explicit runtime/export compatibility path. They
+are not the default target-repo authoring contract and should not be copied into new target repos.
 
 Notes:
 
@@ -132,8 +139,8 @@ Notes:
   by the Codex turn sandbox.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
-- If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
-  identifier, title, and body.
+- Selected modules must compile a non-empty prompt. Legacy `WORKFLOW.md` files with a blank
+  Markdown body use a default prompt template that includes the issue identifier, title, and body.
 - Use `hooks.after_create` to bootstrap a fresh workspace. For a Git-backed repo, you can run
   `git clone ... .` there, along with any other setup commands you need.
 - If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
@@ -144,19 +151,7 @@ Notes:
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
   launched shell.
 
-```yaml
-tracker:
-  api_key: $LINEAR_API_KEY
-workspace:
-  root: $SYMPHONY_WORKSPACE_ROOT
-hooks:
-  after_create: |
-    git clone --depth 1 "$SOURCE_REPO_URL" .
-codex:
-  command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
-```
-
-- If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.
+- If the selected workflow source is missing or has invalid YAML at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
@@ -175,8 +170,10 @@ The observability UI now runs on a minimal Phoenix stack:
 ## Project Layout
 
 - `lib/`: application code and Mix tasks
+- `priv/workflow_modules/`: Symphony-owned workflow module source files used by the compiler
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `../symphony.yml`: the Symphony repo's own target-repo manifest for dogfooding
+- `WORKFLOW.md`: legacy compatibility workflow kept for explicit runtime/export use
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
@@ -211,9 +208,9 @@ the transport representative without depending on long-lived external machines.
 
 Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
 
-The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
-a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
-Linear issue, then marks the project completed so the run remains visible in Linear.
+The live test creates a temporary Linear project and issue, writes an isolated runtime workflow
+fixture, runs a real agent turn, verifies the workspace side effect, requires Codex to comment on and
+close the Linear issue, then marks the project completed so the run remains visible in Linear.
 
 ## FAQ
 

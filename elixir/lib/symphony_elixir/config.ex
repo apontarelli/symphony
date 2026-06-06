@@ -1,10 +1,11 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Runtime configuration loaded from the selected workflow source.
   """
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.Workflow.Manifest
 
   @default_prompt_template """
   You are working on a Linear issue.
@@ -136,7 +137,7 @@ defmodule SymphonyElixir.Config do
   defp format_config_error(reason) do
     case reason do
       {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
+        "Invalid workflow config: #{message}"
 
       {:missing_workflow_file, path, raw_reason} ->
         "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
@@ -147,8 +148,20 @@ defmodule SymphonyElixir.Config do
       :workflow_front_matter_not_a_map ->
         "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
 
+      {:missing_manifest, _path, _raw_reason} ->
+        Manifest.format_error(reason)
+
+      {:invalid_manifest, _path, _message} ->
+        Manifest.format_error(reason)
+
+      {:missing_workflow_module, _path, _raw_reason} ->
+        Manifest.format_error(reason)
+
+      {:invalid_workflow_module, _path, _message} ->
+        Manifest.format_error(reason)
+
       other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
+        "Invalid workflow config: #{inspect(other)}"
     end
   end
 end

@@ -24,8 +24,8 @@ The service solves four operational problems:
 - It turns issue execution into a repeatable daemon workflow instead of manual scripts.
 - It isolates agent execution in per-issue workspaces so agent commands run only inside per-issue
   workspace directories.
-- It keeps the workflow policy in-repo (`WORKFLOW.md`) so teams version the agent prompt and runtime
-  settings with their code.
+- It keeps thin workflow intent in-repo (`symphony.yml`) while Symphony-owned modules render the
+  agent prompt and runtime settings.
 - It provides enough observability to operate and debug multiple concurrent agent runs.
 
 Implementations are expected to document their trust and safety posture explicitly. This
@@ -50,7 +50,8 @@ Important boundary:
 - Create deterministic per-issue workspaces and preserve them across runs.
 - Stop active runs when issue state changes make them ineligible.
 - Recover from transient failures with exponential backoff.
-- Load runtime behavior from a repository-owned `WORKFLOW.md` contract.
+- Load runtime behavior from a repository-owned `symphony.yml` manifest compiled with Symphony
+  workflow modules.
 - Expose operator-visible observability (at minimum structured logs).
 - Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
   in-memory scheduler state is not restored.
@@ -71,9 +72,9 @@ Important boundary:
 ### 3.1 Main Components
 
 1. `Workflow Loader`
-   - Reads `WORKFLOW.md`.
-   - Parses YAML front matter and prompt body.
-   - Returns `{config, prompt_template}`.
+   - Reads `symphony.yml` by default.
+   - Resolves workflow modules from the Symphony-owned module registry.
+   - Returns the compiled `{config, prompt_template}` runtime workflow.
 
 2. `Config Layer`
    - Exposes typed getters for workflow config values.
@@ -115,9 +116,12 @@ Important boundary:
 
 Symphony is easiest to port when kept in these layers:
 
-1. `Policy Layer` (repo-defined)
-   - `WORKFLOW.md` prompt body.
-   - Team-specific rules for ticket handling, validation, and handoff.
+1. `Policy Layer` (repo-defined + Symphony-owned modules)
+   - Target repositories commit a thin `symphony.yml` manifest.
+   - Symphony-owned workflow modules provide shared ticket handling, validation, review, and handoff
+     policy.
+   - Target repositories keep repo-specific style, architecture, setup, and validation docs in their
+     normal repo docs.
 
 2. `Configuration Layer` (typed getters)
    - Parses front matter into typed runtime settings.
@@ -178,12 +182,14 @@ Fields:
 
 #### 4.1.2 Workflow Definition
 
-Parsed `WORKFLOW.md` payload:
+Resolved workflow payload:
 
 - `config` (map)
-  - YAML front matter root object.
+  - Runtime config compiled from `symphony.yml`, selected modules, and module defaults.
 - `prompt_template` (string)
-  - Markdown body after front matter, trimmed.
+  - Prompt body compiled from selected workflow modules.
+- `metadata` (map)
+  - Resolved module identifiers, versions, and policy hash used for audit/debugging.
 
 #### 4.1.3 Service Config (Typed View)
 
@@ -288,42 +294,68 @@ Fields:
 
 ## 5. Workflow Specification (Repository Contract)
 
-### 5.1 File Discovery and Path Resolution
+### 5.1 Manifest Discovery and Path Resolution
 
-Workflow file path precedence:
+Workflow source precedence:
 
 1. Explicit application/runtime setting (set by CLI startup path).
-2. Default: `WORKFLOW.md` in the current process working directory.
+2. Default target-repo authoring source: `symphony.yml` in the current process working directory.
+3. Compatibility fallback: `WORKFLOW.md` in the current process working directory.
 
 Loader behavior:
 
-- If the file cannot be read, return `missing_workflow_file` error.
-- The workflow file is expected to be repository-owned and version-controlled.
+- If an explicit source cannot be read, return a typed missing-source error.
+- A target repo manifest is expected to be repository-owned and version-controlled.
+- `WORKFLOW.md` may remain as a legacy runtime/export input, but it is not the default authoring
+  contract for target repositories.
 
-### 5.2 File Format
+### 5.2 Manifest Format
 
-`WORKFLOW.md` is a Markdown file with OPTIONAL YAML front matter.
+`symphony.yml` is a YAML file.
 
 Design note:
 
-- `WORKFLOW.md` SHOULD be self-contained enough to describe and run different workflows (prompt,
-  runtime settings, hooks, and tracker selection/config) without requiring out-of-band
-  service-specific configuration.
+- `symphony.yml` SHOULD stay thin: project facts, preset/module selection, validation gates, docs
+  entry points, VCS posture, delivery defaults, autonomy posture, and narrow runtime overrides.
+- Target repositories SHOULD NOT copy full prompt prose or Symphony core delivery policy into the
+  manifest.
+- Symphony-owned module source files are part of the Symphony implementation, not files target repos
+  copy into their codebase.
 
 Parsing rules:
 
-- If file starts with `---`, parse lines until the next `---` as YAML front matter.
-- Remaining lines become the prompt body.
-- If front matter is absent, treat the entire file as prompt body and use an empty config map.
-- YAML front matter MUST decode to a map/object; non-map YAML is an error.
-- Prompt body is trimmed before use.
+- YAML MUST decode to a map/object; non-map YAML is an error.
+- `version` MUST identify the manifest schema version.
+- `project.name` MUST identify the project for operator-facing output.
+- `workflow.preset` MUST identify the selected preset.
+- `workflow.modules` MUST be a non-empty list of workflow module ids.
+- `docs.entrypoints`, when present, MUST contain repository-relative docs paths that exist.
 
 Returned workflow object:
 
-- `config`: front matter root object (not nested under a `config` key).
-- `prompt_template`: trimmed Markdown body.
+- `config`: compiled runtime config map.
+- `prompt_template`: prompt compiled from selected workflow modules.
+- `metadata`: resolved module ids/versions/summaries and a deterministic policy hash.
 
-### 5.3 Front Matter Schema
+### 5.3 Manifest Vocabulary
+
+Top-level manifest keys:
+
+- `version`
+- `project`
+- `workflow`
+- `docs`
+- `vcs`
+- `validation`
+- `delivery`
+- `autonomy`
+- `runtime`
+
+The `runtime` key is a narrow escape hatch for implementation/runtime settings that are still
+needed during v1 migration. It compiles into the runtime config schema below and should not contain
+full agent prompt policy.
+
+### 5.4 Compiled Runtime Config Schema
 
 Top-level keys:
 
@@ -343,7 +375,7 @@ Note:
 - Extensions SHOULD document their field schema, defaults, validation rules, and whether changes
   apply dynamically or require restart.
 
-#### 5.3.1 `tracker` (object)
+#### 5.4.1 `tracker` (object)
 
 Fields:
 
@@ -368,7 +400,7 @@ Fields:
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
 
-#### 5.3.2 `polling` (object)
+#### 5.4.2 `polling` (object)
 
 Fields:
 
@@ -376,17 +408,17 @@ Fields:
   - Default: `30000`
   - Changes SHOULD be re-applied at runtime and affect future tick scheduling without restart.
 
-#### 5.3.3 `workspace` (object)
+#### 5.4.3 `workspace` (object)
 
 Fields:
 
 - `root` (path string or `$VAR`)
   - Default: `<system-temp>/symphony_workspaces`
   - `~` is expanded.
-  - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
+  - Relative paths are resolved relative to the directory containing the selected workflow source.
   - The effective workspace root is normalized to an absolute path before use.
 
-#### 5.3.4 `hooks` (object)
+#### 5.4.4 `hooks` (object)
 
 Fields:
 
@@ -410,7 +442,7 @@ Fields:
   - Invalid values fail configuration validation.
   - Changes SHOULD be re-applied at runtime for future hook executions.
 
-#### 5.3.5 `agent` (object)
+#### 5.4.5 `agent` (object)
 
 Fields:
 
@@ -429,7 +461,7 @@ Fields:
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
 
-#### 5.3.6 `codex` (object)
+#### 5.4.6 `codex` (object)
 
 Fields:
 
@@ -459,9 +491,10 @@ fields locally if they want stricter startup checks.
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
 
-### 5.4 Prompt Template Contract
+### 5.5 Prompt Template Contract
 
-The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
+The compiled prompt template is the per-issue prompt template. It is produced from Symphony-owned
+workflow modules selected by the manifest.
 
 Rendering requirements:
 
@@ -481,13 +514,17 @@ Fallback prompt behavior:
 
 - If the workflow prompt body is empty, the runtime MAY use a minimal default prompt
   (`You are working on an issue from Linear.`).
-- Workflow file read/parse failures are configuration/validation errors and SHOULD NOT silently fall
-  back to a prompt.
+- Manifest/module read or parse failures are configuration/validation errors and SHOULD NOT silently
+  fall back to a prompt.
 
-### 5.5 Workflow Validation and Error Surface
+### 5.6 Workflow Validation and Error Surface
 
 Error classes:
 
+- `missing_manifest`
+- `invalid_manifest`
+- `missing_workflow_module`
+- `invalid_workflow_module`
 - `missing_workflow_file`
 - `workflow_parse_error`
 - `workflow_front_matter_not_a_map`
@@ -496,7 +533,7 @@ Error classes:
 
 Dispatch gating behavior:
 
-- Workflow file read/YAML errors block new dispatches until fixed.
+- Manifest/module/workflow read and YAML errors block new dispatches until fixed.
 - Template errors fail only the affected run attempt.
 
 ## 6. Configuration Specification
@@ -522,13 +559,14 @@ Value coercion semantics:
   - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
     arbitrary shell command strings.
 - Relative `workspace.root` values resolve relative to the directory containing the selected
-  `WORKFLOW.md`.
+  workflow source.
 
 ### 6.2 Dynamic Reload Semantics
 
 Dynamic reload is REQUIRED:
 
-- The software MUST detect `WORKFLOW.md` changes.
+- The software MUST detect selected workflow source changes (`symphony.yml`, selected module files,
+  or legacy `WORKFLOW.md`).
 - On change, it MUST re-read and re-apply workflow config and prompt template without restart.
 - The software MUST attempt to adjust live behavior to the new config (for example polling
   cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
@@ -1376,7 +1414,7 @@ Extension config:
 Enablement (extension):
 
 - Start the HTTP server when a CLI `--port` argument is provided.
-- Start the HTTP server when `server.port` is present in `WORKFLOW.md` front matter.
+- Start the HTTP server when `server.port` is present in compiled runtime config.
 - The `server` top-level key is owned by this extension.
 - Positive `server.port` values bind that port.
 - Implementations SHOULD bind loopback by default (`127.0.0.1` or host equivalent) unless explicitly
@@ -1535,8 +1573,8 @@ API design notes:
 ### 14.1 Failure Classes
 
 1. `Workflow/Config Failures`
-   - Missing `WORKFLOW.md`
-   - Invalid YAML front matter
+   - Missing `symphony.yml`, selected module file, or explicit legacy workflow file
+   - Invalid manifest/module YAML or legacy workflow front matter
    - Unsupported tracker kind or missing tracker credentials/project slug
    - Missing coding-agent executable
 
@@ -1606,9 +1644,9 @@ After restart:
 
 Operators can control behavior by:
 
-- Editing `WORKFLOW.md` (prompt and most runtime settings).
-- `WORKFLOW.md` changes are detected and re-applied automatically without restart according to
-  Section 6.2.
+- Editing `symphony.yml`, selected workflow modules, or an explicit legacy workflow file.
+- Selected workflow source changes are detected and re-applied automatically without restart
+  according to Section 6.2.
 - Changing issue states in the tracker:
   - terminal state -> running session is stopped and workspace cleaned when reconciled
   - non-active state -> running session is stopped without cleanup
@@ -1652,7 +1690,7 @@ RECOMMENDED additional hardening for ports:
 
 ### 15.4 Hook Script Safety
 
-Workspace hooks are arbitrary shell scripts from `WORKFLOW.md`.
+Workspace hooks are arbitrary shell scripts from compiled runtime config.
 
 Implications:
 
@@ -1948,13 +1986,14 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Workflow file path precedence:
   - explicit runtime path is used when provided
-  - cwd default is `WORKFLOW.md` when no explicit runtime path is provided
-- Workflow file changes are detected and trigger re-read/re-apply without restart
+  - cwd default is `symphony.yml` when no explicit runtime path is provided and the manifest exists
+  - cwd default may fall back to `WORKFLOW.md` for legacy compatibility when no manifest exists
+- Selected workflow source changes are detected and trigger re-read/re-apply without restart
 - Invalid workflow reload keeps last known good effective configuration and emits an
   operator-visible error
-- Missing `WORKFLOW.md` returns typed error
-- Invalid YAML front matter returns typed error
-- Front matter non-map returns typed error
+- Missing manifest, module file, or explicit legacy workflow file returns typed error
+- Invalid manifest/module YAML or legacy YAML front matter returns typed error
+- Manifest/module/front matter non-map returns typed error
 - Config defaults apply when OPTIONAL values are missing
 - `tracker.kind` validation enforces currently supported kind (`linear`)
 - `tracker.api_key` works (including `$VAR` indirection)
@@ -2053,9 +2092,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI accepts a positional workflow path argument (`path-to-WORKFLOW.md`)
-- CLI uses `./WORKFLOW.md` when no workflow path argument is provided
-- CLI errors on nonexistent explicit workflow path or missing default `./WORKFLOW.md`
+- CLI accepts `workflow check` for target-repo manifest validation
+- CLI accepts a positional legacy workflow path argument (`path-to-WORKFLOW.md`)
+- CLI uses `./symphony.yml` when no explicit runtime workflow path is provided and the manifest exists
+- CLI may use `./WORKFLOW.md` as a compatibility fallback when no manifest exists
+- CLI errors on nonexistent explicit workflow path or missing default workflow source
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
 - CLI exits nonzero when startup fails or the host process exits abnormally
@@ -2084,9 +2125,10 @@ Use the same validation profiles as Section 17:
 ### 18.1 REQUIRED for Conformance
 
 - Workflow path selection supports explicit runtime path and cwd default
-- `WORKFLOW.md` loader with YAML front matter + prompt body split
+- `symphony.yml` manifest loader with module resolution and compiled prompt/config output
+- Legacy `WORKFLOW.md` loader with YAML front matter + prompt body split remains explicit
 - Typed config layer with defaults and `$` resolution
-- Dynamic `WORKFLOW.md` watch/reload/re-apply for config and prompt
+- Dynamic selected workflow source watch/reload/re-apply for config and prompt
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces

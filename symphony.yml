@@ -1,0 +1,32 @@
+version: 1
+project:
+  name: Symphony
+  app_kind: orchestration_service
+workflow:
+  preset: core
+  modules:
+    - core_delivery
+docs:
+  entrypoints:
+    - README.md
+    - SPEC.md
+    - elixir/README.md
+vcs:
+  mode: jj
+delivery:
+  pr_target: main
+runtime:
+  tracker:
+    project_slug: "symphony-self-contained-workflow-modules-72083cd8c253"
+  workspace:
+    root: ~/code/symphony-workspaces
+  hooks:
+    after_create: |
+      git clone --depth 1 https://github.com/openai/symphony .
+      if command -v mise >/dev/null 2>&1; then
+        cd elixir && mise trust && mise exec -- mix deps.get
+      fi
+    before_remove: |
+      cd elixir && mise exec -- mix workspace.before_remove
+  codex:
+    command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server

@@ -31,7 +31,8 @@ Check out [elixir/README.md](elixir/README.md) for instructions on how to set up
 and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
 help with the setup:
 
-> Set up Symphony for my repository based on
+> Add a `symphony.yml` manifest for my repository, run `symphony workflow check`, and set up Symphony
+> based on
 > https://github.com/openai/symphony/blob/main/elixir/README.md
 
 ---

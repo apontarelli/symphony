@@ -1,16 +1,38 @@
 defmodule SymphonyElixir.Workflow do
   @moduledoc """
-  Loads workflow configuration and prompt from WORKFLOW.md.
+  Loads workflow configuration and prompt from a repository manifest.
+
+  `symphony.yml` is the default target-repo authoring source. `WORKFLOW.md`
+  remains supported as an explicit legacy/runtime export path.
   """
 
+  alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.WorkflowStore
 
+  @manifest_file_name "symphony.yml"
   @workflow_file_name "WORKFLOW.md"
 
   @spec workflow_file_path() :: Path.t()
   def workflow_file_path do
     Application.get_env(:symphony_elixir, :workflow_file_path) ||
       Path.join(File.cwd!(), @workflow_file_name)
+  end
+
+  @spec workflow_source_path() :: Path.t()
+  def workflow_source_path do
+    case Application.get_env(:symphony_elixir, :workflow_file_path) do
+      path when is_binary(path) ->
+        path
+
+      _ ->
+        manifest_path = Path.join(File.cwd!(), @manifest_file_name)
+
+        if File.regular?(manifest_path) do
+          manifest_path
+        else
+          workflow_file_path()
+        end
+    end
   end
 
   @spec set_workflow_file_path(Path.t()) :: :ok
@@ -30,7 +52,8 @@ defmodule SymphonyElixir.Workflow do
   @type loaded_workflow :: %{
           config: map(),
           prompt: String.t(),
-          prompt_template: String.t()
+          prompt_template: String.t(),
+          source_paths: [Path.t()]
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
@@ -46,21 +69,31 @@ defmodule SymphonyElixir.Workflow do
 
   @spec load() :: {:ok, loaded_workflow()} | {:error, term()}
   def load do
-    load(workflow_file_path())
+    workflow_source_path()
+    |> Path.expand()
+    |> load()
   end
 
   @spec load(Path.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def load(path) when is_binary(path) do
+    if Path.extname(path) in [".yml", ".yaml"] do
+      Manifest.compile(path)
+    else
+      load_markdown_workflow(path)
+    end
+  end
+
+  defp load_markdown_workflow(path) when is_binary(path) do
     case File.read(path) do
       {:ok, content} ->
-        parse(content)
+        parse(content, path)
 
       {:error, reason} ->
         {:error, {:missing_workflow_file, path, reason}}
     end
   end
 
-  defp parse(content) do
+  defp parse(content, path) do
     {front_matter_lines, prompt_lines} = split_front_matter(content)
 
     case front_matter_yaml_to_map(front_matter_lines) do
@@ -71,7 +104,8 @@ defmodule SymphonyElixir.Workflow do
          %{
            config: front_matter,
            prompt: prompt,
-           prompt_template: prompt
+           prompt_template: prompt,
+           source_paths: [Path.expand(path)]
          }}
 
       {:error, :workflow_front_matter_not_a_map} ->

@@ -1,9 +1,11 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for running Symphony with a repository workflow source.
   """
 
   alias SymphonyElixir.LogFile
+  alias SymphonyElixir.Workflow
+  alias SymphonyElixir.Workflow.Check
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [{@acknowledgement_switch, :boolean}, logs_root: :string, port: :integer]
@@ -14,6 +16,8 @@ defmodule SymphonyElixir.CLI do
           set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
           set_logs_root: (String.t() -> :ok | {:error, term()}),
           set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
+          workflow_source_path: (-> Path.t()),
+          check_workflow: ([String.t()] -> :ok | {:error, String.t()}),
           ensure_all_started: (-> ensure_started_result())
         }
 
@@ -21,7 +25,7 @@ defmodule SymphonyElixir.CLI do
   def main(args) do
     case evaluate(args) do
       :ok ->
-        wait_for_shutdown()
+        if workflow_command?(args), do: System.halt(0), else: wait_for_shutdown()
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -29,14 +33,22 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  @spec evaluate([String.t()]) :: :ok | {:error, String.t()}
+  def evaluate(args), do: evaluate(args, runtime_deps())
+
   @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
-  def evaluate(args, deps \\ runtime_deps()) do
+  def evaluate(["workflow", "check" | check_args], deps) do
+    check_workflow = Map.get(deps, :check_workflow, &Check.run/1)
+    check_workflow.(check_args)
+  end
+
+  def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), deps)
+          run(workflow_source_path(deps), deps)
         end
 
       {opts, [workflow_path], []} ->
@@ -72,8 +84,10 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-symphony.yml-or-WORKFLOW.md]"
   end
+
+  defp workflow_source_path(deps), do: Map.get(deps, :workflow_source_path, &Workflow.workflow_source_path/0).()
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do
@@ -82,9 +96,14 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
+      workflow_source_path: &Workflow.workflow_source_path/0,
+      check_workflow: &Check.run/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end
+
+  defp workflow_command?(["workflow" | _rest]), do: true
+  defp workflow_command?(_args), do: false
 
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do

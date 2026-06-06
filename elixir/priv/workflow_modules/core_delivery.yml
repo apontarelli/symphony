@@ -1,0 +1,107 @@
+id: core_delivery
+version: 1
+summary: Linear workpad, implementation, validation, review, and handoff policy.
+config:
+  tracker:
+    kind: linear
+    api_key: "$LINEAR_API_KEY"
+    required_labels: []
+    active_states:
+      - Todo
+      - In Progress
+      - Merging
+      - Rework
+    terminal_states:
+      - Closed
+      - Cancelled
+      - Canceled
+      - Duplicate
+      - Done
+  polling:
+    interval_ms: 5000
+  workspace:
+    root: ~/code/symphony-workspaces
+  agent:
+    max_concurrent_agents: 10
+    max_turns: 20
+  codex:
+    command: codex app-server
+    approval_policy: never
+    thread_sandbox: workspace-write
+    turn_sandbox_policy:
+      type: workspaceWrite
+      networkAccess: true
+prompt: |
+  You are working on a Linear ticket `{{ issue.identifier }}`.
+
+  Issue context:
+  Identifier: {{ issue.identifier }}
+  Title: {{ issue.title }}
+  Current status: {{ issue.state }}
+  Labels: {{ issue.labels }}
+  URL: {{ issue.url }}
+
+  Description:
+  {% if issue.description %}
+  {{ issue.description }}
+  {% else %}
+  No description provided.
+  {% endif %}
+
+  Instructions:
+
+  1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.
+  2. Only stop early for a true blocker: missing required auth, permissions, or secrets. If blocked, record it in the workpad and move the issue according to workflow.
+  3. Final message must report completed actions and blockers only. Do not include next steps for the user.
+
+  Work only in the provided repository copy. Do not touch any other path.
+
+  ## Linear Workpad
+
+  Use a single persistent Linear issue comment headed `## Codex Workpad`.
+
+  - Fetch the issue by explicit ticket ID and route by current state.
+  - Move `Todo` issues to `In Progress` before active work.
+  - Reuse the active unresolved workpad comment if it exists; otherwise create one.
+  - Keep plan, acceptance criteria, validation, notes, blockers, and handoff in that one comment.
+  - Do not post separate progress or completion comments.
+  - Add a compact environment stamp at the top: `<host>:<abs-workdir>@<short-sha>`.
+  - Mirror every ticket-authored Validation, Test Plan, or Testing item into workpad checkboxes and execute them before handoff.
+
+  ## Execution Loop
+
+  - Reproduce the current behavior or stale signal before implementation.
+  - Sync with the configured PR target before editing.
+  - Keep ticket metadata and workpad checklist current after meaningful milestones.
+  - Prefer the repo's local instructions, scripts, and VCS conventions.
+  - For bugs, add a regression test when it fits.
+  - For out-of-scope improvements, create a separate Backlog issue in the same project and link it to the current issue instead of expanding scope.
+  - Preserve unrecognized workspace changes unless the user explicitly asks to revert them.
+
+  ## Validation
+
+  - Run all ticket-provided validation exactly; treat unmet validation as incomplete work.
+  - Run the strongest feasible repo gate before handoff.
+  - When validation is weak, improve or document the gap before publishing.
+  - Temporary proof edits are allowed only for local validation and must be reverted before commit or publish.
+
+  ## PR Feedback Sweep
+
+  Before Human Review, inspect all PR feedback channels:
+
+  - Top-level PR comments.
+  - Inline review comments.
+  - Review summary states.
+
+  Treat every actionable comment as blocking until code/docs/tests address it or a justified reply is posted.
+
+  ## Handoff
+
+  Move to `Human Review` only after:
+
+  - Workpad checklist and acceptance criteria are complete.
+  - Required validation is green for the latest change.
+  - Automated review and PR feedback sweep have no unresolved fix-required findings.
+  - Branch is pushed, PR is linked to Linear, and required PR metadata is present.
+
+  In `Merging`, run the repo's land flow until the PR is merged. Do not call merge commands directly unless the land flow requires it.

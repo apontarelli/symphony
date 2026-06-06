@@ -5,6 +5,28 @@ defmodule SymphonyElixir.CLITest do
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
+  test "workflow check delegates without requiring the daemon acknowledgement flag" do
+    parent = self()
+
+    deps = %{
+      check_workflow: fn args ->
+        send(parent, {:workflow_check, args})
+        :ok
+      end
+    }
+
+    assert :ok = CLI.evaluate(["workflow", "check", "--manifest", "symphony.yml"], deps)
+    assert_received {:workflow_check, ["--manifest", "symphony.yml"]}
+  end
+
+  test "workflow check propagates validation errors" do
+    deps = %{
+      check_workflow: fn _args -> {:error, "Invalid symphony.yml"} end
+    }
+
+    assert {:error, "Invalid symphony.yml"} = CLI.evaluate(["workflow", "check"], deps)
+  end
+
   test "returns the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
 
@@ -43,21 +65,49 @@ defmodule SymphonyElixir.CLITest do
     refute_received :started
   end
 
-  test "defaults to WORKFLOW.md when workflow path is missing" do
+  test "defaults to symphony.yml when the manifest is present" do
+    parent = self()
+    manifest_path = Path.expand("symphony.yml")
+
     deps = %{
-      file_regular?: fn path -> Path.basename(path) == "WORKFLOW.md" end,
-      set_workflow_file_path: fn _path -> :ok end,
+      file_regular?: fn _path -> true end,
+      workflow_source_path: fn -> manifest_path end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
     assert :ok = CLI.evaluate([@ack_flag], deps)
+    assert_received {:workflow_set, ^manifest_path}
+  end
+
+  test "falls back to WORKFLOW.md when no manifest is present" do
+    parent = self()
+    workflow_path = Path.expand("WORKFLOW.md")
+
+    deps = %{
+      file_regular?: fn path -> Path.basename(path) == "WORKFLOW.md" end,
+      workflow_source_path: fn -> workflow_path end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag], deps)
+    assert_received {:workflow_set, ^workflow_path}
   end
 
   test "uses an explicit workflow path override when provided" do
     parent = self()
-    workflow_path = "tmp/custom/WORKFLOW.md"
+    workflow_path = "tmp/custom/symphony.yml"
     expanded_path = Path.expand(workflow_path)
 
     deps = %{

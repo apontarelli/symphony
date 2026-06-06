@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.WorkflowStore do
   @moduledoc """
-  Caches the last known good workflow and reloads it when `WORKFLOW.md` changes.
+  Caches the last known good workflow and reloads it when selected workflow sources change.
   """
 
   use GenServer
@@ -13,7 +13,7 @@ defmodule SymphonyElixir.WorkflowStore do
   defmodule State do
     @moduledoc false
 
-    defstruct [:path, :stamp, :workflow]
+    defstruct [:path, :path_stamp, :source_paths, :stamp, :workflow]
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -48,7 +48,7 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def init(_opts) do
-    case load_state(Workflow.workflow_file_path()) do
+    case load_state(Workflow.workflow_source_path()) do
       {:ok, state} ->
         schedule_poll()
         {:ok, state}
@@ -94,7 +94,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_state(%State{} = state) do
-    path = Workflow.workflow_file_path()
+    path = Workflow.workflow_source_path() |> Path.expand()
 
     if path != state.path do
       reload_path(path, state)
@@ -116,6 +116,20 @@ defmodule SymphonyElixir.WorkflowStore do
 
   defp reload_current_path(path, state) do
     case current_stamp(path) do
+      {:ok, path_stamp} when path_stamp != state.path_stamp ->
+        reload_path(path, state)
+
+      {:ok, _path_stamp} ->
+        reload_current_sources(path, state)
+
+      {:error, reason} ->
+        log_reload_error(path, reason)
+        {:error, reason, state}
+    end
+  end
+
+  defp reload_current_sources(path, state) do
+    case current_stamp(state.source_paths || [path]) do
       {:ok, stamp} when stamp == state.stamp ->
         {:ok, state}
 
@@ -129,12 +143,44 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp load_state(path) do
-    with {:ok, workflow} <- Workflow.load(path),
-         {:ok, stamp} <- current_stamp(path) do
-      {:ok, %State{path: path, stamp: stamp, workflow: workflow}}
+    expanded_path = Path.expand(path)
+
+    with {:ok, workflow} <- Workflow.load(expanded_path),
+         source_paths <- workflow_source_paths(workflow, expanded_path),
+         {:ok, path_stamp} <- current_stamp(expanded_path),
+         {:ok, stamp} <- current_stamp(source_paths) do
+      {:ok,
+       %State{
+         path: expanded_path,
+         path_stamp: path_stamp,
+         source_paths: source_paths,
+         stamp: stamp,
+         workflow: workflow
+       }}
     else
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp workflow_source_paths(workflow, default_path) do
+    workflow
+    |> Map.get(:source_paths, [default_path])
+    |> Enum.map(&Path.expand/1)
+    |> Enum.uniq()
+  end
+
+  defp current_stamp(paths) when is_list(paths) do
+    paths
+    |> Enum.reduce_while({:ok, []}, fn path, {:ok, stamps} ->
+      case current_stamp(path) do
+        {:ok, stamp} -> {:cont, {:ok, [{path, stamp} | stamps]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, stamps} -> {:ok, Enum.reverse(stamps)}
+      error -> error
     end
   end
 
