@@ -7,25 +7,7 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow
-
-  @default_prompt_template """
-  You are working on a Linear issue.
-
-  Identifier: {{ issue.identifier }}
-  Title: {{ issue.title }}
-
-  Resolved workflow policy:
-  ```json
-  {{ policy_json }}
-  ```
-
-  Body:
-  {% if issue.description %}
-  {{ issue.description }}
-  {% else %}
-  No description provided.
-  {% endif %}
-  """
+  alias SymphonyElixir.Workflow.ModuleRegistry
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
@@ -83,10 +65,10 @@ defmodule SymphonyElixir.Config do
   def workflow_prompt do
     case Workflow.current() do
       {:ok, %{prompt_template: prompt}} ->
-        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+        if String.trim(prompt) == "", do: default_prompt_template(), else: prompt
 
       _ ->
-        @default_prompt_template
+        default_prompt_template()
     end
   end
 
@@ -252,6 +234,16 @@ defmodule SymphonyElixir.Config do
 
       true ->
         :ok
+    end
+  end
+
+  defp default_prompt_template do
+    case ModuleRegistry.compile_default_preset() do
+      {:ok, prompt} ->
+        prompt
+
+      {:error, reason} ->
+        raise ArgumentError, message: "Invalid default workflow module preset: #{inspect(reason)}"
     end
   end
 

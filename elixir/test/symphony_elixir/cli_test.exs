@@ -509,7 +509,8 @@ defmodule SymphonyElixir.CLITest do
     assert config["manifest"]["project"]["name"] == "Symphony"
     assert config["checks"] == [%{"name" => "all", "command" => "cd elixir && make all"}]
     assert config["policy_metadata"]["source"] == "symphony_manifest"
-    assert prompt =~ "You are working on a Linear issue"
+    assert prompt =~ "You are working on a Linear ticket"
+    assert prompt =~ "## Core Workflow Modules"
     refute prompt =~ "elixir/WORKFLOW.md"
   end
 
@@ -529,7 +530,8 @@ defmodule SymphonyElixir.CLITest do
     assert {:ok, compiled_output} = CLI.evaluate(["workflow", "print", "--repo", repo, "--compiled"])
     assert compiled_output =~ "Compiled workflow"
     assert compiled_output =~ "tracker:"
-    assert compiled_output =~ "You are working on a Linear issue"
+    assert compiled_output =~ "You are working on a Linear ticket"
+    assert compiled_output =~ "## Core Workflow Modules"
     assert compiled_output =~ "Docs entrypoints:"
     refute compiled_output =~ "harness_codex_home"
   end

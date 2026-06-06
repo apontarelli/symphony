@@ -295,8 +295,10 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
   that needs to edit protected `.agents/` paths; keep the global `codex` defaults sandboxed.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
-- If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
-  identifier, title, and body.
+- If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into
+  the prompt template. The default preset includes Symphony-owned modules for Linear operation,
+  implementation, sync, quality gates, review, landing, rework, requirement validation, project
+  closeout, and run recovery.
 - Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
   turns run in jj-native workspaces and do not need to write Git metadata directly. Use
   `git clone ... .` only for repos that cannot run under jj compatibility.
