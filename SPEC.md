@@ -375,270 +375,195 @@ Source-of-truth rules:
   commands, architecture, and design conventions.
 - Target repo `AGENTS.md` layers after the harness global `AGENTS.md`; it does not replace or
   duplicate Symphony workflow modules.
-- `WORKFLOW.md` is not the committed source of truth in v1. If a rendered Markdown workflow exists,
-  it is generated runtime/export output for inspection, debugging, or compatibility. It MUST NOT be
-  the setup path that target repos copy and customize.
-
-Compatibility note:
-
-- Existing reference implementations MAY keep a hand-authored Markdown workflow while migrating, but
-  v1 conformance requires the manifest-plus-compiled-workflow model above.
+- Rendered workflow exports are generated inspection/debugging artifacts. They MUST NOT be the setup
+  path that target repos copy and customize.
 
 ### 5.2 Manifest Discovery and File Format
 
 Manifest path precedence:
 
-1. Explicit application/runtime setting, such as a CLI `--manifest` argument or configured manifest
-   path.
-2. Default: `symphony.yml` in the target repository root.
+1. Explicit application/runtime setting, such as a CLI path argument or configured workflow path.
+2. Default manifest: `symphony.yml` in the current process working directory.
 
 Loader behavior:
 
-- If the file cannot be read, return `missing_manifest_file`.
-- The manifest MUST parse as YAML.
-- The YAML root MUST be a map/object.
-- Unknown top-level keys SHOULD produce an operator-visible warning and be ignored for forward
-  compatibility unless the implementation chooses a stricter validation mode.
+- If the selected manifest file cannot be read, return `missing_manifest_file`.
+- If no explicit path is configured, `symphony.yml` in the current process working directory is the
+  only default.
+- Every selected file is parsed as a `symphony.yml` manifest.
 
-The manifest is data only. It SHOULD NOT contain long prompt bodies, copied workpad procedures,
-generated Markdown, host-specific absolute paths, or secrets.
+`symphony.yml` is a YAML manifest. It declares repository facts and selected Symphony-owned workflow
+modules, then compiles to the runtime workflow object used by the daemon.
 
-### 5.3 Manifest Schema
+Required fields for the default preset:
 
-Top-level keys:
+- `project.repository` (string)
+  - Required by the default `workspace` module and used to populate new issue workspaces with
+    `git clone --depth 1 <repository> .`.
 
-- `version`
-- `project`
-- `app`
-- `preset`
-- `modules`
-- `validation`
-- `vcs`
-- `docs`
-- `autonomy`
-- `profiles`
-- `module_pins`
-- `overrides`
+Optional manifest fields:
 
-Minimal example:
+- `project.slug` (string)
+  - Used by the default `linear` module as `runtime.tracker.project_slug` when present.
+- `project.name` (string, defaults to `project.slug`)
+- `project.facts` (object, default `{}`)
+- `app.kind` (string, default `local`)
+- `docs.entry_points` (list of strings, default `[]`)
+- `vcs.kind` (string, default `git`)
+- `vcs.default_branch` (string, default `main`)
+- `vcs.posture` (string)
+- `delivery.pr_target` (string, defaults to `vcs.default_branch`)
+- `validation.gates` (list of `{name, command}` objects, default `[]`)
+- `autonomy.profile` (string, default `default`)
+- `autonomy.completion_requirements` (list of strings, default `[]`)
+- `autonomy.review` (object)
+- `workflow.preset` (string, default `default`)
+- `workflow.modules` (list of strings, appended to preset modules)
+
+Manifest resolution rules:
+
+- YAML MUST decode to a map/object.
+- Missing or invalid fields return typed diagnostics with manifest paths such as `project.repository`,
+  `workflow.preset`, or `workflow.modules[1]`.
+- Presets and modules resolve from the installed Symphony module registry.
+- The default preset installs the `linear`, `workspace`, and `codex` modules.
+- The default `workspace` module compiles `project.repository` into an `after_create` hook so new
+  issue workspaces start with a checked-out repository instead of an empty directory.
+- The resolved runtime `config` includes daemon config plus manifest metadata, `checks`,
+  `completion_requirements`, `delivery`, and `policy_metadata`.
+- The resolved `prompt_template` is generated from registry-owned prompt sections and manifest
+  facts; target repositories do not commit full prompt prose in the manifest.
+
+Minimal manifest example:
 
 ```yaml
-version: 1
 project:
-  id: hard-sets
+  slug: hard-sets
   name: Hard Sets
-  tracker:
-    kind: linear
-    project_slug: hard-sets-premium-v1
+  repository: git@github.com:example/hard-sets.git
 app:
   kind: web
-preset: web-app
-modules:
-  - linear-workpad
-  - github-pr
-validation:
-  gates:
-    - id: check
-      command: bun run check
-      required: true
-vcs:
-  kind: jj
-  pr_target: main
-  branch_prefix: ticket/
 docs:
   entry_points:
-    agents: AGENTS.md
-    setup: README.md
-    architecture: docs/README.md
+    - AGENTS.md
+    - README.md
+vcs:
+  kind: jj
+  default_branch: main
+delivery:
+  pr_target: main
+validation:
+  gates:
+    - name: check
+      command: bun run check
 autonomy:
-  mode: unattended
-  ask_for_human: blockers_only
-module_pins:
-  linear-workpad: 883bf519122b
-overrides:
-  linear-workpad:
-    workpad_heading: "## Codex Workpad"
+  profile: default
+  completion_requirements:
+    - Run the strongest feasible validation gate before handoff.
+workflow:
+  preset: default
+  modules:
+    - github
 ```
 
-#### 5.3.1 `version`
+### 5.3 Manifest Field Semantics
 
-- `version` (integer)
-  - REQUIRED.
-  - Current supported value: `1`.
+#### 5.3.1 `project`
 
-#### 5.3.2 `project`
-
-Project identity fields:
-
-- `id` (string)
-  - REQUIRED.
+- `slug` (string)
+  - OPTIONAL.
   - Stable Symphony-facing project key.
-  - SHOULD be lowercase kebab-case.
+  - Used by the default `linear` module as the tracker project slug when present.
+- `repository` (string)
+  - Required by the default `workspace` module.
+  - Repository URL used to populate new issue workspaces.
 - `name` (string)
   - OPTIONAL human-readable name.
-- `repository` (string)
-  - OPTIONAL repository URL or implementation-defined repository identity.
-- `tracker` (object, OPTIONAL)
-  - `kind` (string), currently `linear` when present.
-  - `project_slug` (string), REQUIRED for dispatch when tracker project routing is not supplied by
-    deployment config.
-  - `team_key` (string, OPTIONAL).
+  - Defaults to `slug`.
+- `facts` (object)
+  - OPTIONAL prompt facts rendered by registry-owned modules.
 
-The manifest MAY identify tracker routing, but it MUST NOT contain tracker API tokens.
+The manifest MAY identify tracker routing by project slug, but it MUST NOT contain tracker API
+tokens.
 
-#### 5.3.3 `app`
-
-Fields:
+#### 5.3.2 `app`
 
 - `kind` (string)
-  - REQUIRED.
-  - Standard values: `web`, `api`, `service`, `cli`, `library`, `mobile`, `monorepo`, `docs`,
-    `other`.
-- `language` (string or list, OPTIONAL)
-- `frameworks` (list of strings, OPTIONAL)
-- `packages` (map or list, OPTIONAL)
-  - Implementation-defined package/workspace hints for monorepos.
+  - OPTIONAL.
+  - Default: `local`.
+  - Examples include `web`, `mobile`, `desktop`, `local/internal`, and `production-facing`.
 
-`app.kind` is an input to preset/module defaults; target repo docs remain the authority for exact
-setup commands and architectural style.
+`app.kind` is an input to preset/module defaults; target repository docs remain the authority for
+exact setup commands and architectural style.
 
-#### 5.3.4 `preset`
+#### 5.3.3 `docs`
 
-- `preset` (string)
-  - REQUIRED.
-  - Selects a named Symphony preset.
-
-A preset is a Symphony-owned bundle of default workflow modules, module ordering, policy defaults,
-checks, completion requirements, and transition defaults for a common app/workflow shape. Presets
-MUST be deterministic for a given preset ref and implementation version.
-
-Examples of preset names:
-
-- `default`
-- `docs-only`
-- `web-app`
-- `backend-service`
-- `library`
-- `symphony-internal`
-
-#### 5.3.5 `modules`
-
-- `modules` (list, OPTIONAL)
+- `entry_points` (list of strings)
+  - OPTIONAL.
   - Default: `[]`.
-  - Each entry MAY be a string module ID or an object.
-
-Object form:
-
-```yaml
-modules:
-  - id: github-pr
-    enabled: true
-    config:
-      label: symphony
-```
-
-Fields:
-
-- `id` (string)
-  - REQUIRED in object form.
-- `enabled` (boolean)
-  - Default: `true`.
-  - `false` disables a preset-selected module when the module allows disabling.
-- `config` (object)
-  - Module-specific configuration validated against that module's schema.
-
-Manifest-selected modules augment or override the preset module set according to module semantics.
-The compiler MUST reject unknown modules unless the implementation explicitly supports deferred
-module installation.
-
-#### 5.3.6 `validation`
-
-Fields:
-
-- `gates` (list of objects, OPTIONAL)
-  - Declares project-specific validation gates that modules may reference or require.
-
-Gate object fields:
-
-- `id` (string), REQUIRED.
-- `command` (string), REQUIRED unless a module supplies the command by `id`.
-- `required` (boolean), default `true`.
-- `working_directory` (string), OPTIONAL repo-relative path.
-- `profile` (string), OPTIONAL; examples: `default`, `docs`, `release`.
-- `when` (string or list, OPTIONAL)
-  - Implementation-defined selector for diff scope, app kind, labels, or module conditions.
-
-Validation gates are project-specific command facts. Symphony modules decide when those gates are
-required by a workflow profile.
-
-#### 5.3.7 `vcs`
-
-Fields:
-
-- `kind` (string)
-  - OPTIONAL. Standard values: `jj`, `git`.
-  - When absent, implementations MAY auto-detect.
-- `pr_target` (string)
-  - OPTIONAL. Default: `main`.
-- `branch_prefix` (string)
-  - OPTIONAL. Default: implementation-defined, usually `ticket/`.
-- `commit_style` (string)
-  - OPTIONAL. Standard value: `conventional`.
-- `push_policy` (string)
-  - OPTIONAL. Standard values: `on_handoff`, `manual`, `disabled`.
-
-The compiled workflow uses `delivery.pr_target` as the PR base branch for a run. When the target is
-not `main`, implementations MUST avoid merging or promoting anything to `main` as part of v1.
-
-#### 5.3.8 `docs`
-
-Fields:
-
-- `entry_points` (map, OPTIONAL)
-  - Values are repo-relative paths or lists of repo-relative paths.
-  - Standard keys: `agents`, `setup`, `architecture`, `product`, `design`, `commands`, `runbook`,
-    `contracts`.
-- `source_of_truth` (map, OPTIONAL)
-  - Human-readable routing notes for where project-specific facts live.
+  - Values are repo-relative paths.
 
 The manifest points to docs; it does not copy their content. Repo-local docs remain authoritative for
 project style, setup, command syntax, domain language, product/design constraints, and architecture.
 
-#### 5.3.9 `autonomy`
+#### 5.3.4 `vcs`
 
-Fields:
+- `kind` (string)
+  - OPTIONAL.
+  - Default: `git`.
+- `default_branch` (string)
+  - OPTIONAL.
+  - Default: `main`.
+- `posture` (string)
+  - OPTIONAL implementation-defined VCS guidance.
 
-- `mode` (string)
-  - OPTIONAL. Standard values: `unattended`, `assisted`.
-  - Default: `unattended`.
-- `ask_for_human` (string)
-  - OPTIONAL. Standard values: `blockers_only`, `on_ambiguity`, `never`.
-  - Default: `blockers_only` for unattended runs.
-- `external_side_effects` (string)
-  - OPTIONAL. Standard values: `ticket_authorized`, `explicit_approval`, `disabled`.
-- `destructive_ops` (string)
-  - OPTIONAL. Standard values: `explicit_approval`, `disabled`.
+#### 5.3.5 `delivery`
+
+- `pr_target` (string)
+  - OPTIONAL.
+  - Defaults to `vcs.default_branch`.
+
+The compiled workflow uses `delivery.pr_target` as the PR base branch for a run. When the target is
+not `main`, implementations MUST avoid merging or promoting anything to `main` as part of v1.
+
+#### 5.3.6 `validation`
+
+- `gates` (list of objects)
+  - OPTIONAL.
+  - Default: `[]`.
+  - Each gate object contains `name` and `command` strings.
+
+Validation gates are project-specific command facts. Symphony modules decide when those gates are
+required by a workflow profile.
+
+#### 5.3.7 `autonomy`
+
+- `profile` (string)
+  - OPTIONAL.
+  - Default: `default`.
+- `completion_requirements` (list of strings)
+  - OPTIONAL.
+  - Default: `[]`.
+- `review` (object)
+  - OPTIONAL implementation-defined review policy.
 
 Autonomy policy constrains workflow modules and prompt rendering. It does not override stricter
-service deployment, Codex approval, sandbox, or host controls.
+service deployment, Codex approval, sandbox, or host controls. `policy_ref` is derived from the
+resolved effective policy and MUST NOT be supplied by the manifest.
 
-#### 5.3.10 `module_pins`
+#### 5.3.8 `workflow`
 
-- `module_pins` (map `module_id -> ref`, OPTIONAL)
-  - Pins a module to a version, digest, git ref, registry ref, or implementation-defined immutable
-    reference.
+- `preset` (string)
+  - OPTIONAL.
+  - Default: `default`.
+- `modules` (list of strings)
+  - OPTIONAL.
+  - Default: `[]`.
+  - Entries are appended to preset modules.
 
-Pins MUST be reflected in compiled workflow metadata and in `policy_ref` calculation.
-
-#### 5.3.11 `overrides`
-
-- `overrides` (map `module_id -> object`, OPTIONAL)
-  - Module-specific override config.
-  - Overrides are applied after preset defaults and before compilation.
-  - Overrides MUST validate against the owning module schema.
-
-Implementations SHOULD reject overrides for modules that are neither selected by the preset nor
-selected by the manifest.
+A preset is a Symphony-owned bundle of default workflow modules, module ordering, policy defaults,
+checks, completion requirements, and transition defaults for a common app/workflow shape. Presets
+MUST be deterministic for a given preset ref and implementation version.
 
 ### 5.4 Workflow Module Semantics
 
@@ -691,8 +616,7 @@ Compilation pipeline:
 
 Rendered Markdown:
 
-- A compiler MAY render Markdown for debugging, human inspection, or compatibility with a legacy
-  runner.
+- A compiler MAY render Markdown for debugging or human inspection.
 - Rendered Markdown MUST include provenance showing the manifest path/ref, preset, module refs, and
   `policy_ref`.
 - Rendered Markdown MUST be treated as generated output. Target repos MUST NOT copy it as their
@@ -855,6 +779,7 @@ fields locally if they want stricter startup checks.
 - `runtime.codex.turn_timeout_ms`: integer, default `3600000`
 - `runtime.codex.read_timeout_ms`: integer, default `5000`
 - `runtime.codex.stall_timeout_ms`: integer, default `300000`
+  - If `<= 0`, stall detection is disabled.
 
 Delivery and docs:
 
@@ -865,13 +790,7 @@ Delivery and docs:
 
 Profile policy:
 
-- `profiles` (object, OPTIONAL)
-  - Declares repository-owned workflow policy profiles in the manifest.
-  - `default` is REQUIRED when `profiles` is present and acts as the baseline policy.
-  - A runtime MAY resolve one selected profile on top of `default`; v1 does not support
-    profile-to-profile inheritance or more than one selected override layer.
-  - External tracker routing facts, including Linear project IDs or slugs, are not profile schema
-    and SHOULD live in operator-local binding config.
+- `autonomy.profile`: string, default `default`
 - Resolved profile policy MUST include `delivery.pr_target`.
 - Selected-profile `codex` overrides MAY set `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` before the Codex thread/turn starts.
@@ -917,7 +836,8 @@ Layering invariants:
 
 ### 6.5 Prompt Template Contract
 
-The compiled workflow provides the per-issue `prompt_template`.
+The compiled workflow provides the per-issue `prompt_template`. Symphony generates it from
+registry-owned module sections and manifest facts.
 
 Rendering requirements:
 
@@ -1000,8 +920,8 @@ Validation checks:
   of a committed manifest `project_slug`.
 - `runtime.codex.command` is present and non-empty.
 - `harness.codex_home` and harness global instructions are available.
-- If profiles are configured, `profiles.default` is present and every selected profile resolves to an
-  effective policy with a string `delivery.pr_target`.
+- Every selected workflow profile resolves to an effective policy with a string
+  `delivery.pr_target`.
 - Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides
   and external tracker bindings.
 - External binding config with ambiguous exact selectors fails validation before dispatch.
@@ -1265,16 +1185,18 @@ Algorithm summary:
 
 Notes:
 
-- This section does not assume any specific repository/VCS workflow.
+- This section does not assume any specific repository/VCS workflow outside manifest mode.
 - Workspace preparation beyond directory creation (for example dependency bootstrap, checkout/sync,
   code generation) is implementation-defined and is typically handled via hooks.
 
 ### 9.3 OPTIONAL Workspace Population (Implementation-Defined)
 
-The spec does not require any built-in VCS or repository bootstrap behavior.
-
 Implementations MAY populate or synchronize the workspace using implementation-defined logic and/or
 hooks (for example `after_create` and/or `before_run`).
+
+The default registry-owned `workspace` module uses `project.repository` to compile an `after_create`
+clone hook. Implementations MAY provide additional presets or modules for other population
+strategies.
 
 Failure handling:
 
@@ -2012,9 +1934,7 @@ API design notes:
 1. `Manifest/Module/Config Failures`
    - Missing `symphony.yml`
    - Invalid manifest YAML
-   - Unsupported manifest version
    - Missing preset or workflow module
-   - Module pin, dependency, conflict, or override validation failure
    - Compiled workflow validation failure
    - Unsupported tracker kind or missing tracker credentials/project slug
    - Missing harness `CODEX_HOME` or harness global instructions
@@ -2437,7 +2357,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - Manifest path precedence:
   - explicit manifest path is used when provided
-  - target repo root default is `symphony.yml` when no explicit manifest path is provided
+  - cwd default is `symphony.yml` when no explicit manifest path is provided
 - Manifest, module, and relevant deployment config changes trigger recompile/re-apply without
   restart
 - Invalid manifest/module reload keeps the last known good compiled workflow and emits an
@@ -2445,12 +2365,13 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Missing `symphony.yml` returns typed error
 - Invalid manifest YAML returns typed error
 - Manifest root non-map returns typed error
-- Unsupported manifest version returns typed error
-- `project.id`, `app.kind`, and `preset` validation fails when any required value is missing
+- Default selected modules report a path-specific diagnostic when `project.repository` is missing
 - Preset resolution is deterministic
-- Module selection combines preset modules, manifest-selected modules, pins, and overrides
-- Unknown modules, invalid module pins, dependency failures, conflicts, and override schema errors
-  return typed errors
+- `symphony.yml` manifest defaults resolve from installed presets/modules without release-channel
+  fields
+- `symphony.yml` default workspace resolution compiles a repository population hook from
+  `project.repository`
+- Unknown manifest presets/modules return path-specific diagnostics
 - `policy_ref` changes when normalized manifest, selected module refs, profile inputs, or rendered
   policy content change
 - Config defaults apply when OPTIONAL values are missing
@@ -2557,9 +2478,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 - CLI or host config accepts an explicit manifest path argument (`path-to-symphony.yml`) or
   equivalent setting
-- CLI or host config uses `<target-repo>/symphony.yml` when no explicit manifest path is provided
-- CLI or host config errors on nonexistent explicit manifest path or missing default
-  `symphony.yml`
+- CLI accepts a positional manifest path argument
+- CLI uses `./symphony.yml` when no manifest path argument is provided
+- CLI errors on nonexistent explicit manifest path or missing default manifest
 - CLI or host config accepts or derives the harness `CODEX_HOME`
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally
@@ -2590,8 +2511,7 @@ Use the same validation profiles as Section 17:
 
 - Manifest path selection supports explicit runtime path and target repo root default
 - `symphony.yml` loader with v1 YAML object schema
-- Workflow module registry with presets, selected modules, pins, dependencies, conflicts, and
-  overrides
+- Workflow module registry with presets and selected modules
 - Workflow compiler that produces `policy_ref`, prompt template, checks, completion requirements,
   transitions, tools, delivery config, harness config, runtime config, and docs routing
 - Typed config layer with defaults and `$` resolution

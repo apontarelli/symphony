@@ -167,6 +167,7 @@ defmodule SymphonyElixir.PromptBuilder do
   defp validation_requirement_items(policy) do
     [
       named_policy_value("checks", policy_value(policy, "checks")),
+      named_policy_value("completion_requirements", policy_value(policy, "completion_requirements")),
       named_policy_value("validation", policy_value(policy, "validation")),
       named_policy_value("validation_requirements", policy_value(policy, "validation_requirements"))
     ]

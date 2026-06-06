@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.WorkflowStore do
   @moduledoc """
-  Caches the last known good workflow and reloads it when `WORKFLOW.md` changes.
+  Caches the last known good workflow and reloads it when the selected workflow file changes.
   """
 
   use GenServer
@@ -48,7 +48,9 @@ defmodule SymphonyElixir.WorkflowStore do
 
   @impl true
   def init(_opts) do
-    case load_state(Workflow.workflow_file_path()) do
+    path = selected_workflow_path()
+
+    case load_state(path) do
       {:ok, state} ->
         schedule_poll()
         {:ok, state}
@@ -94,7 +96,7 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp reload_state(%State{} = state) do
-    path = Workflow.workflow_file_path()
+    path = reload_workflow_path(state)
 
     if path != state.path do
       reload_path(path, state)
@@ -148,6 +150,17 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp log_reload_error(path, reason) do
-    Logger.error("Failed to reload workflow path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
+    Logger.error("Failed to reload manifest path=#{path} reason=#{inspect(reason)}; keeping last known good configuration")
+  end
+
+  defp selected_workflow_path do
+    case Application.get_env(:symphony_elixir, :workflow_file_path) do
+      path when is_binary(path) -> path
+      _ -> Workflow.selected_workflow_file_path()
+    end
+  end
+
+  defp reload_workflow_path(%State{}) do
+    selected_workflow_path()
   end
 end

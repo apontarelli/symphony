@@ -47,7 +47,7 @@ defmodule SymphonyElixir.CLITest do
       end
     }
 
-    assert {:error, banner} = CLI.evaluate(["WORKFLOW.md"], deps)
+    assert {:error, banner} = CLI.evaluate(["symphony.yml"], deps)
     assert banner =~ "This Symphony implementation is a low key engineering preview."
     assert banner =~ "Codex will run without any guardrails."
     assert banner =~ "SymphonyElixir is not a supported product and is presented as-is."
@@ -63,9 +63,9 @@ defmodule SymphonyElixir.CLITest do
     refute_received :started
   end
 
-  test "defaults to WORKFLOW.md when workflow path is missing" do
+  test "defaults to symphony.yml when manifest path is missing" do
     deps = %{
-      file_regular?: fn path -> Path.basename(path) == "WORKFLOW.md" end,
+      file_regular?: fn path -> Path.basename(path) == "symphony.yml" end,
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
@@ -79,9 +79,36 @@ defmodule SymphonyElixir.CLITest do
     assert :ok = CLI.evaluate([@ack_flag], deps)
   end
 
+  test "uses symphony.yml as the only default manifest" do
+    parent = self()
+    manifest_path = Path.expand("symphony.yml")
+
+    deps = %{
+      file_regular?: fn path ->
+        send(parent, {:workflow_checked, path})
+        path == manifest_path
+      end,
+      set_workflow_file_path: fn path ->
+        send(parent, {:workflow_set, path})
+        :ok
+      end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      set_linear_profile_bindings: fn _bindings -> :ok end,
+      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
+      set_profile_override: fn _profile -> :ok end,
+      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate([@ack_flag], deps)
+    assert_received {:workflow_checked, ^manifest_path}
+    assert_received {:workflow_set, ^manifest_path}
+  end
+
   test "uses an explicit workflow path override when provided" do
     parent = self()
-    workflow_path = "tmp/custom/WORKFLOW.md"
+    workflow_path = "tmp/custom/symphony.yml"
     expanded_path = Path.expand(workflow_path)
 
     deps = %{
@@ -125,12 +152,12 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
-    assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "WORKFLOW.md"], deps)
+    assert :ok = CLI.evaluate([@ack_flag, "--logs-root", "tmp/custom-logs", "symphony.yml"], deps)
     assert_received {:logs_root, expanded_path}
     assert expanded_path == Path.expand("tmp/custom-logs")
   end
 
-  test "returns not found when workflow file does not exist" do
+  test "returns not found when manifest file does not exist" do
     deps = %{
       file_regular?: fn _path -> false end,
       set_workflow_file_path: fn _path -> :ok end,
@@ -143,8 +170,8 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
-    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "Workflow file not found:"
+    assert {:error, message} = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
+    assert message =~ "Manifest file not found:"
   end
 
   test "returns startup error when app cannot start" do
@@ -160,8 +187,8 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn -> {:error, :boom} end
     }
 
-    assert {:error, message} = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
-    assert message =~ "Failed to start Symphony with workflow"
+    assert {:error, message} = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
+    assert message =~ "Failed to start Symphony with manifest"
     assert message =~ ":boom"
   end
 
@@ -178,7 +205,7 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
-    assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
+    assert :ok = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
   end
 
   test "accepts external Linear bindings and one-process profile override" do
@@ -210,7 +237,7 @@ defmodule SymphonyElixir.CLITest do
 
     assert :ok =
              CLI.evaluate(
-               [@ack_flag, "--linear-bindings", "ops/bindings.yml", "--profile", "strict", "WORKFLOW.md"],
+               [@ack_flag, "--linear-bindings", "ops/bindings.yml", "--profile", "strict", "symphony.yml"],
                deps
              )
 
@@ -221,9 +248,9 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:profile, "strict"}
   end
 
-  test "loads default local Linear bindings next to the workflow file" do
+  test "loads default local Linear bindings next to the manifest" do
     parent = self()
-    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+    workflow_path = Path.expand("tmp/project/symphony.yml")
     default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
 
     deps = %{
@@ -257,7 +284,7 @@ defmodule SymphonyElixir.CLITest do
 
   test "skips default local Linear bindings when the file is absent" do
     parent = self()
-    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+    workflow_path = Path.expand("tmp/project/symphony.yml")
 
     deps = %{
       file_regular?: fn path -> path == workflow_path end,
@@ -289,7 +316,7 @@ defmodule SymphonyElixir.CLITest do
 
   test "explicit Linear bindings override the default local bindings path" do
     parent = self()
-    workflow_path = Path.expand("tmp/project/WORKFLOW.md")
+    workflow_path = Path.expand("tmp/project/symphony.yml")
     explicit_path = Path.expand("tmp/ops/bindings.yml")
     default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
 

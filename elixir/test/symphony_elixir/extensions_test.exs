@@ -107,17 +107,19 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Second prompt")
-    send(WorkflowStore, :poll)
+    workflow_store = Process.whereis(WorkflowStore)
+    assert is_pid(workflow_store)
+    send(workflow_store, :poll)
 
     assert_eventually(fn ->
       match?({:ok, %{prompt: "Second prompt"}}, Workflow.current())
     end)
 
-    File.write!(Workflow.workflow_file_path(), "---\ntracker: [\n---\nBroken prompt\n")
+    File.write!(Workflow.workflow_file_path(), "project: [\n")
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
-    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "THIRD_WORKFLOW.md")
+    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "third-symphony.yml")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
     Workflow.set_workflow_file_path(third_workflow)
     assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
@@ -128,24 +130,79 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
   end
 
-  test "workflow store init stops on missing workflow file" do
-    missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "MISSING_WORKFLOW.md")
+  test "workflow store keeps last good manifest when manifest reload fails" do
+    ensure_workflow_store_running()
+    manifest_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "symphony.yml")
+    File.write!(manifest_path, "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\n")
+    Workflow.set_workflow_file_path(manifest_path)
+
+    assert {:ok, %{config: config}} = Workflow.current()
+    assert config["tracker"]["project_slug"] == "manifest-repo"
+
+    File.write!(manifest_path, "project: [\n")
+
+    assert {:error, _reason} = WorkflowStore.force_reload()
+    assert {:ok, %{config: last_good_config}} = Workflow.current()
+    assert last_good_config["tracker"]["project_slug"] == "manifest-repo"
+  end
+
+  test "workflow store keeps last good default manifest when the manifest disappears" do
+    original_workflow_path = Workflow.workflow_file_path()
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+    end)
+
+    workflow_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-default-manifest-reload-#{System.unique_integer([:positive])}")
+
+    manifest_path = Path.join(workflow_root, "symphony.yml")
+    File.mkdir_p!(workflow_root)
+
+    File.write!(
+      manifest_path,
+      "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\n"
+    )
+
+    Workflow.clear_workflow_file_path()
+
+    try do
+      File.cd!(workflow_root, fn ->
+        expected_manifest_path = Path.join(File.cwd!(), "symphony.yml")
+
+        assert {:ok, state} = WorkflowStore.init([])
+        assert state.path == expected_manifest_path
+        assert state.workflow.config["tracker"]["project_slug"] == "manifest-repo"
+
+        File.rm!(manifest_path)
+
+        assert {:noreply, reloaded_state} = WorkflowStore.handle_info(:poll, state)
+        assert reloaded_state.path == expected_manifest_path
+        assert reloaded_state.workflow.config["tracker"]["project_slug"] == "manifest-repo"
+      end)
+    after
+      File.rm_rf(workflow_root)
+    end
+  end
+
+  test "workflow store init stops on missing manifest file" do
+    missing_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "missing-symphony.yml")
     Workflow.set_workflow_file_path(missing_path)
 
-    assert {:stop, {:missing_workflow_file, ^missing_path, :enoent}} = WorkflowStore.init([])
+    assert {:stop, {:missing_manifest_file, ^missing_path, :enoent}} = WorkflowStore.init([])
   end
 
   test "workflow store start_link and poll callback cover missing-file error paths" do
     ensure_workflow_store_running()
     existing_path = Workflow.workflow_file_path()
-    manual_path = Path.join(Path.dirname(existing_path), "MANUAL_WORKFLOW.md")
-    missing_path = Path.join(Path.dirname(existing_path), "MANUAL_MISSING_WORKFLOW.md")
+    manual_path = Path.join(Path.dirname(existing_path), "manual-symphony.yml")
+    missing_path = Path.join(Path.dirname(existing_path), "manual-missing-symphony.yml")
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
 
     Workflow.set_workflow_file_path(missing_path)
 
-    assert {:error, {:missing_workflow_file, ^missing_path, :enoent}} =
+    assert {:error, {:missing_manifest_file, ^missing_path, :enoent}} =
              WorkflowStore.force_reload()
 
     write_workflow_file!(manual_path, prompt: "Manual workflow prompt")
@@ -155,22 +212,22 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert Process.alive?(manual_pid)
 
     state = :sys.get_state(manual_pid)
-    File.write!(manual_path, "---\ntracker: [\n---\nBroken prompt\n")
+    File.write!(manual_path, "project: [\n")
     assert {:noreply, returned_state} = WorkflowStore.handle_info(:poll, state)
     assert returned_state.workflow.prompt == "Manual workflow prompt"
     refute returned_state.stamp == nil
-    assert_receive :poll, 1_100
+    assert_receive :poll, 1_500
 
     Workflow.set_workflow_file_path(missing_path)
     assert {:noreply, path_error_state} = WorkflowStore.handle_info(:poll, returned_state)
     assert path_error_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
+    assert_receive :poll, 1_500
 
     Workflow.set_workflow_file_path(manual_path)
     File.rm!(manual_path)
     assert {:noreply, removed_state} = WorkflowStore.handle_info(:poll, path_error_state)
     assert removed_state.workflow.prompt == "Manual workflow prompt"
-    assert_receive :poll, 1_100
+    assert_receive :poll, 1_500
 
     Process.exit(manual_pid, :normal)
     restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)

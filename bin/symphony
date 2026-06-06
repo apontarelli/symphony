@@ -4,13 +4,13 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  symphony [project-name] [--workflow /path/to/WORKFLOW.md] [options]
-  symphony --workflow /path/to/WORKFLOW.md [options]
+  symphony [project-name] [--workflow /path/to/symphony.yml] [options]
+  symphony --workflow /path/to/symphony.yml [options]
 
 Project resolution:
-  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/WORKFLOW.md.
-  --workflow <path>           Uses the explicit workflow path.
-  no project or workflow      Uses ./WORKFLOW.md when present, otherwise the repo workflow.
+  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.yml.
+  --workflow <path>           Uses the explicit manifest path.
+  no project or workflow      Uses ./symphony.yml when present, otherwise the repo manifest.
 
 Options:
   --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
@@ -106,7 +106,7 @@ run_elixir() {
   local args
 
   [[ -n "$workflow" ]] || die "SYMPHONY_WORKFLOW is required"
-  [[ -f "$workflow" ]] || die "workflow file not found: $workflow"
+  [[ -f "$workflow" ]] || die "manifest file not found: $workflow"
   [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
 
   export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/nix/var/nix/profiles/default/bin:${PATH}"
@@ -283,22 +283,22 @@ main() {
     if [[ -f "$expanded_project" ]]; then
       workflow="$(cd "$(dirname "$expanded_project")" >/dev/null 2>&1 && pwd)/$(basename "$expanded_project")"
       project_name="$(basename "$(dirname "$workflow")")"
-    elif [[ -d "$expanded_project" ]]; then
-      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/WORKFLOW.md"
-      project_name="$(basename "$expanded_project")"
-    else
-      workflow="$dev_root/$project/WORKFLOW.md"
-      project_name="$project"
-    fi
-  elif [[ -f WORKFLOW.md ]]; then
-    workflow="$PWD/WORKFLOW.md"
-    project_name="$(basename "$PWD")"
-  else
-    workflow="$symphony_home/WORKFLOW.md"
-    project_name="symphony"
-  fi
+	    elif [[ -d "$expanded_project" ]]; then
+	      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/symphony.yml"
+	      project_name="$(basename "$expanded_project")"
+	    else
+	      workflow="$dev_root/$project/symphony.yml"
+	      project_name="$project"
+	    fi
+	  elif [[ -f symphony.yml ]]; then
+	    workflow="$PWD/symphony.yml"
+	    project_name="$(basename "$PWD")"
+	  else
+	    workflow="$symphony_home/symphony.yml"
+	    project_name="symphony"
+	  fi
 
-  [[ -f "$workflow" ]] || die "WORKFLOW.md not found: $workflow"
+	  [[ -f "$workflow" ]] || die "manifest not found: $workflow"
 
   if [[ -z "$logs_root" ]]; then
     logs_root="$symphony_home/log"

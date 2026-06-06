@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for running Symphony with an optional manifest path.
   """
 
   alias SymphonyElixir.Config.ProfileBindings
@@ -49,7 +49,7 @@ defmodule SymphonyElixir.CLI do
              :ok <- maybe_set_logs_root(opts, deps),
              :ok <- maybe_set_server_port(opts, deps),
              :ok <- maybe_set_profile_override(opts, deps) do
-          run(Path.expand("WORKFLOW.md"), opts, deps)
+          run(default_workflow_path(deps), opts, deps)
         end
 
       {opts, [workflow_path], []} ->
@@ -78,7 +78,7 @@ defmodule SymphonyElixir.CLI do
         start_runtime(expanded_path, deps)
       end
     else
-      {:error, "Workflow file not found: #{expanded_path}"}
+      {:error, "Manifest file not found: #{expanded_path}"}
     end
   end
 
@@ -88,14 +88,16 @@ defmodule SymphonyElixir.CLI do
         :ok
 
       {:error, reason} ->
-        {:error, "Failed to start Symphony with workflow #{workflow_path}: #{inspect(reason)}"}
+        {:error, "Failed to start Symphony with manifest #{workflow_path}: #{inspect(reason)}"}
     end
   end
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--linear-bindings <path>] [--profile <name>] [path-to-WORKFLOW.md]\n\nIf --linear-bindings is omitted, Symphony loads linear-profile-bindings.local.yml next to WORKFLOW.md when present."
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--linear-bindings <path>] [--profile <name>] [path-to-symphony.yml]\n\nIf --linear-bindings is omitted, Symphony loads linear-profile-bindings.local.yml next to the selected manifest when present."
   end
+
+  defp default_workflow_path(_deps), do: Path.expand("symphony.yml")
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do

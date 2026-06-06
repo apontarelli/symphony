@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from `WORKFLOW.md`.
+  Runtime configuration loaded from the selected workflow file.
   """
 
   alias SymphonyElixir.Config.ProfileBindings
@@ -51,7 +51,7 @@ defmodule SymphonyElixir.Config do
         settings
 
       {:error, reason} ->
-        raise ArgumentError, message: format_config_error(reason)
+        raise ArgumentError, message: format_error(reason)
     end
   end
 
@@ -190,6 +190,50 @@ defmodule SymphonyElixir.Config do
   defp normalize_map_keys(value) when is_list(value), do: Enum.map(value, &normalize_map_keys/1)
   defp normalize_map_keys(value), do: value
 
+  @spec format_error(term()) :: String.t()
+  def format_error(:missing_linear_api_token), do: "Linear API token missing in selected workflow config"
+
+  def format_error(:missing_linear_project_slug), do: "Linear project slug missing in selected workflow config"
+
+  def format_error(:missing_tracker_kind), do: "Tracker kind missing in selected workflow config"
+
+  def format_error({:unsupported_tracker_kind, kind}),
+    do: "Unsupported tracker kind in selected workflow config: #{inspect(kind)}"
+
+  def format_error({:invalid_workflow_config, message}), do: "Invalid selected workflow config: #{message}"
+
+  def format_error({:manifest_parse_error, raw_reason}), do: "Failed to parse symphony.yml: #{inspect(raw_reason)}"
+
+  def format_error({:invalid_manifest, diagnostics}),
+    do: "Invalid symphony.yml manifest: #{format_manifest_diagnostics(diagnostics)}"
+
+  def format_error({:missing_manifest_file, path, raw_reason}),
+    do: "Missing symphony.yml at #{path}: #{inspect(raw_reason)}"
+
+  def format_error({:invalid_linear_profile_bindings, message}), do: "Invalid Linear profile bindings: #{message}"
+
+  def format_error({:unknown_linear_profile_binding, source, profile, reason}),
+    do: "Invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}"
+
+  def format_error(:missing_linear_catch_all_team_selector),
+    do: "Linear catch-all profile binding requires external team_id or team_key"
+
+  def format_error(other), do: "Invalid workflow config: #{inspect(other)}"
+
+  @spec config_error?(term()) :: boolean()
+  def config_error?(:missing_linear_api_token), do: true
+  def config_error?(:missing_linear_project_slug), do: true
+  def config_error?(:missing_tracker_kind), do: true
+  def config_error?({:unsupported_tracker_kind, _kind}), do: true
+  def config_error?({:invalid_workflow_config, _message}), do: true
+  def config_error?({:manifest_parse_error, _reason}), do: true
+  def config_error?({:invalid_manifest, _diagnostics}), do: true
+  def config_error?({:missing_manifest_file, _path, _reason}), do: true
+  def config_error?({:invalid_linear_profile_bindings, _message}), do: true
+  def config_error?({:unknown_linear_profile_binding, _source, _profile, _reason}), do: true
+  def config_error?(:missing_linear_catch_all_team_selector), do: true
+  def config_error?(_reason), do: false
+
   defp validate_semantics(settings) do
     cond do
       is_nil(settings.tracker.kind) ->
@@ -211,22 +255,7 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp format_config_error(reason) do
-    case reason do
-      {:invalid_workflow_config, message} ->
-        "Invalid WORKFLOW.md config: #{message}"
-
-      {:missing_workflow_file, path, raw_reason} ->
-        "Missing WORKFLOW.md at #{path}: #{inspect(raw_reason)}"
-
-      {:workflow_parse_error, raw_reason} ->
-        "Failed to parse WORKFLOW.md: #{inspect(raw_reason)}"
-
-      :workflow_front_matter_not_a_map ->
-        "Failed to parse WORKFLOW.md: workflow front matter must decode to a map"
-
-      other ->
-        "Invalid WORKFLOW.md config: #{inspect(other)}"
-    end
+  defp format_manifest_diagnostics(diagnostics) when is_list(diagnostics) do
+    Enum.map_join(diagnostics, ", ", fn %{path: path, message: message} -> "#{path} #{message}" end)
   end
 end
