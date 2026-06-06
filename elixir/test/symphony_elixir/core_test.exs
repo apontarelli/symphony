@@ -1133,7 +1133,7 @@ defmodule SymphonyElixir.CoreTest do
     assert String.trim(prompt) != ""
     assert prompt =~ "You are working on a Linear issue for Symphony."
     assert prompt =~ "Workflow modules:"
-    assert prompt =~ "Validation gates:\n- test: mise exec -- mix test"
+    assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() == prompt
 
@@ -1967,6 +1967,7 @@ defmodule SymphonyElixir.CoreTest do
     prompt = PromptBuilder.build_prompt(issue)
 
     assert prompt =~ "Target main"
+    assert prompt =~ "target=main"
     assert prompt =~ ~s("pr_target": "main")
     assert prompt =~ ~s("policy_ref")
   end
@@ -2054,7 +2055,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "prompt builder uses a sensible default template when workflow prompt is blank" do
+  test "prompt builder uses the generated manifest template when workflow prompt is blank" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "   \n")
 
     issue = %Issue{
@@ -2068,16 +2069,17 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear issue."
+    assert prompt =~ "You are working on a Linear issue for project."
+    assert prompt =~ "Workflow modules:"
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
-    assert prompt =~ "Resolved workflow policy:"
-    assert prompt =~ ~s("pr_target": "main")
-    assert prompt =~ "Body:"
+    assert prompt =~ "- PR target: main"
+    assert prompt =~ "target=main"
     assert prompt =~ "Include enough issue context to start working."
+    assert prompt =~ "Selected Workflow Profile"
     assert Config.workflow_prompt() =~ "{{ issue.identifier }}"
     assert Config.workflow_prompt() =~ "{{ issue.title }}"
-    assert Config.workflow_prompt() =~ "{{ policy_json }}"
+    assert Config.workflow_prompt() =~ "Workflow modules:"
     assert Config.workflow_prompt() =~ "{{ issue.description }}"
   end
 
@@ -2158,7 +2160,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Workflow modules:"
     assert prompt =~ "Use Linear as the tracker"
     assert prompt =~ "Run Codex with the configured runtime settings"
-    assert prompt =~ "Validation gates:\n- test: mise exec -- mix test"
+    assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use generated manifests"

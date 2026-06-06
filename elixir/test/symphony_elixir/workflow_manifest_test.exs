@@ -10,29 +10,31 @@ defmodule SymphonyElixir.WorkflowManifestTest do
 
     path =
       write_manifest!("""
+      version: 1
       project:
         slug: target-repo
         name: Target Repo
         repository: github.com/example/target-repo
+        kind: elixir
+        app_kind: web
         facts:
           owner: platform
-      app:
-        kind: web
       docs:
-        entry_points:
+        entrypoints:
           - README.md
           - docs/ARCHITECTURE.md
       vcs:
-        kind: jj
+        mode: jj
         default_branch: trunk
         posture: stacked
       delivery:
         pr_target: release/next
       validation:
-        gates:
+        commands:
           - name: unit
             command: mix test
-      autonomy:
+      automation:
+        posture: unattended
         profile: default
         completion_requirements:
           - tests-green
@@ -52,12 +54,24 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["hooks"]["after_create"] == "git clone --depth 1 'github.com/example/target-repo' ."
     assert config["manifest"]["project"]["name"] == "Target Repo"
     assert config["manifest"]["project"]["repository"] == "github.com/example/target-repo"
+    assert config["manifest"]["project"]["kind"] == "elixir"
+    assert config["manifest"]["project"]["app_kind"] == "web"
     assert config["manifest"]["project"]["facts"] == %{"owner" => "platform"}
-    assert config["manifest"]["app"]["kind"] == "web"
-    assert config["manifest"]["docs"]["entry_points"] == ["README.md", "docs/ARCHITECTURE.md"]
-    assert config["manifest"]["vcs"]["kind"] == "jj"
+    assert config["manifest"]["docs"]["entrypoints"] == ["README.md", "docs/ARCHITECTURE.md"]
+    assert config["manifest"]["vcs"]["mode"] == "jj"
     assert config["manifest"]["vcs"]["posture"] == "stacked"
-    assert config["manifest"]["workflow"]["modules"] == ["linear", "workspace", "codex", "observability"]
+
+    assert config["manifest"]["workflow"]["modules"] == [
+             "repo.docs",
+             "validation.commands",
+             "tracker.linear",
+             "workspace",
+             "codex.harness",
+             "delivery.github_pr",
+             "observability"
+           ]
+
+    refute Map.has_key?(config["manifest"]["workflow"], "_module_requests")
     assert config["observability"]["dashboard_enabled"] == true
     assert config["observability"]["refresh_ms"] == 1_000
     assert config["checks"] == [%{"name" => "unit", "command" => "mix test"}]
@@ -70,6 +84,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
     System.put_env("LINEAR_API_KEY", "manifest-token")
     Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
     assert {:ok, policy} = Config.effective_policy()
     assert is_binary(policy["policy_ref"])
@@ -83,8 +98,10 @@ defmodule SymphonyElixir.WorkflowManifestTest do
 
     assert prompt =~ "Target Repo"
     assert prompt =~ "Repository: github.com/example/target-repo"
+    assert prompt =~ "Project kind: elixir"
     assert prompt =~ "App kind: web"
     assert prompt =~ "Project facts:\n- owner: platform"
+    assert prompt =~ "VCS:\n- Mode: jj"
     assert prompt =~ "- Posture: stacked"
     assert prompt =~ "Delivery:\n- PR target: release/next"
     assert prompt =~ "mix test"
@@ -93,21 +110,33 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Use the dashboard and status APIs as operator-visible evidence"
   end
 
-  test "selected modules return path-specific requirement diagnostics" do
+  test "legacy manifest vocabulary is rejected instead of translated" do
     path =
       write_manifest!("""
-      project: {}
+      project:
+        slug: target-repo
+        repository: github.com/example/target-repo
+      app:
+        kind: web
+      docs:
+        entry_points:
+          - README.md
+      vcs:
+        kind: jj
+      validation:
+        gates:
+          - name: unit
+            command: mix test
+      autonomy:
+        profile: default
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
-    refute Enum.any?(diagnostics, &(&1.path == "project.slug"))
-    assert %{path: "project.repository", message: "is required by selected workflow modules"} in diagnostics
-
-    path = write_manifest!("app:\n  kind: web\n")
-
-    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
-    refute Enum.any?(diagnostics, &(&1.path == "project.slug"))
-    assert %{path: "project.repository", message: "is required by selected workflow modules"} in diagnostics
+    assert %{path: "app", message: "is not supported; use project.app_kind"} in diagnostics
+    assert %{path: "docs.entry_points", message: "is not supported; use docs.entrypoints"} in diagnostics
+    assert %{path: "vcs.kind", message: "is not supported; use vcs.mode"} in diagnostics
+    assert %{path: "validation.gates", message: "is not supported; use validation.commands"} in diagnostics
+    assert %{path: "autonomy", message: "is not supported; use automation"} in diagnostics
   end
 
   test "present optional sections can omit list fields" do
@@ -117,13 +146,22 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         slug: target-repo
         repository: github.com/example/target-repo
       docs: {}
+      validation: {}
       workflow:
         preset: default
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
-    assert config["manifest"]["docs"]["entry_points"] == []
-    assert config["manifest"]["workflow"]["modules"] == ["linear", "workspace", "codex"]
+    assert config["manifest"]["docs"]["entrypoints"] == []
+
+    assert config["manifest"]["workflow"]["modules"] == [
+             "repo.docs",
+             "validation.commands",
+             "tracker.linear",
+             "workspace",
+             "codex.harness",
+             "delivery.github_pr"
+           ]
   end
 
   test "missing file and non-map YAML return typed manifest errors" do
@@ -142,92 +180,107 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     path =
       write_manifest!("""
       project: 123
-      app: []
       docs: no
       vcs: []
       delivery: bad
       validation: bad
-      autonomy: bad
+      automation: bad
       workflow: bad
       runtime: bad
+      harness: bad
+      bindings: bad
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
 
     assert %{path: "project", message: "must be a map"} in diagnostics
-    assert %{path: "app", message: "must be a map"} in diagnostics
     assert %{path: "docs", message: "must be a map"} in diagnostics
     assert %{path: "vcs", message: "must be a map"} in diagnostics
     assert %{path: "delivery", message: "must be a map"} in diagnostics
     assert %{path: "validation", message: "must be a map"} in diagnostics
-    assert %{path: "autonomy", message: "must be a map"} in diagnostics
+    assert %{path: "automation", message: "must be a map"} in diagnostics
     assert %{path: "workflow", message: "must be a map"} in diagnostics
     assert %{path: "runtime", message: "must be a map"} in diagnostics
+    assert %{path: "harness", message: "must be a map"} in diagnostics
+    assert %{path: "bindings", message: "must be a map"} in diagnostics
   end
 
   test "invalid nested field types return field-level diagnostics" do
     path =
       write_manifest!("""
+      version: "1"
       project:
         slug: 123
         name: 456
         repository: 789
+        kind: []
+        app_kind: 123
         facts: "not-a-map"
-      app:
-        kind: 123
       docs:
-        entry_points: README.md
+        entrypoints: README.md
       vcs:
-        kind: 123
+        mode: 123
         default_branch: 456
         posture: 789
       delivery:
         pr_target: 123
       validation:
-        gates: test
-      autonomy:
-        profile: 123
+        commands: test
+      automation:
+        posture: 123
+        profile: 456
         completion_requirements: tests
-        policy_ref: 456
+        policy_ref: old
         review: true
       workflow:
         preset: 123
         modules: codex
+      harness:
+        codex_home: []
+      bindings:
+        local_file: []
+        require_local: yes
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
 
+    assert %{path: "version", message: "must be an integer"} in diagnostics
     assert %{path: "project.slug", message: "must be a string"} in diagnostics
     assert %{path: "project.name", message: "must be a string"} in diagnostics
     assert %{path: "project.repository", message: "must be a string"} in diagnostics
+    assert %{path: "project.kind", message: "must be a string"} in diagnostics
+    assert %{path: "project.app_kind", message: "must be a string"} in diagnostics
     assert %{path: "project.facts", message: "must be a map"} in diagnostics
-    assert %{path: "app.kind", message: "must be a string"} in diagnostics
-    assert %{path: "docs.entry_points", message: "must be a list"} in diagnostics
-    assert %{path: "vcs.kind", message: "must be a string"} in diagnostics
+    assert %{path: "docs.entrypoints", message: "must be a list"} in diagnostics
+    assert %{path: "vcs.mode", message: "must be a string"} in diagnostics
     assert %{path: "vcs.default_branch", message: "must be a string"} in diagnostics
     assert %{path: "vcs.posture", message: "must be a string"} in diagnostics
     assert %{path: "delivery.pr_target", message: "must be a string"} in diagnostics
-    assert %{path: "validation.gates", message: "must be a list"} in diagnostics
-    assert %{path: "autonomy.profile", message: "must be a string"} in diagnostics
-    assert %{path: "autonomy.completion_requirements", message: "must be a list"} in diagnostics
-    assert %{path: "autonomy.policy_ref", message: "is not supported; policy_ref is derived from the resolved policy"} in diagnostics
-    assert %{path: "autonomy.review", message: "must be a map"} in diagnostics
+    assert %{path: "validation.commands", message: "must be a list"} in diagnostics
+    assert %{path: "automation.posture", message: "must be a string"} in diagnostics
+    assert %{path: "automation.profile", message: "must be a string"} in diagnostics
+    assert %{path: "automation.completion_requirements", message: "must be a list"} in diagnostics
+    assert %{path: "automation.policy_ref", message: "is not supported; policy_ref is derived from the resolved policy"} in diagnostics
+    assert %{path: "automation.review", message: "must be a map"} in diagnostics
     assert %{path: "workflow.preset", message: "must be a string"} in diagnostics
     assert %{path: "workflow.modules", message: "must be a list"} in diagnostics
+    assert %{path: "harness.codex_home", message: "must be a string"} in diagnostics
+    assert %{path: "bindings.local_file", message: "must be a string"} in diagnostics
+    assert %{path: "bindings.require_local", message: "must be a boolean"} in diagnostics
   end
 
-  test "invalid validation gates and list entries return indexed diagnostics" do
+  test "invalid validation commands and list entries return indexed diagnostics" do
     path =
       write_manifest!("""
       project:
         slug: target-repo
         repository: github.com/example/target-repo
       docs:
-        entry_points:
+        entrypoints:
           - ""
           - 123
       validation:
-        gates:
+        commands:
           - not-a-map
           - name: ""
             command: 123
@@ -238,13 +291,13 @@ defmodule SymphonyElixir.WorkflowManifestTest do
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
 
-    assert %{path: "docs.entry_points[0]", message: "must be a non-empty string"} in diagnostics
-    assert %{path: "docs.entry_points[1]", message: "must be a non-empty string"} in diagnostics
-    assert %{path: "validation.gates[0]", message: "must be a map"} in diagnostics
-    assert %{path: "validation.gates[1].name", message: "is required"} in diagnostics
-    assert %{path: "validation.gates[1].command", message: "must be a string"} in diagnostics
-    assert %{path: "validation.gates[2].name", message: "is required"} in diagnostics
-    assert %{path: "validation.gates[3].command", message: "is required"} in diagnostics
+    assert %{path: "docs.entrypoints[0]", message: "must be a non-empty string"} in diagnostics
+    assert %{path: "docs.entrypoints[1]", message: "must be a non-empty string"} in diagnostics
+    assert %{path: "validation.commands[0]", message: "must be a map"} in diagnostics
+    assert %{path: "validation.commands[1].name", message: "is required"} in diagnostics
+    assert %{path: "validation.commands[1].command", message: "must be a string"} in diagnostics
+    assert %{path: "validation.commands[2].name", message: "is required"} in diagnostics
+    assert %{path: "validation.commands[3].command", message: "is required"} in diagnostics
   end
 
   test "empty optional sections use defaults" do
@@ -256,21 +309,33 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         facts:
       docs:
       validation: {}
-      autonomy:
+      automation:
         completion_requirements:
         review:
       workflow:
         preset: default
         modules:
+      harness: {}
+      bindings: {}
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
 
     assert config["manifest"]["project"]["facts"] == %{}
-    assert config["manifest"]["docs"]["entry_points"] == []
+    assert config["manifest"]["docs"]["entrypoints"] == []
     assert config["checks"] == []
     assert config["completion_requirements"] == []
-    assert config["manifest"]["workflow"]["modules"] == ["linear", "workspace", "codex"]
+    assert config["manifest"]["harness"]["codex_home"] == nil
+    assert config["manifest"]["bindings"] == %{"local_file" => ".symphony.local.yml", "require_local" => false}
+
+    assert config["manifest"]["workflow"]["modules"] == [
+             "repo.docs",
+             "validation.commands",
+             "tracker.linear",
+             "workspace",
+             "codex.harness",
+             "delivery.github_pr"
+           ]
   end
 
   test "unknown preset and modules return path-specific diagnostics" do
@@ -293,7 +358,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         repository: github.com/example/target-repo
       workflow:
         modules:
-          - codex
+          - observability
           - unknown-module
       """)
 
@@ -301,7 +366,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              Manifest.load(module_path)
   end
 
-  test "unknown module diagnostics preserve original indexes after invalid list entries" do
+  test "invalid module list entries preserve their original indexes" do
     path =
       write_manifest!("""
       project:
@@ -311,19 +376,19 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         modules:
           - ""
           - 123
-          - unknown-module
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
     assert %{path: "workflow.modules[0]", message: "must be a non-empty string"} in diagnostics
     assert %{path: "workflow.modules[1]", message: "must be a non-empty string"} in diagnostics
-    assert %{path: "workflow.modules[2]", message: "unknown module: unknown-module"} in diagnostics
   end
 
   test "module registry reports defensive diagnostics and optional workspace config" do
     assert ModuleRegistry.module_diagnostics("unknown-module", 2, %{}) == [
              %{path: "workflow.modules[2]", message: "unknown module: unknown-module"}
            ]
+
+    assert ModuleRegistry.module_description("unknown-module") == "unknown module"
 
     assert {:ok, config} = ModuleRegistry.module_config("workspace", 0, %{"project" => %{}})
     assert config["hooks"]["timeout_ms"] == 60_000
@@ -343,8 +408,17 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     refute get_in(config, ["manifest", "release_channel"])
     refute get_in(config, ["manifest", "workflow", "release_channel"])
     assert config["manifest"]["workflow"]["preset"] == "default"
-    assert config["manifest"]["workflow"]["modules"] == ["linear", "workspace", "codex"]
-    assert config["manifest"]["app"]["kind"] == "local"
+
+    assert config["manifest"]["workflow"]["modules"] == [
+             "repo.docs",
+             "validation.commands",
+             "tracker.linear",
+             "workspace",
+             "codex.harness",
+             "delivery.github_pr"
+           ]
+
+    assert config["manifest"]["project"]["app_kind"] == "local"
     assert config["delivery"]["pr_target"] == "main"
   end
 
@@ -359,14 +433,17 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         slug: target-repo
         name: Target Repo
         repository: github.com/example/target-repo
+        kind: elixir
+        app_kind: web
         facts:
           owner: platform
       vcs:
-        kind: jj
+        mode: jj
         posture: stacked
       """)
 
     Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
     assert :ok = Config.validate!()
 
@@ -401,7 +478,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "workflow"
     assert prompt =~ "URL: https://linear.app/example/SID-290"
     assert prompt =~ "Project facts:\n- owner: platform"
-    assert prompt =~ "VCS:\n- Kind: jj"
+    assert prompt =~ "VCS:\n- Mode: jj"
     assert prompt =~ "- Posture: stacked"
     assert prompt =~ "Route ticket states before acting"
   end

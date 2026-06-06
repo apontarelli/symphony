@@ -35,14 +35,25 @@ defmodule SymphonyElixir.CLI do
       :ok ->
         wait_for_shutdown()
 
+      {:ok, message} ->
+        IO.puts(message)
+        System.halt(0)
+
       {:error, message} ->
         IO.puts(:stderr, message)
         System.halt(1)
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
-  def evaluate(args, deps \\ runtime_deps()) do
+  @spec evaluate([String.t()]) :: :ok | {:ok, String.t()} | {:error, String.t()}
+  def evaluate(args), do: evaluate(args, runtime_deps())
+
+  @spec evaluate([String.t()], deps()) :: :ok | {:ok, String.t()} | {:error, String.t()}
+  def evaluate(["workflow" | workflow_args], _deps) do
+    SymphonyElixir.WorkflowCLI.evaluate(workflow_args)
+  end
+
+  def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),

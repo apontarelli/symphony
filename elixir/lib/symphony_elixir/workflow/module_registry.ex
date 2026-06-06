@@ -16,7 +16,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   @presets %{
     "default" => %{
-      modules: ["linear", "workspace", "codex"],
+      modules: ["repo.docs", "validation.commands", "tracker.linear", "workspace", "codex.harness", "delivery.github_pr"],
       config: %{
         "checks" => [],
         "completion_requirements" => [],
@@ -37,7 +37,21 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   }
 
   @modules %{
-    "linear" => %{
+    "repo.docs" => %{
+      config: %{},
+      prompt_sections: [
+        "Treat the manifest docs entrypoints as the first repo-specific instructions to read before changing code."
+      ],
+      description: "repo instruction and durable docs routing"
+    },
+    "validation.commands" => %{
+      config: %{},
+      prompt_sections: [
+        "Use the manifest validation commands as the repo-owned quality gates for touched surfaces."
+      ],
+      description: "operator-defined validation gates"
+    },
+    "tracker.linear" => %{
       config: %{
         "tracker" => %{
           "kind" => "linear",
@@ -53,7 +67,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
         "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
         "`Merging` means approval was granted; run the configured land skill/flow and never bypass it with a direct merge command.",
         "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
-      ]
+      ],
+      description: "Linear tracker issue context and handoff states"
     },
     "workspace" => %{
       config: %{
@@ -62,9 +77,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       },
       prompt_sections: [
         "Work only inside the assigned repository workspace."
-      ]
+      ],
+      description: "workspace checkout and lifecycle hooks"
     },
-    "codex" => %{
+    "codex.harness" => %{
       config: %{
         "agent" => %{
           "max_concurrent_agents" => 10,
@@ -88,7 +104,15 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       },
       prompt_sections: [
         "Run Codex with the configured runtime settings for implementation turns."
-      ]
+      ],
+      description: "isolated Codex harness CODEX_HOME policy"
+    },
+    "delivery.github_pr" => %{
+      config: %{},
+      prompt_sections: [
+        "Use GitHub pull requests as the delivery artifact when handing work to human review."
+      ],
+      description: "GitHub pull request delivery defaults"
     },
     "observability" => %{
       config: %{
@@ -100,7 +124,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       },
       prompt_sections: [
         "Use the dashboard and status APIs as operator-visible evidence when relevant."
-      ]
+      ],
+      description: "operator-visible status and dashboard evidence"
     }
   }
 
@@ -127,6 +152,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     end
   end
 
+  @spec module_description(String.t()) :: String.t()
+  def module_description(name) when is_binary(name) do
+    case Map.fetch(@modules, name) do
+      {:ok, defaults} -> Map.fetch!(defaults, :description)
+      :error -> "unknown module"
+    end
+  end
+
   @spec module_diagnostics(String.t(), non_neg_integer(), map()) :: [diagnostic()]
   def module_diagnostics(name, index, manifest) when is_binary(name) and is_integer(index) and index >= 0 do
     case module_defaults(name, index) do
@@ -149,13 +182,9 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     end
   end
 
-  defp module_manifest_diagnostics("workspace", manifest) do
-    required_string(manifest, ["project", "repository"], "project.repository")
-  end
-
   defp module_manifest_diagnostics(_name, _manifest), do: []
 
-  defp module_manifest_config("linear", manifest) do
+  defp module_manifest_config("tracker.linear", manifest) do
     case get_in(manifest, ["project", "slug"]) do
       slug when is_binary(slug) -> %{"tracker" => %{"project_slug" => slug}}
       _slug -> %{}
@@ -170,20 +199,6 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   end
 
   defp module_manifest_config(_name, _manifest), do: %{}
-
-  defp required_string(manifest, path, diagnostic_path) do
-    case get_in(manifest, path) do
-      value when is_binary(value) ->
-        if String.trim(value) == "" do
-          [%{path: diagnostic_path, message: "is required by selected workflow modules"}]
-        else
-          []
-        end
-
-      _value ->
-        [%{path: diagnostic_path, message: "is required by selected workflow modules"}]
-    end
-  end
 
   defp shell_quote(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
