@@ -1,4 +1,4 @@
-defmodule SymphonyElixir.WorkflowModulesTest do
+defmodule SymphonyElixir.WorkflowModuleRegistryTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Workflow.ModuleRegistry
@@ -43,6 +43,26 @@ defmodule SymphonyElixir.WorkflowModulesTest do
     refute linear_module.content =~ "symphony-linear"
   end
 
+  test "core module registry resolves prompt metadata from the default preset" do
+    assert {:ok, resolution} = ModuleRegistry.default_prompt_module_resolution()
+
+    assert resolution.module_names == @default_module_ids
+    assert resolution.policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert %{name: "linear-operation", version: "v1"} in resolution.module_refs
+    assert resolution.rendered =~ "Resolved modules: linear-operation@v1"
+    assert resolution.rendered =~ "Policy hash: #{resolution.policy_hash}"
+    assert resolution.rendered =~ "### Linear Operation"
+    refute Regex.match?(~r/`symphony-[a-z-]+`/, resolution.rendered)
+  end
+
+  test "loaded workflows carry registry-backed prompt metadata" do
+    assert {:ok, workflow} = Workflow.current()
+
+    assert workflow.workflow_module_resolution.module_names == @default_module_ids
+    assert workflow.workflow_module_resolution.rendered =~ "### Linear Operation"
+    assert workflow.prompt_template =~ "You are an agent for this repository."
+  end
+
   test "core module registry reports unknown module ids" do
     assert {:error, %{path: "workflow.modules[0]", message: "unknown module: missing-module"}} =
              ModuleRegistry.module_defaults("missing-module", 0)
@@ -77,6 +97,20 @@ defmodule SymphonyElixir.WorkflowModulesTest do
 
     assert {:error, {:unknown_core_workflow_module, "missing-module"}} =
              ModuleRegistry.compile_preset(preset)
+  end
+
+  test "preset compiler renders supplied core modules" do
+    preset = %{
+      id: "custom",
+      version: "v1",
+      module_ids: ["linear-operation"]
+    }
+
+    assert {:ok, prompt} = ModuleRegistry.compile_preset(preset)
+
+    assert prompt =~ "Preset: custom@v1"
+    assert prompt =~ "### Linear Operation"
+    refute prompt =~ "### VCS Commit Push"
   end
 
   test "preset compiler rejects runtime config modules as core workflow modules" do

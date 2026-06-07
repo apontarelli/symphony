@@ -4,30 +4,50 @@ defmodule SymphonyElixir.PromptBuilder do
   """
 
   alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.Workflow.ModuleRegistry
 
   @render_opts [strict_variables: true, strict_filters: true]
 
+  @type prompt_bundle :: %{
+          prompt: String.t(),
+          workflow_module_resolution: ModuleRegistry.prompt_module_resolution()
+        }
+
   @spec build_prompt(SymphonyElixir.Linear.Issue.t(), keyword()) :: String.t()
   def build_prompt(issue, opts \\ []) do
+    build_prompt_bundle(issue, opts).prompt
+  end
+
+  @spec build_prompt_bundle(SymphonyElixir.Linear.Issue.t(), keyword()) :: prompt_bundle()
+  def build_prompt_bundle(issue, opts \\ []) do
+    workflow = workflow!()
+    workflow_module_resolution = workflow_module_resolution!(workflow)
     policy = prompt_policy(issue, opts)
 
     template =
-      Workflow.current()
+      workflow
       |> prompt_template!()
       |> parse_template!()
 
-    template
-    |> Solid.render!(
-      %{
-        "attempt" => Keyword.get(opts, :attempt),
-        "issue" => issue |> Map.from_struct() |> to_solid_map(),
-        "policy" => policy |> to_solid_value(),
-        "policy_json" => Jason.encode!(policy, pretty: true)
-      },
-      @render_opts
-    )
-    |> IO.iodata_to_binary()
-    |> append_selected_policy_context(policy)
+    prompt =
+      template
+      |> Solid.render!(
+        %{
+          "attempt" => Keyword.get(opts, :attempt),
+          "issue" => issue |> Map.from_struct() |> to_solid_map(),
+          "policy" => policy |> to_solid_value(),
+          "policy_json" => Jason.encode!(policy, pretty: true),
+          "workflow" => workflow_context(workflow_module_resolution)
+        },
+        @render_opts
+      )
+      |> IO.iodata_to_binary()
+      |> append_selected_policy_context(policy)
+
+    %{
+      prompt: prompt,
+      workflow_module_resolution: workflow_module_resolution
+    }
   end
 
   @doc false
@@ -68,11 +88,16 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp prompt_template!({:ok, %{prompt_template: prompt}}) when is_binary(prompt), do: prompt
-
-  defp prompt_template!({:error, reason}) do
-    raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
+  defp workflow! do
+    case Workflow.current() do
+      {:ok, workflow} when is_map(workflow) -> workflow
+      {:error, reason} -> raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
+    end
   end
+
+  defp prompt_template!(%{prompt_template: prompt}) when is_binary(prompt), do: prompt
+
+  defp workflow_module_resolution!(%{workflow_module_resolution: resolution}) when is_map(resolution), do: resolution
 
   defp parse_template!(prompt) when is_binary(prompt) do
     Solid.parse!(prompt)
@@ -96,6 +121,15 @@ defmodule SymphonyElixir.PromptBuilder do
   defp to_solid_value(value) when is_map(value), do: to_solid_map(value)
   defp to_solid_value(value) when is_list(value), do: Enum.map(value, &to_solid_value/1)
   defp to_solid_value(value), do: value
+
+  defp workflow_context(%{module_refs: refs, module_names: names, policy_hash: policy_hash, rendered: rendered}) do
+    %{
+      "modules" => rendered,
+      "module_policy_hash" => policy_hash,
+      "module_names" => Enum.join(names, ", "),
+      "module_refs" => Enum.map(refs, &to_solid_map/1)
+    }
+  end
 
   defp append_selected_policy_context(prompt, policy) when is_map(policy) and map_size(policy) > 0 do
     [String.trim_trailing(prompt), selected_policy_context(policy)]

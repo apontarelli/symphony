@@ -51,12 +51,13 @@ defmodule SymphonyElixir.Workflow.Manifest do
       |> deep_merge(manifest_config(manifest))
       |> deep_merge(manifest["runtime"])
 
-    prompt = Map.get(manifest, "prompt_template") || prompt_template(manifest)
+    {prompt, workflow_module_resolution} = prompt_template_and_resolution(manifest)
 
     %{
       config: config,
       prompt: prompt,
-      prompt_template: prompt
+      prompt_template: prompt,
+      workflow_module_resolution: workflow_module_resolution
     }
   end
 
@@ -449,9 +450,16 @@ defmodule SymphonyElixir.Workflow.Manifest do
     end)
   end
 
-  defp prompt_template(manifest) do
-    {:ok, prompt} = ModuleRegistry.compile_manifest_prompt(manifest)
-    prompt
+  defp prompt_template_and_resolution(manifest) do
+    case Map.get(manifest, "prompt_template") do
+      prompt when is_binary(prompt) ->
+        {:ok, resolution} = ModuleRegistry.prompt_module_resolution(manifest)
+        {prompt, resolution}
+
+      _ ->
+        {:ok, %{prompt: prompt, workflow_module_resolution: resolution}} = ModuleRegistry.compile_manifest(manifest)
+        {prompt, resolution}
+    end
   end
 
   defp validate_workflow(errors, manifest) do

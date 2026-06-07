@@ -2108,6 +2108,29 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt() =~ "{{ issue.description }}"
   end
 
+  test "prompt builder exposes workflow module context to templates" do
+    workflow_prompt = "modules={{ workflow.module_names }} hash={{ workflow.module_policy_hash }}\n{{ workflow.modules }}"
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: workflow_prompt)
+
+    issue = %Issue{
+      identifier: "MT-779",
+      title: "Render modules",
+      description: "Expose workflow module context",
+      state: "Todo",
+      url: "https://example.org/issues/MT-779",
+      labels: []
+    }
+
+    bundle = PromptBuilder.build_prompt_bundle(issue)
+
+    assert bundle.workflow_module_resolution.policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert bundle.prompt =~ "modules=linear-operation, implementation-loop"
+    assert bundle.prompt =~ "hash=#{bundle.workflow_module_resolution.policy_hash}"
+    assert bundle.prompt =~ "Resolved modules: linear-operation@v1"
+    assert bundle.prompt =~ "### Linear Operation"
+    refute bundle.prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+  end
+
   test "prompt builder default template handles missing issue body" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "")
 
@@ -2125,6 +2148,24 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Identifier: MT-778"
     assert prompt =~ "Title: Handle empty body"
     assert prompt =~ "No description provided."
+  end
+
+  test "prompt builder falls back to no selected policy context when config policy is unavailable" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_turns: 0, prompt: "Ticket {{ issue.identifier }}")
+
+    issue = %Issue{
+      identifier: "MT-781",
+      title: "Invalid policy",
+      description: "Render without policy context",
+      state: "Todo",
+      url: "https://example.org/issues/MT-781",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt == "Ticket MT-781"
+    refute prompt =~ "Selected Workflow Profile"
   end
 
   test "prompt builder reports workflow load failures separately from template parse errors" do
@@ -2177,7 +2218,8 @@ defmodule SymphonyElixir.CoreTest do
       restore_env("LINEAR_API_KEY", previous_linear_api_key)
     end)
 
-    prompt = PromptBuilder.build_prompt(issue, attempt: 2)
+    prompt_bundle = PromptBuilder.build_prompt_bundle(issue, attempt: 2)
+    prompt = prompt_bundle.prompt
 
     assert prompt =~ "You are working on a Linear ticket `MT-616`"
     assert prompt =~ "Project slug: symphony"
@@ -2194,8 +2236,15 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Final responses report completed actions and blockers only."
     assert prompt =~ "### Land Merge"
     assert prompt =~ "Merging, locate the attached PR"
+    assert prompt =~ "This is an unattended orchestration session."
+    assert prompt =~ "Only stop early for a true blocker"
+    assert prompt =~ "Do not include next steps for the user."
+    assert prompt_bundle.workflow_module_resolution.policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
+    assert %{name: "linear-operation", version: "v1"} in prompt_bundle.workflow_module_resolution.module_refs
     refute prompt =~ ".codex/skills"
     refute prompt =~ "## Related skills"
+    refute prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+    assert prompt =~ "never bypass it with a direct merge command"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt 2"
     assert prompt =~ "## Selected Workflow Profile"
@@ -2418,11 +2467,111 @@ defmodule SymphonyElixir.CoreTest do
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
-                        session_id: session_id
+                        session_id: session_id,
+                        workflow_module_policy_hash: workflow_module_policy_hash,
+                        workflow_modules: workflow_modules
                       }},
                      500
 
       assert session_id == "thread-live-turn-live"
+      assert workflow_module_policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
+      assert %{name: "linear-operation", version: "v1"} in workflow_modules
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner completes with empty CODEX_HOME and bundled workflow modules" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-no-global-skills-#{System.unique_integer([:positive])}"
+      )
+
+    previous_codex_home = System.get_env("CODEX_HOME")
+    previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+    on_exit(fn ->
+      restore_env("CODEX_HOME", previous_codex_home)
+      restore_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      empty_codex_home = Path.join(test_root, "codex-home")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-no-global-skills.trace")
+
+      File.mkdir_p!(empty_codex_home)
+      System.put_env("CODEX_HOME", empty_codex_home)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-no-global-skills.trace}"
+      printf 'CODEX_HOME:%s\\n' "${CODEX_HOME:-}" >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-no-skills"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-no-skills"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        prompt: "Harness proof\n{{ workflow.modules }}"
+      )
+
+      issue = %Issue{
+        id: "issue-no-global-skills",
+        identifier: "MT-283",
+        title: "Run without external delivery skills",
+        description: "Prove bundled workflow modules compile into the prompt",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-283",
+        labels: []
+      }
+
+      assert :ok =
+               AgentRunner.run(
+                 issue,
+                 nil,
+                 policy: %{},
+                 issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
+               )
+
+      trace = File.read!(trace_file)
+
+      assert trace =~ "CODEX_HOME:#{empty_codex_home}"
+      assert trace =~ "Resolved modules: linear-operation@v1"
+      assert trace =~ "Policy hash: sha256:"
+
+      refute trace =~
+               ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+
+      refute File.exists?(Path.join(empty_codex_home, "skills"))
     after
       File.rm_rf(test_root)
     end

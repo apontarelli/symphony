@@ -30,6 +30,17 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           config: map(),
           prompt_sections: [String.t()]
         }
+  @type module_ref :: %{
+          name: String.t(),
+          version: String.t()
+        }
+  @type prompt_module_resolution :: %{
+          modules: [workflow_module()],
+          module_refs: [module_ref()],
+          module_names: [String.t()],
+          policy_hash: String.t(),
+          rendered: String.t()
+        }
 
   @runtime_module_ids ["repo.docs", "validation.commands", "tracker.linear", "workspace", "codex.harness", "delivery.github_pr"]
 
@@ -564,11 +575,9 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   @spec compile_default_preset() :: {:ok, String.t()} | {:error, term()}
   def compile_default_preset do
-    compile_preset(%{
-      id: "default",
-      version: "v1",
-      module_ids: @core_module_ids
-    })
+    with {:ok, resolution} <- default_prompt_module_resolution() do
+      {:ok, render_core_prompt(%{id: "default", version: "v1"}, resolution.modules)}
+    end
   end
 
   @spec compile_preset(%{
@@ -578,16 +587,41 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
         }) :: {:ok, String.t()} | {:error, term()}
   def compile_preset(%{id: id, version: version, module_ids: module_ids})
       when is_binary(id) and is_binary(version) and is_list(module_ids) do
-    with {:ok, modules} <- fetch_core_modules(module_ids) do
-      {:ok, render_core_prompt(%{id: id, version: version}, modules)}
+    with {:ok, resolution} <- prompt_module_resolution_for_core_modules(module_ids) do
+      {:ok, render_core_prompt(%{id: id, version: version}, resolution.modules)}
     end
   end
 
-  @spec compile_manifest_prompt(map()) :: {:ok, String.t()} | {:error, term()}
-  def compile_manifest_prompt(%{"workflow" => %{"preset" => preset_name}} = manifest) do
+  @spec compile_manifest(map()) ::
+          {:ok, %{prompt: String.t(), workflow_module_resolution: prompt_module_resolution()}} | {:error, term()}
+  def compile_manifest(%{"workflow" => %{"preset" => preset_name}} = manifest) do
     with {:ok, preset_defaults} <- preset(preset_name),
-         {:ok, modules} <- fetch_core_modules(preset_defaults.core_modules) do
-      {:ok, render_core_prompt(preset_defaults, modules, manifest)}
+         {:ok, resolution} <- prompt_module_resolution_for_preset(preset_defaults) do
+      {:ok,
+       %{
+         prompt: render_core_prompt(preset_defaults, resolution.modules, manifest),
+         workflow_module_resolution: resolution
+       }}
+    end
+  end
+
+  @spec default_prompt_module_resolution() :: {:ok, prompt_module_resolution()} | {:error, term()}
+  def default_prompt_module_resolution, do: prompt_module_resolution_for_core_modules(@core_module_ids)
+
+  @spec prompt_module_resolution(map()) :: {:ok, prompt_module_resolution()} | {:error, term()}
+  def prompt_module_resolution(%{"workflow" => %{"preset" => preset_name}}) do
+    with {:ok, preset_defaults} <- preset(preset_name) do
+      prompt_module_resolution_for_preset(preset_defaults)
+    end
+  end
+
+  defp prompt_module_resolution_for_preset(%{core_modules: module_ids}) when is_list(module_ids) do
+    prompt_module_resolution_for_core_modules(module_ids)
+  end
+
+  defp prompt_module_resolution_for_core_modules(module_ids) do
+    with {:ok, modules} <- fetch_core_modules(module_ids) do
+      {:ok, build_prompt_module_resolution(modules)}
     end
   end
 
@@ -608,6 +642,48 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       {:ok, modules} -> {:ok, Enum.reverse(modules)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp build_prompt_module_resolution(modules) do
+    refs = Enum.map(modules, &module_ref/1)
+    policy_hash = policy_hash(modules)
+
+    %{
+      modules: modules,
+      module_refs: refs,
+      module_names: Enum.map(refs, & &1.name),
+      policy_hash: policy_hash,
+      rendered: render_resolved_modules(modules, refs, policy_hash)
+    }
+  end
+
+  defp module_ref(module), do: %{name: module.id, version: module.version}
+
+  defp render_resolved_modules(modules, refs, policy_hash) do
+    module_index = Enum.map_join(refs, ", ", &"#{&1.name}@#{&1.version}")
+    rendered_modules = Enum.map_join(modules, "\n\n", &render_core_module/1)
+
+    """
+    Resolved modules: #{module_index}
+    Policy hash: #{policy_hash}
+
+    #{rendered_modules}
+    """
+    |> String.trim()
+  end
+
+  defp policy_hash(modules) do
+    material =
+      Enum.map_join(modules, "\n", fn module ->
+        "#{module.id}@#{module.version}:#{hash(module.content)}"
+      end)
+
+    "sha256:" <> hash(material)
+  end
+
+  defp hash(value) when is_binary(value) do
+    :crypto.hash(:sha256, value)
+    |> Base.encode16(case: :lower)
   end
 
   defp render_core_prompt(preset, modules, manifest \\ nil) do

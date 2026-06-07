@@ -20,8 +20,9 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 4. Sends a workflow prompt to Codex
 5. Keeps Codex working on the issue until the work is done
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that
+bundled workflow modules and agents can make raw Linear GraphQL calls when the direct tracker tool
+surface is not enough.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -42,18 +43,13 @@ Linear issue can become a dispatch candidate again after restart.
 4. Run `symphony workflow check` to validate the manifest, repo docs, local binding file, and any
    configured harness CODEX_HOME.
 5. Run `symphony workflow print --compiled` to inspect the resolved workflow config and prompt.
-6. Ensure the global `symphony-linear`, `symphony-commit`, `symphony-pull`,
-   `symphony-quality-gates`, `symphony-review`, `symphony-push`, `symphony-land`, and
-   `symphony-debug` skills are available to Codex.
-   - `symphony-linear` expects Symphony's `linear_graphql` app-server tool for raw Linear
-     GraphQL operations such as comment editing or upload flows.
-7. Customize the generated `symphony.yml` for your project.
+6. Customize the generated `symphony.yml` for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL. Keep operator-local project IDs in the local bindings file, not in committed manifests.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
-8. Follow the instructions below to install the required runtime dependencies and start the service.
+7. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
 
@@ -299,6 +295,10 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
   the prompt template. The default preset includes Symphony-owned modules for Linear operation,
   implementation, sync, quality gates, review, landing, rework, requirement validation, project
   closeout, and run recovery.
+- Bundled core workflow modules resolve through `SymphonyElixir.Workflow.ModuleRegistry` during
+  prompt compilation. A custom workflow prompt can render them with `{{ workflow.modules }}`, and
+  each run records module names, versions, and a policy hash. The default delivery workflow does not
+  require globally installed Symphony delivery skills.
 - Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
   turns run in jj-native workspaces and do not need to write Git metadata directly. Use
   `git clone ... .` only for repos that cannot run under jj compatibility.

@@ -84,6 +84,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    workflow_module_resolution = Keyword.get(opts, :workflow_module_resolution)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -98,11 +99,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         emit_message(
           on_message,
           :session_started,
-          %{
-            session_id: session_id,
-            thread_id: thread_id,
-            turn_id: turn_id
-          },
+          session_started_details(session_id, thread_id, turn_id, workflow_module_resolution),
           metadata
         )
 
@@ -1195,6 +1192,23 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_set_usage(metadata, _payload), do: metadata
+
+  defp session_started_details(session_id, thread_id, turn_id, workflow_module_resolution) do
+    %{
+      session_id: session_id,
+      thread_id: thread_id,
+      turn_id: turn_id
+    }
+    |> maybe_put_workflow_module_resolution(workflow_module_resolution)
+  end
+
+  defp maybe_put_workflow_module_resolution(details, %{module_refs: refs, policy_hash: policy_hash}) do
+    details
+    |> Map.put(:workflow_module_policy_hash, policy_hash)
+    |> Map.put(:workflow_modules, Enum.map(refs, &Map.take(&1, [:name, :version])))
+  end
+
+  defp maybe_put_workflow_module_resolution(details, _workflow_module_resolution), do: details
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
