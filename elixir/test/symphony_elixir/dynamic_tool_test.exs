@@ -245,7 +245,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert Jason.decode!(missing_token["output"]) == %{
              "error" => %{
-               "message" => "Symphony is missing Linear auth. Set `linear.api_key` in the selected manifest config or export `LINEAR_API_KEY`."
+               "message" => "Symphony is missing Linear auth. Set `linear.api_key` in workflow config or export `LINEAR_API_KEY`."
              }
            }
 

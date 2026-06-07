@@ -35,6 +35,8 @@ bindings:
   local_file: .symphony.local.yml
   require_local: false
 runtime:
+  tracker:
+    project_slug: $SYMPHONY_LINEAR_PROJECT_SLUG
   polling:
     interval_ms: 5000
   workspace:

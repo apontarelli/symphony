@@ -15,14 +15,10 @@ defmodule SymphonyElixir.Workflow do
   end
 
   @spec selected_workflow_file_path() :: Path.t()
-  def selected_workflow_file_path do
-    workflow_file_path()
-  end
+  def selected_workflow_file_path, do: workflow_file_path()
 
   @spec manifest_file_path() :: Path.t()
-  def manifest_file_path do
-    Path.join(File.cwd!(), @manifest_file_name)
-  end
+  def manifest_file_path, do: Path.join(File.cwd!(), @manifest_file_name)
 
   @spec set_workflow_file_path(Path.t()) :: :ok
   def set_workflow_file_path(path) when is_binary(path) do
@@ -62,7 +58,7 @@ defmodule SymphonyElixir.Workflow do
 
   @spec load(Path.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def load(path) when is_binary(path) do
-    Manifest.load(path)
+    Manifest.load(Path.expand(path))
   end
 
   defp maybe_reload_store do
