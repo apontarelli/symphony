@@ -1732,6 +1732,11 @@ Inputs to prompt rendering:
 - resolved `policy` object, including `policy_ref` and selection metadata when available
 - `policy_json` JSON string containing the same resolved policy object
 - OPTIONAL `attempt` integer (retry/continuation metadata)
+- resolved bundled workflow module context:
+  - `workflow.modules` Markdown
+  - `workflow.module_policy_hash`
+  - `workflow.module_names`
+  - `workflow.module_refs`
 
 ### 12.2 Rendering Rules
 
@@ -1740,6 +1745,12 @@ Inputs to prompt rendering:
 - Convert issue object keys to strings for template compatibility.
 - Convert policy object keys to strings for template compatibility.
 - Preserve nested arrays/maps (labels, blockers, policy metadata) so templates can iterate.
+- Resolve bundled workflow modules from the implementation-owned workflow module registry before
+  rendering. Module resolution MUST record module names, versions, and a deterministic policy hash
+  for each agent run.
+- Core delivery prompts MUST use bundled registry modules for tracker, workpad, sync, validation,
+  review, publish, merge, debug, requirement-validation, and closeout behavior rather than requiring
+  globally installed delivery skills.
 
 ### 12.3 Retry/Continuation Semantics
 
@@ -1769,6 +1780,11 @@ REQUIRED context fields for issue-related logs:
 REQUIRED context for coding-agent session lifecycle logs:
 
 - `session_id`
+
+When bundled workflow modules are resolved for a run, session lifecycle metadata SHOULD include:
+
+- `workflow_module_policy_hash`
+- `workflow_modules` as name/version pairs
 
 Message formatting requirements:
 
@@ -2490,6 +2506,9 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `runtime.codex.command` is preserved as a shell command string
 - Per-state concurrency override map normalizes state names and rejects invalid values
 - Compiled prompt template renders `issue` and `attempt`
+- Prompt template can render bundled workflow module context
+- Workflow module resolution records module names, versions, and a policy hash
+- Missing external delivery skills does not block workflow startup or agent execution
 - Prompt rendering fails on unknown variables (strict mode)
 - If rendered Markdown export is implemented, it is generated from the compiled workflow and is not
   required as target repo source

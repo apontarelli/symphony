@@ -115,14 +115,16 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt_bundle = build_turn_prompt(issue, opts, turn_number, max_turns)
+    log_workflow_module_resolution(issue, prompt_bundle)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
              app_session,
-             prompt,
+             prompt_bundle.prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: codex_message_handler(codex_update_recipient, issue),
+             workflow_module_resolution: prompt_bundle.workflow_module_resolution
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
 
@@ -155,18 +157,31 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt_bundle(issue, opts)
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
-    """
-    Continuation guidance:
+    %{
+      prompt: """
+      Continuation guidance:
 
-    - The previous Codex turn completed normally, but the Linear issue is still in an active state.
-    - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-    - Resume from the current workspace and workpad state instead of restarting from scratch.
-    - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-    - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
-    """
+      - The previous Codex turn completed normally, but the Linear issue is still in an active state.
+      - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
+      - Resume from the current workspace and workpad state instead of restarting from scratch.
+      - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
+      - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+      """,
+      workflow_module_resolution: nil
+    }
+  end
+
+  defp log_workflow_module_resolution(issue, %{workflow_module_resolution: %{module_refs: refs, policy_hash: policy_hash}}) do
+    module_refs = Enum.map_join(refs, ",", &"#{&1.name}@#{&1.version}")
+
+    Logger.info("Resolved workflow modules for #{issue_context(issue)} workflow_module_policy_hash=#{policy_hash} workflow_modules=#{module_refs}")
+  end
+
+  defp log_workflow_module_resolution(_issue, _prompt_bundle) do
+    :ok
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do

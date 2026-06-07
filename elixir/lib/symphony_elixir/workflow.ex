@@ -3,7 +3,7 @@ defmodule SymphonyElixir.Workflow do
   Loads workflow configuration and prompt from `symphony.yml`.
   """
 
-  alias SymphonyElixir.Workflow.Manifest
+  alias SymphonyElixir.Workflow.{Manifest, ModuleRegistry}
   alias SymphonyElixir.WorkflowStore
 
   @manifest_file_name "symphony.yml"
@@ -37,7 +37,8 @@ defmodule SymphonyElixir.Workflow do
   @type loaded_workflow :: %{
           config: map(),
           prompt: String.t(),
-          prompt_template: String.t()
+          prompt_template: String.t(),
+          workflow_module_resolution: ModuleRegistry.prompt_module_resolution()
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}
