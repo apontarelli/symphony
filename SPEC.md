@@ -959,9 +959,9 @@ Configuration is resolved in this order:
 
 1. Select the manifest file path (explicit runtime setting, otherwise cwd default).
 2. Parse the YAML manifest into a raw config map.
-3. Apply built-in defaults for missing OPTIONAL fields.
-4. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
-5. Coerce and validate typed values.
+ 3. Apply built-in defaults for missing OPTIONAL fields.
+ 4. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
+ 5. Coerce and validate typed values.
 
 Environment variables do not globally override YAML values. They are used only when a config value
 explicitly references them.

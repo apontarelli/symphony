@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.Config do
   @moduledoc """
-  Runtime configuration loaded from the selected workflow file.
+  Runtime configuration loaded from `symphony.yml`.
   """
 
   alias SymphonyElixir.Config.ProfileBindings
@@ -248,6 +248,9 @@ defmodule SymphonyElixir.Config do
   end
 
   defp format_manifest_diagnostics(diagnostics) when is_list(diagnostics) do
-    Enum.map_join(diagnostics, ", ", fn %{path: path, message: message} -> "#{path} #{message}" end)
+    Enum.map_join(diagnostics, ", ", fn
+      %{path: path, message: message} -> "#{path} #{message}"
+      diagnostic when is_binary(diagnostic) -> diagnostic
+    end)
   end
 end

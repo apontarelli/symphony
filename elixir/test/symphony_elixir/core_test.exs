@@ -1190,7 +1190,25 @@ defmodule SymphonyElixir.CoreTest do
 
     Workflow.clear_workflow_file_path()
 
+    assert Workflow.manifest_file_path() == Path.join(File.cwd!(), "symphony.yml")
     assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "symphony.yml")
+  end
+
+  test "workflow file path stays on symphony.yml when no manifest exists in cwd" do
+    original_workflow_path = Workflow.workflow_file_path()
+    root = Path.join(System.tmp_dir!(), "symphony-elixir-workflow-md-default-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+      File.rm_rf(root)
+    end)
+
+    File.mkdir_p!(root)
+    Workflow.clear_workflow_file_path()
+
+    File.cd!(root, fn ->
+      assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "symphony.yml")
+    end)
   end
 
   test "workflow load defaults to symphony.yml when app env is unset" do
@@ -2128,7 +2146,7 @@ defmodule SymphonyElixir.CoreTest do
     issue = %Issue{
       identifier: "MT-780",
       title: "Workflow unavailable",
-      description: "Missing workflow file",
+      description: "Missing manifest",
       state: "Todo",
       url: "https://example.org/issues/MT-780",
       labels: []

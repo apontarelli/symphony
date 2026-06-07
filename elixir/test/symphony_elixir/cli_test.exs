@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.CLITest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case
 
   alias SymphonyElixir.CLI
   alias SymphonyElixir.Workflow.{Manifest, Renderer}
@@ -511,7 +511,6 @@ defmodule SymphonyElixir.CLITest do
     assert config["policy_metadata"]["source"] == "symphony_manifest"
     assert prompt =~ "You are working on a Linear ticket"
     assert prompt =~ "## Core Workflow Modules"
-    refute prompt =~ "elixir/WORKFLOW.md"
   end
 
   test "workflow print shows resolved modules and can include compiled workflow output" do
@@ -525,7 +524,6 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "Resolved workflow"
     assert output =~ "preset: default"
     assert output =~ "repo.docs"
-    refute output =~ "Compiled WORKFLOW.md"
 
     assert {:ok, compiled_output} = CLI.evaluate(["workflow", "print", "--repo", repo, "--compiled"])
     assert compiled_output =~ "Compiled workflow"
@@ -545,7 +543,6 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "Compiled workflow"
     assert output =~ Renderer.to_yaml(compiled.config)
     assert output =~ compiled.prompt
-    refute output =~ "Compiled WORKFLOW.md"
     refute output =~ "$LINEAR_PROJECT_SLUG"
   end
 

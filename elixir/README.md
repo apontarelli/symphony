@@ -328,7 +328,7 @@ codex:
   command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
 ```
 
-- If the selected workflow file is missing or invalid at startup, Symphony does not boot.
+- If the selected manifest is missing or invalid at startup, Symphony does not boot.
 - If a later reload fails, Symphony keeps running with the last known good workflow and logs the
   reload error until the file is fixed.
 - A running or retrying issue keeps the resolved workflow profile policy selected at dispatch time.

@@ -1,6 +1,6 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an optional manifest path.
+  Escript entrypoint for running Symphony with a manifest.
   """
 
   alias SymphonyElixir.Config.ProfileBindings
@@ -18,22 +18,26 @@ defmodule SymphonyElixir.CLI do
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
-          file_regular?: (String.t() -> boolean()),
-          set_workflow_file_path: (String.t() -> :ok | {:error, term()}),
-          set_logs_root: (String.t() -> :ok | {:error, term()}),
-          set_server_port_override: (non_neg_integer() | nil -> :ok | {:error, term()}),
-          set_linear_profile_bindings: (map() -> :ok | {:error, term()}),
-          set_linear_profile_bindings_source_path: (String.t(), boolean() -> :ok | {:error, term()}),
-          set_profile_override: (String.t() | nil -> :ok | {:error, term()}),
-          load_linear_profile_bindings: (String.t() -> {:ok, map()} | {:error, term()}),
-          ensure_all_started: (-> ensure_started_result())
+          required(:file_regular?) => (String.t() -> boolean()),
+          required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
+          required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
+          required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
+          required(:set_linear_profile_bindings) => (map() -> :ok | {:error, term()}),
+          required(:set_linear_profile_bindings_source_path) => (String.t(), boolean() -> :ok | {:error, term()}),
+          required(:set_profile_override) => (String.t() | nil -> :ok | {:error, term()}),
+          required(:load_linear_profile_bindings) => (String.t() -> {:ok, map()} | {:error, term()}),
+          required(:ensure_all_started) => (-> ensure_started_result())
         }
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
     case evaluate(args) do
       :ok ->
-        wait_for_shutdown()
+        if workflow_command?(args) do
+          System.halt(0)
+        else
+          wait_for_shutdown()
+        end
 
       {:ok, message} ->
         IO.puts(message)
@@ -124,6 +128,9 @@ defmodule SymphonyElixir.CLI do
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end
+
+  defp workflow_command?(["workflow" | _args]), do: true
+  defp workflow_command?(_args), do: false
 
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do
