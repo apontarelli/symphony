@@ -1131,11 +1131,13 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(profiles, ["default", "delivery", "pr_target"]) == "main"
 
     assert String.trim(prompt) != ""
-    assert prompt =~ "You are working on a Linear issue for Symphony."
-    assert prompt =~ "Workflow modules:"
+    assert prompt =~ "You are working on a Linear ticket `{{ issue.identifier }}`"
+    assert prompt =~ "Project context:"
+    assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
     assert is_binary(Config.workflow_prompt())
-    assert Config.workflow_prompt() == prompt
+    assert Config.workflow_prompt() =~ "## Core Workflow Modules"
+    refute Config.workflow_prompt() =~ "## Related skills"
 
     assert {:ok, policy} = Config.effective_policy()
     assert is_binary(policy["policy_ref"])
@@ -2069,17 +2071,22 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear issue for project."
-    assert prompt =~ "Workflow modules:"
+    assert prompt =~ "You are working on a Linear ticket `MT-777`"
+    assert prompt =~ "Project context:"
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
     assert prompt =~ "- PR target: main"
     assert prompt =~ "target=main"
+    assert prompt =~ "Description:"
     assert prompt =~ "Include enough issue context to start working."
     assert prompt =~ "Selected Workflow Profile"
+    assert prompt =~ "## Core Workflow Modules"
+    assert prompt =~ "### Linear Operation"
+    assert prompt =~ "Use Linear as the tracker"
+    refute prompt =~ "## Related skills"
     assert Config.workflow_prompt() =~ "{{ issue.identifier }}"
     assert Config.workflow_prompt() =~ "{{ issue.title }}"
-    assert Config.workflow_prompt() =~ "Workflow modules:"
+    assert Config.workflow_prompt() =~ "## Core Workflow Modules"
     assert Config.workflow_prompt() =~ "{{ issue.description }}"
   end
 
@@ -2154,10 +2161,10 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue, attempt: 2)
 
-    assert prompt =~ "You are working on a Linear issue for Symphony."
+    assert prompt =~ "You are working on a Linear ticket `MT-616`"
     assert prompt =~ "Project slug: symphony"
     assert prompt =~ "Repository: https://github.com/openai/symphony"
-    assert prompt =~ "Workflow modules:"
+    assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Use Linear as the tracker"
     assert prompt =~ "Run Codex with the configured runtime settings"
     assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
@@ -2166,6 +2173,11 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Title: Use generated manifests"
     assert prompt =~ "Current status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-generated-manifests"
+    assert prompt =~ "Final responses report completed actions and blockers only."
+    assert prompt =~ "### Land Merge"
+    assert prompt =~ "Merging, locate the attached PR"
+    refute prompt =~ ".codex/skills"
+    refute prompt =~ "## Related skills"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt 2"
     assert prompt =~ "## Selected Workflow Profile"

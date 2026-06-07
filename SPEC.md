@@ -690,7 +690,7 @@ Minimal shape:
       {"id": "tracker.linear", "ref": "883bf519122b"}
     ]
   },
-  "prompt_template": "You are working on a Linear issue for {{ project.name }}...",
+  "prompt_template": "You are working on a Linear ticket `{{ issue.identifier }}`...",
   "checks": [],
   "completion_requirements": [],
   "delivery": {"pr_target": "main"},
@@ -870,10 +870,32 @@ Template input variables:
 
 Fallback prompt behavior:
 
-- If the compiled workflow prompt template is empty, the runtime MAY use a minimal default prompt
-  (`You are working on an issue from Linear.`).
+- If the compiled workflow prompt template is empty, the runtime SHOULD compile a default prompt from its
+  built-in core workflow module registry.
+- The default compiled prompt SHOULD include enough issue context and workflow policy for an agent
+  to execute the run without requiring globally installed workflow skills.
 - Manifest, module, compile, or template errors are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
+
+### 5.4.1 Core Workflow Modules
+
+Implementations MAY provide an internal workflow module registry for reusable prompt policy.
+
+Core module requirements:
+
+- Modules SHOULD be versioned and owned by the Symphony implementation.
+- Each module SHOULD include `id`, `summary`, `version`, default-inclusion metadata,
+  compatibility constraints, optional pins, and Markdown content.
+- The default preset SHOULD be compiled from modules marked for default inclusion.
+- Missing module IDs or malformed registry entries SHOULD be caught by unit tests or workflow
+  validation before handoff.
+- Adding future non-default modules SHOULD NOT require editing target repository manifests. Target
+  repositories should only need manifest changes when they explicitly opt in to non-default module
+  selections or versions.
+
+The default module set SHOULD cover Linear operation, implementation loop, VCS/commit/push,
+pull/sync, quality gates, automated review, land/merge, rework, requirement validation, project
+closeout, and debugging/run recovery.
 
 ### 5.5 Workflow Validation and Error Surface
 
