@@ -4,18 +4,20 @@ project:
   name: Symphony
   repository: https://github.com/openai/symphony
   kind: elixir
-  app_kind: local/internal
+  app_kind: web
 workflow:
   preset: default
   modules: []
 docs:
   entrypoints:
-    - AGENTS.md
     - README.md
+    - SPEC.md
+    - elixir/AGENTS.md
+    - elixir/README.md
 validation:
   commands:
-    - name: test
-      command: mise exec -- mix test
+    - name: all
+      command: cd elixir && make all
 vcs:
   mode: jj
   default_branch: main

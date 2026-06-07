@@ -51,6 +51,14 @@ symphony --workflow /path/to/project/symphony.yml
 symphony --workflow /path/to/project/symphony.yml --no-portless
 ```
 
+The Elixir CLI can also initialize and inspect a target repo manifest directly:
+
+```bash
+symphony workflow init
+symphony workflow check
+symphony workflow print --compiled
+```
+
 ---
 
 ## License

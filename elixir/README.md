@@ -37,19 +37,23 @@ Linear issue can become a dispatch candidate again after restart.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Add a `symphony.yml` manifest to your repo.
-4. Ensure the global `symphony-linear`, `symphony-commit`, `symphony-pull`,
+3. Build the CLI and run `symphony workflow init` from the target repo root to create
+   `symphony.yml`.
+4. Run `symphony workflow check` to validate the manifest, repo docs, local binding file, and any
+   configured harness CODEX_HOME.
+5. Run `symphony workflow print --compiled` to inspect the resolved workflow config and prompt.
+6. Ensure the global `symphony-linear`, `symphony-commit`, `symphony-pull`,
    `symphony-quality-gates`, `symphony-review`, `symphony-push`, `symphony-land`, and
    `symphony-debug` skills are available to Codex.
    - `symphony-linear` expects Symphony's `linear_graphql` app-server tool for raw Linear
      GraphQL operations such as comment editing or upload flows.
-5. Customize the manifest for your project.
+7. Customize the generated `symphony.yml` for your project.
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
+     URL. Keep operator-local project IDs in the local bindings file, not in committed manifests.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
-6. Follow the instructions below to install the required runtime dependencies and start the service.
+8. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
 
@@ -88,6 +92,56 @@ symlink `../bin/symphony` into a directory already on `PATH`.
 
 ## Configuration
 
+Target repos can use a committed `symphony.yml` manifest for setup and audit:
+
+```bash
+./bin/symphony workflow init --repo /path/to/repo
+./bin/symphony workflow check --repo /path/to/repo
+./bin/symphony workflow print --repo /path/to/repo --compiled
+```
+
+`init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
+left unchanged unless `--force` is passed. `check` validates the manifest schema, selected modules,
+repo doc entrypoints, validation command shape, local bindings, and a configured harness
+`CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
+workflow config and prompt without writing generated prompt files into the target repo.
+
+`symphony.yml` v1 contains:
+
+```yaml
+version: 1
+project:
+  name: my-repo
+  kind: elixir
+  app_kind: local
+workflow:
+  preset: default
+  modules: []
+docs:
+  entrypoints:
+    - AGENTS.md
+    - README.md
+validation:
+  commands:
+    - name: test
+      command: mix test
+vcs:
+  mode: jj
+delivery:
+  pr_target: main
+automation:
+  posture: unattended
+harness:
+  codex_home: null
+bindings:
+  local_file: .symphony.local.yml
+  require_local: false
+```
+
+`harness.codex_home: null` means Symphony derives a managed harness CODEX_HOME. If a path is set,
+`workflow check` requires that directory and its `AGENTS.md` to exist. `bindings.local_file` is for
+operator-local tracker/project data that should not be committed.
+
 Pass a custom manifest path to `./bin/symphony` when starting the service:
 
 ```bash
@@ -112,24 +166,27 @@ Minimal manifest example:
 project:
   slug: "..."
   repository: git@github.com:your-org/your-repo.git
-app:
-  kind: web
+  kind: elixir
+  app_kind: web
 docs:
-  entry_points:
+  entrypoints:
     - README.md
 vcs:
-  kind: git
+  mode: git
   default_branch: main
 validation:
-  gates:
+  commands:
     - name: tests
       command: make test
+automation:
+  posture: unattended
+  profile: default
 workflow:
   preset: default
 ```
 
-The default manifest `workspace` module uses `project.repository` to populate new issue workspaces
-with `git clone --depth 1 <repository> .`.
+When `project.repository` is present, the default `workspace` module uses it to populate new issue
+workspaces with `git clone --depth 1 <repository> .`.
 
 Repository-owned profile overrides can live under `runtime.profiles` in committed `symphony.yml`.
 They describe policy available to every run of the repo and should not contain Linear project IDs:
@@ -144,7 +201,7 @@ runtime:
         - make all
 ```
 
-The `default` profile is compiled from manifest delivery, validation, and autonomy fields.
+The `default` profile is compiled from manifest delivery, validation, and automation fields.
 `delivery.pr_target` is the only v1 delivery selector: use `main` for normal mainline PRs, or a
 non-main branch such as `project/integration` when work should open PRs against a project integration
 branch. v1 does not automate promotion from a non-main target back to `main` after restart or
@@ -302,6 +359,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
 - `symphony.yml`: in-repo manifest used by local runs
+- `../symphony.yml`: dogfood target-repo manifest for CLI `workflow check`/`print`
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
