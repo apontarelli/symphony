@@ -26,6 +26,18 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(evidence, &(&1.summary =~ "low-risk"))
   end
 
+  test "classifies top-level auto-land enablement as auto-land eligible" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "mix test", status: :passed}],
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{auto_land_enabled: true}
+      })
+
+    assert decision.route == :auto_land
+  end
+
   test "does not classify missing check evidence as auto-land eligible" do
     decision =
       HandoffRoute.classify(%{
@@ -38,6 +50,127 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert decision.route == :human_review
     assert decision.target_state == "Human Review"
     assert Enum.any?(decision.evidence, &(&1.kind == :check and &1.status == :missing))
+  end
+
+  test "manifest auto-land policy blocks handoff when required evidence is missing" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [
+          %{name: "tests", status: :passed},
+          %{name: "quality_gates", status: :passed},
+          %{name: "automated_review", status: :passed},
+          %{name: "route_classification", status: :passed},
+          %{name: "sync", status: :passed}
+        ],
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{
+            posture: "permissive",
+            required_checks: ["security-review"],
+            blocked_state: "Human Review",
+            dry_run: true
+          }
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+    assert decision.summary =~ "Missing required auto-land evidence"
+    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.status == :missing and &1.summary =~ "security-review"))
+  end
+
+  test "manifest auto-land policy records passed evidence when every required check is present" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(["security-review"]),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{
+            posture: "permissive",
+            required_checks: ["security-review"],
+            dry_run: true
+          }
+        }
+      })
+
+    assert decision.route == :auto_land
+    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.status == :passed))
+  end
+
+  test "manifest auto-land force-human-review labels route to human review" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        issue_labels: [" Manual-Review "],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: true}
+        }
+      })
+
+    assert decision.route == :human_review
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :policy and &1.summary =~ "manual-review")
+           )
+  end
+
+  test "production auto-land policy requires recovery evidence" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [
+          %{name: "tests", status: :passed},
+          %{name: "quality_gates", status: :passed},
+          %{name: "automated_review", status: :passed},
+          %{name: "route_classification", status: :passed},
+          %{name: "sync", status: :passed}
+        ],
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "production_web"},
+          auto_land: %{dry_run: true}
+        }
+      })
+
+    assert decision.route == :blocked
+    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.summary =~ "recovery"))
+  end
+
+  test "strict auto-land posture requires recovery evidence" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "strict", required_checks: "security-review", dry_run: true}
+        }
+      })
+
+    assert decision.route == :blocked
+    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.summary =~ "recovery"))
+  end
+
+  test "auto-land posture off routes through human review" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "tests", status: :passed}],
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{auto_land: %{posture: "off", dry_run: true}}
+      })
+
+    assert decision.route == :human_review
+    assert decision.target_state == "Human Review"
   end
 
   test "routes risky completed work to human review with risk evidence" do
@@ -316,5 +449,11 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert comment =~ "### Handoff Route"
     assert comment =~ "rework"
     assert_receive {:memory_tracker_state_update, "issue-1", "Rework"}
+  end
+
+  defp auto_land_checks(extra_checks \\ []) do
+    ~w(tests quality_gates automated_review route_classification sync)
+    |> Kernel.++(extra_checks)
+    |> Enum.map(&%{name: &1, status: :passed})
   end
 end

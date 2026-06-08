@@ -232,6 +232,77 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "max_risk_class: low"
   end
 
+  test "auto-land policy compiles from symphony manifest fields" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+        criticality: prototype
+        deployment_coupling: none
+      auto_land:
+        posture: permissive
+        required_checks:
+          - security-review
+        force_human_review_labels:
+          - manual-review
+        failure_state: Rework
+        blocked_state: Human Review
+        dry_run: true
+      """)
+
+    assert {:ok, %{config: config}} = Manifest.load(path)
+
+    expected_auto_land = %{
+      "posture" => "permissive",
+      "required_checks" => ["security-review"],
+      "force_human_review_labels" => ["manual-review"],
+      "failure_state" => "Rework",
+      "blocked_state" => "Human Review",
+      "dry_run" => true
+    }
+
+    assert config["manifest"]["project"]["criticality"] == "prototype"
+    assert config["manifest"]["project"]["deployment_coupling"] == "none"
+    assert config["manifest"]["auto_land"] == expected_auto_land
+    assert config["project"]["criticality"] == "prototype"
+    assert config["project"]["deployment_coupling"] == "none"
+    assert config["auto_land"] == expected_auto_land
+    assert get_in(config, ["profiles", "default", "auto_land"]) == expected_auto_land
+
+    workflow_path = Workflow.workflow_file_path()
+    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+    Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    settings = Config.settings!()
+    assert settings.project.criticality == "prototype"
+    assert settings.project.deployment_coupling == "none"
+    assert settings.auto_land.posture == "permissive"
+    assert settings.auto_land.required_checks == ["security-review"]
+    assert settings.auto_land.force_human_review_labels == ["manual-review"]
+  end
+
+  test "auto-land policy compiles documented default force-human-review labels" do
+    path =
+      write_manifest!("""
+      version: 1
+      auto_land:
+        posture: permissive
+        dry_run: true
+      """)
+
+    assert {:ok, %{config: config}} = Manifest.load(path)
+
+    assert config["auto_land"]["force_human_review_labels"] == [
+             "force-human-review",
+             "human-review",
+             "manual-review",
+             "no-auto-land"
+           ]
+  end
+
   test "legacy manifest vocabulary is rejected instead of translated" do
     path =
       write_manifest!("""

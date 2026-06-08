@@ -2331,6 +2331,10 @@ defmodule SymphonyElixir.CoreTest do
     refute prompt =~ "## Related skills"
     refute prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
     assert prompt =~ "never bypass it with a direct merge command"
+    assert prompt =~ "Auto-land route classification"
+    assert prompt =~ "structured completion evidence"
+    assert prompt =~ "dry-run auto-land"
+    assert prompt =~ "no merge or landing command is allowed"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt 2"
     assert prompt =~ "## Selected Workflow Profile"

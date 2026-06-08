@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   @manifest_file "symphony.yml"
   @local_bindings_file ".symphony.local.yml"
+  @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
 
   @type diagnostic :: %{path: String.t(), message: String.t()}
   @type manifest_error ::
@@ -159,6 +160,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {validation, validation_errors} = normalize_validation(Map.get(raw, "validation"))
     {automation, automation_errors} = normalize_automation(Map.get(raw, "automation"))
     {workflow, workflow_errors} = normalize_workflow(Map.get(raw, "workflow"))
+    {auto_land, auto_land_errors} = normalize_auto_land(Map.get(raw, "auto_land"))
     {review_routing, review_routing_errors} = normalize_review_routing(Map.get(raw, "review_routing"))
     {harness, harness_errors} = normalize_harness(Map.get(raw, "harness"))
     {bindings, bindings_errors} = normalize_bindings(Map.get(raw, "bindings"))
@@ -175,6 +177,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
         validation_errors ++
         automation_errors ++
         workflow_errors ++
+        auto_land_errors ++
         review_routing_errors ++
         harness_errors ++
         bindings_errors ++
@@ -192,6 +195,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
           "validation" => validation,
           "automation" => automation,
           "workflow" => workflow,
+          "auto_land" => auto_land,
           "review_routing" => review_routing,
           "harness" => harness,
           "bindings" => bindings,
@@ -229,7 +233,16 @@ defmodule SymphonyElixir.Workflow.Manifest do
   end
 
   defp normalize_project(nil) do
-    {%{"slug" => nil, "name" => nil, "repository" => nil, "kind" => "generic", "app_kind" => "local", "facts" => %{}}, []}
+    {%{
+       "slug" => nil,
+       "name" => nil,
+       "repository" => nil,
+       "kind" => "generic",
+       "app_kind" => "local",
+       "facts" => %{},
+       "criticality" => "internal",
+       "deployment_coupling" => "local"
+     }, []}
   end
 
   defp normalize_project(raw) when is_map(raw) do
@@ -239,6 +252,10 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {kind, kind_errors} = string_field(raw, "kind", "project.kind", default: "generic")
     {app_kind, app_kind_errors} = string_field(raw, "app_kind", "project.app_kind", default: "local")
     {facts, facts_errors} = map_field(raw, "facts", "project.facts", default: %{})
+    {criticality, criticality_errors} = string_field(raw, "criticality", "project.criticality", default: "internal")
+
+    {deployment_coupling, deployment_coupling_errors} =
+      string_field(raw, "deployment_coupling", "project.deployment_coupling", default: "local")
 
     project =
       %{
@@ -246,15 +263,34 @@ defmodule SymphonyElixir.Workflow.Manifest do
         "name" => name,
         "kind" => kind,
         "app_kind" => app_kind,
-        "facts" => facts
+        "facts" => facts,
+        "criticality" => criticality,
+        "deployment_coupling" => deployment_coupling
       }
       |> maybe_put("repository", repository)
 
-    {project, slug_errors ++ name_errors ++ repository_errors ++ kind_errors ++ app_kind_errors ++ facts_errors}
+    errors =
+      slug_errors ++
+        name_errors ++
+        repository_errors ++
+        kind_errors ++
+        app_kind_errors ++
+        facts_errors ++ criticality_errors ++ deployment_coupling_errors
+
+    {project, errors}
   end
 
   defp normalize_project(_raw) do
-    {%{"slug" => nil, "name" => nil, "repository" => nil, "kind" => "generic", "app_kind" => "local", "facts" => %{}}, [type_error("project", "must be a map")]}
+    {%{
+       "slug" => nil,
+       "name" => nil,
+       "repository" => nil,
+       "kind" => "generic",
+       "app_kind" => "local",
+       "facts" => %{},
+       "criticality" => "internal",
+       "deployment_coupling" => "local"
+     }, [type_error("project", "must be a map")]}
   end
 
   defp finalize_project(project) do
@@ -355,6 +391,41 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp normalize_review_routing(raw) when is_map(raw), do: {normalize_keys(raw), []}
   defp normalize_review_routing(_raw), do: {nil, [type_error("review_routing", "must be a map")]}
 
+  defp normalize_auto_land(nil), do: {nil, []}
+
+  defp normalize_auto_land(raw) when is_map(raw) do
+    {posture, posture_errors} = string_field(raw, "posture", "auto_land.posture", default: nil)
+    {required_checks, required_check_errors} = string_list_field(raw, "required_checks", "auto_land.required_checks", default: [])
+
+    {force_human_review_labels, label_errors} =
+      string_list_field(raw, "force_human_review_labels", "auto_land.force_human_review_labels", default: @default_force_human_review_labels)
+
+    {failure_state, failure_state_errors} = string_field(raw, "failure_state", "auto_land.failure_state", default: "Rework")
+    {blocked_state, blocked_state_errors} = string_field(raw, "blocked_state", "auto_land.blocked_state", default: "Human Review")
+    {dry_run, dry_run_errors} = boolean_field(raw, "dry_run", "auto_land.dry_run", default: true)
+
+    auto_land =
+      %{
+        "required_checks" => required_checks,
+        "force_human_review_labels" => force_human_review_labels,
+        "failure_state" => failure_state,
+        "blocked_state" => blocked_state,
+        "dry_run" => dry_run
+      }
+      |> maybe_put("posture", posture)
+
+    errors =
+      posture_errors ++
+        required_check_errors ++
+        label_errors ++
+        failure_state_errors ++
+        blocked_state_errors ++ dry_run_errors
+
+    {auto_land, errors}
+  end
+
+  defp normalize_auto_land(_raw), do: {nil, [type_error("auto_land", "must be a map")]}
+
   defp workflow_modules(raw) do
     case indexed_string_list_field(raw, "modules", "workflow.modules", default: []) do
       {modules, errors} ->
@@ -414,6 +485,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
     %{
       "manifest" => public_manifest,
+      "project" => landing_project_policy(project),
       "checks" => validation["commands"],
       "completion_requirements" => automation["completion_requirements"],
       "delivery" => delivery,
@@ -425,6 +497,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
         "source" => "symphony_manifest"
       }
     }
+    |> maybe_put("auto_land", manifest["auto_land"])
   end
 
   defp manifest_profiles(manifest) do
@@ -442,6 +515,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "delivery" => manifest["delivery"],
       "manifest" => manifest_policy_inputs(manifest)
     }
+    |> Map.put("project", landing_project_policy(manifest["project"]))
+    |> maybe_put("auto_land", manifest["auto_land"])
     |> maybe_put("review", Map.get(manifest["automation"], "review"))
     |> maybe_put("review_routing", Map.get(manifest, "review_routing"))
   end
@@ -449,7 +524,11 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp manifest_policy_inputs(manifest) do
     manifest
     |> public_manifest()
-    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "review_routing", "harness", "bindings"])
+    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "auto_land", "review_routing", "harness", "bindings"])
+  end
+
+  defp landing_project_policy(project) do
+    Map.take(project, ["criticality", "deployment_coupling"])
   end
 
   defp public_manifest(manifest) do

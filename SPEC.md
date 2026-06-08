@@ -421,6 +421,15 @@ Optional manifest fields:
 - `automation.review` (object)
 - `workflow.preset` (string, default `default`)
 - `workflow.modules` (list of strings, appended to preset modules)
+- `project.criticality` (string, default `internal`)
+- `project.deployment_coupling` (string, default `local`)
+- `auto_land.posture` (string, default derived from project criticality and deployment coupling)
+- `auto_land.required_checks` (list of strings, default `[]`)
+- `auto_land.force_human_review_labels` (list of strings, default includes `force-human-review`,
+  `human-review`, `manual-review`, and `no-auto-land`)
+- `auto_land.failure_state` (string, default `Rework`)
+- `auto_land.blocked_state` (string, default `Human Review`)
+- `auto_land.dry_run` (boolean, default `true`)
 - `review_routing` (object)
 
 Manifest resolution rules:
@@ -500,6 +509,17 @@ review_routing:
   - Examples include `web`, `mobile`, `desktop`, `local/internal`, and `production-facing`.
 - `facts` (object)
   - OPTIONAL prompt facts rendered by registry-owned modules.
+- `criticality` (string)
+  - OPTIONAL.
+  - Default: `internal`.
+  - Supported values: `local`, `prototype`, `internal`, `production`.
+  - Used to derive the default auto-land posture when `auto_land.posture` is omitted.
+- `deployment_coupling` (string)
+  - OPTIONAL.
+  - Default: `local`.
+  - Supported values: `none`, `local`, `preview`, `staging`, `production`, `production_web`.
+  - `production` and `production_web` require strict auto-land evidence even when other project
+    metadata is lower criticality.
 
 The manifest MAY identify tracker routing by project slug, but it MUST NOT contain tracker API
 tokens.
@@ -579,7 +599,49 @@ A preset is a Symphony-owned bundle of default workflow modules, module ordering
 checks, completion requirements, and transition defaults for a common app/workflow shape. Presets
 MUST be deterministic for a given preset ref and implementation version.
 
-#### 5.3.8 `review_routing` (object, OPTIONAL extension)
+#### 5.3.8 `auto_land` (object, OPTIONAL extension)
+
+`auto_land` describes the side-effect-free classification policy used before final handoff. It can
+select dry-run auto-land, human review, rework, or blocked routing, but v1 MUST NOT merge or land a
+PR from auto-land.
+
+Fields:
+
+- `posture` (string, OPTIONAL)
+  - Supported values: `off`, `permissive`, `strict`.
+  - When omitted, local/prototype/internal projects default to `permissive`; production or
+    production-web coupled projects default to `strict`.
+- `required_checks` (list of strings)
+  - Default: `[]`.
+  - Adds project-specific required evidence checks to the posture defaults.
+- `force_human_review_labels` (list of strings)
+  - Default: `force-human-review`, `human-review`, `manual-review`, `no-auto-land`.
+  - Any matching issue label forces the route to human review.
+- `failure_state` (string)
+  - Default: `Rework`.
+  - Target tracker state for failed required evidence when the workflow applies the decision.
+- `blocked_state` (string)
+  - Default: `Human Review`.
+  - Target tracker state for missing required evidence when the workflow applies the decision.
+- `dry_run` (boolean)
+  - Default: `true`.
+  - When true, Symphony may classify and record an `auto_land` decision but MUST NOT merge or land
+    the PR.
+  - v1 implementations MUST reject or ignore `false` until landing integration is implemented.
+
+Default required evidence:
+
+- `permissive`: `tests`, `quality_gates`, `automated_review`, `route_classification`, `sync`.
+- `strict`: permissive checks plus `recovery`.
+
+Decision routes:
+
+- `auto_land`: all required evidence passed and no force-human-review override matched.
+- `human_review`: posture is `off`, or a force-human-review label matched.
+- `rework`: one or more required evidence checks failed.
+- `blocked`: one or more required evidence checks are missing.
+
+#### 5.3.9 `review_routing` (object, OPTIONAL extension)
 
 `review_routing` describes the policy used by the workflow prompt and agent tooling to choose a
 completion route after implementation and validation. It compiles into the resolved profile policy
