@@ -514,6 +514,19 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
              ],
+             "handoff_routes" => [
+               %{
+                 "issue_id" => "issue-http",
+                 "route" => "human_review",
+                 "target_state" => "Human Review",
+                 "summary" => "Human review required for risky or policy-protected work.",
+                 "recommendation" => "Review evidence, then approve for Merging or request Rework.",
+                 "options" => [],
+                 "evidence" => [],
+                 "artifacts" => [],
+                 "metadata" => %{}
+               }
+             ],
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -1171,6 +1184,19 @@ defmodule SymphonyElixir.ExtensionsTest do
             timestamp: DateTime.utc_now()
           },
           last_codex_timestamp: DateTime.utc_now()
+        }
+      ],
+      handoff_routes: [
+        %{
+          issue_id: "issue-http",
+          route: "human_review",
+          target_state: "Human Review",
+          summary: "Human review required for risky or policy-protected work.",
+          recommendation: "Review evidence, then approve for Merging or request Rework.",
+          options: [],
+          evidence: [],
+          artifacts: [],
+          metadata: %{}
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

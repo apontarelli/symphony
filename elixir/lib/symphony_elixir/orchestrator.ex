@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, HandoffRoute, HandoffRouteRecorder, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -36,6 +36,7 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_token,
       running: %{},
       completed: MapSet.new(),
+      handoff_routes: %{},
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
@@ -217,7 +218,7 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
       state
-      |> complete_issue(issue_id)
+      |> complete_issue(issue_id, running_entry)
       |> schedule_issue_retry(
         issue_id,
         1,
@@ -758,6 +759,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
+    handoff_route = handoff_decision_for_running_entry(running_entry, %{reason: error})
+    maybe_persist_handoff_route(issue_id, handoff_route)
+
     blocked_entry =
       running_entry
       |> policy_tracking_fields_from_running()
@@ -780,7 +784,13 @@ defmodule SymphonyElixir.Orchestrator do
       | running: Map.delete(state.running, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
         claimed: MapSet.put(state.claimed, issue_id),
-        blocked: Map.put(state.blocked, issue_id, blocked_entry)
+        blocked: Map.put(state.blocked, issue_id, blocked_entry),
+        handoff_routes:
+          Map.put(
+            state.handoff_routes,
+            issue_id,
+            HandoffRoute.to_map(handoff_route)
+          )
     }
   end
 
@@ -1054,6 +1064,7 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
+            handoff_routes: Map.delete(state.handoff_routes, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
         }
 
@@ -1095,10 +1106,22 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp complete_issue(%State{} = state, issue_id) do
+  defp complete_issue(%State{} = state, issue_id, running_entry) do
+    handoff_route = handoff_decision_for_running_entry(running_entry, nil)
+
+    if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
+      maybe_persist_handoff_route(issue_id, handoff_route)
+    end
+
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
+        handoff_routes:
+          Map.put(
+            state.handoff_routes,
+            issue_id,
+            HandoffRoute.to_map(handoff_route)
+          ),
         retry_attempts: Map.delete(state.retry_attempts, issue_id)
     }
   end
@@ -1632,6 +1655,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       handoff_routes: handoff_route_entries(state.handoff_routes),
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1663,6 +1687,63 @@ defmodule SymphonyElixir.Orchestrator do
   defp blocked_issue_url(%{issue: %Issue{url: url}}), do: url
   defp blocked_issue_url(_metadata), do: nil
 
+  defp handoff_route_entries(handoff_routes) when is_map(handoff_routes) do
+    Enum.map(handoff_routes, fn {issue_id, decision} ->
+      Map.put(decision, :issue_id, issue_id)
+    end)
+  end
+
+  defp handoff_route_entries(_handoff_routes), do: []
+
+  defp handoff_decision_for_running_entry(running_entry, blocker) when is_map(running_entry) do
+    running_entry
+    |> Map.get(:completion, %{})
+    |> HandoffRouteRecorder.classify_completion(blocker)
+  end
+
+  defp handoff_decision_for_running_entry(_running_entry, blocker) do
+    HandoffRouteRecorder.classify_completion(%{}, blocker)
+  end
+
+  defp maybe_persist_handoff_route(issue_id, %HandoffRoute.Decision{} = decision)
+       when is_binary(issue_id) do
+    case HandoffRouteRecorder.record(issue_id, decision) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Unable to persist handoff route for issue_id=#{issue_id}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp maybe_put_completion(running_entry, update) do
+    case completion_for_update(update) do
+      %{} = completion -> Map.put(running_entry, :completion, completion)
+      _ -> running_entry
+    end
+  end
+
+  defp completion_for_update(%{completion: completion}) when is_map(completion), do: completion
+  defp completion_for_update(%{"completion" => completion}) when is_map(completion), do: completion
+
+  defp completion_for_update(%{payload: payload}) when is_map(payload) do
+    completion_from_payload(payload)
+  end
+
+  defp completion_for_update(%{"payload" => payload}) when is_map(payload) do
+    completion_from_payload(payload)
+  end
+
+  defp completion_for_update(_update), do: nil
+
+  defp completion_from_payload(payload) when is_map(payload) do
+    map_at_path(payload, ["params", "completion"]) ||
+      map_at_path(payload, [:params, :completion]) ||
+      map_at_path(payload, ["params", "turn", "completion"]) ||
+      map_at_path(payload, [:params, :turn, :completion])
+  end
+
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
@@ -1692,7 +1773,8 @@ defmodule SymphonyElixir.Orchestrator do
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
-      }),
+      })
+      |> maybe_put_completion(update),
       token_delta
     }
   end
