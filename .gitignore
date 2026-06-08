@@ -1,1 +1,5 @@
 *.png
+
+# Local Symphony operator config.
+.symphony.local.yml
+linear-profile-bindings.local.yml

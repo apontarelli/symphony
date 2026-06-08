@@ -1114,7 +1114,7 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert Map.get(tracker, "project_slug") == "$SYMPHONY_LINEAR_PROJECT_SLUG"
+    assert Map.get(tracker, "project_slug") == "symphony-self-contained-workflow-modules-72083cd8c253"
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 

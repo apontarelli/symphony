@@ -79,13 +79,12 @@ mise exec -- ./bin/symphony ../symphony.yml
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
 It keeps local shell glue in this repo instead of dotfiles, resolves project workflows, loads
-`~/.config/symphony/.env` through `op run`, uses Portless by default, and rebuilds the escript
-before launching:
+`~/.config/symphony/.env` through `op run`, and rebuilds the escript before launching:
 
 ```bash
 cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony my-project
-../bin/symphony --workflow /path/to/project/symphony.yml --no-portless
+../bin/symphony --workflow /path/to/project/symphony.yml
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or

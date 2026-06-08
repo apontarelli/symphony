@@ -457,6 +457,77 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
   end
 
+  test "linear client fetches URL-style project slugs by Linear slugId suffix" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_project_page, query, variables})
+
+      nodes =
+        case variables.projectSlug do
+          "72083cd8c253" ->
+            [
+              %{
+                "id" => "issue-1",
+                "identifier" => "SID-305",
+                "title" => "Publish through host-owned VCS handoff",
+                "description" => "Use the host repository target.",
+                "priority" => 2,
+                "state" => %{"name" => "Todo"},
+                "labels" => %{"nodes" => []},
+                "inverseRelations" => %{"nodes" => []},
+                "project" => %{
+                  "id" => "project-1",
+                  "slugId" => "72083cd8c253",
+                  "name" => "Symphony Self-Contained Workflow Modules"
+                }
+              }
+            ]
+
+          _slug ->
+            []
+        end
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => nodes,
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [issue]} =
+             Client.fetch_by_project_selector_for_test(
+               %{project_slug: "symphony-self-contained-workflow-modules-72083cd8c253"},
+               ["Todo"],
+               graphql_fun
+             )
+
+    assert issue.identifier == "SID-305"
+    assert issue.project_slug == "72083cd8c253"
+
+    assert_receive {:fetch_project_page, query,
+                    %{
+                      projectSlug: "symphony-self-contained-workflow-modules-72083cd8c253",
+                      stateNames: ["Todo"],
+                      first: 50,
+                      relationFirst: 50,
+                      after: nil
+                    }}
+
+    assert query =~ "SymphonyLinearPoll"
+
+    assert_receive {:fetch_project_page, ^query,
+                    %{
+                      projectSlug: "72083cd8c253",
+                      stateNames: ["Todo"],
+                      first: 50,
+                      relationFirst: 50,
+                      after: nil
+                    }}
+  end
+
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->

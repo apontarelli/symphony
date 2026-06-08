@@ -42,13 +42,11 @@ help with the setup:
 
 If you want a shell command, put this repository's `bin/` directory on your `PATH` or symlink
 `bin/symphony` into a directory already on your `PATH`. The repo-owned launcher resolves workflow
-paths, wraps the service with `op run` and Portless by default, and rebuilds the Elixir escript
-before launch:
+paths, wraps the service with `op run`, and rebuilds the Elixir escript before launch:
 
 ```bash
 symphony my-project
 symphony --workflow /path/to/project/symphony.yml
-symphony --workflow /path/to/project/symphony.yml --no-portless
 ```
 
 The Elixir CLI can also initialize and inspect a target repo manifest directly:

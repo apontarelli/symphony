@@ -489,6 +489,18 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc false
+  @spec fetch_by_project_selector_for_test(
+          map(),
+          [String.t()],
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_by_project_selector_for_test(selector, state_names, graphql_fun)
+      when is_map(selector) and is_list(state_names) and is_function(graphql_fun, 2) do
+    do_fetch_by_project_selector(selector, state_names, nil, graphql_fun)
+  end
+
   defp fetch_by_configured_scope(tracker, state_names, assignee_filter) do
     bindings = Config.linear_profile_bindings()
     team_selector = ProfileBindings.team_fetch_selector(bindings)
@@ -544,17 +556,38 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp do_fetch_by_project_selector(%{project_id: project_id}, state_names, assignee_filter)
-       when is_binary(project_id) do
-    do_fetch_by_states(@query_by_project_id, %{projectId: project_id}, state_names, assignee_filter)
+  defp do_fetch_by_project_selector(selector, state_names, assignee_filter) do
+    do_fetch_by_project_selector(selector, state_names, assignee_filter, &graphql/2)
   end
 
-  defp do_fetch_by_project_selector(%{project_slug: project_slug}, state_names, assignee_filter)
-       when is_binary(project_slug) do
-    do_fetch_by_states(@query_by_project_slug, %{projectSlug: project_slug}, state_names, assignee_filter)
+  defp do_fetch_by_project_selector(%{project_id: project_id}, state_names, assignee_filter, graphql_fun)
+       when is_binary(project_id) and is_function(graphql_fun, 2) do
+    do_fetch_by_states(@query_by_project_id, %{projectId: project_id}, state_names, assignee_filter, graphql_fun)
   end
 
-  defp do_fetch_by_project_selector(_selector, _state_names, _assignee_filter), do: {:ok, []}
+  defp do_fetch_by_project_selector(%{project_slug: project_slug}, state_names, assignee_filter, graphql_fun)
+       when is_binary(project_slug) and is_function(graphql_fun, 2) do
+    project_slug
+    |> project_slug_fetch_values()
+    |> Enum.reduce_while({:ok, []}, fn fetch_slug, {:ok, acc} ->
+      case do_fetch_by_states(
+             @query_by_project_slug,
+             %{projectSlug: fetch_slug},
+             state_names,
+             assignee_filter,
+             graphql_fun
+           ) do
+        {:ok, issues} -> {:cont, {:ok, acc ++ issues}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, issues} -> {:ok, Enum.uniq_by(issues, &issue_identity/1)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_fetch_by_project_selector(_selector, _state_names, _assignee_filter, _graphql_fun), do: {:ok, []}
 
   defp do_fetch_by_team_selector(%{team_id: team_id}, state_names, assignee_filter) when is_binary(team_id) do
     do_fetch_by_states(@query_by_team_id, %{teamId: team_id}, state_names, assignee_filter)
@@ -567,12 +600,16 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_by_team_selector(_selector, _state_names, _assignee_filter), do: {:error, :missing_linear_catch_all_team_selector}
 
   defp do_fetch_by_states(query, variables, state_names, assignee_filter) do
-    do_fetch_by_states_page(query, variables, state_names, assignee_filter, nil, [])
+    do_fetch_by_states(query, variables, state_names, assignee_filter, &graphql/2)
   end
 
-  defp do_fetch_by_states_page(query, variables, state_names, assignee_filter, after_cursor, acc_issues) do
+  defp do_fetch_by_states(query, variables, state_names, assignee_filter, graphql_fun) when is_function(graphql_fun, 2) do
+    do_fetch_by_states_page(query, variables, state_names, assignee_filter, nil, [], graphql_fun)
+  end
+
+  defp do_fetch_by_states_page(query, variables, state_names, assignee_filter, after_cursor, acc_issues, graphql_fun) do
     with {:ok, body} <-
-           graphql(
+           graphql_fun.(
              query,
              Map.merge(variables, %{
                stateNames: state_names,
@@ -586,7 +623,7 @@ defmodule SymphonyElixir.Linear.Client do
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(query, variables, state_names, assignee_filter, next_cursor, updated_acc)
+          do_fetch_by_states_page(query, variables, state_names, assignee_filter, next_cursor, updated_acc, graphql_fun)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -606,6 +643,31 @@ defmodule SymphonyElixir.Linear.Client do
   defp issue_identity(%Issue{id: issue_id}) when is_binary(issue_id), do: {:id, issue_id}
   defp issue_identity(%Issue{identifier: identifier}) when is_binary(identifier), do: {:identifier, identifier}
   defp issue_identity(issue), do: {:term, inspect(issue)}
+
+  defp project_slug_fetch_values(project_slug) do
+    case normalized_string(project_slug) do
+      nil ->
+        []
+
+      slug ->
+        [slug, linear_slug_id_suffix(slug)]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+    end
+  end
+
+  defp linear_slug_id_suffix(project_slug) when is_binary(project_slug) do
+    suffix =
+      project_slug
+      |> String.split("-", trim: true)
+      |> List.last()
+
+    cond do
+      suffix == project_slug -> nil
+      is_binary(suffix) and Regex.match?(~r/^[A-Za-z0-9]{8,}$/, suffix) -> suffix
+      true -> nil
+    end
+  end
 
   defp do_fetch_issue_states(ids, assignee_filter) do
     do_fetch_issue_states(ids, assignee_filter, &graphql/2)

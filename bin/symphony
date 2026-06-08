@@ -20,7 +20,6 @@ Options:
   --linear-bindings <path>    Override local Linear profile bindings.
   --profile <name>            Select one workflow profile for this process.
   --dev-root <path>           Project root directory. Default: ~/dev.
-  --no-portless               Run directly instead of through Portless.
   --skip-build                Do not rebuild elixir/bin/symphony before launch.
   --dry-run                   Print the launch command and exit.
   -h, --help                  Show this help.
@@ -29,9 +28,7 @@ Environment:
   SYMPHONY_HOME               Symphony Elixir dir. Default: <repo>/elixir.
   SYMPHONY_DEV_ROOT           Project root directory. Default: ~/dev.
   SYMPHONY_ENV_FILE           Default env file path.
-  SYMPHONY_PORTLESS_NAME      Override Portless route name.
   SYMPHONY_SKIP_BUILD=1       Same as --skip-build.
-  PORTLESS=0                  Same as --no-portless.
 
 The env file is resolved by `op run`; keep 1Password refs there, not literal secrets.
 USAGE
@@ -86,13 +83,6 @@ print_command() {
   done
 
   printf '\n'
-}
-
-sanitize_name() {
-  local name="$1"
-  name="${name// /-}"
-  name="${name//\//-}"
-  printf '%s\n' "$name"
 }
 
 run_elixir() {
@@ -162,7 +152,6 @@ main() {
   local dev_root="${SYMPHONY_DEV_ROOT:-"$HOME/dev"}"
   local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
   local use_env_file=1
-  local use_portless=1
   local dry_run=0
   local project=""
   local workflow=""
@@ -171,10 +160,6 @@ main() {
   local linear_bindings=""
   local profile=""
   local arg
-
-  if [[ "${PORTLESS:-}" == "0" ]]; then
-    use_portless=0
-  fi
 
   while [[ $# -gt 0 ]]; do
     arg="$1"
@@ -218,10 +203,6 @@ main() {
         require_value "$arg" "${2:-}"
         dev_root="$2"
         shift 2
-        ;;
-      --no-portless)
-        use_portless=0
-        shift
         ;;
       --skip-build)
         export SYMPHONY_SKIP_BUILD=1
@@ -313,14 +294,6 @@ main() {
     }
   fi
 
-  if [[ "$use_portless" == "1" ]]; then
-    command -v portless >/dev/null 2>&1 || {
-      printf 'error: portless not found on PATH\n' >&2
-      printf 'hint: install portless or pass --no-portless\n' >&2
-      exit 127
-    }
-  fi
-
   local runtime_env=(
     "SYMPHONY_HOME=$symphony_home"
     "SYMPHONY_WORKFLOW=$workflow"
@@ -339,34 +312,17 @@ main() {
     runtime_env+=("SYMPHONY_PROFILE=$profile")
   fi
 
-  local route="${SYMPHONY_PORTLESS_NAME:-symphony-$(sanitize_name "$project_name")}"
   local cmd
 
-  if [[ "$use_portless" == "1" ]]; then
-    if [[ "$use_env_file" == "1" ]]; then
-      cmd=(env "${runtime_env[@]}" portless run --name "$route" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
-    else
-      cmd=(env "${runtime_env[@]}" portless run --name "$route" "$repo_root/bin/symphony" __run)
-    fi
+  if [[ "$use_env_file" == "1" ]]; then
+    cmd=(env "${runtime_env[@]}" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
   else
-    if [[ "$use_env_file" == "1" ]]; then
-      cmd=(env "${runtime_env[@]}" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
-    else
-      cmd=(env "${runtime_env[@]}" "$repo_root/bin/symphony" __run)
-    fi
+    cmd=(env "${runtime_env[@]}" "$repo_root/bin/symphony" __run)
   fi
 
   if [[ "$dry_run" == "1" ]]; then
-    if [[ "$use_portless" == "1" ]]; then
-      printf 'cd %q; ' "$symphony_home"
-    fi
-
     print_command "${cmd[@]}"
     exit 0
-  fi
-
-  if [[ "$use_portless" == "1" ]]; then
-    cd "$symphony_home"
   fi
 
   exec "${cmd[@]}"

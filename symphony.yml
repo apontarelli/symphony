@@ -37,7 +37,7 @@ bindings:
   require_local: false
 runtime:
   tracker:
-    project_slug: $SYMPHONY_LINEAR_PROJECT_SLUG
+    project_slug: symphony-self-contained-workflow-modules-72083cd8c253
   polling:
     interval_ms: 5000
   workspace:
