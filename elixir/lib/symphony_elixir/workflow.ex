@@ -11,6 +11,7 @@ defmodule SymphonyElixir.Workflow do
   @spec workflow_file_path() :: Path.t()
   def workflow_file_path do
     Application.get_env(:symphony_elixir, :workflow_file_path) ||
+      Application.get_env(:symphony_elixir, :default_workflow_file_path) ||
       manifest_file_path()
   end
 

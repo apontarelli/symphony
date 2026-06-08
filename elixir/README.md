@@ -74,7 +74,7 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony
+mise exec -- ./bin/symphony ../symphony.yml
 ```
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
@@ -143,13 +143,15 @@ bindings:
 `workflow check` requires that directory and its `AGENTS.md` to exist. `bindings.local_file` is for
 operator-local tracker/project data that should not be committed.
 
-Pass a custom manifest path to `./bin/symphony` when starting the service:
+Pass a manifest path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/symphony.yml
+./bin/symphony ../symphony.yml
 ```
 
-If no path is passed, Symphony uses `./symphony.yml`.
+If no path is passed, the Elixir escript uses `./symphony.yml` from the current directory. From this
+repository, use `../symphony.yml` or the higher-level `../bin/symphony` launcher so local runs use
+the single root manifest.
 
 `project.criticality` and `project.deployment_coupling` describe how risky the project is to land
 automatically. Local, prototype, and internal work default to permissive auto-land policy; production
@@ -409,8 +411,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `symphony.yml`: in-repo manifest used by local runs
-- `../symphony.yml`: dogfood target-repo manifest for CLI `workflow check`/`print`
+- `../symphony.yml`: root dogfood manifest used by local runs and CLI `workflow check`/`print`
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing

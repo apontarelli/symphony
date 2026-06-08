@@ -147,10 +147,12 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "workflow store keeps last good default manifest when the manifest disappears" do
-    original_workflow_path = Workflow.workflow_file_path()
+    original_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    original_default_path = Application.get_env(:symphony_elixir, :default_workflow_file_path)
 
     on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+      restore_app_env(:workflow_file_path, original_workflow_path)
+      restore_app_env(:default_workflow_file_path, original_default_path)
     end)
 
     workflow_root =
@@ -164,7 +166,8 @@ defmodule SymphonyElixir.ExtensionsTest do
       "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\n"
     )
 
-    Workflow.clear_workflow_file_path()
+    Application.delete_env(:symphony_elixir, :workflow_file_path)
+    Application.delete_env(:symphony_elixir, :default_workflow_file_path)
 
     try do
       File.cd!(workflow_root, fn ->
@@ -1235,4 +1238,7 @@ defmodule SymphonyElixir.ExtensionsTest do
       end
     end
   end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_app_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 end

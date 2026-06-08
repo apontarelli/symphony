@@ -18,7 +18,7 @@ docs:
 validation:
   commands:
     - name: all
-      command: cd elixir && make all
+      command: cd elixir && mise exec -- make all
 vcs:
   mode: jj
   default_branch: main

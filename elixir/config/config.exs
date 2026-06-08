@@ -1,6 +1,8 @@
 import Config
 
-config :symphony_elixir, validate_startup: config_env() != :test
+config :symphony_elixir,
+  validate_startup: config_env() != :test,
+  default_workflow_file_path: Path.expand("../../symphony.yml", __DIR__)
 
 config :phoenix, :json_library, Jason
 

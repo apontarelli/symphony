@@ -294,7 +294,7 @@ main() {
 	    workflow="$PWD/symphony.yml"
 	    project_name="$(basename "$PWD")"
 	  else
-	    workflow="$symphony_home/symphony.yml"
+	    workflow="$repo_root/symphony.yml"
 	    project_name="symphony"
 	  fi
 

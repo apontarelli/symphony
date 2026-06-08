@@ -3,7 +3,7 @@
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
-Workflow behavior is versioned in [`elixir/symphony.yml`](elixir/symphony.yml). The manifest selects
+Workflow behavior is versioned in [`symphony.yml`](symphony.yml). The manifest selects
 Symphony-owned workflow modules, repository facts, validation gates, and delivery policy. Operator
 local Linear project bindings can select profiles at runtime without committing project-specific IDs
 to the manifest. The selected profile and delivery target are surfaced in agent prompts, workpads,

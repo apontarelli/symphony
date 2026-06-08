@@ -1106,7 +1106,7 @@ defmodule SymphonyElixir.CoreTest do
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
 
     System.put_env("LINEAR_API_KEY", "manifest-token")
-    Workflow.clear_workflow_file_path()
+    Workflow.set_workflow_file_path(repo_manifest_path())
 
     assert {:ok, %{config: config, prompt: prompt}} = Workflow.load()
     assert is_map(config)
@@ -1114,7 +1114,7 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert Map.get(tracker, "project_slug") == "symphony"
+    assert Map.get(tracker, "project_slug") == "$SYMPHONY_LINEAR_PROJECT_SLUG"
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
@@ -1134,14 +1134,14 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "You are working on a Linear ticket `{{ issue.identifier }}`"
     assert prompt =~ "Project context:"
     assert prompt =~ "## Core Workflow Modules"
-    assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
+    assert prompt =~ "Validation commands:\n- all: cd elixir && mise exec -- make all"
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() =~ "## Core Workflow Modules"
     refute Config.workflow_prompt() =~ "## Related skills"
 
     assert {:ok, policy} = Config.effective_policy()
     assert is_binary(policy["policy_ref"])
-    assert policy["checks"] == [%{"name" => "test", "command" => "mise exec -- mix test"}]
+    assert policy["checks"] == [%{"name" => "all", "command" => "cd elixir && mise exec -- make all"}]
     assert policy["completion_requirements"] == ["Run the strongest feasible validation gate before handoff."]
     assert policy["delivery"] == %{"pr_target" => "main"}
     assert policy["policy_metadata"]["project_slug"] == "symphony"
@@ -1181,30 +1181,36 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.settings!().tracker.assignee == env_assignee
   end
 
-  test "workflow file path defaults to symphony.yml in the current working directory when app env is unset" do
-    original_workflow_path = Workflow.workflow_file_path()
+  test "workflow file path uses configured default when runtime override is unset" do
+    original_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    original_default_path = Application.get_env(:symphony_elixir, :default_workflow_file_path)
 
     on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+      restore_app_env(:workflow_file_path, original_workflow_path)
+      restore_app_env(:default_workflow_file_path, original_default_path)
     end)
 
-    Workflow.clear_workflow_file_path()
+    Application.delete_env(:symphony_elixir, :workflow_file_path)
+    Application.put_env(:symphony_elixir, :default_workflow_file_path, repo_manifest_path())
 
     assert Workflow.manifest_file_path() == Path.join(File.cwd!(), "symphony.yml")
-    assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "symphony.yml")
+    assert Workflow.workflow_file_path() == repo_manifest_path()
   end
 
-  test "workflow file path stays on symphony.yml when no manifest exists in cwd" do
-    original_workflow_path = Workflow.workflow_file_path()
+  test "workflow file path falls back to cwd symphony.yml when no default is configured" do
+    original_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    original_default_path = Application.get_env(:symphony_elixir, :default_workflow_file_path)
     root = Path.join(System.tmp_dir!(), "symphony-elixir-workflow-md-default-#{System.unique_integer([:positive])}")
 
     on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+      restore_app_env(:workflow_file_path, original_workflow_path)
+      restore_app_env(:default_workflow_file_path, original_default_path)
       File.rm_rf(root)
     end)
 
     File.mkdir_p!(root)
-    Workflow.clear_workflow_file_path()
+    Application.delete_env(:symphony_elixir, :workflow_file_path)
+    Application.delete_env(:symphony_elixir, :default_workflow_file_path)
 
     File.cd!(root, fn ->
       assert Workflow.workflow_file_path() == Path.join(File.cwd!(), "symphony.yml")
@@ -1212,17 +1218,20 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "workflow load defaults to symphony.yml when app env is unset" do
-    original_workflow_path = Workflow.workflow_file_path()
+    original_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    original_default_path = Application.get_env(:symphony_elixir, :default_workflow_file_path)
 
     on_exit(fn ->
-      Workflow.set_workflow_file_path(original_workflow_path)
+      restore_app_env(:workflow_file_path, original_workflow_path)
+      restore_app_env(:default_workflow_file_path, original_default_path)
     end)
 
     workflow_root =
       Path.join(System.tmp_dir!(), "symphony-elixir-manifest-precedence-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(workflow_root)
-    Workflow.clear_workflow_file_path()
+    Application.delete_env(:symphony_elixir, :workflow_file_path)
+    Application.delete_env(:symphony_elixir, :default_workflow_file_path)
 
     try do
       write_manifest_file!(Path.join(workflow_root, "symphony.yml"),
@@ -2287,7 +2296,7 @@ defmodule SymphonyElixir.CoreTest do
   test "in-repo symphony.yml renders generated prompt correctly" do
     workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
-    Workflow.set_workflow_file_path(Path.expand("symphony.yml", File.cwd!()))
+    Workflow.set_workflow_file_path(repo_manifest_path())
     System.put_env("LINEAR_API_KEY", "manifest-token")
 
     issue = %Issue{
@@ -2313,7 +2322,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Use Linear as the tracker"
     assert prompt =~ "Run Codex with the configured runtime settings"
-    assert prompt =~ "Validation commands:\n- test: mise exec -- mix test"
+    assert prompt =~ "Validation commands:\n- all: cd elixir && mise exec -- make all"
     assert prompt =~ "Issue context:"
     assert prompt =~ "Identifier: MT-616"
     assert prompt =~ "Title: Use generated manifests"
@@ -2340,13 +2349,13 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "## Selected Workflow Profile"
     assert prompt =~ "Workpad stamp: `Policy: profile=default target=main policy_ref="
     assert prompt =~ "checks: {"
-    assert prompt =~ "mise exec -- mix test"
+    assert prompt =~ "cd elixir && mise exec -- make all"
     assert prompt =~ "completion_requirements: Run the strongest feasible validation gate before handoff."
   end
 
   test "prompt renders non-main delivery policy context and gates" do
     workflow_path = Workflow.workflow_file_path()
-    Workflow.set_workflow_file_path(Path.expand("symphony.yml", File.cwd!()))
+    Workflow.set_workflow_file_path(repo_manifest_path())
 
     issue = %Issue{
       identifier: "MT-617",
@@ -3341,4 +3350,6 @@ defmodule SymphonyElixir.CoreTest do
       }
     }
   end
+
+  defp repo_manifest_path, do: Path.expand("../../../symphony.yml", __DIR__)
 end

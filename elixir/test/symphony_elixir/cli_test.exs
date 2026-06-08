@@ -507,7 +507,7 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:ok, %{config: config, prompt: prompt}} = Manifest.load(Path.join(repo, "symphony.yml"))
     assert config["manifest"]["project"]["name"] == "Symphony"
-    assert config["checks"] == [%{"name" => "all", "command" => "cd elixir && make all"}]
+    assert config["checks"] == [%{"name" => "all", "command" => "cd elixir && mise exec -- make all"}]
     assert config["policy_metadata"]["source"] == "symphony_manifest"
     assert prompt =~ "You are working on a Linear ticket"
     assert prompt =~ "## Core Workflow Modules"
