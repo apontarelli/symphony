@@ -13,9 +13,11 @@ defmodule SymphonyElixir.MixProject do
           threshold: 100
         ],
         ignore_modules: [
+          Mix.Tasks.Incident.LinearIssue,
           SymphonyElixir.Config,
           SymphonyElixir.Config.ProfileBindingAdmin,
           SymphonyElixir.Config.ProfileBindings,
+          SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,
           SymphonyElixir.Workflow.Manifest,
           SymphonyElixir.Workflow.Renderer,
