@@ -313,6 +313,12 @@ project binding must use exactly one of `project_id` or `project_slug`. Project 
   prompt compilation. A custom workflow prompt can render them with `{{ workflow.modules }}`, and
   each run records module names, versions, and a policy hash. The default delivery workflow does not
   require globally installed Symphony delivery skills.
+- `product_visual_review` can be selected in `workflow.modules` and configured under
+  `runtime.workflow_modules.product_visual_review` to enable product/design QA in the first-turn
+  agent prompt. Set `enabled: true`, choose `project_kind: web | mobile | desktop`, and use
+  `route_policy: auto | required | recommended | off`. In `auto`, the agent classifies the final
+  diff against configured `changed_file_triggers` and issue labels, runs Browser/Playwright-oriented
+  web checks when product-facing changes are present, and records visual evidence for handoff.
 - Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
   turns run in jj-native workspaces and do not need to write Git metadata directly. Use
   `git clone ... .` only for repos that cannot run under jj compatibility.

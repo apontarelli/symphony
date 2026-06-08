@@ -7,7 +7,8 @@ project:
   app_kind: local/internal
 workflow:
   preset: default
-  modules: []
+  modules:
+    - product_visual_review
 docs:
   entrypoints:
     - AGENTS.md
@@ -62,6 +63,11 @@ runtime:
     turn_sandbox_policy:
       type: workspaceWrite
       networkAccess: true
+  workflow_modules:
+    product_visual_review:
+      enabled: true
+      project_kind: web
+      route_policy: auto
   profiles:
     skill_authoring:
       delivery:

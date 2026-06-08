@@ -110,6 +110,66 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Use the dashboard and status APIs as operator-visible evidence"
   end
 
+  test "product visual review module compiles through registry-backed workflow modules" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+        repository: github.com/example/target-repo
+        kind: elixir
+        app_kind: web
+      workflow:
+        preset: default
+        modules:
+          - product_visual_review
+      runtime:
+        workflow_modules:
+          product_visual_review:
+            enabled: true
+            project_kind: web
+            route_policy: required
+      """)
+
+    assert {:ok, %{config: config, prompt: prompt, workflow_module_resolution: resolution}} = Manifest.load(path)
+
+    assert get_in(config, ["workflow_modules", "product_visual_review", "enabled"]) == true
+    assert %{name: "product_visual_review", version: "v1"} in resolution.module_refs
+    assert "product_visual_review" in resolution.module_names
+    assert resolution.rendered =~ "### Product Visual Review"
+    assert resolution.rendered =~ "Route policy: `required`"
+    assert prompt =~ "### Product Visual Review"
+    assert prompt =~ "Artifact evidence:"
+  end
+
+  test "disabled product visual review module compiles explicit disabled content" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+      workflow:
+        preset: default
+        modules:
+          - product_visual_review
+      runtime:
+        workflow_modules:
+          product_visual_review:
+            enabled: false
+      """)
+
+    assert {:ok, %{config: config, prompt: prompt, workflow_module_resolution: resolution}} = Manifest.load(path)
+
+    assert get_in(config, ["workflow_modules", "product_visual_review", "enabled"]) == false
+    assert %{name: "product_visual_review", version: "v1"} in resolution.module_refs
+    assert "product_visual_review" in resolution.module_names
+    assert resolution.rendered =~ "### Product Visual Review"
+    assert resolution.rendered =~ "Product visual review is disabled by workflow module configuration."
+    assert prompt =~ "Product visual review is disabled by workflow module configuration."
+  end
+
   test "review routing compiles into resolved policy and prompt context" do
     path =
       write_manifest!("""
@@ -457,6 +517,17 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert {:ok, config} = ModuleRegistry.module_config("workspace", 0, %{"project" => %{}})
     assert config["hooks"]["timeout_ms"] == 60_000
     refute Map.has_key?(config["hooks"], "after_create")
+
+    invalid_product_visual_review_manifest = %{
+      "runtime" => %{
+        "workflow_modules" => %{
+          "product_visual_review" => %{"route_policy" => "invalid"}
+        }
+      }
+    }
+
+    assert {:error, %{path: "runtime.workflow_modules.product_visual_review", message: "route_policy is invalid"}} =
+             ModuleRegistry.module_config("product_visual_review", 0, invalid_product_visual_review_manifest)
   end
 
   test "default resolution does not require release-channel fields" do
