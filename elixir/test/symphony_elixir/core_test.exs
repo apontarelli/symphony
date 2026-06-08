@@ -1121,7 +1121,7 @@ defmodule SymphonyElixir.CoreTest do
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
     assert Map.get(hooks, "after_create") =~ "jj is required for this Symphony workflow"
-    assert Map.get(hooks, "after_create") =~ "jj git clone https://github.com/openai/symphony ."
+    assert Map.get(hooks, "after_create") =~ "jj git clone https://github.com/apontarelli/symphony ."
     assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
     assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
     assert Map.get(hooks, "before_run") =~ "jj status || true"
@@ -2309,7 +2309,7 @@ defmodule SymphonyElixir.CoreTest do
 
     assert prompt =~ "You are working on a Linear ticket `MT-616`"
     assert prompt =~ "Project slug: symphony"
-    assert prompt =~ "Repository: https://github.com/openai/symphony"
+    assert prompt =~ "Repository: https://github.com/apontarelli/symphony"
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Use Linear as the tracker"
     assert prompt =~ "Run Codex with the configured runtime settings"

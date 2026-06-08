@@ -2,7 +2,7 @@ version: 1
 project:
   slug: symphony
   name: Symphony
-  repository: https://github.com/openai/symphony
+  repository: https://github.com/apontarelli/symphony
   kind: elixir
   app_kind: local/internal
 workflow:
@@ -44,7 +44,7 @@ runtime:
         echo 'jj is required for this Symphony workflow' >&2
         exit 127
       fi
-      jj git clone https://github.com/openai/symphony .
+      jj git clone https://github.com/apontarelli/symphony .
       if command -v mise >/dev/null 2>&1; then
         cd elixir && mise trust && mise exec -- mix deps.get
       fi
