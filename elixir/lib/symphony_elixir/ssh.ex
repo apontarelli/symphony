@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
+  alias SymphonyElixir.Shell
+
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
@@ -28,7 +30,7 @@ defmodule SymphonyElixir.SSH do
 
   @spec remote_shell_command(String.t()) :: String.t()
   def remote_shell_command(command) when is_binary(command) do
-    "bash -lc " <> shell_escape(command)
+    Shell.remote_command(command)
   end
 
   defp ssh_executable do
@@ -92,9 +94,5 @@ defmodule SymphonyElixir.SSH do
     # IPv6 literals contain ":" already, so we only accept additional ":port"
     # parsing when the host is explicitly bracketed, e.g. "[::1]:2222".
     String.contains?(destination, "[") and String.contains?(destination, "]")
-  end
-
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 end

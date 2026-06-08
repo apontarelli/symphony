@@ -147,6 +147,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
           profiles: %{default: %{delivery: %{pr_target: "main"}}},
+          harness_codex_home: nil,
           hook_after_create: nil,
           hook_before_run: nil,
           hook_after_run: nil,
@@ -187,6 +188,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     profiles = Keyword.get(config, :profiles)
+    harness_codex_home = Keyword.get(config, :harness_codex_home)
     hook_after_create = Keyword.get(config, :hook_after_create)
     hook_before_run = Keyword.get(config, :hook_before_run)
     hook_after_run = Keyword.get(config, :hook_after_run)
@@ -244,6 +246,8 @@ defmodule SymphonyElixir.TestSupport do
         "  repository: #{yaml_value(project_repository)}",
         "workflow:",
         "  preset: \"default\"",
+        "harness:",
+        "  codex_home: #{yaml_value(harness_codex_home)}",
         "runtime:",
         indent_block(Enum.join(runtime_sections, "\n"), 2),
         prompt_template_yaml(prompt)

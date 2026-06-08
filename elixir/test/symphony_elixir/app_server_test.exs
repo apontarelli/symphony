@@ -301,6 +301,183 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server launches local codex with a generated Symphony harness CODEX_HOME outside target cwd" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-codex-home-#{System.unique_integer([:positive])}"
+      )
+
+    previous_home = System.get_env("SYMPHONY_CODEX_HOME")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_CODEX_HOME", previous_home)
+    end)
+
+    System.delete_env("SYMPHONY_CODEX_HOME")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CODEX-HOME")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-home.trace")
+
+      File.mkdir_p!(workspace)
+      {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+      expected_codex_home = Path.join([Path.dirname(canonical_workspace), ".symphony", "codex_home"])
+
+      write_successful_fake_codex!(codex_binary, trace_file,
+        thread_id: "thread-codex-home",
+        turn_id: "turn-codex-home",
+        trace_startup: """
+        printf 'ENV_CODEX_HOME:%s\\n' "$CODEX_HOME" >> "$trace_file"
+        printf 'PWD:%s\\n' "$PWD" >> "$trace_file"
+        if [ -f "$CODEX_HOME/AGENTS.md" ]; then
+          grep 'Symphony Harness' "$CODEX_HOME/AGENTS.md" | sed 's/^/AGENTS:/' >> "$trace_file"
+        fi
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-codex-home",
+        identifier: "MT-CODEX-HOME",
+        title: "Use harness codex home",
+        description: "Ensure app-server launches Codex with Symphony-owned CODEX_HOME",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-CODEX-HOME",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate harness CODEX_HOME", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV_CODEX_HOME:#{expected_codex_home}"
+      assert trace =~ "PWD:#{canonical_workspace}"
+      assert trace =~ "AGENTS:# Symphony Harness"
+      assert File.read!(Path.join(expected_codex_home, "AGENTS.md")) =~ "Symphony Harness"
+      refute File.exists?(Path.join(workspace, ".symphony"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server honors local Symphony CODEX_HOME override while still generating harness instructions" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-codex-home-override-#{System.unique_integer([:positive])}"
+      )
+
+    previous_home = System.get_env("SYMPHONY_CODEX_HOME")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_CODEX_HOME", previous_home)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CODEX-HOME-OVERRIDE")
+      codex_home = Path.join(test_root, "override-codex-home")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-home-override.trace")
+
+      System.put_env("SYMPHONY_CODEX_HOME", codex_home)
+      File.mkdir_p!(workspace)
+
+      write_successful_fake_codex!(codex_binary, trace_file,
+        thread_id: "thread-codex-home-override",
+        turn_id: "turn-codex-home-override",
+        trace_startup: trace_codex_home_script()
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-codex-home-override",
+        identifier: "MT-CODEX-HOME-OVERRIDE",
+        title: "Use override codex home",
+        description: "Ensure local development can override the generated CODEX_HOME path",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-CODEX-HOME-OVERRIDE",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate CODEX_HOME override", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV_CODEX_HOME:#{codex_home}"
+      assert trace =~ "AGENTS:# Symphony Harness"
+      assert File.read!(Path.join(codex_home, "AGENTS.md")) =~ "Symphony Harness"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server uses configured manifest harness CODEX_HOME" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-manifest-codex-home-#{System.unique_integer([:positive])}"
+      )
+
+    previous_home = System.get_env("SYMPHONY_CODEX_HOME")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_CODEX_HOME", previous_home)
+    end)
+
+    System.delete_env("SYMPHONY_CODEX_HOME")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-CODEX-HOME-MANIFEST")
+      codex_home = Path.join(test_root, "manifest-codex-home")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-home-manifest.trace")
+
+      File.mkdir_p!(workspace)
+
+      write_successful_fake_codex!(codex_binary, trace_file,
+        thread_id: "thread-codex-home-manifest",
+        turn_id: "turn-codex-home-manifest",
+        trace_startup: trace_codex_home_script()
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        harness_codex_home: codex_home
+      )
+
+      issue = %Issue{
+        id: "issue-codex-home-manifest",
+        identifier: "MT-CODEX-HOME-MANIFEST",
+        title: "Use configured codex home",
+        description: "Ensure runtime honors manifest harness CODEX_HOME",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-CODEX-HOME-MANIFEST",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate configured CODEX_HOME", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ENV_CODEX_HOME:#{codex_home}"
+      assert trace =~ "AGENTS:# Symphony Harness"
+      assert File.read!(Path.join(codex_home, "AGENTS.md")) =~ "Symphony Harness"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server marks request-for-input events as a hard failure" do
     test_root =
       Path.join(
@@ -1699,12 +1876,18 @@ defmodule SymphonyElixir.AppServerTest do
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
+      expected_codex_home = "/remote/workspaces/.symphony/codex_home"
 
       assert argv_line = Enum.find(lines, &String.starts_with?(&1, "ARGV:"))
       assert argv_line =~ "-T -p 2200 worker-01 bash -lc"
+      assert argv_line =~ "mkdir -p "
+      assert argv_line =~ expected_codex_home
+      assert argv_line =~ "printf %b"
+      assert argv_line =~ "Symphony Harness"
       assert argv_line =~ "cd "
       assert argv_line =~ remote_workspace
-      assert argv_line =~ "exec "
+      assert argv_line =~ "CODEX_HOME="
+      assert argv_line =~ " exec "
       assert argv_line =~ "fake-remote-codex app-server"
 
       expected_turn_policy = %{
@@ -1747,5 +1930,52 @@ defmodule SymphonyElixir.AppServerTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp write_successful_fake_codex!(path, trace_file, opts) do
+    thread_id = Keyword.fetch!(opts, :thread_id)
+    turn_id = Keyword.fetch!(opts, :turn_id)
+    trace_startup = Keyword.get(opts, :trace_startup, "")
+
+    File.write!(path, """
+    #!/bin/sh
+    trace_file="#{trace_file}"
+    #{trace_startup}
+
+    count=0
+    while IFS= read -r _line; do
+      count=$((count + 1))
+
+      case "$count" in
+        1)
+          printf '%s\\n' '{"id":1,"result":{}}'
+          ;;
+        2)
+          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"#{thread_id}"}}}'
+          ;;
+        3)
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"#{turn_id}"}}}'
+          ;;
+        4)
+          printf '%s\\n' '{"method":"turn/completed"}'
+          exit 0
+          ;;
+        *)
+          exit 0
+          ;;
+      esac
+    done
+    """)
+
+    File.chmod!(path, 0o755)
+  end
+
+  defp trace_codex_home_script do
+    """
+    printf 'ENV_CODEX_HOME:%s\\n' "$CODEX_HOME" >> "$trace_file"
+    if [ -f "$CODEX_HOME/AGENTS.md" ]; then
+      grep 'Symphony Harness' "$CODEX_HOME/AGENTS.md" | sed 's/^/AGENTS:/' >> "$trace_file"
+    fi
+    """
   end
 end

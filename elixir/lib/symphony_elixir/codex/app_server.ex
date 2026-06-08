@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.Launch, Config, PathSafety}
 
   @initialize_id 1
   @thread_start_id 2
@@ -24,6 +24,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_sandbox_policy: map(),
           thread_id: String.t(),
           workspace: Path.t(),
+          codex_home: Path.t(),
           worker_host: String.t() | nil
         }
 
@@ -43,7 +44,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     worker_host = Keyword.get(opts, :worker_host)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, port} <- start_port(expanded_workspace, worker_host) do
+         {:ok, launch} <- Launch.start(expanded_workspace, worker_host, Config.settings!().codex.command, line: @port_line_bytes) do
+      port = launch.port
       metadata = port_metadata(port, worker_host)
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
@@ -58,6 +60,7 @@ defmodule SymphonyElixir.Codex.AppServer do
            turn_sandbox_policy: session_policies.turn_sandbox_policy,
            thread_id: thread_id,
            workspace: expanded_workspace,
+           codex_home: launch.codex_home,
            worker_host: worker_host
          }}
       else
@@ -191,42 +194,6 @@ defmodule SymphonyElixir.Codex.AppServer do
       true ->
         {:ok, workspace}
     end
-  end
-
-  defp start_port(workspace, nil) do
-    executable = System.find_executable("bash")
-
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
-            cd: String.to_charlist(workspace),
-            line: @port_line_bytes
-          ]
-        )
-
-      {:ok, port}
-    end
-  end
-
-  defp start_port(workspace, worker_host) when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace)
-    SSH.start_port(worker_host, remote_command, line: @port_line_bytes)
-  end
-
-  defp remote_launch_command(workspace) when is_binary(workspace) do
-    [
-      "cd #{shell_escape(workspace)}",
-      "exec #{Config.settings!().codex.command}"
-    ]
-    |> Enum.join(" && ")
   end
 
   defp port_metadata(port, worker_host) when is_port(port) do
@@ -1209,10 +1176,6 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_put_workflow_module_resolution(details, _workflow_module_resolution), do: details
-
-  defp shell_escape(value) when is_binary(value) do
-    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
-  end
 
   defp default_on_message(_message), do: :ok
 

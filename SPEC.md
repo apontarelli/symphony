@@ -1382,7 +1382,7 @@ Subprocess launch parameters:
 - Command: `runtime.codex.command`
 - Invocation: `bash -lc <runtime.codex.command>`
 - Working directory: workspace path
-- Environment: harness `CODEX_HOME`
+- Environment: `CODEX_HOME` points at the Symphony-owned harness Codex home for the session.
 - Transport/framing: the protocol transport required by the targeted Codex app-server version
 
 Notes:
@@ -1390,6 +1390,12 @@ Notes:
 - The default command is `codex app-server`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
+- The harness Codex home contains Symphony-owned global instructions. It MUST NOT replace the target
+  workspace cwd, so repository-local `AGENTS.md` files and docs can still layer after the harness
+  global instructions.
+- Worker machines still provide machine-global dependencies such as the Codex executable and
+  authentication material. The harness home isolates automation instructions; it does not require
+  copying Symphony skills into user-global homes.
 
 RECOMMENDED additional process settings:
 
@@ -1402,6 +1408,8 @@ Reference: https://developers.openai.com/codex/app-server/
 Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
 client to:
 
+- Create or update the Symphony-owned harness Codex home before launching the app-server
+  subprocess.
 - Start the app-server subprocess in the per-issue workspace.
 - Initialize the app-server session using the targeted Codex app-server protocol.
 - Create or resume a coding-agent thread according to the targeted protocol.
