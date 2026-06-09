@@ -7,6 +7,8 @@ defmodule SymphonyElixir.HandoffRoute do
   Rework.
   """
 
+  alias SymphonyElixir.HandoffRoute.PublishPreflightEvidence
+
   defmodule Evidence do
     @moduledoc "Supporting fact used to select a handoff route."
 
@@ -253,8 +255,21 @@ defmodule SymphonyElixir.HandoffRoute do
     policy = fetch(input, :policy, %{}) |> normalize_map()
     artifacts = fetch(input, :artifacts, []) |> normalize_artifacts()
     decision = fetch(input, :decision, %{}) |> normalize_decision()
-    blocker = fetch(input, :blocker, nil) |> normalize_blocker()
+    publish_preflight = fetch(input, :publish_preflight, nil) |> PublishPreflightEvidence.normalize()
+    blocker = normalize_blocker(fetch(input, :blocker, nil)) || PublishPreflightEvidence.blocker(publish_preflight)
     labels = fetch(input, :labels, fetch(input, :issue_labels, [])) |> normalize_label_list()
+
+    evidence_context = %{
+      checks: checks,
+      review: review,
+      changed_surfaces: changed_surfaces,
+      policy: policy,
+      artifacts: artifacts,
+      blocker: blocker,
+      decision: decision,
+      labels: labels,
+      publish_preflight: publish_preflight
+    }
 
     %{
       checks: checks,
@@ -263,9 +278,10 @@ defmodule SymphonyElixir.HandoffRoute do
       policy: policy,
       artifacts: artifacts,
       decision: decision,
+      publish_preflight: publish_preflight,
       blocker: blocker,
       labels: labels,
-      evidence: base_evidence(checks, review, changed_surfaces, policy, artifacts, blocker, decision, labels)
+      evidence: base_evidence(evidence_context)
     }
   end
 
@@ -438,17 +454,18 @@ defmodule SymphonyElixir.HandoffRoute do
       (manifest_auto_land_policy?(auto_land) and fetch(auto_land, :posture, "permissive") != "off")
   end
 
-  defp base_evidence(checks, review, changed_surfaces, policy, artifacts, blocker, decision, labels) do
+  defp base_evidence(context) do
     []
-    |> Kernel.++(blocker_evidence(blocker))
-    |> Kernel.++(check_evidence(checks))
-    |> Kernel.++(review_evidence(review))
-    |> Kernel.++(route_gate_evidence(review, decision))
-    |> Kernel.++(surface_evidence(changed_surfaces))
-    |> Kernel.++(policy_evidence(policy))
-    |> Kernel.++(auto_land_force_label_evidence(%{labels: labels, policy: policy}))
-    |> Kernel.++(auto_land_evidence(%{checks: checks, policy: policy}))
-    |> Kernel.++(artifact_evidence(artifacts))
+    |> Kernel.++(blocker_evidence(context.blocker))
+    |> Kernel.++(PublishPreflightEvidence.evidence(context.publish_preflight))
+    |> Kernel.++(check_evidence(context.checks))
+    |> Kernel.++(review_evidence(context.review))
+    |> Kernel.++(route_gate_evidence(context.review, context.decision))
+    |> Kernel.++(surface_evidence(context.changed_surfaces))
+    |> Kernel.++(policy_evidence(context.policy))
+    |> Kernel.++(auto_land_force_label_evidence(%{labels: context.labels, policy: context.policy}))
+    |> Kernel.++(auto_land_evidence(%{checks: context.checks, policy: context.policy}))
+    |> Kernel.++(artifact_evidence(context.artifacts))
   end
 
   defp blocker_evidence(nil), do: []

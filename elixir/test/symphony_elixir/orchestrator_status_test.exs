@@ -470,6 +470,183 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert completed_state.codex_totals.total_tokens == 16
   end
 
+  test "normal worker exit runs host publish preflight before handoff routing" do
+    previous_runner = Application.get_env(:symphony_elixir, :publish_preflight_runner)
+
+    on_exit(fn ->
+      case previous_runner do
+        nil -> Application.delete_env(:symphony_elixir, :publish_preflight_runner)
+        runner -> Application.put_env(:symphony_elixir, :publish_preflight_runner, runner)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :publish_preflight_runner, fn %{step: step} ->
+      status = if step == :remote_push, do: 1, else: 0
+      output = if step == :remote_push, do: "permission denied", else: "ok"
+      {:ok, %{status: status, output: output}}
+    end)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue_id = "issue-publish-preflight"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PUBLISH",
+      title: "Publish preflight",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PUBLISH"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :PublishPreflightOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      workspace_path: workspace,
+      worker_host: nil,
+      policy: %{
+        "manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}},
+        "delivery" => %{"pr_target" => "main"}
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.utc_now(),
+         completion: %{
+           checks: [%{name: "tests", status: :passed}]
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert %{
+             route: "blocked",
+             target_state: "Human Review",
+             evidence: evidence
+           } = completed_state.handoff_routes[issue_id]
+
+    assert Enum.any?(
+             evidence,
+             &(&1.kind == "publish_preflight" and &1.status == "blocked" and &1.metadata.failure_class == :remote_push_unavailable)
+           )
+  end
+
+  test "normal worker exit without completion metadata does not run publish preflight" do
+    parent = self()
+    previous_runner = Application.get_env(:symphony_elixir, :publish_preflight_runner)
+
+    on_exit(fn ->
+      case previous_runner do
+        nil -> Application.delete_env(:symphony_elixir, :publish_preflight_runner)
+        runner -> Application.put_env(:symphony_elixir, :publish_preflight_runner, runner)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :publish_preflight_runner, fn %{step: step} ->
+      send(parent, {:publish_preflight_called, step})
+      {:ok, %{status: 0, output: "ok"}}
+    end)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-no-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(workspace)
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue_id = "issue-no-publish-preflight"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-NO-PUBLISH",
+      title: "No publish preflight",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-NO-PUBLISH"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :NoPublishPreflightOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      workspace_path: workspace,
+      worker_host: nil,
+      policy: %{
+        "manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}},
+        "delivery" => %{"pr_target" => "main"}
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert %{route: "human_review", evidence: evidence} = completed_state.handoff_routes[issue_id]
+    refute Enum.any?(evidence, &(&1.kind == "publish_preflight"))
+    refute_receive {:publish_preflight_called, _step}, 50
+  end
+
   test "orchestrator snapshot tracks codex token-count cumulative usage payloads" do
     issue_id = "issue-token-count-snapshot"
 
