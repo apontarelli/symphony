@@ -3,10 +3,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   Records structured handoff route decisions to the configured tracker.
   """
 
-  alias SymphonyElixir.{HandoffRoute, PathSafety, Tracker}
-
-  @change_manifest_keys [:change_manifest, "change_manifest", :changeManifest, "changeManifest"]
-  @changed_file_keys [:changed_files, "changed_files", :changedFiles, "changedFiles", :files, "files"]
+  alias SymphonyElixir.{HandoffManifest, HandoffRoute, PathSafety, Tracker}
 
   @completion_keys [
     :checks,
@@ -30,7 +27,11 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     :decision,
     "decision",
     :publish_preflight,
-    "publish_preflight"
+    "publish_preflight",
+    :publish_handoff,
+    "publish_handoff",
+    :publishHandoff,
+    "publishHandoff"
   ]
 
   @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil) ::
@@ -50,6 +51,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       artifacts: completion_field(completion, :artifacts, []),
       decision: completion_field(completion, :decision, %{}),
       publish_preflight: completion_field(completion, :publish_preflight, nil),
+      publish_handoff: completion_field(completion, :publish_handoff, nil),
       blocker: blocker
     }
     |> HandoffRoute.classify()
@@ -76,7 +78,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   defp add_handoff_manifest_check(checks, completion, workspace, worker_host) do
     checks = if is_list(checks), do: checks, else: []
 
-    case handoff_manifest(completion) do
+    case HandoffManifest.source(completion) do
       :absent ->
         if completion_metadata?(completion) do
           checks ++ [handoff_manifest_check(%{}, workspace, worker_host)]
@@ -91,44 +93,6 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
         checks ++ [failed_handoff_manifest_check(failure)]
     end
   end
-
-  defp handoff_manifest(completion) do
-    manifest_keys = present_keys(completion, @change_manifest_keys)
-    changed_file_keys = present_keys(completion, @changed_file_keys)
-
-    cond do
-      length(manifest_keys) > 1 ->
-        {:failed, manifest_source_failure(:duplicate_change_manifest_aliases, manifest_keys)}
-
-      length(changed_file_keys) > 1 ->
-        {:failed, manifest_source_failure(:duplicate_changed_file_aliases, changed_file_keys)}
-
-      manifest_keys != [] and changed_file_keys != [] ->
-        {:failed, manifest_source_failure(:conflicting_manifest_sources, manifest_keys ++ changed_file_keys)}
-
-      manifest_keys != [] ->
-        {:present, Map.fetch!(completion, hd(manifest_keys))}
-
-      changed_file_keys != [] ->
-        changed_files = Map.fetch!(completion, hd(changed_file_keys))
-        {:present, %{changed_files: changed_files, validation: completion_field(completion, :checks, [])}}
-
-      true ->
-        :absent
-    end
-  end
-
-  defp manifest_source_failure(reason, keys) do
-    %{
-      path: "<manifest>",
-      reason: reason,
-      message: "Completion metadata must provide one unambiguous changed-file manifest source.",
-      metadata: %{sources: Enum.map(keys, &manifest_key_name/1)}
-    }
-  end
-
-  defp manifest_key_name(key) when is_atom(key), do: Atom.to_string(key)
-  defp manifest_key_name(key), do: to_string(key)
 
   defp handoff_manifest_check(_manifest, _workspace, worker_host)
        when is_binary(worker_host) and worker_host != "" do
@@ -195,6 +159,4 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       metadata: %{failures: [failure]}
     }
   end
-
-  defp present_keys(map, keys), do: Enum.filter(keys, &Map.has_key?(map, &1))
 end

@@ -15,11 +15,6 @@ defmodule SymphonyElixir.PublishPreflight do
     remote_push_unavailable: "Remote push dry-run is unavailable to the host.",
     pr_creation_unavailable: "PR creation preflight is unavailable for the configured repository/base branch."
   }
-  @publish_target_keys %{
-    "github_repository" => :github_repository,
-    "pr_target" => :pr_target,
-    "repository" => :repository
-  }
 
   @type failure_class ::
           :workspace_vcs_metadata_unavailable | :remote_push_unavailable | :pr_creation_unavailable
@@ -53,7 +48,7 @@ defmodule SymphonyElixir.PublishPreflight do
       env: Keyword.get(opts, :env, [])
     }
 
-    publish_target = resolve_publish_target(policy)
+    publish_target = PublishTarget.resolve_policy(policy) || empty_publish_target()
     repository = publish_target.repository
     base_branch = publish_target.base_branch
 
@@ -100,7 +95,13 @@ defmodule SymphonyElixir.PublishPreflight do
     run_step(
       context,
       :remote_push,
-      "git remote get-url --push origin >/dev/null && git push --dry-run --porcelain origin HEAD:#{@preflight_branch} >/dev/null",
+      "(" <>
+        "git remote get-url --push origin >/dev/null 2>&1 && " <>
+        "git push --dry-run --porcelain origin HEAD:#{@preflight_branch} >/dev/null" <>
+        ") || (" <>
+        "jj git remote list | grep -E '^origin[[:space:]]' >/dev/null && " <>
+        "jj git push --dry-run --remote origin --change @ >/dev/null" <>
+        ")",
       :remote_push_unavailable
     )
   end
@@ -206,61 +207,9 @@ defmodule SymphonyElixir.PublishPreflight do
     }
   end
 
-  defp resolve_publish_target(policy) do
-    explicit_target = publish_target_from_policy(policy)
-    repository = publish_target_field(explicit_target, "repository") || manifest_repository(policy)
-    base_branch = publish_target_field(explicit_target, "pr_target") || delivery_pr_target(policy)
-    github_repository = publish_target_field(explicit_target, "github_repository") || github_repository(repository, base_branch)
-
-    %{
-      repository: repository,
-      base_branch: base_branch,
-      github_repository: github_repository
-    }
-  end
-
-  defp publish_target_from_policy(policy) when is_map(policy) do
-    case Map.get(policy, "publish_target", Map.get(policy, :publish_target)) do
-      target when is_map(target) -> target
-      _target -> %{}
-    end
-  end
-
-  defp publish_target_field(target, field) when is_map(target) do
-    target
-    |> Map.get(field, Map.get(target, Map.fetch!(@publish_target_keys, field)))
-    |> optional_trimmed_string()
-  end
-
-  defp manifest_repository(policy) do
-    policy
-    |> get_in(["manifest", "project", "repository"])
-    |> optional_trimmed_string()
-  end
-
-  defp delivery_pr_target(policy) do
-    policy
-    |> get_in(["delivery", "pr_target"])
-    |> optional_trimmed_string()
-  end
-
-  defp github_repository(repository, base_branch) do
-    case PublishTarget.build(repository, base_branch) do
-      %{"github_repository" => github_repository} -> github_repository
-      _target -> nil
-    end
-  end
+  defp empty_publish_target, do: %{repository: nil, base_branch: nil, github_repository: nil}
 
   defp valid_workspace_path?(workspace), do: is_binary(workspace) and String.trim(workspace) != ""
-
-  defp optional_trimmed_string(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
-    end
-  end
-
-  defp optional_trimmed_string(_value), do: nil
 
   defp sanitize_output(output) do
     output

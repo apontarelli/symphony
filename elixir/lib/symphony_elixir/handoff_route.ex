@@ -7,7 +7,7 @@ defmodule SymphonyElixir.HandoffRoute do
   Rework.
   """
 
-  alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishPreflightEvidence}
+  alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishHandoffEvidence, PublishPreflightEvidence}
 
   @manifest_check_name "change_manifest"
   defmodule Evidence do
@@ -125,6 +125,7 @@ defmodule SymphonyElixir.HandoffRoute do
     "posture" => :posture,
     "pr_target" => :pr_target,
     "project" => :project,
+    "publish_handoff" => :publish_handoff,
     "question" => :question,
     "reason" => :reason,
     "recommendation" => :recommendation,
@@ -257,7 +258,13 @@ defmodule SymphonyElixir.HandoffRoute do
     artifacts = fetch(input, :artifacts, []) |> normalize_artifacts()
     decision = fetch(input, :decision, %{}) |> normalize_decision()
     publish_preflight = fetch(input, :publish_preflight, nil) |> PublishPreflightEvidence.normalize()
-    blocker = normalize_blocker(fetch(input, :blocker, nil)) || PublishPreflightEvidence.blocker(publish_preflight)
+    publish_handoff = fetch(input, :publish_handoff, nil) |> PublishHandoffEvidence.normalize()
+
+    blocker =
+      normalize_blocker(fetch(input, :blocker, nil)) ||
+        PublishPreflightEvidence.blocker(publish_preflight) ||
+        PublishHandoffEvidence.blocker(publish_handoff)
+
     labels = fetch(input, :labels, fetch(input, :issue_labels, [])) |> normalize_label_list()
     auto_land = AutoLandPolicy.evaluate(%{checks: checks, labels: labels, policy: policy})
 
@@ -271,6 +278,7 @@ defmodule SymphonyElixir.HandoffRoute do
       decision: decision,
       labels: labels,
       publish_preflight: publish_preflight,
+      publish_handoff: publish_handoff,
       auto_land: auto_land
     }
 
@@ -282,6 +290,7 @@ defmodule SymphonyElixir.HandoffRoute do
       artifacts: artifacts,
       decision: decision,
       publish_preflight: publish_preflight,
+      publish_handoff: publish_handoff,
       blocker: blocker,
       labels: labels,
       auto_land: auto_land,
@@ -458,6 +467,7 @@ defmodule SymphonyElixir.HandoffRoute do
     []
     |> Kernel.++(blocker_evidence(context.blocker))
     |> Kernel.++(PublishPreflightEvidence.evidence(context.publish_preflight))
+    |> Kernel.++(PublishHandoffEvidence.evidence(context.publish_handoff))
     |> Kernel.++(check_evidence(context.checks))
     |> Kernel.++(review_evidence(context.review))
     |> Kernel.++(route_gate_evidence(context.review, context.decision))

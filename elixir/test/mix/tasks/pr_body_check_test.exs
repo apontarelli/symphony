@@ -2,6 +2,7 @@ defmodule Mix.Tasks.PrBody.CheckTest do
   use ExUnit.Case, async: false
 
   alias Mix.Tasks.PrBody.Check
+  alias SymphonyElixir.PrBody
 
   import ExUnit.CaptureIO
 
@@ -57,6 +58,11 @@ defmodule Mix.Tasks.PrBody.CheckTest do
   test "prints help" do
     output = capture_io(fn -> Check.run(["--help"]) end)
     assert output =~ "mix pr_body.check --file /path/to/pr_body.md"
+  end
+
+  test "exposes template paths and rejects non-string body input" do
+    assert ".github/pull_request_template.md" in PrBody.template_paths()
+    assert PrBody.validate_body(%{}) == {:error, "PR body must be a string."}
   end
 
   test "fails on invalid options" do
