@@ -7,6 +7,8 @@ defmodule Mix.Tasks.Incident.LinearIssue do
 
   @moduledoc """
   Builds a bounded Linear issue payload from a production failure signal.
+  The payload must include a generic failure summary plus source-specific evidence in
+  `source_payload`; see `docs/incident_linear_issue.md` for the exact per-source fields.
 
   Dry-run is the default and does not require Linear credentials:
 

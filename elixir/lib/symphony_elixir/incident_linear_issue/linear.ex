@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.IncidentLinearIssue.Linear do
   @moduledoc false
 
+  alias SymphonyElixir.Config
   alias SymphonyElixir.IncidentLinearIssue
   alias SymphonyElixir.Linear.Client
 
@@ -79,6 +80,7 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
   def create(payload, opts \\ []) when is_map(payload) and is_list(opts) do
     with :ok <- require_project_opt_in(opts),
          {:ok, plan} <- IncidentLinearIssue.plan(payload, opts),
+         :ok <- require_configured_project_scope(plan),
          {:ok, candidates} <- recent_issues(plan, opts) do
       case IncidentLinearIssue.find_duplicate(plan, candidates) do
         {:duplicate, duplicate} -> {:duplicate, duplicate}
@@ -91,6 +93,24 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
     if Keyword.get(opts, :project_opt_in, false), do: :ok, else: {:error, :project_opt_in_required}
   end
 
+  defp require_configured_project_scope(%IncidentLinearIssue{} = plan) do
+    with {:ok, settings} <- Config.settings() do
+      cond do
+        settings.tracker.kind != "linear" ->
+          {:error, {:unsupported_incident_tracker_kind, settings.tracker.kind}}
+
+        not is_binary(settings.tracker.project_slug) ->
+          {:error, :missing_incident_project_scope}
+
+        normalize_text(settings.tracker.project_slug) != normalize_text(plan.target_project) ->
+          {:error, {:incident_project_scope_mismatch, plan.target_project, settings.tracker.project_slug}}
+
+        true ->
+          :ok
+      end
+    end
+  end
+
   defp recent_issues(%IncidentLinearIssue{} = plan, opts) do
     client = client_module(opts)
 
@@ -98,8 +118,8 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
            projectSlug: plan.target_project,
            first: plan.dedupe.candidate_limit
          }) do
+      {:ok, %{"errors" => errors}} when not is_nil(errors) and errors != [] -> {:error, {:linear_graphql_errors, errors}}
       {:ok, %{"data" => %{"issues" => %{"nodes" => nodes}}}} when is_list(nodes) -> {:ok, nodes}
-      {:ok, %{"errors" => errors}} -> {:error, {:linear_graphql_errors, errors}}
       {:ok, _body} -> {:error, :linear_unknown_payload}
       {:error, reason} -> {:error, reason}
     end
@@ -116,14 +136,14 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
 
   defp resolve_target(%IncidentLinearIssue{} = plan, client) do
     case client.graphql(@target_query, %{projectSlug: plan.target_project}) do
+      {:ok, %{"errors" => errors}} when not is_nil(errors) and errors != [] ->
+        {:error, {:linear_graphql_errors, errors}}
+
       {:ok, %{"data" => %{"projects" => %{"nodes" => [project | _]}}}} ->
         resolve_target_from_project(plan, project)
 
       {:ok, %{"data" => %{"projects" => %{"nodes" => []}}}} ->
         {:error, {:project_not_found, plan.target_project}}
-
-      {:ok, %{"errors" => errors}} ->
-        {:error, {:linear_graphql_errors, errors}}
 
       {:ok, _body} ->
         {:error, :linear_unknown_payload}
@@ -136,15 +156,26 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
   defp resolve_target_from_project(%IncidentLinearIssue{} = plan, project) do
     teams = get_in(project, ["teams", "nodes"]) || []
 
-    case teams do
-      [%{} = team] ->
-        resolve_target_for_team(plan, project, team)
+    if plan.target_team_key do
+      resolve_target_from_team_key(plan, project, teams)
+    else
+      case teams do
+        [%{} = team] ->
+          resolve_target_for_team(plan, project, team)
 
-      [] ->
-        {:error, {:project_has_no_teams, plan.target_project}}
+        [] ->
+          {:error, {:project_has_no_teams, plan.target_project}}
 
-      _teams ->
-        {:error, {:ambiguous_project_teams, plan.target_project}}
+        _teams ->
+          {:error, {:ambiguous_project_teams, plan.target_project}}
+      end
+    end
+  end
+
+  defp resolve_target_from_team_key(%IncidentLinearIssue{} = plan, project, teams) do
+    case Enum.find(teams, &(normalize_text(&1["key"]) == normalize_text(plan.target_team_key))) do
+      %{} = team -> resolve_target_for_team(plan, project, team)
+      nil -> {:error, {:target_team_not_found, plan.target_team_key, plan.target_project}}
     end
   end
 
@@ -187,6 +218,9 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
 
   defp resolve_label_ids(%IncidentLinearIssue{} = plan, team_id, client) do
     case client.graphql(@labels_query, %{teamId: team_id, names: plan.labels, first: length(plan.labels)}) do
+      {:ok, %{"errors" => errors}} when not is_nil(errors) and errors != [] ->
+        {:error, {:linear_graphql_errors, errors}}
+
       {:ok, %{"data" => %{"issueLabels" => %{"nodes" => labels}}}} when is_list(labels) ->
         label_lookup = Map.new(labels, &{normalize_text(&1["name"]), &1["id"]})
         missing_labels = Enum.reject(plan.labels, &Map.has_key?(label_lookup, normalize_text(&1)))
@@ -196,9 +230,6 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
         else
           {:error, {:missing_linear_labels, missing_labels}}
         end
-
-      {:ok, %{"errors" => errors}} ->
-        {:error, {:linear_graphql_errors, errors}}
 
       {:ok, _body} ->
         {:error, :linear_unknown_payload}
@@ -214,14 +245,15 @@ defmodule SymphonyElixir.IncidentLinearIssue.Linear do
       projectId: target.project_id,
       stateId: target.state_id,
       labelIds: label_ids,
+      priority: plan.priority,
       title: plan.title,
       description: plan.body
     }
 
     case client.graphql(@create_mutation, %{input: input}) do
+      {:ok, %{"errors" => errors}} when not is_nil(errors) and errors != [] -> {:error, {:linear_graphql_errors, errors}}
       {:ok, %{"data" => %{"issueCreate" => %{"success" => true, "issue" => issue}}}} -> {:ok, issue}
       {:ok, %{"data" => %{"issueCreate" => %{"success" => false}}}} -> {:error, :linear_issue_create_failed}
-      {:ok, %{"errors" => errors}} -> {:error, {:linear_graphql_errors, errors}}
       {:ok, _body} -> {:error, :linear_unknown_payload}
       {:error, reason} -> {:error, reason}
     end

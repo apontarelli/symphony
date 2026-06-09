@@ -2004,19 +2004,26 @@ signals into tracker issues. This extension is outside the orchestrator polling 
 If implemented:
 
 - Supported sources SHOULD be enumerated rather than accepting arbitrary source names. The Elixir
-  prototype supports `github_actions`, `sentry`, `posthog`, and `project_webhook`.
-- The normalized payload SHOULD include title, severity, affected project, signal source, non-empty
-  evidence-link strings, reproduction notes, diagnostic notes, suggested owner, and suggested agent
-  route.
+  implementation supports `github_actions`, `sentry`, `posthog`, and `project_webhook`.
+- The normalized payload SHOULD include title, severity, affected project, signal source, failing
+  signal, non-empty evidence-link strings, source-specific evidence payload, reproduction notes,
+  diagnostic notes, suggested owner, suggested validation, and suggested agent route.
+- Supported sources SHOULD document required normalized evidence payload fields. The Elixir
+  implementation requires `repository`, `workflow`, `run_id`, and `run_url` for GitHub Actions;
+  `organization`, `project`, `issue_url`, and `event_id` for Sentry; `project`, `alert_name`,
+  `alert_url`, and `metric` for PostHog; and `webhook_name`, `event_id`, and `event_url` for
+  project webhooks.
 - Issue creation MUST be opt-in and MUST NOT be enabled by merely starting the orchestrator.
 - Dry-run SHOULD be the default so operators can inspect the generated issue body without tracker
   writes.
 - Duplicate suppression SHOULD use a deterministic source/project correlation key and a bounded
-  tracker scan. Candidate scan limits MUST stay positive and bounded. It MUST NOT require a universal
-  incident database.
+  tracker scan. Terminal matching issues SHOULD NOT suppress a newly observed incident. Candidate
+  scan limits MUST stay positive and bounded. It MUST NOT require a universal incident database.
 - Created issues SHOULD target `Backlog` by default, MAY target `Todo` only through explicit
-  configuration, MUST reject terminal states, and SHOULD include explicit labels before any agent
-  dispatch path can pick them up.
+  configuration, MUST reject terminal states, SHOULD map severity to tracker priority, SHOULD route
+  by configured project/team evidence, MUST reject payload target projects outside the selected
+  workflow tracker scope, and SHOULD include explicit labels before any agent dispatch path can pick
+  them up.
 - Project-specific monitoring remains responsible for alert thresholds, source credentials,
   webhook hosting, and source-specific payload normalization. Symphony owns only the shared intake
   contract and bounded tracker issue creation behavior.
@@ -2881,9 +2888,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Issue state refresh query uses GraphQL ID typing (`[ID!]`) as specified in Section 11.2
 - Error mapping for request errors, non-200, GraphQL errors, malformed payloads
 - If incident signal intake is implemented, dry-run validates the normalized fake payload, generated
-  issue body, labels, target state, and correlation marker without creating tracker work
+  issue body, labels, target state, source-specific evidence, suggested validation, priority
+  mapping, and correlation marker without creating tracker work
 - If incident signal intake is implemented, duplicate suppression detects a matching bounded
-  correlation marker before create mode attempts a new issue
+  non-terminal correlation marker before create mode attempts a new issue, and terminal matches are
+  treated as stale
 
 ### 17.4 Orchestrator Dispatch, Reconciliation, and Retry
 
@@ -3024,7 +3033,8 @@ Use the same validation profiles as Section 17:
   first-turn prompts and keeps the classification testable through route policy, project kind,
   changed-file triggers, issue-label triggers, checks, and artifact ids.
 - Incident signal intake extension defaults to dry-run, requires explicit project opt-in for create
-  mode, documents project-monitoring ownership, and performs bounded duplicate suppression.
+  mode, documents project-monitoring ownership, binds create mode to the selected workflow tracker
+  project, and performs bounded non-terminal duplicate suppression.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.
