@@ -9,6 +9,7 @@ defmodule SymphonyElixir.HandoffRoute do
 
   alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishPreflightEvidence}
 
+  @manifest_check_name "change_manifest"
   defmodule Evidence do
     @moduledoc "Supporting fact used to select a handoff route."
 
@@ -117,6 +118,7 @@ defmodule SymphonyElixir.HandoffRoute do
     "kind" => :kind,
     "label" => :label,
     "labels" => :labels,
+    "metadata" => :metadata,
     "name" => :name,
     "options" => :options,
     "policy" => :policy,
@@ -431,12 +433,16 @@ defmodule SymphonyElixir.HandoffRoute do
   end
 
   defp auto_land_candidate?(context) do
-    context.checks != [] and
+    substantive_auto_land_checks(context.checks) != [] and
       context.auto_land.enabled? and
       not missing_auto_land_evidence?(context) and
       Enum.all?(context.checks, &(Map.get(&1, :status) in @passed_statuses)) and
       Map.get(context.review, :status) in @passed_statuses and
       not risky?(context)
+  end
+
+  defp substantive_auto_land_checks(checks) do
+    Enum.reject(checks, &(&1.name == @manifest_check_name))
   end
 
   defp policy_requires_human_review?(policy) do
@@ -492,16 +498,30 @@ defmodule SymphonyElixir.HandoffRoute do
           status: :passed,
           summary: "All checks passed: #{Enum.map_join(checks, ", ", & &1.name)}"
         }
-      ]
+      ] ++ metadata_check_evidence(checks)
     else
       Enum.map(checks, fn check ->
         %Evidence{
           kind: :check,
           status: Map.get(check, :status),
-          summary: check.summary || "#{check.name} #{check.status}"
+          summary: check.summary || "#{check.name} #{check.status}",
+          metadata: check.metadata
         }
       end)
     end
+  end
+
+  defp metadata_check_evidence(checks) do
+    checks
+    |> Enum.filter(&(Map.get(&1, :metadata, %{}) != %{}))
+    |> Enum.map(fn check ->
+      %Evidence{
+        kind: :check,
+        status: Map.get(check, :status),
+        summary: check.summary || "#{check.name} #{check.status}",
+        metadata: check.metadata
+      }
+    end)
   end
 
   defp review_evidence(%{status: :unknown}), do: []
@@ -598,7 +618,8 @@ defmodule SymphonyElixir.HandoffRoute do
       %{
         name: fetch(check, :name, "unnamed check") |> to_string(),
         status: fetch(check, :status, :unknown) |> normalize_status(),
-        summary: optional_string(fetch(check, :summary, nil))
+        summary: optional_string(fetch(check, :summary, nil)),
+        metadata: fetch(check, :metadata, %{}) |> normalize_map()
       }
     end)
   end

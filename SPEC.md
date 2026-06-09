@@ -1902,6 +1902,10 @@ Required route evidence payload:
     "checks": [
       {"name": "mix test", "status": "passed", "details": "summary or artifact ref"}
     ],
+    "change_manifest": {
+      "changed_files": ["lib/example.ex"],
+      "validation": "same validation evidence represented by checks, or an implementation-defined artifact ref"
+    },
     "code_review": {
       "mode": "automated | human | mixed | not_applicable",
       "status": "passed | fix_required | comments_addressed | blocked",
@@ -1947,6 +1951,10 @@ Evidence rules:
 
 - `checks` MUST name every required ticket/workflow validation gate that was run or explain why it
   could not run.
+- `change_manifest.changed_files` MUST list the files the completed workspace intends to publish.
+  Each path MUST be relative, normalized, and contained by the workspace root after symlink
+  resolution. Implementations MUST fail closed for absolute paths, traversal, generated runtime
+  state, logs, caches, temporary app data, local secrets, and operator-local config.
 - `code_review.status` MUST be `passed` or `comments_addressed` before `auto_land`,
   `human_review`, or `product_visual_review`.
 - `risk.changed_surfaces` MUST be concrete enough for tests to assert route decisions, for example

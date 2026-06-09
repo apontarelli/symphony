@@ -20,6 +20,7 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
         }
 
   @passed_statuses MapSet.new([:passed, :pass, :success, :clean, :ok])
+  @manifest_check_name "change_manifest"
   @default_required_checks ~w(tests quality_gates automated_review route_classification sync)
   @strict_recovery_checks ~w(
     deployment_status
@@ -169,6 +170,7 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
 
   defp passed_checks(checks) do
     checks
+    |> Enum.reject(&(Map.get(&1, :name) == @manifest_check_name))
     |> Enum.filter(&(Map.get(&1, :status) in @passed_statuses))
     |> Enum.flat_map(&check_names/1)
     |> Enum.uniq()

@@ -1713,7 +1713,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp handoff_decision_for_running_entry(running_entry, blocker) when is_map(running_entry) do
     running_entry
     |> Map.get(:completion, %{})
-    |> HandoffRouteRecorder.classify_completion(blocker)
+    |> HandoffRouteRecorder.classify_completion(
+      blocker,
+      Map.get(running_entry, :workspace_path),
+      Map.get(running_entry, :worker_host)
+    )
   end
 
   defp handoff_decision_for_running_entry(_running_entry, blocker) do

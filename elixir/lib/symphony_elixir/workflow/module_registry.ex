@@ -446,10 +446,13 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       issue labels, validation evidence, PR checks, automated review result, and sync result.
 
       Record structured completion evidence for the handoff route classifier: validation checks,
-      quality gates, automated review, route classification, sync evidence, issue labels, and any
-      project-specific required auto-land checks. Record the selected handoff route in the workpad.
-      When a PR exists, also record the decision in a PR handoff comment or existing PR handoff
-      location.
+      quality gates, automated review, route classification, sync evidence, issue labels, changed_files
+      or change_manifest.changed_files, and any project-specific required auto-land checks. Changed
+      file paths must be relative, normalized workspace paths; host validation rejects absolute
+      paths, traversal, symlink escapes, generated runtime state, caches, logs, temporary app data,
+      local secret files, and operator-local config. Record the selected handoff route in the
+      workpad. When a PR exists, also record the decision in a PR handoff comment or existing PR
+      handoff location.
 
       Treat dry-run auto-land as a visibility route: record that Symphony selected dry-run
       auto-land, move the issue to Human Review for v1 visibility, and do not merge. In v1,
