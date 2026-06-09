@@ -4,6 +4,7 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
   alias SymphonyElixir.HandoffRoute.Evidence
 
   defstruct enabled?: false,
+            dry_run?: true,
             required_checks: [],
             missing_checks: [],
             matched_force_human_review_label: nil,
@@ -12,6 +13,7 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
+          dry_run?: boolean(),
           required_checks: [String.t()],
           missing_checks: [String.t()],
           matched_force_human_review_label: String.t() | nil,
@@ -21,7 +23,9 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
 
   @passed_statuses MapSet.new([:passed, :pass, :success, :clean, :ok])
   @manifest_check_name "change_manifest"
+  @pr_feedback_check_name "pr_feedback"
   @default_required_checks ~w(tests quality_gates automated_review route_classification sync)
+  @real_landing_required_checks ~w(pr_feedback)
   @strict_recovery_checks ~w(
     deployment_status
     rollback_plan
@@ -51,11 +55,11 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     "deployment_coupling" => :deployment_coupling,
     "dry_run" => :dry_run,
     "enabled" => :enabled,
-    "failure_state" => :failure_state,
     "force_human_review_labels" => :force_human_review_labels,
     "project" => :project,
     "posture" => :posture,
-    "required_checks" => :required_checks
+    "required_checks" => :required_checks,
+    "structured_pr_feedback" => :structured_pr_feedback
   }
 
   @spec evaluate(term()) :: t()
@@ -64,12 +68,14 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     policy = fetch(input, :policy, %{}) |> normalize_map()
     labels = fetch(input, :labels, []) |> normalize_label_list()
     auto_land = fetch(policy, :auto_land, %{}) |> normalize_map()
-    required_checks = required_checks(policy, auto_land)
+    dry_run? = dry_run?(auto_land)
+    required_checks = required_checks(policy, auto_land, dry_run?)
     missing_checks = required_checks -- passed_checks(checks)
     matched_force_label = matched_force_human_review_label(labels, auto_land)
 
     %__MODULE__{
       enabled?: enabled?(policy, auto_land),
+      dry_run?: dry_run?,
       required_checks: required_checks,
       missing_checks: missing_checks,
       matched_force_human_review_label: matched_force_label,
@@ -120,16 +126,20 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     ]
   end
 
-  defp enabled?(policy, auto_land) do
-    fetch(policy, :auto_land_enabled, false) == true or
-      fetch(auto_land, :enabled, false) == true or
-      (manifest_policy?(auto_land) and fetch(auto_land, :posture, "permissive") != "off")
+  defp enabled?(policy, auto_land) when is_map(auto_land) do
+    fetch(auto_land, :posture, nil) != "off" and enabled_with_active_posture?(policy, auto_land)
   end
 
-  defp required_checks(policy, auto_land) do
+  defp enabled_with_active_posture?(policy, auto_land) do
+    fetch(policy, :auto_land_enabled, false) == true or
+      fetch(auto_land, :enabled, false) == true or
+      manifest_policy?(auto_land)
+  end
+
+  defp required_checks(policy, auto_land, dry_run?) do
     if manifest_policy?(auto_land) and fetch(auto_land, :posture, "permissive") != "off" do
       policy
-      |> default_required_checks(auto_land)
+      |> default_required_checks(auto_land, dry_run?)
       |> Kernel.++(fetch(auto_land, :required_checks, []) |> normalize_check_list())
       |> Enum.uniq()
     else
@@ -137,12 +147,10 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     end
   end
 
-  defp default_required_checks(policy, auto_land) do
-    if strict_policy?(policy, auto_land) do
-      @default_required_checks ++ @strict_recovery_checks
-    else
-      @default_required_checks
-    end
+  defp default_required_checks(policy, auto_land, dry_run?) do
+    @default_required_checks
+    |> Kernel.++(real_landing_required_checks(dry_run?))
+    |> Kernel.++(strict_recovery_checks(policy, auto_land))
   end
 
   defp strict_policy?(policy, auto_land) do
@@ -153,8 +161,17 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
       fetch(project, :deployment_coupling, nil) in ["production", "production_web"]
   end
 
+  defp real_landing_required_checks(true), do: []
+  defp real_landing_required_checks(false), do: @real_landing_required_checks
+
+  defp strict_recovery_checks(policy, auto_land) do
+    if strict_policy?(policy, auto_land), do: @strict_recovery_checks, else: []
+  end
+
+  defp dry_run?(auto_land), do: fetch(auto_land, :dry_run, true) != false
+
   defp manifest_policy?(auto_land) do
-    Enum.any?([:posture, :dry_run, :required_checks, :blocked_state, :failure_state], &Map.has_key?(auto_land, &1))
+    Enum.any?([:posture, :dry_run, :required_checks, :blocked_state], &Map.has_key?(auto_land, &1))
   end
 
   defp matched_force_human_review_label(labels, auto_land) do
@@ -176,7 +193,7 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     |> Enum.uniq()
   end
 
-  defp check_names(%{name: name}) do
+  defp check_names(%{name: name, metadata: metadata}) do
     case normalize_check(name) do
       nil ->
         []
@@ -184,15 +201,27 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
       name ->
         canonical = Map.get(@check_aliases, name, name)
 
-        if canonical == name do
-          [name]
-        else
-          [name, canonical]
+        cond do
+          canonical == @pr_feedback_check_name and not structured_pr_feedback_check?(metadata) ->
+            []
+
+          canonical == name ->
+            [name]
+
+          true ->
+            [name, canonical]
         end
     end
   end
 
+  defp check_names(%{name: name}), do: check_names(%{name: name, metadata: %{}})
+
   defp check_names(_check), do: []
+
+  defp structured_pr_feedback_check?(metadata) do
+    metadata = normalize_map(metadata)
+    fetch(metadata, :structured_pr_feedback, false) == true
+  end
 
   defp normalize_check_list(values) when is_list(values) do
     values

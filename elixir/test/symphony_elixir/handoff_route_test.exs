@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   alias SymphonyElixir.{HandoffRoute, HandoffRouteRecorder}
 
-  test "classifies low-risk passed work as auto-land eligible while keeping v1 handoff conservative" do
+  test "classifies dry-run auto-land as eligible while keeping handoff conservative" do
     decision =
       HandoffRoute.classify(%{
         checks: [%{name: "mix test", status: :passed}],
@@ -14,7 +14,9 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
     assert decision.route == :auto_land
     assert decision.target_state == "Human Review"
+    assert decision.summary =~ "Dry-run auto-land"
     assert decision.recommendation =~ "Auto-land"
+    assert decision.metadata == %{auto_land_executor: "dry_run", dry_run: true}
 
     assert %{
              route: "auto_land",
@@ -24,6 +26,276 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
     assert Enum.any?(evidence, &(&1.summary =~ "All checks passed"))
     assert Enum.any?(evidence, &(&1.summary =~ "low-risk"))
+  end
+
+  test "classifies explicitly opted-in permissive local work as guarded real auto-land" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs, :tests],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    assert decision.route == :auto_land
+    assert decision.target_state == "Merging"
+    assert decision.summary =~ "guarded landing"
+    assert decision.recommendation =~ "Merging"
+    assert decision.metadata == %{auto_land_executor: "land_merge", dry_run: false}
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :auto_land and &1.status == :passed and &1.summary =~ "pr_feedback")
+           )
+  end
+
+  test "classifies explicitly opted-in strict production work only with recovery evidence" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(strict_recovery_checks()),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "production_web"},
+          auto_land: %{dry_run: false}
+        }
+      })
+
+    assert decision.route == :auto_land
+    assert decision.target_state == "Merging"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :auto_land and &1.status == :passed and &1.summary =~ "rollback_plan")
+           )
+  end
+
+  test "blocks real auto-land when PR feedback sweep evidence is missing" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :auto_land and &1.status == :missing and &1.summary =~ "pr_feedback")
+           )
+  end
+
+  test "does not accept bare pr_feedback check tokens as sweep evidence" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: real_auto_land_checks(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :auto_land and &1.status == :missing and &1.summary =~ "pr_feedback")
+           )
+  end
+
+  test "routes stale sync or actionable PR feedback evidence to rework before real auto-land" do
+    sync_failed =
+      HandoffRoute.classify(%{
+        checks: replace_check(auto_land_checks(), "sync", :failed, "Branch is stale against main."),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    feedback_failed =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: outstanding_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    assert sync_failed.route == :rework
+    assert sync_failed.target_state == "Rework"
+    assert feedback_failed.route == :rework
+    assert feedback_failed.target_state == "Rework"
+  end
+
+  test "routes structured PR feedback by normalized status and unresolved counts" do
+    addressed =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback("addressed", "0"),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    pushback_posted =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback("pushback_posted"),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    unresolved_count =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(:none, 0, top_level_count: 1),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    assert addressed.route == :auto_land
+    assert pushback_posted.route == :auto_land
+    assert unresolved_count.route == :rework
+  end
+
+  test "blocks malformed structured PR feedback instead of treating it as proof" do
+    incomplete_channel =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: %{status: :none, top_level_comments: "not checked"},
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    non_map_feedback =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: "not feedback",
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    unsupported_status =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback("not_applicable"),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    unknown_status =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback("commented"),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    non_string_status =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(12),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    malformed_count =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(:none, "unparsed"),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    non_integer_count =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(:none, []),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: permissive_real_auto_land_policy()
+      })
+
+    for decision <- [
+          incomplete_channel,
+          non_map_feedback,
+          unsupported_status,
+          unknown_status,
+          non_string_status,
+          malformed_count,
+          non_integer_count
+        ] do
+      assert decision.route == :blocked
+      assert decision.target_state == "Human Review"
+      assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.status == :missing))
+    end
+  end
+
+  test "blocks strict real auto-land when production recovery evidence is missing" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(~w(deployment_status monitoring_source incident_issue_creation)),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "production_web"},
+          auto_land: %{dry_run: false}
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :auto_land and &1.status == :missing and &1.summary =~ "rollback_plan")
+           )
+  end
+
+  test "posture off prevents real auto-land even when legacy enabled flag is true" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{
+          auto_land: %{enabled: true, posture: "off", dry_run: false}
+        }
+      })
+
+    assert decision.route == :human_review
+    assert decision.target_state == "Human Review"
   end
 
   test "classifies top-level auto-land enablement as auto-land eligible" do
@@ -429,6 +701,118 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(malformed.evidence, &(&1.kind == :check and &1.status == :missing))
   end
 
+  test "recorder prefers host policy and labels over completion-owned route policy" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-host-policy-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib"))
+      File.write!(Path.join([workspace, "lib", "safe.ex"]), "defmodule Safe, do: nil\n")
+
+      completion_claims_real_land = %{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        changed_files: ["lib/safe.ex"],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      }
+
+      host_dry_run =
+        HandoffRouteRecorder.classify_completion(
+          completion_claims_real_land,
+          nil,
+          workspace,
+          nil,
+          %{
+            policy: %{
+              project: %{criticality: "prototype", deployment_coupling: "none"},
+              auto_land: %{posture: "permissive", dry_run: true}
+            },
+            labels: []
+          }
+        )
+
+      host_force_review_label =
+        HandoffRouteRecorder.classify_completion(
+          completion_claims_real_land,
+          nil,
+          workspace,
+          nil,
+          %{
+            policy: %{
+              project: %{criticality: "prototype", deployment_coupling: "none"},
+              auto_land: %{posture: "permissive", dry_run: false}
+            },
+            labels: ["no-auto-land"]
+          }
+        )
+
+      assert host_dry_run.route == :auto_land
+      assert host_dry_run.target_state == "Human Review"
+      assert host_force_review_label.route == :human_review
+      assert host_force_review_label.target_state == "Human Review"
+
+      keyword_context_force_review_label =
+        HandoffRouteRecorder.classify_completion(
+          completion_claims_real_land,
+          nil,
+          workspace,
+          nil,
+          policy: %{
+            project: %{criticality: "prototype", deployment_coupling: "none"},
+            auto_land: %{posture: "permissive", dry_run: false}
+          },
+          labels: ["no-auto-land"]
+        )
+
+      invalid_context_uses_completion_policy =
+        HandoffRouteRecorder.classify_completion(
+          completion_claims_real_land,
+          nil,
+          workspace,
+          nil,
+          "not routing context"
+        )
+
+      camel_feedback_completion =
+        completion_claims_real_land
+        |> Map.delete(:pr_feedback)
+        |> Map.put("prFeedback", clean_pr_feedback())
+
+      camel_feedback =
+        HandoffRouteRecorder.classify_completion(
+          camel_feedback_completion,
+          nil,
+          workspace,
+          nil,
+          %{
+            policy: %{
+              project: %{criticality: "prototype", deployment_coupling: "none"},
+              auto_land: %{posture: "permissive", dry_run: false}
+            },
+            labels: []
+          }
+        )
+
+      assert keyword_context_force_review_label.route == :human_review
+      assert keyword_context_force_review_label.target_state == "Human Review"
+      assert invalid_context_uses_completion_policy.route == :auto_land
+      assert invalid_context_uses_completion_policy.target_state == "Merging"
+      assert camel_feedback.route == :auto_land
+      assert camel_feedback.target_state == "Merging"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "publish preflight failures route as structured blockers" do
     decision =
       HandoffRouteRecorder.classify_completion(%{
@@ -814,6 +1198,64 @@ defmodule SymphonyElixir.HandoffRouteTest do
     ~w(tests quality_gates automated_review route_classification sync)
     |> Kernel.++(extra_checks)
     |> Enum.map(&%{name: &1, status: :passed})
+  end
+
+  defp permissive_real_auto_land_policy do
+    %{
+      project: %{criticality: "prototype", deployment_coupling: "none"},
+      auto_land: %{posture: "permissive", dry_run: false}
+    }
+  end
+
+  defp real_auto_land_checks(extra_checks \\ []) do
+    auto_land_checks(["pr_feedback"] ++ extra_checks)
+  end
+
+  defp clean_pr_feedback(status \\ :none, default_count \\ 0, opts \\ []) do
+    top_level_count = Keyword.get(opts, :top_level_count, default_count)
+
+    %{
+      status: status,
+      top_level_comments: %{
+        checked: true,
+        source: "gh pr view --comments",
+        unresolved_actionable_count: top_level_count
+      },
+      inline_review_comments: %{
+        checked: true,
+        source: "gh api repos/example/project/pulls/1/comments",
+        unresolved_actionable_count: default_count
+      },
+      review_summaries: %{
+        checked: true,
+        source: "gh pr view --json reviews",
+        unresolved_actionable_count: default_count
+      }
+    }
+  end
+
+  defp outstanding_pr_feedback do
+    %{
+      status: :outstanding,
+      top_level_comments: %{checked: true, source: "gh pr view --comments", unresolved_actionable_count: 1},
+      inline_review_comments: %{
+        checked: true,
+        source: "gh api repos/example/project/pulls/1/comments",
+        unresolved_actionable_count: 0
+      },
+      review_summaries: %{checked: true, source: "gh pr view --json reviews", unresolved_actionable_count: 0}
+    }
+  end
+
+  defp strict_recovery_checks do
+    ~w(deployment_status rollback_plan monitoring_source incident_issue_creation)
+  end
+
+  defp replace_check(checks, name, status, summary) do
+    Enum.map(checks, fn
+      %{name: ^name} = check -> Map.merge(check, %{status: status, summary: summary})
+      check -> check
+    end)
   end
 
   defp publish_preflight_remote_push_failure?(evidence) do

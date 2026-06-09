@@ -174,17 +174,19 @@ or production-web coupled work defaults to strict policy.
 `auto_land.posture` can be `off`, `permissive`, or `strict`. When omitted, Symphony derives the
 posture from project criticality and deployment coupling. `auto_land.required_checks` adds evidence
 requirements to the posture defaults: permissive policy requires tests, quality gates, automated
-review, route classification, and sync evidence; strict policy also requires project-owned
-production recovery evidence: deployment status, rollback or rollback-plan proof, monitoring source,
-and incident issue creation path. A generic `recovery` check is not sufficient for strict or
-production-web auto-land.
+review, route classification, and sync evidence. Repos that opt into real landing with
+`auto_land.dry_run: false` also must provide PR feedback sweep evidence before routing to `Merging`.
+Strict policy also requires project-owned production recovery evidence: deployment status, rollback
+or rollback-plan proof, monitoring source, and incident issue creation path. A generic `recovery`
+check is not sufficient for strict or production-web auto-land.
 
 `auto_land.force_human_review_labels` always routes matching issues to human review, even when
-evidence is otherwise sufficient. `auto_land.dry_run` defaults to `true` and must remain true in v1;
-Symphony can classify and record an auto-land decision without merging for real. Symphony records
-the route decision; the project remains responsible for how deployments are performed, how rollback
-or rollback-plan proof is generated, where monitoring signals originate, and how incident intake
-creates tracker work.
+evidence is otherwise sufficient. `auto_land.dry_run` defaults to `true`, so Symphony classifies and
+records an auto-land decision without merging. Setting `auto_land.dry_run: false` is the opt-in for
+guarded real auto-land: the classifier can move eligible work to `Merging`, where the existing land
+flow performs final check and review polling before merge. The project remains responsible for how
+deployments are performed, how rollback or rollback-plan proof is generated, where monitoring
+signals originate, and how incident intake creates tracker work.
 
 Optional flags:
 

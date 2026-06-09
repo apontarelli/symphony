@@ -266,7 +266,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
           - security-review
         force_human_review_labels:
           - manual-review
-        failure_state: Rework
         blocked_state: Human Review
         dry_run: true
       """)
@@ -277,7 +276,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       "posture" => "permissive",
       "required_checks" => ["security-review"],
       "force_human_review_labels" => ["manual-review"],
-      "failure_state" => "Rework",
       "blocked_state" => "Human Review",
       "dry_run" => true
     }
@@ -313,10 +311,10 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         pr_target: main
       auto_land:
         posture: permissive
-        dry_run: true
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
+    assert config["auto_land"]["dry_run"] == true
 
     assert config["auto_land"]["force_human_review_labels"] == [
              "force-human-review",
@@ -324,6 +322,50 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              "manual-review",
              "no-auto-land"
            ]
+  end
+
+  test "auto-land failure_state is rejected instead of accepted as a no-op" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      auto_land:
+        posture: permissive
+        failure_state: Needs Fix
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+    assert %{path: "auto_land.failure_state", message: "is not supported; failed auto-land evidence routes to Rework"} in diagnostics
+  end
+
+  test "auto-land policy compiles explicit real landing opt-in" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        repository: github.com/example/target-repo
+        criticality: prototype
+        deployment_coupling: none
+      delivery:
+        pr_target: main
+      auto_land:
+        posture: permissive
+        dry_run: false
+      """)
+
+    assert {:ok, %{config: config}} = Manifest.load(path)
+    assert config["auto_land"]["dry_run"] == false
+
+    workflow_path = Workflow.workflow_file_path()
+    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+    Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    settings = Config.settings!()
+    assert settings.auto_land.dry_run == false
   end
 
   test "legacy manifest vocabulary is rejected instead of translated" do

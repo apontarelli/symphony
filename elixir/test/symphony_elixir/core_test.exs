@@ -1518,6 +1518,82 @@ defmodule SymphonyElixir.CoreTest do
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
+  test "normal worker exit uses host policy and issue labels for auto-land routing" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-route-host-policy"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :RouteHostPolicyOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-elixir-route-host-policy-#{System.unique_integer([:positive])}")
+    workspace = Path.join(workspace_root, "MT-HOST")
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join([workspace, "lib", "route.ex"]), "defmodule Route, do: nil\n")
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+
+      File.rm_rf(workspace_root)
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-HOST",
+      issue: %Issue{id: issue_id, identifier: "MT-HOST", state: "In Progress", labels: ["no-auto-land"]},
+      session_id: nil,
+      workspace_path: workspace,
+      policy: %{
+        project: %{criticality: "prototype", deployment_coupling: "none"},
+        auto_land: %{posture: "permissive", dry_run: false}
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.utc_now(),
+         completion: %{
+           checks: auto_land_checks(),
+           pr_feedback: clean_pr_feedback(),
+           review: %{status: :clean},
+           changed_surfaces: [:docs],
+           changed_files: ["lib/route.ex"],
+           policy: %{
+             project: %{criticality: "prototype", deployment_coupling: "none"},
+             auto_land: %{posture: "permissive", dry_run: false}
+           }
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    assert %{
+             route: "human_review",
+             target_state: "Human Review"
+           } = state.handoff_routes[issue_id]
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -2034,7 +2110,9 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "structured completion evidence"
     assert prompt =~ "changed_files"
     assert prompt =~ "dry-run auto-land"
-    assert prompt =~ "no merge or landing command is allowed"
+    assert prompt =~ "auto-land as guarded landing"
+    assert prompt =~ "auto_land.dry_run: false"
+    assert prompt =~ "route the issue to Merging"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt 2"
     assert prompt =~ "## Selected Workflow Profile"
@@ -3025,6 +3103,24 @@ defmodule SymphonyElixir.CoreTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp auto_land_checks do
+    ~w(tests quality_gates automated_review route_classification sync)
+    |> Enum.map(&%{name: &1, status: :passed})
+  end
+
+  defp clean_pr_feedback do
+    %{
+      status: :none,
+      top_level_comments: %{checked: true, source: "gh pr view --comments", unresolved_actionable_count: 0},
+      inline_review_comments: %{
+        checked: true,
+        source: "gh api repos/example/project/pulls/1/comments",
+        unresolved_actionable_count: 0
+      },
+      review_summaries: %{checked: true, source: "gh pr view --json reviews", unresolved_actionable_count: 0}
+    }
   end
 
   defp repo_manifest_path, do: Path.expand("../../../symphony.yml", __DIR__)

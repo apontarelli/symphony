@@ -290,7 +290,6 @@ defmodule SymphonyElixir.Config.Schema do
       field(:posture, :string)
       field(:required_checks, {:array, :string}, default: [])
       field(:force_human_review_labels, {:array, :string}, default: @default_force_human_review_labels)
-      field(:failure_state, :string, default: "Rework")
       field(:blocked_state, :string, default: "Human Review")
       field(:dry_run, :boolean, default: true)
     end
@@ -304,7 +303,6 @@ defmodule SymphonyElixir.Config.Schema do
           :posture,
           :required_checks,
           :force_human_review_labels,
-          :failure_state,
           :blocked_state,
           :dry_run
         ],
@@ -314,7 +312,6 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:required_checks, &normalize_token_list/1)
       |> update_change(:force_human_review_labels, &normalize_token_list/1)
       |> validate_posture()
-      |> validate_v1_dry_run()
     end
 
     defp validate_posture(changeset) do
@@ -326,14 +323,6 @@ defmodule SymphonyElixir.Config.Schema do
             [posture: "is invalid"]
           end
       end)
-    end
-
-    defp validate_v1_dry_run(changeset) do
-      if get_change(changeset, :dry_run) == false do
-        add_error(changeset, :dry_run, "must be true until landing integration is enabled")
-      else
-        changeset
-      end
     end
 
     defp normalize_optional_token(nil), do: nil

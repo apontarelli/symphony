@@ -227,6 +227,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
     |> reject_legacy_nested(raw, ["docs", "entry_points"], "is not supported; use docs.entrypoints")
     |> reject_legacy_nested(raw, ["validation", "gates"], "is not supported; use validation.commands")
     |> reject_legacy_nested(raw, ["vcs", "kind"], "is not supported; use vcs.mode")
+    |> reject_legacy_nested(raw, ["auto_land", "failure_state"], "is not supported; failed auto-land evidence routes to Rework")
   end
 
   defp reject_legacy_top_level(errors, raw, key, message) do
@@ -431,7 +432,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {force_human_review_labels, label_errors} =
       string_list_field(raw, "force_human_review_labels", "auto_land.force_human_review_labels", default: @default_force_human_review_labels)
 
-    {failure_state, failure_state_errors} = string_field(raw, "failure_state", "auto_land.failure_state", default: "Rework")
     {blocked_state, blocked_state_errors} = string_field(raw, "blocked_state", "auto_land.blocked_state", default: "Human Review")
     {dry_run, dry_run_errors} = boolean_field(raw, "dry_run", "auto_land.dry_run", default: true)
 
@@ -439,7 +439,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
       %{
         "required_checks" => required_checks,
         "force_human_review_labels" => force_human_review_labels,
-        "failure_state" => failure_state,
         "blocked_state" => blocked_state,
         "dry_run" => dry_run
       }
@@ -449,7 +448,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
       posture_errors ++
         required_check_errors ++
         label_errors ++
-        failure_state_errors ++
         blocked_state_errors ++ dry_run_errors
 
     {auto_land, errors}
