@@ -43,6 +43,12 @@ host, whether the configured remote accepts a push dry-run, and whether the conf
 repository/base branch can support PR creation. The checks return structured capability and failure
 data without creating commits, branches, pushes, or pull requests.
 
+When completion metadata includes `changed_files` or `change_manifest.changed_files`, Symphony
+validates each path on the host before recording a publishable route. Paths must be relative,
+normalized workspace paths. Absolute paths, traversal, symlink escapes, generated runtime state,
+logs, caches, temporary app data, local secrets, and operator-local config are rejected with
+structured route evidence.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

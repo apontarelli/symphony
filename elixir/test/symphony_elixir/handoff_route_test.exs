@@ -52,6 +52,18 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(decision.evidence, &(&1.kind == :check and &1.status == :missing))
   end
 
+  test "does not use manifest validation as the only auto-land check" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "change_manifest", status: :passed}],
+        review: %{status: :clean},
+        changed_surfaces: [:docs],
+        policy: %{auto_land: %{enabled: true}}
+      })
+
+    assert decision.route == :human_review
+  end
+
   test "manifest auto-land policy blocks handoff when required evidence is missing" do
     decision =
       HandoffRoute.classify(%{
@@ -379,17 +391,37 @@ defmodule SymphonyElixir.HandoffRouteTest do
   test "recorder classifies completion metadata before tracker writes" do
     assert HandoffRouteRecorder.completion_metadata?(%{"checks" => []})
     assert HandoffRouteRecorder.completion_metadata?(%{"publish_preflight" => %{}})
+    assert HandoffRouteRecorder.completion_metadata?(%{"changed_files" => []})
     refute HandoffRouteRecorder.completion_metadata?(%{"ignored" => true})
     refute HandoffRouteRecorder.completion_metadata?("not completion metadata")
 
-    decision =
-      HandoffRouteRecorder.classify_completion(%{
-        "checks" => [%{"name" => "mix test", "status" => "passed"}],
-        "review" => %{"status" => "clean"},
-        "changed_surfaces" => ["visual_design"]
-      })
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-completion-metadata-#{System.unique_integer([:positive])}"
+      )
 
-    assert decision.route == :product_visual_review
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib"))
+      File.write!(Path.join([workspace, "lib", "view.ex"]), "defmodule View, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_surfaces" => ["visual_design"],
+            "changed_files" => ["lib/view.ex"]
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :product_visual_review
+    after
+      File.rm_rf(test_root)
+    end
 
     malformed = HandoffRouteRecorder.classify_completion("not completion metadata")
 
@@ -437,28 +469,47 @@ defmodule SymphonyElixir.HandoffRouteTest do
   end
 
   test "publish preflight passed evidence does not block handoff" do
-    decision =
-      HandoffRouteRecorder.classify_completion(%{
-        "checks" => [%{"name" => "tests", "status" => "passed"}],
-        "review" => %{"status" => "clean"},
-        "publish_preflight" => %{
-          "repository" => "https://github.com/example/project",
-          "base_branch" => "main",
-          "capabilities" => %{
-            "workspace_vcs_metadata" => true,
-            "remote_push" => true,
-            "pr_creation" => true
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-publish-preflight-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib"))
+      File.write!(Path.join([workspace, "lib", "safe.ex"]), "defmodule Safe, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "tests", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/safe.ex"],
+            "publish_preflight" => %{
+              "repository" => "https://github.com/example/project",
+              "base_branch" => "main",
+              "capabilities" => %{
+                "workspace_vcs_metadata" => true,
+                "remote_push" => true,
+                "pr_creation" => true
+              },
+              "failures" => []
+            }
           },
-          "failures" => []
-        }
-      })
+          nil,
+          workspace
+        )
 
-    assert decision.route == :human_review
+      assert decision.route == :human_review
 
-    assert Enum.any?(
-             decision.evidence,
-             &(&1.kind == :publish_preflight and &1.status == :passed and &1.summary =~ "main")
-           )
+      assert Enum.any?(
+               decision.evidence,
+               &(&1.kind == :publish_preflight and &1.status == :passed and &1.summary =~ "main")
+             )
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "normalizes malformed publish preflight metadata conservatively" do
@@ -522,13 +573,223 @@ defmodule SymphonyElixir.HandoffRouteTest do
                metadata: %{
                  repository: nil,
                  base_branch: nil,
-                 capabilities: %{workspace_vcs_metadata: false, remote_push: false, pr_creation: false},
+                 capabilities: %{
+                   workspace_vcs_metadata: false,
+                   remote_push: false,
+                   pr_creation: false
+                 },
                  failure_class: :unknown,
                  command: "42",
                  details: nil
                }
              }
            ] = Enum.filter(malformed_fields.evidence, &(&1.kind == :publish_preflight))
+  end
+
+  test "recorder fails closed when completion metadata omits or malforms the manifest" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-malformed-manifest-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(workspace)
+
+      missing =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"}
+          },
+          nil,
+          workspace
+        )
+
+      assert missing.route == :rework
+      assert manifest_failure_reason?(missing, :missing_changed_files)
+
+      malformed =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "change_manifest" => []
+          },
+          nil,
+          workspace
+        )
+
+      assert malformed.route == :rework
+      assert manifest_failure_reason?(malformed, :invalid_manifest)
+
+      duplicate_alias =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/safe.ex"],
+            "files" => ["../do-not-persist.env"]
+          },
+          nil,
+          workspace
+        )
+
+      assert duplicate_alias.route == :rework
+      assert manifest_failure_reason?(duplicate_alias, :duplicate_changed_file_aliases)
+
+      duplicate_manifest_alias =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            :change_manifest => %{"changed_files" => ["lib/safe.ex"]},
+            "change_manifest" => %{"changed_files" => ["lib/safe.ex"]},
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"}
+          },
+          nil,
+          workspace
+        )
+
+      assert duplicate_manifest_alias.route == :rework
+      assert manifest_failure_reason?(duplicate_manifest_alias, :duplicate_change_manifest_aliases)
+
+      conflicting_sources =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "change_manifest" => %{"changed_files" => ["lib/safe.ex"]},
+            "changed_files" => ["../do-not-persist.env"]
+          },
+          nil,
+          workspace
+        )
+
+      assert conflicting_sources.route == :rework
+      assert manifest_failure_reason?(conflicting_sources, :conflicting_manifest_sources)
+
+      comment = HandoffRoute.format_comment(conflicting_sources)
+      refute comment =~ "do-not-persist"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder blocks handoff when changed-file manifest validation fails" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-manifest-guard-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(workspace)
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_surfaces" => ["docs"],
+            "changed_files" => ["../.env"]
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :rework
+      assert decision.target_state == "Rework"
+
+      assert Enum.any?(decision.evidence, fn evidence ->
+               evidence.kind == :check and evidence.status == :failed and
+                 evidence.summary =~ "Changed-file manifest rejected" and
+                 match?(
+                   [%{reason: :path_traversal, path: "../.env"}],
+                   evidence.metadata.failures
+                 )
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder validates nested change manifests and rejects missing workspace context" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-nested-manifest-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib"))
+      File.write!(Path.join([workspace, "lib", "nested.ex"]), "defmodule Nested, do: nil\n")
+
+      valid =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "mix test", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "change_manifest" => %{
+              "changed_files" => ["lib/nested.ex"],
+              "validation" => [%{"name" => "mix test", "status" => "passed"}]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert valid.route == :human_review
+      assert Enum.any?(valid.evidence, &(&1.kind == :check and &1.summary =~ "change_manifest"))
+
+      assert Enum.any?(valid.evidence, fn evidence ->
+               evidence.kind == :check and
+                 evidence.metadata == %{
+                   changed_files: ["lib/nested.ex"],
+                   validation: [%{"name" => "mix test", "status" => "passed"}]
+                 }
+             end)
+
+      missing_workspace =
+        HandoffRouteRecorder.classify_completion(%{
+          "changed_files" => ["lib/nested.ex"],
+          "checks" => [%{"name" => "mix test", "status" => "passed"}],
+          "review" => %{"status" => "clean"}
+        })
+
+      assert missing_workspace.route == :rework
+
+      assert Enum.any?(missing_workspace.evidence, fn evidence ->
+               evidence.kind == :check and evidence.status == :failed and
+                 match?([%{reason: :missing_workspace}], evidence.metadata.failures)
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder fails closed for remote workspace manifests" do
+    remote =
+      HandoffRouteRecorder.classify_completion(
+        %{
+          "changed_files" => ["lib/remote.ex"],
+          "checks" => [%{"name" => "mix test", "status" => "passed"}],
+          "review" => %{"status" => "clean"}
+        },
+        nil,
+        "/remote/workspace",
+        "worker-a"
+      )
+
+    assert remote.route == :rework
+    assert manifest_failure_reason?(remote, :remote_workspace_validation_unavailable)
+
+    assert Enum.any?(remote.evidence, fn evidence ->
+             evidence.kind == :check and
+               get_in(evidence.metadata, [:failures, Access.at(0), :metadata, :worker_host]) == "worker-a"
+           end)
   end
 
   test "recorder writes the route comment and moves the selected state" do
@@ -559,5 +820,12 @@ defmodule SymphonyElixir.HandoffRouteTest do
     evidence.kind == :publish_preflight and
       evidence.status == :blocked and
       evidence.metadata.failure_class == :remote_push_unavailable
+  end
+
+  defp manifest_failure_reason?(decision, reason) do
+    Enum.any?(decision.evidence, fn evidence ->
+      evidence.kind == :check and evidence.status == :failed and
+        Enum.any?(get_in(evidence.metadata, [:failures]) || [], &(&1.reason == reason))
+    end)
   end
 end

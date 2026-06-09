@@ -1440,11 +1440,17 @@ defmodule SymphonyElixir.CoreTest do
     ref = make_ref()
     orchestrator_name = Module.concat(__MODULE__, :RouteCompletionOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+    workspace_root = Path.join(System.tmp_dir!(), "symphony-elixir-route-completion-#{System.unique_integer([:positive])}")
+    workspace = Path.join(workspace_root, "MT-ROUTE")
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join([workspace, "lib", "route.ex"]), "defmodule Route, do: nil\n")
 
     on_exit(fn ->
       if Process.alive?(pid) do
         Process.exit(pid, :normal)
       end
+
+      File.rm_rf(workspace_root)
     end)
 
     initial_state = :sys.get_state(pid)
@@ -1455,6 +1461,7 @@ defmodule SymphonyElixir.CoreTest do
       identifier: "MT-ROUTE",
       issue: %Issue{id: issue_id, identifier: "MT-ROUTE", state: "In Progress"},
       session_id: nil,
+      workspace_path: workspace,
       started_at: DateTime.utc_now()
     }
 
@@ -1477,6 +1484,7 @@ defmodule SymphonyElixir.CoreTest do
                checks: [%{name: "mix test", status: :passed}],
                review: %{status: :decision_needed},
                changed_surfaces: [:domain],
+               changed_files: ["lib/route.ex"],
                decision: %{
                  question: "Choose handoff route",
                  recommendation: "Keep Human Review for v1",
@@ -1505,6 +1513,7 @@ defmodule SymphonyElixir.CoreTest do
     assert_receive {:memory_tracker_comment, ^issue_id, route_comment}
     assert route_comment =~ "### Handoff Route"
     assert route_comment =~ "decision_needed"
+    assert route_comment =~ "change_manifest"
     assert route_comment =~ "Keep Human Review"
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
@@ -2023,6 +2032,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "never bypass it with a direct merge command"
     assert prompt =~ "Auto-land route classification"
     assert prompt =~ "structured completion evidence"
+    assert prompt =~ "changed_files"
     assert prompt =~ "dry-run auto-land"
     assert prompt =~ "no merge or landing command is allowed"
     assert prompt =~ "Continuation context:"
