@@ -406,6 +406,8 @@ Optional manifest fields:
 - `project.repository` (string)
   - Used by the default `workspace` module to populate new issue workspaces with
     `git clone --depth 1 <repository> .` when present.
+  - Required by publish-capable GitHub PR workflows and must resolve to the GitHub repository that
+    host-owned publish will target.
 - `project.kind` (string, default `generic`)
 - `project.app_kind` (string, default `local`)
 - `project.facts` (object, default `{}`)
@@ -414,6 +416,8 @@ Optional manifest fields:
 - `vcs.default_branch` (string, default `main`)
 - `vcs.posture` (string)
 - `delivery.pr_target` (string, defaults to `vcs.default_branch`)
+  - Publish-capable GitHub PR workflows must set this field explicitly to an unambiguous base branch
+    name.
 - `validation.commands` (list of `{name, command}` objects, default `[]`)
 - `automation.posture` (string, default `unattended`)
 - `automation.profile` (string, default `default`)
@@ -554,8 +558,10 @@ project style, setup, command syntax, domain language, product/design constraint
   - OPTIONAL.
   - Defaults to `vcs.default_branch`.
 
-The compiled workflow uses `delivery.pr_target` as the PR base branch for a run. When the target is
-not `main`, implementations MUST avoid merging or promoting anything to `main` as part of v1.
+The compiled workflow uses `delivery.pr_target` as the PR base branch for a run. Publish-capable
+GitHub PR workflows MUST set this field explicitly; defaulting to `vcs.default_branch` is only for
+non-publish workflow compatibility. When the target is not `main`, implementations MUST avoid
+merging or promoting anything to `main` as part of v1.
 
 #### 5.3.5 `validation`
 
@@ -798,6 +804,7 @@ Required top-level fields:
 - `checks` (list)
 - `completion_requirements` (list)
 - `delivery` (object)
+- `publish_target` (object, OPTIONAL)
 - `transitions` (object)
 - `tools` (object or list)
 - `harness` (object)
@@ -821,6 +828,12 @@ Minimal shape:
   "checks": [],
   "completion_requirements": [],
   "delivery": {"pr_target": "main"},
+  "publish_target": {
+    "repository": "https://github.com/example/project",
+    "pr_target": "main",
+    "github_repository": "example/project",
+    "display": "example/project:main"
+  },
   "transitions": {},
   "tools": {},
   "harness": {

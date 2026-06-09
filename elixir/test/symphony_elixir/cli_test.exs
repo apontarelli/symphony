@@ -300,6 +300,58 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "must stay inside the repo"
   end
 
+  test "workflow check rejects missing publish repository and explicit PR target" do
+    repo = tmp_repo!("symphony-elixir-check-missing-publish-target")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      name: missing-publish-target
+      kind: elixir
+      app_kind: web
+    workflow:
+      preset: default
+    vcs:
+      mode: jj
+      default_branch: main
+    automation:
+      posture: unattended
+    """)
+
+    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert output =~ "Workflow check failed"
+    assert output =~ "project.repository"
+    assert output =~ "is required for publish handoff"
+    assert output =~ "delivery.pr_target"
+    assert output =~ "Set `delivery.pr_target` to the PR base branch"
+  end
+
+  test "workflow check rejects incompatible publish repository and ambiguous PR target" do
+    repo = tmp_repo!("symphony-elixir-check-bad-publish-target")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      name: bad-publish-target
+      repository: https://gitlab.com/example/target-repo
+      kind: elixir
+      app_kind: web
+    workflow:
+      preset: default
+    delivery:
+      pr_target: origin/main
+    automation:
+      posture: unattended
+    """)
+
+    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert output =~ "project.repository"
+    assert output =~ "must be a GitHub repository URL for publish handoff"
+    assert output =~ "delivery.pr_target"
+    assert output =~ "must be an unambiguous branch name for publish handoff"
+    assert output =~ "origin/main"
+  end
+
   test "workflow check gives setup remediation when manifest is missing or malformed" do
     repo = tmp_repo!("symphony-elixir-check-missing")
 
@@ -322,12 +374,16 @@ defmodule SymphonyElixir.CLITest do
     File.write!(Path.join([repo, ".symphony", "codex-home", "AGENTS.md"]), "harness\n")
 
     assert {:ok, _output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    set_publish_repository!(repo, "https://github.com/example/ready-repo")
     assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
 
     assert output =~ "Workflow check passed"
     assert output =~ "preset: default"
     assert output =~ "modules:"
     assert output =~ "tracker.linear"
+    assert output =~ "publish target:"
+    assert output =~ "repository: https://github.com/example/ready-repo"
+    assert output =~ "resolved: example/ready-repo:main"
     assert output =~ "harness.codex_home: managed default"
   end
 
@@ -336,9 +392,12 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
     assert output =~ "Workflow check passed"
+    assert output =~ "resolved: apontarelli/symphony:main"
 
     assert {:ok, %{config: config, prompt: prompt}} = Manifest.load(Path.join(repo, "symphony.yml"))
     assert config["manifest"]["project"]["name"] == "Symphony"
+    assert config["publish_target"]["display"] == "apontarelli/symphony:main"
+    refute config["publish_target"]["display"] == "openai/symphony:main"
     assert config["checks"] == [%{"name" => "all", "command" => "cd elixir && mise exec -- make all"}]
     assert config["policy_metadata"]["source"] == "symphony_manifest"
     assert prompt =~ "You are working on a Linear ticket"
@@ -351,14 +410,19 @@ defmodule SymphonyElixir.CLITest do
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
 
     assert {:ok, _output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    set_publish_repository!(repo, "https://github.com/example/print-repo")
 
     assert {:ok, output} = CLI.evaluate(["workflow", "print", "--repo", repo])
     assert output =~ "Resolved workflow"
     assert output =~ "preset: default"
     assert output =~ "repo.docs"
+    assert output =~ "publish target:"
+    assert output =~ "resolved: example/print-repo:main"
 
     assert {:ok, compiled_output} = CLI.evaluate(["workflow", "print", "--repo", repo, "--compiled"])
     assert compiled_output =~ "Compiled workflow"
+    assert compiled_output =~ "publish_target:"
+    assert compiled_output =~ "display: \"example/print-repo:main\""
     assert compiled_output =~ "tracker:"
     assert compiled_output =~ "You are working on a Linear ticket"
     assert compiled_output =~ "## Core Workflow Modules"
@@ -383,6 +447,13 @@ defmodule SymphonyElixir.CLITest do
     File.rm_rf!(path)
     File.mkdir_p!(path)
     path
+  end
+
+  defp set_publish_repository!(repo, repository) do
+    manifest_path = Path.join(repo, "symphony.yml")
+    {:ok, manifest} = YamlElixir.read_from_file(manifest_path)
+    manifest = put_in(manifest, ["project", "repository"], repository)
+    File.write!(manifest_path, Renderer.to_yaml(manifest))
   end
 
   defp repo_root!, do: Path.expand("../../..", __DIR__)

@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Config.Schema do
   import Ecto.Changeset
 
   alias SymphonyElixir.PathSafety
+  alias SymphonyElixir.Workflow.PublishTarget
 
   @primary_key false
   @policy_ref_length 12
@@ -471,8 +472,10 @@ defmodule SymphonyElixir.Config.Schema do
         |> normalize_policy_metadata()
         |> Map.merge(Keyword.get(opts, :metadata, %{}) |> normalize_policy_metadata())
 
-      policy
-      |> Map.put(@profile_policy_ref_key, policy_ref(policy))
+      finalized_policy = put_resolved_publish_target(policy)
+
+      finalized_policy
+      |> Map.put(@profile_policy_ref_key, policy_ref(finalized_policy))
       |> put_policy_metadata(metadata)
       |> then(&{:ok, &1})
     end
@@ -757,12 +760,15 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp resolve_profile_policy(profiles, profile_name, refinement_names, opts)
        when is_map(profiles) and is_list(refinement_names) and is_list(opts) do
+    locked_delivery_target = normalize_delivery_target_override(Keyword.get(opts, :delivery_target_override))
+
     with {:ok, default_policy} <- fetch_profile_policy(profiles, "default"),
          {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
          {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
+         {:ok, policy} <- apply_delivery_target_override(policy, locked_delivery_target),
          :ok <- validate_resolved_delivery(policy, profile_name) do
-      apply_refinement_policies(profiles, policy, refinement_names)
+      apply_refinement_policies(profiles, policy, refinement_names, locked_delivery_target)
     end
   end
 
@@ -786,13 +792,58 @@ defmodule SymphonyElixir.Config.Schema do
     apply_policy_overrides(default_effective, selected_policy, [profile_name])
   end
 
-  defp apply_refinement_policies(_profiles, policy, []), do: {:ok, policy}
+  defp normalize_delivery_target_override(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
 
-  defp apply_refinement_policies(profiles, policy, [profile_name | rest]) do
+  defp normalize_delivery_target_override(_value), do: nil
+
+  defp apply_delivery_target_override(policy, nil), do: {:ok, policy}
+
+  defp apply_delivery_target_override(policy, delivery_target) do
+    apply_policy_overrides(policy, %{"delivery" => %{@delivery_pr_target_key => delivery_target}}, ["delivery_target_override"])
+  end
+
+  defp apply_refinement_policies(_profiles, policy, [], _locked_delivery_target), do: {:ok, policy}
+
+  defp apply_refinement_policies(profiles, policy, [profile_name | rest], locked_delivery_target) do
     with {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, refined_policy} <- apply_policy_overrides(policy, selected_policy, [profile_name]),
+         :ok <- validate_refinement_delivery_target(refined_policy, profile_name, locked_delivery_target),
          :ok <- validate_resolved_delivery(refined_policy, profile_name) do
-      apply_refinement_policies(profiles, refined_policy, rest)
+      apply_refinement_policies(profiles, refined_policy, rest, locked_delivery_target)
+    end
+  end
+
+  defp put_resolved_publish_target(policy) do
+    if publish_handoff_policy?(policy) do
+      repository = get_in(policy, ["manifest", "project", "repository"])
+      pr_target = get_in(policy, ["delivery", @delivery_pr_target_key])
+
+      case PublishTarget.build(repository, pr_target) do
+        nil -> Map.delete(policy, "publish_target")
+        target -> Map.put(policy, "publish_target", target)
+      end
+    else
+      policy
+    end
+  end
+
+  defp publish_handoff_policy?(policy) do
+    Map.has_key?(policy, "publish_target") or
+      publish_handoff_manifest_policy?(policy)
+  end
+
+  defp publish_handoff_manifest_policy?(policy) do
+    with true <- "delivery.github_pr" in (get_in(policy, ["manifest", "workflow", "modules"]) || []),
+         repository when is_binary(repository) <- get_in(policy, ["manifest", "project", "repository"]),
+         pr_target when is_binary(pr_target) <- get_in(policy, ["delivery", @delivery_pr_target_key]) do
+      PublishTarget.build(repository, pr_target) != nil
+    else
+      _value -> false
     end
   end
 
@@ -905,6 +956,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_resolved_delivery(policy, profile_name) do
     case Map.get(policy, "delivery") do
       %{} = delivery ->
+        pr_target = Map.get(delivery, @delivery_pr_target_key)
+
         unsupported_fields =
           delivery
           |> Map.keys()
@@ -915,11 +968,14 @@ defmodule SymphonyElixir.Config.Schema do
           unsupported_fields != [] ->
             {:error, {:unsupported_delivery_policy_fields, profile_name, unsupported_fields}}
 
-          valid_pr_target?(Map.get(delivery, @delivery_pr_target_key)) ->
-            :ok
+          not valid_pr_target?(pr_target) ->
+            {:error, {:missing_delivery_pr_target, profile_name}}
+
+          publish_handoff_policy?(policy) and PublishTarget.ambiguous_pr_target?(pr_target) ->
+            {:error, {:ambiguous_delivery_pr_target, profile_name}}
 
           true ->
-            {:error, {:missing_delivery_pr_target, profile_name}}
+            :ok
         end
 
       _delivery ->
@@ -928,6 +984,18 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp valid_pr_target?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp validate_refinement_delivery_target(_policy, _profile_name, nil), do: :ok
+
+  defp validate_refinement_delivery_target(policy, profile_name, locked_delivery_target) do
+    case get_in(policy, ["delivery", @delivery_pr_target_key]) do
+      ^locked_delivery_target ->
+        :ok
+
+      changed_target ->
+        {:error, {:refinement_delivery_target_override, profile_name, locked_delivery_target, changed_target}}
+    end
+  end
 
   defp policy_ref(policy) do
     :sha256
@@ -964,6 +1032,10 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp format_policy_resolution_error({:missing_delivery_pr_target, profile_name}) do
     "#{profile_name}.delivery.pr_target is required in resolved policy"
+  end
+
+  defp format_policy_resolution_error({:ambiguous_delivery_pr_target, profile_name}) do
+    "#{profile_name}.delivery.pr_target must be an unambiguous branch name for publish handoff"
   end
 
   defp format_policy_resolution_error({:unsupported_delivery_policy_fields, profile_name, fields}) do

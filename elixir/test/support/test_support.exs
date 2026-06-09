@@ -155,7 +155,8 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
-          project_repository: "https://example.com/project.git",
+          project_repository: "https://github.com/example/project.git",
+          delivery_pr_target: "main",
           workflow_module_ids: [],
           workflow_modules_product_visual_review: nil,
           prompt: @workflow_prompt
@@ -200,6 +201,7 @@ defmodule SymphonyElixir.TestSupport do
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
     project_repository = Keyword.get(config, :project_repository)
+    delivery_pr_target = Keyword.get(config, :delivery_pr_target)
     workflow_module_ids = Keyword.get(config, :workflow_module_ids)
     workflow_modules_product_visual_review = Keyword.get(config, :workflow_modules_product_visual_review)
     prompt = Keyword.get(config, :prompt)
@@ -248,6 +250,8 @@ defmodule SymphonyElixir.TestSupport do
         "  slug: #{yaml_value(tracker_project_slug)}",
         "  name: #{yaml_value("project")}",
         "  repository: #{yaml_value(project_repository)}",
+        "delivery:",
+        "  pr_target: #{yaml_value(delivery_pr_target)}",
         workflow_yaml(workflow_module_ids),
         "harness:",
         "  codex_home: #{yaml_value(harness_codex_home)}",

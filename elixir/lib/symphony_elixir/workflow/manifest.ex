@@ -3,11 +3,16 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workflow.ModuleRegistry
+  alias SymphonyElixir.Workflow.PublishTarget
 
   @manifest_file "symphony.yml"
   @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
 
-  @type diagnostic :: %{path: String.t(), message: String.t()}
+  @type diagnostic :: %{
+          required(:path) => String.t(),
+          required(:message) => String.t(),
+          optional(:remediation) => String.t()
+        }
   @type manifest_error ::
           {:invalid_manifest, [diagnostic()]}
           | {:manifest_parse_error, term()}
@@ -105,12 +110,23 @@ defmodule SymphonyElixir.Workflow.Manifest do
     }
   end
 
+  @spec publish_target(map()) :: map() | nil
+  def publish_target(manifest) when is_map(manifest) do
+    manifest
+    |> compile()
+    |> Map.get(:config)
+    |> Map.get("publish_target")
+  end
+
+  @spec publish_target(String.t() | nil, String.t() | nil) :: map() | nil
+  def publish_target(repository, pr_target), do: PublishTarget.build(repository, pr_target)
+
   @spec validation_report_from_diagnostics([diagnostic()]) :: validation_report()
   def validation_report_from_diagnostics(diagnostics) do
     %{
       errors:
-        Enum.map(diagnostics, fn %{path: path, message: message} ->
-          %{path: path, message: message, remediation: "Fix the field in symphony.yml."}
+        Enum.map(diagnostics, fn %{path: path, message: message} = diagnostic ->
+          %{path: path, message: message, remediation: Map.get(diagnostic, :remediation, "Fix the field in symphony.yml.")}
         end),
       modules: [],
       preset: "default"
@@ -153,7 +169,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {project, project_errors} = normalize_project(Map.get(raw, "project"))
     {docs, docs_errors} = normalize_docs(Map.get(raw, "docs"))
     {vcs, vcs_errors} = normalize_vcs(Map.get(raw, "vcs"))
-    {delivery, delivery_errors} = normalize_delivery(Map.get(raw, "delivery"), vcs)
+    {delivery, delivery_errors, field_sources} = normalize_delivery(raw, vcs)
     {validation, validation_errors} = normalize_validation(Map.get(raw, "validation"))
     {automation, automation_errors} = normalize_automation(Map.get(raw, "automation"))
     {workflow, workflow_errors} = normalize_workflow(Map.get(raw, "workflow"))
@@ -193,7 +209,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
           "auto_land" => auto_land,
           "review_routing" => review_routing,
           "harness" => harness,
-          "runtime" => runtime
+          "runtime" => runtime,
+          "_field_sources" => field_sources
         }
         |> maybe_put("prompt_template", prompt_template)
 
@@ -316,14 +333,34 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_vcs(_raw), do: {%{"mode" => "git", "default_branch" => "main"}, [type_error("vcs", "must be a map")]}
 
-  defp normalize_delivery(nil, vcs), do: {%{"pr_target" => vcs["default_branch"]}, []}
+  defp normalize_delivery(raw, vcs) do
+    delivery = Map.get(raw, "delivery")
+    {normalized, errors} = normalize_delivery_value(delivery, vcs)
 
-  defp normalize_delivery(raw, vcs) when is_map(raw) do
+    field_sources = %{
+      "delivery_pr_target_explicit" => explicit_delivery_pr_target?(delivery)
+    }
+
+    {normalized, errors, field_sources}
+  end
+
+  defp normalize_delivery_value(nil, vcs), do: {%{"pr_target" => vcs["default_branch"]}, []}
+
+  defp normalize_delivery_value(raw, vcs) when is_map(raw) do
     {pr_target, errors} = string_field(raw, "pr_target", "delivery.pr_target", default: vcs["default_branch"])
     {%{"pr_target" => pr_target}, errors}
   end
 
-  defp normalize_delivery(_raw, vcs), do: {%{"pr_target" => vcs["default_branch"]}, [type_error("delivery", "must be a map")]}
+  defp normalize_delivery_value(_raw, vcs), do: {%{"pr_target" => vcs["default_branch"]}, [type_error("delivery", "must be a map")]}
+
+  defp explicit_delivery_pr_target?(%{} = delivery) do
+    case Map.get(delivery, "pr_target") do
+      value when is_binary(value) -> String.trim(value) != ""
+      _value -> false
+    end
+  end
+
+  defp explicit_delivery_pr_target?(_delivery), do: false
 
   defp normalize_validation(nil), do: {%{"commands" => []}, []}
 
@@ -516,7 +553,9 @@ defmodule SymphonyElixir.Workflow.Manifest do
   end
 
   defp public_manifest(manifest) do
-    update_in(manifest, ["workflow"], fn workflow ->
+    manifest
+    |> Map.delete("_field_sources")
+    |> update_in(["workflow"], fn workflow ->
       Map.delete(workflow, "_module_requests")
     end)
   end
@@ -535,7 +574,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp validate_workflow(errors, manifest) do
     Enum.reduce(workflow_module_diagnostics(manifest), errors, fn diagnostic, acc ->
-      validation_error(acc, diagnostic.path, diagnostic.message, "Use a supported workflow module.")
+      remediation = Map.get(diagnostic, :remediation, "Use a supported workflow module.")
+      validation_error(acc, diagnostic.path, diagnostic.message, remediation)
     end)
   end
 

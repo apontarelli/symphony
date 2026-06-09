@@ -196,6 +196,192 @@ defmodule SymphonyElixir.CoreTest do
     assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
   end
 
+  test "workflow profile resolution recomputes publish target from effective delivery target" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://github.com/example/target-repo"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   },
+                   "publish_target" => %{
+                     "repository" => "https://github.com/example/target-repo",
+                     "pr_target" => "main",
+                     "github_repository" => "example/target-repo",
+                     "display" => "example/target-repo:main"
+                   }
+                 },
+                 "project_alpha" => %{
+                   "delivery" => %{"pr_target" => "project/alpha"}
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings, "project_alpha")
+    assert policy["delivery"] == %{"pr_target" => "project/alpha"}
+
+    assert policy["publish_target"] == %{
+             "repository" => "https://github.com/example/target-repo",
+             "pr_target" => "project/alpha",
+             "github_repository" => "example/target-repo",
+             "display" => "example/target-repo:project/alpha"
+           }
+
+    assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
+  end
+
+  test "workflow profile resolution rejects ambiguous publish delivery target overrides" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://github.com/example/target-repo"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   }
+                 }
+               }
+             })
+
+    assert {:error, {:ambiguous_delivery_pr_target, "default"}} =
+             Schema.resolve_effective_policy(settings, "default", [], delivery_target_override: "origin/main")
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://github.com/example/target-repo"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   }
+                 },
+                 "project_alpha" => %{"delivery" => %{"pr_target" => "refs/heads/main"}}
+               }
+             })
+
+    assert message =~
+             "project_alpha.delivery.pr_target must be an unambiguous branch name for publish handoff"
+  end
+
+  test "workflow profile resolution applies valid delivery target override to publish target" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://github.com/example/target-repo"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   }
+                 }
+               }
+             })
+
+    assert {:ok, policy} =
+             Schema.resolve_effective_policy(settings, "default", [], delivery_target_override: " project/integration ")
+
+    assert policy["delivery"] == %{"pr_target" => "project/integration"}
+
+    assert policy["publish_target"] == %{
+             "repository" => "https://github.com/example/target-repo",
+             "pr_target" => "project/integration",
+             "github_repository" => "example/target-repo",
+             "display" => "example/target-repo:project/integration"
+           }
+
+    assert {:ok, unchanged_policy} =
+             Schema.resolve_effective_policy(settings, "default", [], delivery_target_override: " ")
+
+    assert unchanged_policy["delivery"] == %{"pr_target" => "main"}
+
+    assert {:ok, unchanged_policy} =
+             Schema.resolve_effective_policy(settings, "default", [], delivery_target_override: 123)
+
+    assert unchanged_policy["delivery"] == %{"pr_target" => "main"}
+  end
+
+  test "workflow profile resolution rejects refinements that override a locked delivery target" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://github.com/example/target-repo"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   }
+                 },
+                 "strict_label" => %{
+                   "delivery" => %{"pr_target" => "release/next"}
+                 },
+                 "same_target_label" => %{
+                   "delivery" => %{"pr_target" => "project/integration"},
+                   "checks" => ["smoke"]
+                 }
+               }
+             })
+
+    assert {:error, {:refinement_delivery_target_override, "strict_label", "project/integration", "release/next"}} =
+             Schema.resolve_effective_policy(settings, "default", ["strict_label"], delivery_target_override: "project/integration")
+
+    assert {:ok, policy} =
+             Schema.resolve_effective_policy(settings, "default", ["same_target_label"], delivery_target_override: "project/integration")
+
+    assert policy["delivery"] == %{"pr_target" => "project/integration"}
+    assert policy["checks"] == ["smoke"]
+  end
+
+  test "workflow profile resolution keeps legacy targets when publish repository is not GitHub" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://example.com/project.git"},
+                     "workflow" => %{"modules" => ["delivery.github_pr"]}
+                   }
+                 },
+                 "strict" => %{
+                   "delivery" => %{"pr_target" => "Human Review"}
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings, "strict")
+    assert policy["delivery"] == %{"pr_target" => "Human Review"}
+    refute Map.has_key?(policy, "publish_target")
+  end
+
+  test "workflow profile resolution drops stale publish target when repository is not GitHub" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "profiles" => %{
+                 "default" => %{
+                   "delivery" => %{"pr_target" => "main"},
+                   "manifest" => %{
+                     "project" => %{"repository" => "https://example.com/project.git"},
+                     "workflow" => %{"modules" => []}
+                   },
+                   "publish_target" => %{
+                     "repository" => "https://github.com/example/old-repo",
+                     "pr_target" => "main",
+                     "github_repository" => "example/old-repo",
+                     "display" => "example/old-repo:main"
+                   }
+                 }
+               }
+             })
+
+    assert {:ok, policy} = Schema.resolve_effective_policy(settings)
+    assert policy["delivery"] == %{"pr_target" => "main"}
+    refute Map.has_key?(policy, "publish_target")
+  end
+
   test "workflow profile resolution ignores malformed policy metadata" do
     settings = %Schema{
       profiles: %{
@@ -245,9 +431,9 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       prompt: "Shared repository rule for {{ issue.identifier }}.",
       profiles: %{
-        default: %{delivery: %{pr_target: "Human Review"}},
+        default: %{delivery: %{pr_target: "human-review"}},
         strict: %{
-          delivery: %{pr_target: "Merging"},
+          delivery: %{pr_target: "merging"},
           prompt: %{rules: ["Use the strict profile harness."]},
           checks: ["mix test"],
           review: %{mode: "strict"}
@@ -274,7 +460,7 @@ defmodule SymphonyElixir.CoreTest do
 
     assert prompt =~ "Shared repository rule for SID-PROMPT."
     assert prompt =~ "## Selected Workflow Profile"
-    assert prompt =~ "Policy: profile=strict target=Merging policy_ref=#{policy["policy_ref"]}"
+    assert prompt =~ "Policy: profile=strict target=merging policy_ref=#{policy["policy_ref"]}"
     assert prompt =~ "before implementation work starts"
     assert prompt =~ "Use the strict profile harness."
     assert prompt =~ "Validation requirements:"
@@ -505,7 +691,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: "project",
       profiles: %{
         default: %{delivery: %{pr_target: "main"}, checks: ["format"]},
-        strict: %{delivery: %{pr_target: "Human Review"}, checks: ["mix test"]}
+        strict: %{delivery: %{pr_target: "human-review"}, checks: ["mix test"]}
       }
     )
 
@@ -534,7 +720,7 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
         default: %{delivery: %{pr_target: "main"}},
-        strict: %{delivery: %{pr_target: "Human Review"}, checks: ["mix test"]}
+        strict: %{delivery: %{pr_target: "human-review"}, checks: ["mix test"]}
       }
     )
 
@@ -548,7 +734,7 @@ defmodule SymphonyElixir.CoreTest do
 
     Config.set_profile_override("strict")
     assert {:ok, override_policy} = Config.issue_policy(issue)
-    assert override_policy["delivery"]["pr_target"] == "Human Review"
+    assert override_policy["delivery"]["pr_target"] == "human-review"
     assert override_policy["checks"] == ["mix test"]
     assert override_policy["policy_metadata"]["source"] == "profile_override"
     assert override_policy["policy_metadata"]["profile"] == "strict"
