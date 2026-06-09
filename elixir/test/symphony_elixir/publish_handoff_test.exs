@@ -583,8 +583,24 @@ defmodule SymphonyElixir.PublishHandoffTest do
       File.mkdir_p!(Path.join(workspace, "lib"))
       File.mkdir_p!(fake_bin)
       File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-      File.write!(Path.join(fake_bin, "jj"), "#!/bin/sh\nsleep 1\n")
+      File.write!(Path.join(fake_bin, "jj"), "#!/bin/sh\nexit 127\n")
       File.chmod!(Path.join(fake_bin, "jj"), 0o755)
+
+      fast_failure =
+        PublishHandoff.run(
+          workspace,
+          publish_policy(vcs_mode: "jj"),
+          issue("SID-309"),
+          completion_for(["lib/source.ex"]),
+          env: [{"PATH", fake_bin}],
+          timeout_ms: 500
+        )
+
+      assert fast_failure.status == :blocked
+      assert fast_failure.failure.reason == :jj_remote_list_failed
+      assert fast_failure.failure.exit_status == 127
+
+      File.write!(Path.join(fake_bin, "jj"), "#!/bin/sh\nexec #{shell_quote(sleep_executable!())} 1\n")
 
       result =
         PublishHandoff.run(
@@ -593,7 +609,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
           issue("SID-309"),
           completion_for(["lib/source.ex"]),
           env: [{"PATH", fake_bin}],
-          timeout_ms: 1
+          timeout_ms: 500
         )
 
       assert result.status == :blocked
@@ -788,5 +804,13 @@ defmodule SymphonyElixir.PublishHandoffTest do
     File.write!(absolute_path, contents)
     ExUnit.Callbacks.on_exit(fn -> File.rm_rf(workspace) end)
     workspace
+  end
+
+  defp sleep_executable! do
+    System.find_executable("sleep") || flunk("sleep executable is required for timeout fixture")
+  end
+
+  defp shell_quote(value) do
+    "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
   end
 end
