@@ -4,7 +4,6 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
-  alias SymphonyElixir.Config.ProfileBindings
 
   @stale_after_seconds 5 * 60
   @default_profile "default"
@@ -169,6 +168,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
+      project_id: entry_project_id(entry, project),
       project_slug: project_slug,
       state: entry.state,
       worker_host: Map.get(entry, :worker_host),
@@ -202,6 +202,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
+      project_id: entry_project_id(entry, project),
       project_slug: project_slug,
       attempt: entry.attempt,
       profile: entry_project_profile(entry, project),
@@ -226,6 +227,7 @@ defmodule SymphonyElixirWeb.Presenter do
       issue_id: entry.issue_id,
       issue_identifier: entry.identifier,
       issue_url: Map.get(entry, :issue_url),
+      project_id: entry_project_id(entry, project),
       project_slug: project_slug,
       state: entry.state,
       error: entry.error,
@@ -311,33 +313,23 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
-  defp bound_project_payloads(snapshot) do
-    snapshot
-    |> snapshot_bound_project_payloads()
-    |> case do
-      [] -> configured_bound_project_payloads()
-      projects -> projects
-    end
-  end
-
-  defp snapshot_bound_project_payloads(snapshot) when is_map(snapshot) do
-    snapshot
-    |> Map.get(:bound_projects, Map.get(snapshot, :project_bindings, []))
-    |> List.wrap()
-    |> Enum.flat_map(&normalize_bound_project/1)
-  end
+  defp bound_project_payloads(_snapshot), do: configured_bound_project_payloads()
 
   defp configured_bound_project_payloads do
     case Config.settings() do
       {:ok, settings} ->
-        case settings.tracker.project_slug do
-          slug when is_binary(slug) and slug != "" ->
+        project_id = normalized_string(settings.tracker.project_id)
+        project_slug = normalized_string(settings.tracker.project_slug)
+
+        case project_id || project_slug do
+          project_key when is_binary(project_key) ->
             [
               %{
-                id: slug,
-                name: human_project_name(slug) || slug,
-                slug: slug,
-                url: linear_project_url(slug),
+                id: project_key,
+                project_id: project_id,
+                name: human_project_name(project_slug || project_key) || project_key,
+                slug: project_slug,
+                url: project_slug && linear_project_url(project_slug),
                 profile: @default_profile,
                 pr_target: @default_pr_target
               }
@@ -352,47 +344,13 @@ defmodule SymphonyElixirWeb.Presenter do
     end
   end
 
-  defp normalize_bound_project(project) when is_map(project) do
-    case bound_project_slug(project) do
-      slug when is_binary(slug) and slug != "" -> [bound_project_payload(project, slug)]
-      _ -> []
-    end
-  end
-
-  defp normalize_bound_project(_project), do: []
-
-  defp bound_project_slug(project) do
-    project_value(project, :project_slug) || project_value(project, :slug) || project_value(project, :id)
-  end
-
-  defp bound_project_payload(project, slug) do
-    %{
-      id: slug,
-      name: project_name(project, slug),
-      slug: slug,
-      url: project_value(project, :url) || linear_project_url(slug),
-      profile: project_value(project, :profile) || @default_profile,
-      pr_target: project_value(project, :pr_target) || project_value(project, :target) || @default_pr_target
-    }
-  end
-
   defp project_value(project, key) when is_map(project) and is_atom(key) do
-    Map.get(project, key) || Map.get(project, Atom.to_string(key))
+    Map.get(project, key) || Map.get(project, Atom.to_string(key)) || issue_project_value(project, key)
   end
 
-  defp project_name(project, slug) do
-    raw_name = normalized_string(project_value(project, :name))
-    slug_name = human_project_name(slug)
-
-    cond do
-      is_nil(raw_name) -> slug_name || slug
-      raw_name in [project_value(project, :id), slug] or opaque_project_name?(raw_name) -> slug_name || raw_name
-      true -> raw_name
-    end
-  end
-
-  defp opaque_project_name?(value) when is_binary(value), do: Regex.match?(~r/^[0-9a-f-]{8,}$/i, value)
-  defp opaque_project_name?(_value), do: false
+  defp issue_project_value(%{issue: issue}, key) when is_map(issue), do: project_value(issue, key)
+  defp issue_project_value(%{"issue" => issue}, key) when is_map(issue), do: project_value(issue, key)
+  defp issue_project_value(_project, _key), do: nil
 
   defp normalized_string(value) when is_binary(value) do
     case String.trim(value) do
@@ -425,6 +383,10 @@ defmodule SymphonyElixirWeb.Presenter do
     project_value(entry, :project_slug) || project_value(entry, :slug) || default_project_slug
   end
 
+  defp entry_project_id(entry, project) do
+    project_value(entry, :project_id) || project_value(project, :project_id)
+  end
+
   defp entry_project_profile(entry, project) do
     project_value(entry, :profile) || project_value(project, :profile) || @default_profile
   end
@@ -437,18 +399,13 @@ defmodule SymphonyElixirWeb.Presenter do
   defp project_status_projects([], [], []), do: []
 
   defp project_status_projects(bound_projects, running, retrying) do
-    bound_slugs = MapSet.new(Enum.map(bound_projects, & &1.slug))
-
     entries = running ++ retrying
 
     runtime_projects =
       entries
-      |> Enum.map(&Map.get(&1, :project_slug))
-      |> Enum.uniq()
-      |> Enum.reject(&MapSet.member?(bound_slugs, &1))
-      |> Enum.map(fn slug ->
-        runtime_project_payload(slug, Enum.find(entries, &(Map.get(&1, :project_slug) == slug)))
-      end)
+      |> Enum.reject(fn entry -> Enum.any?(bound_projects, &entry_in_project?(entry, &1)) end)
+      |> Enum.uniq_by(&{Map.get(&1, :project_id), Map.get(&1, :project_slug)})
+      |> Enum.map(&runtime_project_payload(Map.get(&1, :project_slug), &1))
 
     bound_projects ++ runtime_projects
   end
@@ -456,22 +413,24 @@ defmodule SymphonyElixirWeb.Presenter do
   defp runtime_project_payload(nil, entry) do
     %{
       id: "runtime",
+      project_id: nil,
       name: "Runtime",
       slug: nil,
       url: nil,
-      profile: project_value(entry || %{}, :profile) || @default_profile,
-      pr_target: project_value(entry || %{}, :pr_target) || @default_pr_target
+      profile: project_value(entry, :profile) || @default_profile,
+      pr_target: project_value(entry, :pr_target) || @default_pr_target
     }
   end
 
   defp runtime_project_payload(slug, entry) do
     %{
       id: slug,
+      project_id: nil,
       name: slug,
       slug: slug,
       url: linear_project_url(slug),
-      profile: project_value(entry || %{}, :profile) || @default_profile,
-      pr_target: project_value(entry || %{}, :pr_target) || @default_pr_target
+      profile: project_value(entry, :profile) || @default_profile,
+      pr_target: project_value(entry, :pr_target) || @default_pr_target
     }
   end
 
@@ -480,6 +439,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{
         id: "configuration",
         project: "Configuration",
+        project_id: nil,
         project_slug: nil,
         project_url: nil,
         statuses: ["config_warning"],
@@ -501,6 +461,7 @@ defmodule SymphonyElixirWeb.Presenter do
       [
         %{
           id: "runtime",
+          project_id: nil,
           name: "Runtime",
           slug: nil,
           url: nil,
@@ -518,10 +479,10 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp project_status_payloads(bound_projects, running, retrying, work_errors, config_warnings, stale_warnings) do
     Enum.map(bound_projects, fn project ->
-      project_running = Enum.filter(running, &entry_in_project?(&1, project.slug))
-      project_retrying = Enum.filter(retrying, &entry_in_project?(&1, project.slug))
-      project_errors = Enum.filter(work_errors, &entry_in_project?(&1, project.slug))
-      project_stale_warnings = Enum.filter(stale_warnings, &entry_in_project?(&1, project.slug))
+      project_running = Enum.filter(running, &entry_in_project?(&1, project))
+      project_retrying = Enum.filter(retrying, &entry_in_project?(&1, project))
+      project_errors = Enum.filter(work_errors, &entry_in_project?(&1, project))
+      project_stale_warnings = Enum.filter(stale_warnings, &entry_in_project?(&1, project))
       running_count = length(project_running)
       retrying_count = length(project_retrying)
       error_count = length(project_errors)
@@ -531,6 +492,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{
         id: project.id,
         project: project.name,
+        project_id: Map.get(project, :project_id),
         project_slug: project.slug,
         project_url: project.url,
         statuses: project_statuses(running_count, retrying_count, error_count, stale_count, config_warning_count),
@@ -547,9 +509,18 @@ defmodule SymphonyElixirWeb.Presenter do
     end)
   end
 
-  defp entry_in_project?(entry, project_slug) do
-    entry_slug = Map.get(entry, :project_slug)
-    is_nil(project_slug) or is_nil(entry_slug) or entry_slug == project_slug
+  defp entry_in_project?(entry, project) when is_map(project) do
+    project_id = project_value(project, :project_id)
+    project_slug = project_value(project, :slug) || project_value(project, :project_slug)
+    entry_id = project_value(entry, :project_id)
+    entry_slug = project_value(entry, :project_slug)
+
+    cond do
+      is_binary(project_id) and is_binary(entry_id) -> project_id == entry_id
+      is_binary(project_slug) and is_binary(entry_slug) -> project_slug == entry_slug
+      is_nil(project_id) and is_nil(project_slug) -> true
+      true -> false
+    end
   end
 
   defp project_statuses(running_count, retrying_count, error_count, stale_count, config_warning_count) do
@@ -660,22 +631,14 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp missing_linear_api_token_warning(_tracker), do: nil
 
-  defp missing_linear_project_scope_warning(%{kind: "linear", project_slug: project_slug}) when not is_binary(project_slug) do
-    if linear_dispatch_scope_configured?() do
-      nil
-    else
-      config_warning("missing_linear_project_slug", "Linear project slug is not configured.")
-    end
+  defp missing_linear_project_scope_warning(%{kind: "linear", project_id: project_id, project_slug: project_slug})
+       when not is_binary(project_id) and not is_binary(project_slug) do
+    config_warning("missing_linear_project_scope", "Linear project_id or project_slug is not configured.")
   end
 
   defp missing_linear_project_scope_warning(_tracker), do: nil
 
   defp config_warning(code, message), do: %{code: code, message: message}
-
-  defp linear_dispatch_scope_configured? do
-    Config.linear_profile_bindings()
-    |> ProfileBindings.dispatch_scope_configured?()
-  end
 
   defp token_hotspot_payload([]), do: nil
 

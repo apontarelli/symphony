@@ -4,10 +4,10 @@ Symphony turns project work into isolated, autonomous implementation runs, allow
 work instead of supervising coding agents.
 
 Workflow behavior is versioned in [`symphony.yml`](symphony.yml). The manifest selects
-Symphony-owned workflow modules, repository facts, validation gates, and delivery policy. Operator
-local Linear project bindings can select profiles at runtime without committing project-specific IDs
-to the manifest. The selected profile and delivery target are surfaced in agent prompts, workpads,
-and dashboards so each run has a compact policy audit trail.
+Symphony-owned workflow modules, repository facts, validation gates, delivery policy, and tracker
+project scope. A process-level profile override can select alternate policy for a run. The selected
+profile and delivery target are surfaced in agent prompts, workpads, and dashboards so each run has a
+compact policy audit trail.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 

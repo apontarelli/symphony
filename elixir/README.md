@@ -45,12 +45,12 @@ decision-needed handoff.
    set it as the `LINEAR_API_KEY` environment variable.
 3. Build the CLI and run `symphony workflow init` from the target repo root to create
    `symphony.yml`.
-4. Run `symphony workflow check` to validate the manifest, repo docs, local binding file, and any
-   configured harness CODEX_HOME.
+4. Run `symphony workflow check` to validate the manifest, repo docs, and any configured harness
+   CODEX_HOME.
 5. Run `symphony workflow print --compiled` to inspect the resolved workflow config and prompt.
 6. Customize the generated `symphony.yml` for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL. Keep operator-local project IDs in the local bindings file, not in committed manifests.
+   - Prefer the Linear project ID in committed `runtime.tracker.project_id`; add
+     `runtime.tracker.project_slug` when the dashboard should render a project URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
@@ -102,8 +102,7 @@ Target repos can use a committed `symphony.yml` manifest for setup and audit:
 
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
 left unchanged unless `--force` is passed. `check` validates the manifest schema, selected modules,
-repo doc entrypoints, validation command shape, local bindings, and a configured harness
-`CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
+repo doc entrypoints, validation command shape, and a configured harness `CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
 workflow config and prompt without writing generated prompt files into the target repo.
 
 `symphony.yml` v1 contains:
@@ -133,14 +132,10 @@ automation:
   posture: unattended
 harness:
   codex_home: null
-bindings:
-  local_file: .symphony.local.yml
-  require_local: false
 ```
 
 `harness.codex_home: null` means Symphony derives a managed harness CODEX_HOME. If a path is set,
-`workflow check` requires that directory and its `AGENTS.md` to exist. `bindings.local_file` is for
-operator-local tracker/project data that should not be committed.
+`workflow check` requires that directory and its `AGENTS.md` to exist.
 
 Pass a manifest path to `./bin/symphony` when starting the service:
 
@@ -169,8 +164,7 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
-- `--linear-bindings` overrides the default local Linear profile binding file path
-- `--profile` selects one workflow profile for the current process, before project/label bindings
+- `--profile` selects one workflow profile for the current process
 
 The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
 modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.
@@ -234,62 +228,37 @@ Notes:
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
-- Linear project-to-profile bindings live outside committed `symphony.yml`. Copy
-`linear-profile-bindings.example.yml` to `linear-profile-bindings.local.yml` and fill in your
-operator-local Linear project slug IDs and optional `pr_target` values. The local file is
-gitignored and loads automatically when it sits next to the selected manifest. Use
-`--linear-bindings /path/to/bindings.yml` only to override the default lookup path:
+- Linear polling scope lives in committed `symphony.yml` under `runtime.tracker`. Prefer
+  `project_id`; include `project_slug` when a human-readable Linear project URL/display fallback is
+  useful. The project scope is repository automation policy, not a local operator preference:
 
 ```yaml
-team_key: SID
-projects:
-  - project_slug: linear-project-slug
-    profile: default
-    pr_target: project/integration
-labels:
-  - label: strict
-    profile: strict
-catch_all:
-  enabled: false
-  profile: default
-allow_default: false
+runtime:
+  tracker:
+    project_id: 00000000-0000-0000-0000-000000000000
+    project_slug: my-linear-project-slug
 ```
 
-Use external bindings for operator-local Linear routing facts:
-
-```yaml
-team_key: SID
-projects:
-  - project_slug: project-alpha
-    profile: project_integration
-    pr_target: project/alpha
-labels:
-  - label: strict
-    profile: strict_review
-```
-
-Selection precedence is CLI `--profile`, exact project binding, one matching label refinement within
-that project, catch-all, then `default` only when `allow_default: true` or no external bindings are
-configured. Multiple matches at the same precedence block dispatch. Label refinements can change
-validation/review/prompt policy but cannot change the selected project delivery target. Each
-project binding must use exactly one of `project_id` or `project_slug`. Project bindings may set
-`pr_target`; when absent, Symphony uses the selected profile's `delivery.pr_target`.
-- Ticket class labels have generic Symphony behavior independent of project profile routing:
+- Candidate polling filters by `runtime.tracker.project_id` when present and falls back to
+  `runtime.tracker.project_slug`. Workflow profiles do not choose which Linear project is polled.
+  `--profile` is a process-wide override for policy selection; otherwise the `default` profile is
+  used.
+- Ticket class labels have generic Symphony behavior independent of tracker project scope:
   - `Requirement` issues are validation artifacts. They are dispatched from `Todo` only after
     all blocking implementation issues are terminal.
   - `Project Closeout` issues use the project closeout workflow and should be blocked by unresolved
     Requirement issues.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
-  runtime selected a binding. Delivery skills use `delivery.pr_target` for branch sync, PR base
+  runtime attaches metadata. Delivery skills use `delivery.pr_target` for branch sync, PR base
   selection, review gates, and landing guardrails. Symphony also appends a compact
   selected-profile block to the first agent prompt with the exact workpad stamp, profile prompt
   rules (`prompt.rules`, `prompt_rules`, or `prompt_requirements`), validation requirements
   (`checks`, `validation`, or `validation_requirements`), and review requirements (`review` or
   `review_requirements`).
 - The workpad stamp format is
-  `Policy: profile=<name> target=<pr_target> policy_ref=<short-hash>`. Explicit CLI or override
-  metadata appends `override=<source>`; normal project/profile binding selection does not.
+  `Policy: profile=<name> target=<pr_target> policy_ref=<short-hash>`. Explicit `--profile`
+  metadata appends `override=profile_override`; default profile selection does not.
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.
@@ -396,11 +365,11 @@ The observability UI now runs on a minimal Phoenix stack:
 - LiveView for the dashboard at `/`
 - A compact control panel overview for freshness, running/retrying work, work errors,
   config warnings, stale sessions, runtime, and token usage
-- A primary project status table that includes active and idle bound projects
+- A primary project status table for the configured tracker project plus runtime project rows
 - Running session detail with issue state, profile/target, runtime, last Codex update,
   copyable session ID, and token split
-- Optional Admin details for binding/profile metadata and rate-limit diagnostics only when
-  upstream rate-limit data is present
+- Optional Admin details for runtime metadata and rate-limit diagnostics only when upstream
+  rate-limit data is present
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap

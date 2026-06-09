@@ -32,11 +32,9 @@ automation:
     - Run the strongest feasible validation gate before handoff.
 harness:
   codex_home: null
-bindings:
-  local_file: .symphony.local.yml
-  require_local: false
 runtime:
   tracker:
+    project_id: d3c9fafa-42b4-4b08-82d1-a54429b90346
     project_slug: symphony-self-contained-workflow-modules-72083cd8c253
   polling:
     interval_ms: 5000

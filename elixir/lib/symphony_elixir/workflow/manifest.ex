@@ -5,7 +5,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
   alias SymphonyElixir.Workflow.ModuleRegistry
 
   @manifest_file "symphony.yml"
-  @local_bindings_file ".symphony.local.yml"
   @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
 
   @type diagnostic :: %{path: String.t(), message: String.t()}
@@ -87,8 +86,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "vcs" => %{"mode" => cli_detect_vcs_mode(repo_root), "default_branch" => "main"},
       "delivery" => %{"pr_target" => "main"},
       "automation" => %{"posture" => "unattended", "profile" => "default", "completion_requirements" => []},
-      "harness" => %{"codex_home" => nil},
-      "bindings" => %{"local_file" => @local_bindings_file, "require_local" => false}
+      "harness" => %{"codex_home" => nil}
     }
   end
 
@@ -99,7 +97,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
       |> validate_workflow(manifest)
       |> validate_docs(repo_root, manifest)
       |> validate_harness(repo_root, manifest)
-      |> validate_bindings(repo_root, manifest)
 
     %{
       errors: Enum.reverse(errors),
@@ -163,7 +160,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {auto_land, auto_land_errors} = normalize_auto_land(Map.get(raw, "auto_land"))
     {review_routing, review_routing_errors} = normalize_review_routing(Map.get(raw, "review_routing"))
     {harness, harness_errors} = normalize_harness(Map.get(raw, "harness"))
-    {bindings, bindings_errors} = normalize_bindings(Map.get(raw, "bindings"))
     {runtime, runtime_errors} = normalize_runtime(Map.get(raw, "runtime"))
     {prompt_template, prompt_errors} = string_field(raw, "prompt_template", "prompt_template", default: nil)
 
@@ -180,7 +176,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
         auto_land_errors ++
         review_routing_errors ++
         harness_errors ++
-        bindings_errors ++
         runtime_errors ++
         prompt_errors
 
@@ -198,7 +193,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
           "auto_land" => auto_land,
           "review_routing" => review_routing,
           "harness" => harness,
-          "bindings" => bindings,
           "runtime" => runtime
         }
         |> maybe_put("prompt_template", prompt_template)
@@ -444,16 +438,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_harness(_raw), do: {%{"codex_home" => nil}, [type_error("harness", "must be a map")]}
 
-  defp normalize_bindings(nil), do: {%{"local_file" => @local_bindings_file, "require_local" => false}, []}
-
-  defp normalize_bindings(raw) when is_map(raw) do
-    {local_file, local_file_errors} = string_field(raw, "local_file", "bindings.local_file", default: @local_bindings_file)
-    {require_local, require_local_errors} = boolean_field(raw, "require_local", "bindings.require_local", default: false)
-    {%{"local_file" => local_file, "require_local" => require_local}, local_file_errors ++ require_local_errors}
-  end
-
-  defp normalize_bindings(_raw), do: {%{"local_file" => @local_bindings_file, "require_local" => false}, [type_error("bindings", "must be a map")]}
-
   defp normalize_runtime(nil), do: {%{}, []}
   defp normalize_runtime(raw) when is_map(raw), do: {raw, []}
   defp normalize_runtime(_raw), do: {%{}, [type_error("runtime", "must be a map")]}
@@ -524,7 +508,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp manifest_policy_inputs(manifest) do
     manifest
     |> public_manifest()
-    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "auto_land", "review_routing", "harness", "bindings"])
+    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "auto_land", "review_routing", "harness"])
   end
 
   defp landing_project_policy(project) do
@@ -609,23 +593,6 @@ defmodule SymphonyElixir.Workflow.Manifest do
           true ->
             errors
         end
-    end
-  end
-
-  defp validate_bindings(errors, repo_root, manifest) do
-    local_file = get_in(manifest, ["bindings", "local_file"]) || @local_bindings_file
-    require_local? = get_in(manifest, ["bindings", "require_local"]) || false
-    path = Path.join(repo_root, local_file)
-
-    cond do
-      Path.type(local_file) == :absolute or not inside_repo?(repo_root, local_file) ->
-        validation_error(errors, "bindings.local_file", "must stay inside the repo", "Remove `..` path segments from the local binding path.")
-
-      require_local? and not File.regular?(path) ->
-        validation_error(errors, "bindings.local_file", "missing required #{local_file}", "Create the file or set `bindings.require_local: false`.")
-
-      true ->
-        errors
     end
   end
 

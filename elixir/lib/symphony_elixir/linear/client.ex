@@ -5,11 +5,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.{Config, Linear.Issue}
-  alias SymphonyElixir.Config.ProfileBindings
 
   @issue_page_size 50
-  @project_page_size 100
-  @active_project_status_types MapSet.new(["backlog", "planned", "started"])
   @max_error_body_log_bytes 1_000
 
   @query_by_project_slug """
@@ -122,116 +119,6 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @query_by_team_key """
-  query SymphonyLinearPollByTeamKey($teamKey: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
-    issues(filter: {team: {key: {eq: $teamKey}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        priority
-        state {
-          name
-        }
-        branchName
-        url
-        assignee {
-          id
-        }
-        team {
-          id
-          key
-          name
-        }
-        project {
-          id
-          slugId
-          name
-        }
-        labels {
-          nodes {
-            name
-          }
-        }
-        inverseRelations(first: $relationFirst) {
-          nodes {
-            type
-            issue {
-              id
-              identifier
-              state {
-                name
-              }
-            }
-          }
-        }
-        createdAt
-        updatedAt
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-  }
-  """
-
-  @query_by_team_id """
-  query SymphonyLinearPollByTeamId($teamId: ID!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
-    issues(filter: {team: {id: {eq: $teamId}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
-      nodes {
-        id
-        identifier
-        title
-        description
-        priority
-        state {
-          name
-        }
-        branchName
-        url
-        assignee {
-          id
-        }
-        team {
-          id
-          key
-          name
-        }
-        project {
-          id
-          slugId
-          name
-        }
-        labels {
-          nodes {
-            name
-          }
-        }
-        inverseRelations(first: $relationFirst) {
-          nodes {
-            type
-            issue {
-              id
-              identifier
-              state {
-                name
-              }
-            }
-          }
-        }
-        createdAt
-        updatedAt
-      }
-      pageInfo {
-        hasNextPage
-        endCursor
-      }
-    }
-  }
-  """
-
   @query_by_ids """
   query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
@@ -291,56 +178,6 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @projects_by_team_id_query """
-  query SymphonyLinearProjectsByTeamId($teamId: ID!, $first: Int!, $after: String) {
-    team(id: $teamId) {
-      projects(first: $first, after: $after) {
-        nodes {
-          id
-          name
-          slugId
-          url
-          archivedAt
-          status {
-            name
-            type
-          }
-        }
-        pageInfo {
-          hasNextPage
-          endCursor
-        }
-      }
-    }
-  }
-  """
-
-  @projects_by_team_key_query """
-  query SymphonyLinearProjectsByTeamKey($teamKey: String!, $first: Int!, $after: String) {
-    teams(filter: {key: {eq: $teamKey}}, first: 1) {
-      nodes {
-        projects(first: $first, after: $after) {
-          nodes {
-            id
-            name
-            slugId
-            url
-            archivedAt
-            status {
-              name
-              type
-            }
-          }
-          pageInfo {
-            hasNextPage
-            endCursor
-          }
-        }
-      }
-    }
-  }
-  """
-
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
     tracker = Config.settings!().tracker
@@ -385,17 +222,6 @@ defmodule SymphonyElixir.Linear.Client do
         end
     end
   end
-
-  @spec fetch_active_projects(map()) :: {:ok, [map()]} | {:error, term()}
-  def fetch_active_projects(%{team_id: team_id}) when is_binary(team_id) do
-    fetch_active_projects_page(@projects_by_team_id_query, %{teamId: team_id}, nil, [])
-  end
-
-  def fetch_active_projects(%{team_key: team_key}) when is_binary(team_key) do
-    fetch_active_projects_page(@projects_by_team_key_query, %{teamKey: team_key}, nil, [])
-  end
-
-  def fetch_active_projects(_selector), do: {:error, :missing_linear_project_discovery_team_selector}
 
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
@@ -458,22 +284,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_active_projects_for_test(map(), (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
-          {:ok, [map()]} | {:error, term()}
-  def fetch_active_projects_for_test(selector, graphql_fun) when is_map(selector) and is_function(graphql_fun, 2) do
-    case selector do
-      %{team_id: team_id} when is_binary(team_id) ->
-        fetch_active_projects_page(@projects_by_team_id_query, %{teamId: team_id}, nil, [], graphql_fun)
-
-      %{team_key: team_key} when is_binary(team_key) ->
-        fetch_active_projects_page(@projects_by_team_key_query, %{teamKey: team_key}, nil, [], graphql_fun)
-
-      _selector ->
-        {:error, :missing_linear_project_discovery_team_selector}
-    end
-  end
-
-  @doc false
   @spec fetch_issue_states_by_ids_for_test([String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
@@ -502,57 +312,15 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp fetch_by_configured_scope(tracker, state_names, assignee_filter) do
-    bindings = Config.linear_profile_bindings()
-    team_selector = ProfileBindings.team_fetch_selector(bindings)
-    project_selectors = ProfileBindings.project_fetch_selectors(bindings)
-
     cond do
-      ProfileBindings.catch_all_enabled?(bindings) and is_map(team_selector) ->
-        do_fetch_by_team_selector(team_selector, state_names, assignee_filter)
-
-      project_selectors != [] ->
-        do_fetch_by_project_selectors(project_selectors, state_names, assignee_filter)
+      is_binary(tracker.project_id) ->
+        do_fetch_by_project_selector(%{project_id: tracker.project_id}, state_names, assignee_filter)
 
       is_binary(tracker.project_slug) ->
         do_fetch_by_project_selector(%{project_slug: tracker.project_slug}, state_names, assignee_filter)
 
       true ->
-        {:error, :missing_linear_project_slug}
-    end
-  end
-
-  defp fetch_active_projects_page(query, variables, after_cursor, acc_projects, graphql_fun \\ &graphql/2) do
-    with {:ok, body} <- graphql_fun.(query, Map.merge(variables, %{first: @project_page_size, after: after_cursor})),
-         {:ok, projects, page_info} <- decode_project_page_response(body) do
-      continue_active_projects_page(query, variables, page_info, Enum.reverse(projects, acc_projects), graphql_fun)
-    end
-  end
-
-  defp continue_active_projects_page(query, variables, page_info, acc_projects, graphql_fun) do
-    case next_page_cursor(page_info) do
-      {:ok, next_cursor} -> fetch_active_projects_page(query, variables, next_cursor, acc_projects, graphql_fun)
-      :done -> {:ok, acc_projects_to_result(acc_projects)}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp acc_projects_to_result(acc_projects) do
-    acc_projects
-    |> Enum.reverse()
-    |> Enum.uniq_by(& &1.id)
-  end
-
-  defp do_fetch_by_project_selectors(project_selectors, state_names, assignee_filter) do
-    project_selectors
-    |> Enum.reduce_while({:ok, []}, fn selector, {:ok, acc} ->
-      case do_fetch_by_project_selector(selector, state_names, assignee_filter) do
-        {:ok, issues} -> {:cont, {:ok, acc ++ issues}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, issues} -> {:ok, Enum.uniq_by(issues, &issue_identity/1)}
-      {:error, reason} -> {:error, reason}
+        {:error, :missing_linear_project_scope}
     end
   end
 
@@ -588,20 +356,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_project_selector(_selector, _state_names, _assignee_filter, _graphql_fun), do: {:ok, []}
-
-  defp do_fetch_by_team_selector(%{team_id: team_id}, state_names, assignee_filter) when is_binary(team_id) do
-    do_fetch_by_states(@query_by_team_id, %{teamId: team_id}, state_names, assignee_filter)
-  end
-
-  defp do_fetch_by_team_selector(%{team_key: team_key}, state_names, assignee_filter) when is_binary(team_key) do
-    do_fetch_by_states(@query_by_team_key, %{teamKey: team_key}, state_names, assignee_filter)
-  end
-
-  defp do_fetch_by_team_selector(_selector, _state_names, _assignee_filter), do: {:error, :missing_linear_catch_all_team_selector}
-
-  defp do_fetch_by_states(query, variables, state_names, assignee_filter) do
-    do_fetch_by_states(query, variables, state_names, assignee_filter, &graphql/2)
-  end
 
   defp do_fetch_by_states(query, variables, state_names, assignee_filter, graphql_fun) when is_function(graphql_fun, 2) do
     do_fetch_by_states_page(query, variables, state_names, assignee_filter, nil, [], graphql_fun)
@@ -645,8 +399,8 @@ defmodule SymphonyElixir.Linear.Client do
   defp issue_identity(issue), do: {:term, inspect(issue)}
 
   defp project_slug_fetch_values(project_slug) do
-    case normalized_string(project_slug) do
-      nil ->
+    case String.trim(project_slug) do
+      "" ->
         []
 
       slug ->
@@ -850,89 +604,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
-
-  defp decode_project_page_response(%{"errors" => errors}), do: {:error, {:linear_graphql_errors, errors}}
-
-  defp decode_project_page_response(%{"data" => %{"team" => %{"projects" => projects}}}) do
-    decode_projects_connection(projects)
-  end
-
-  defp decode_project_page_response(%{"data" => %{"teams" => %{"nodes" => [%{"projects" => projects} | _rest]}}}) do
-    decode_projects_connection(projects)
-  end
-
-  defp decode_project_page_response(%{"data" => %{"teams" => %{"nodes" => []}}}), do: {:error, :linear_team_not_found}
-  defp decode_project_page_response(_response), do: {:error, :linear_unknown_payload}
-
-  defp decode_projects_connection(%{
-         "nodes" => nodes,
-         "pageInfo" => %{"hasNextPage" => has_next_page, "endCursor" => end_cursor}
-       })
-       when is_list(nodes) do
-    projects =
-      nodes
-      |> Enum.map(&normalize_project/1)
-      |> Enum.reject(&is_nil/1)
-
-    {:ok, projects, %{has_next_page: has_next_page == true, end_cursor: end_cursor}}
-  end
-
-  defp decode_projects_connection(_projects), do: {:error, :linear_unknown_payload}
-
-  defp normalize_project(project) when is_map(project) do
-    status_type = normalized_status_type(get_in(project, ["status", "type"]))
-    linear_slug_id = normalized_string(project["slugId"])
-    slug = project_url_slug(project["url"]) || linear_slug_id
-
-    if is_binary(project["deletedAt"]) do
-      nil
-    else
-      %{
-        id: project["id"],
-        name: project["name"],
-        slug_id: slug,
-        linear_slug_id: linear_slug_id,
-        url: project["url"],
-        archived?: is_binary(project["archivedAt"]),
-        deleted?: false,
-        active?: is_nil(project["archivedAt"]) and MapSet.member?(@active_project_status_types, status_type),
-        status_name: get_in(project, ["status", "name"]),
-        status_type: status_type
-      }
-    end
-  end
-
-  defp normalize_project(_project), do: nil
-
-  defp project_url_slug(url) when is_binary(url) do
-    url
-    |> URI.parse()
-    |> Map.get(:path)
-    |> case do
-      path when is_binary(path) ->
-        path
-        |> String.split("/", trim: true)
-        |> List.last()
-        |> normalized_string()
-
-      _path ->
-        nil
-    end
-  end
-
-  defp project_url_slug(_url), do: nil
-
-  defp normalized_status_type(value) when is_binary(value), do: String.downcase(value)
-  defp normalized_status_type(_value), do: nil
-
-  defp normalized_string(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      normalized -> normalized
-    end
-  end
-
-  defp normalized_string(_value), do: nil
 
   defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
        when is_binary(end_cursor) and byte_size(end_cursor) > 0 do

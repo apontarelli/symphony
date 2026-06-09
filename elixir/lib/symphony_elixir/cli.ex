@@ -3,14 +3,11 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with a manifest.
   """
 
-  alias SymphonyElixir.Config.ProfileBindings
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
-  @default_linear_bindings_file "linear-profile-bindings.local.yml"
   @switches [
     {@acknowledgement_switch, :boolean},
-    linear_bindings: :string,
     logs_root: :string,
     port: :integer,
     profile: :string
@@ -22,10 +19,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_workflow_file_path) => (String.t() -> :ok | {:error, term()}),
           required(:set_logs_root) => (String.t() -> :ok | {:error, term()}),
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
-          required(:set_linear_profile_bindings) => (map() -> :ok | {:error, term()}),
-          required(:set_linear_profile_bindings_source_path) => (String.t(), boolean() -> :ok | {:error, term()}),
           required(:set_profile_override) => (String.t() | nil -> :ok | {:error, term()}),
-          required(:load_linear_profile_bindings) => (String.t() -> {:ok, map()} | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result())
         }
 
@@ -83,15 +77,12 @@ defmodule SymphonyElixir.CLI do
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
   def run(workflow_path, deps), do: run(workflow_path, [], deps)
 
-  defp run(workflow_path, opts, deps) do
+  defp run(workflow_path, _opts, deps) do
     expanded_path = Path.expand(workflow_path)
 
     if deps.file_regular?.(expanded_path) do
       :ok = deps.set_workflow_file_path.(expanded_path)
-
-      with :ok <- maybe_load_linear_profile_bindings(opts, expanded_path, deps) do
-        start_runtime(expanded_path, deps)
-      end
+      start_runtime(expanded_path, deps)
     else
       {:error, "Manifest file not found: #{expanded_path}"}
     end
@@ -109,7 +100,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--linear-bindings <path>] [--profile <name>] [path-to-symphony.yml]\n\nIf --linear-bindings is omitted, Symphony loads linear-profile-bindings.local.yml next to the selected manifest when present."
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]"
   end
 
   defp default_workflow_path(_deps), do: Path.expand("symphony.yml")
@@ -121,10 +112,7 @@ defmodule SymphonyElixir.CLI do
       set_workflow_file_path: &SymphonyElixir.Workflow.set_workflow_file_path/1,
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
-      set_linear_profile_bindings: &ProfileBindings.set/1,
-      set_linear_profile_bindings_source_path: &ProfileBindings.set_source_path/2,
-      set_profile_override: &ProfileBindings.set_profile_override/1,
-      load_linear_profile_bindings: &ProfileBindings.load_file/1,
+      set_profile_override: &SymphonyElixir.Config.set_profile_override/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end
@@ -228,45 +216,6 @@ defmodule SymphonyElixir.CLI do
         else
           :ok = deps.set_profile_override.(profile)
         end
-    end
-  end
-
-  defp maybe_load_linear_profile_bindings(opts, workflow_path, deps) do
-    case Keyword.get_values(opts, :linear_bindings) do
-      [] ->
-        default_path =
-          workflow_path
-          |> Path.dirname()
-          |> Path.join(@default_linear_bindings_file)
-          |> Path.expand()
-
-        :ok = deps.set_linear_profile_bindings_source_path.(default_path, false)
-
-        if deps.file_regular?.(default_path) do
-          load_linear_profile_bindings(default_path, deps)
-        else
-          :ok
-        end
-
-      values ->
-        path = values |> List.last() |> String.trim()
-        expanded_path = Path.expand(path)
-        :ok = deps.set_linear_profile_bindings_source_path.(expanded_path, true)
-        load_linear_profile_bindings(expanded_path, deps)
-    end
-  end
-
-  defp load_linear_profile_bindings("", _deps), do: {:error, usage_message()}
-
-  defp load_linear_profile_bindings(path, deps) do
-    expanded_path = Path.expand(path)
-
-    case deps.load_linear_profile_bindings.(expanded_path) do
-      {:ok, bindings} ->
-        :ok = deps.set_linear_profile_bindings.(bindings)
-
-      {:error, reason} ->
-        {:error, "Failed to load Linear profile bindings #{expanded_path}: #{inspect(reason)}"}
     end
   end
 

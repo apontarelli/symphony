@@ -6,7 +6,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
-  alias SymphonyElixirWeb.DashboardLive
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -415,6 +414,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                %{
                  "id" => "project",
                  "project" => "Project",
+                 "project_id" => nil,
                  "project_slug" => "project",
                  "project_url" => "https://linear.app/project/project/issues",
                  "statuses" => ["work_error", "retrying", "active"],
@@ -449,6 +449,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
                  "issue_url" => "https://example.org/issues/MT-HTTP",
+                 "project_id" => nil,
                  "project_slug" => "project",
                  "state" => "In Progress",
                  "worker_host" => nil,
@@ -475,6 +476,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
                  "issue_url" => "https://example.org/issues/MT-RETRY",
+                 "project_id" => nil,
                  "project_slug" => "project",
                  "attempt" => 2,
                  "pr_target" => "main",
@@ -497,6 +499,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "issue_id" => "issue-blocked",
                  "issue_identifier" => "MT-BLOCKED",
                  "issue_url" => "https://example.org/issues/MT-BLOCKED",
+                 "project_id" => nil,
                  "project_slug" => "project",
                  "state" => "In Progress",
                  "error" => "codex turn requires operator input",
@@ -773,7 +776,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
     assert html =~ "Profile / target"
-    assert html =~ "Automation scope"
     refute html =~ "Operations Dashboard"
     refute html =~ "Retry queue"
     refute html =~ "data-runtime-clock="
@@ -827,14 +829,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute render(view) =~ "javascript:alert"
   end
 
-  test "dashboard shows active and idle bound projects and hides empty rate limits" do
+  test "dashboard shows configured tracker project status and hides empty rate limits" do
     orchestrator_name = Module.concat(__MODULE__, :IdleDashboardOrchestrator)
 
     snapshot = %{
-      bound_projects: [
-        %{project_slug: "project", profile: "default", pr_target: "main"},
-        %{project_slug: "idle-project", profile: "maintenance", pr_target: "release"}
-      ],
       running: [
         %{
           issue_id: "issue-active",
@@ -873,10 +871,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "project"
     assert html =~ "MT-ACTIVE"
     assert html =~ "Active"
-    assert html =~ "idle-project"
-    assert html =~ "Idle"
-    assert html =~ "maintenance"
-    assert html =~ "release"
     refute html =~ "Rate limits"
     refute html =~ "<pre class=\"code-panel\">n/a</pre>"
   end
@@ -885,7 +879,6 @@ defmodule SymphonyElixir.ExtensionsTest do
     orchestrator_name = Module.concat(__MODULE__, :UnavailableRateLimitDashboardOrchestrator)
 
     snapshot = %{
-      bound_projects: [%{project_slug: "idle-project", profile: "default", pr_target: "main"}],
       running: [],
       retrying: [],
       codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
@@ -908,75 +901,20 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "<pre class=\"code-panel\">"
   end
 
-  test "dashboard save persists server draft instead of stale submitted project rows" do
-    source_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "linear-profile-bindings.local.yml")
-    ProfileBindings.set_source_path(source_path)
-    File.write!(source_path, "projects: []\n")
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      profiles: %{
-        default: %{delivery: %{pr_target: "main"}},
-        selected: %{delivery: %{pr_target: "project/selected"}}
-      }
-    )
-
-    ProfileBindings.set(%{
-      team_key: "HAR",
-      projects: [%{project_slug: "old-project", profile: "default", pr_target: "main"}]
-    })
-
-    socket = %Phoenix.LiveView.Socket{
-      assigns: %{
-        __changed__: %{},
-        draft_projects: [
-          %{
-            selector_kind: "project_slug",
-            selector_value: "selected-project-a123",
-            profile: "selected",
-            pr_target: "project/selected"
-          }
-        ],
-        payload: %{running: []}
-      }
-    }
-
-    stale_submit = %{
-      "projects" => %{
-        "0" => %{
-          "include" => "true",
-          "selector_kind" => "project_slug",
-          "selector_value" => "old-project",
-          "profile" => "default",
-          "pr_target_mode" => "main"
-        }
-      }
-    }
-
-    assert {:noreply, _socket} = DashboardLive.handle_event("save_bindings", stale_submit, socket)
-
-    assert [%{project_slug: "selected-project-a123", profile: "selected", pr_target: "project/selected"}] =
-             ProfileBindings.current().projects
-
-    persisted = File.read!(source_path)
-    assert persisted =~ ~s(project_slug: "selected-project-a123")
-    refute persisted =~ "old-project"
-  end
-
   test "dashboard treats stale active sessions as warnings and hides identification-only rate limits" do
     orchestrator_name = Module.concat(__MODULE__, :StaleDashboardOrchestrator)
     stale_at = DateTime.utc_now() |> DateTime.add(-360, :second)
     started_at = DateTime.utc_now() |> DateTime.add(-420, :second)
 
     snapshot = %{
-      bound_projects: [
-        %{project_slug: "ops-project", profile: "incident", pr_target: "release"}
-      ],
       running: [
         %{
           issue_id: "issue-stale",
           identifier: "MT-STALE",
           project_slug: "ops-project",
           state: "In Progress",
+          profile: "incident",
+          pr_target: "release",
           session_id: "thread-stale",
           turn_count: 3,
           codex_app_server_pid: nil,
@@ -1007,8 +945,12 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert state_payload["counts"]["stale_warnings"] == 1
     assert state_payload["rate_limits_available"] == false
 
-    assert [%{"statuses" => statuses, "profile" => "incident", "pr_target" => "release"}] =
-             state_payload["project_statuses"]
+    project_status =
+      Enum.find(state_payload["project_statuses"], fn status ->
+        status["project_slug"] == "ops-project"
+      end)
+
+    assert %{"statuses" => statuses, "profile" => "incident", "pr_target" => "release"} = project_status
 
     assert "stale" in statuses
     assert "active" in statuses

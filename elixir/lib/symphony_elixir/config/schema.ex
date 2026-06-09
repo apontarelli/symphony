@@ -55,6 +55,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:kind, :string)
       field(:endpoint, :string, default: "https://api.linear.app/graphql")
       field(:api_key, :string)
+      field(:project_id, :string)
       field(:project_slug, :string)
       field(:assignee, :string)
       field(:required_labels, {:array, :string}, default: [])
@@ -67,7 +68,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :required_labels, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_id,
+          :project_slug,
+          :assignee,
+          :required_labels,
+          :active_states,
+          :terminal_states
+        ],
         empty_values: []
       )
       |> update_change(:required_labels, fn labels ->
@@ -750,9 +761,8 @@ defmodule SymphonyElixir.Config.Schema do
          {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
          {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
-         {:ok, policy} <- apply_delivery_target_override(policy, Keyword.get(opts, :delivery_target_override)),
          :ok <- validate_resolved_delivery(policy, profile_name) do
-      apply_refinement_policies(profiles, policy, refinement_names, Keyword.get(opts, :lock_delivery_target))
+      apply_refinement_policies(profiles, policy, refinement_names)
     end
   end
 
@@ -776,26 +786,13 @@ defmodule SymphonyElixir.Config.Schema do
     apply_policy_overrides(default_effective, selected_policy, [profile_name])
   end
 
-  defp apply_delivery_target_override(policy, nil), do: {:ok, policy}
+  defp apply_refinement_policies(_profiles, policy, []), do: {:ok, policy}
 
-  defp apply_delivery_target_override(policy, pr_target) when is_binary(pr_target) do
-    delivery = Map.get(policy, "delivery", %{})
-
-    if is_map(delivery) do
-      {:ok, Map.put(policy, "delivery", Map.put(delivery, @delivery_pr_target_key, pr_target))}
-    else
-      {:ok, Map.put(policy, "delivery", %{@delivery_pr_target_key => pr_target})}
-    end
-  end
-
-  defp apply_refinement_policies(_profiles, policy, [], _locked_delivery_target), do: {:ok, policy}
-
-  defp apply_refinement_policies(profiles, policy, [profile_name | rest], locked_delivery_target) do
+  defp apply_refinement_policies(profiles, policy, [profile_name | rest]) do
     with {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, refined_policy} <- apply_policy_overrides(policy, selected_policy, [profile_name]),
-         :ok <- validate_resolved_delivery(refined_policy, profile_name),
-         :ok <- validate_refinement_delivery_target(refined_policy, profile_name, locked_delivery_target) do
-      apply_refinement_policies(profiles, refined_policy, rest, locked_delivery_target)
+         :ok <- validate_resolved_delivery(refined_policy, profile_name) do
+      apply_refinement_policies(profiles, refined_policy, rest)
     end
   end
 
@@ -931,18 +928,6 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp valid_pr_target?(value), do: is_binary(value) and String.trim(value) != ""
-
-  defp validate_refinement_delivery_target(_policy, _profile_name, nil), do: :ok
-
-  defp validate_refinement_delivery_target(policy, profile_name, locked_delivery_target) do
-    case get_in(policy, ["delivery", @delivery_pr_target_key]) do
-      ^locked_delivery_target ->
-        :ok
-
-      changed_target ->
-        {:error, {:refinement_delivery_target_override, profile_name, locked_delivery_target, changed_target}}
-    end
-  end
 
   defp policy_ref(policy) do
     :sha256

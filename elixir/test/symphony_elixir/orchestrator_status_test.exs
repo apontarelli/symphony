@@ -21,56 +21,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     send(pid, :stop)
   end
 
-  test "startup fails before terminal workspace cleanup when external bindings are invalid" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-invalid-binding-cleanup-#{System.unique_integer([:positive])}"
-      )
-
-    issue = %Issue{
-      id: "issue-terminal",
-      identifier: "MT-SKIP",
-      title: "Terminal issue",
-      state: "Closed"
-    }
-
-    try do
-      workspace = Path.join(test_root, issue.identifier)
-      File.mkdir_p!(workspace)
-      File.write!(Path.join(workspace, "marker.txt"), "keep\n")
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        tracker_kind: "memory",
-        workspace_root: test_root,
-        tracker_terminal_states: ["Closed"],
-        poll_interval_ms: 30_000
-      )
-
-      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-      ProfileBindings.set(%{projects: %{}})
-
-      orchestrator_name = Module.concat(__MODULE__, :InvalidBindingCleanupOrchestrator)
-      previous_trap_exit = Process.flag(:trap_exit, true)
-
-      on_exit(fn ->
-        Process.flag(:trap_exit, previous_trap_exit)
-      end)
-
-      log =
-        capture_log(fn ->
-          assert {:error, {:invalid_startup_config, {:invalid_linear_profile_bindings, "projects must be a list"}}} =
-                   Orchestrator.start_link(name: orchestrator_name)
-        end)
-
-      assert log =~ "Startup config validation failed"
-      assert log =~ "projects must be a list"
-      assert File.exists?(Path.join(workspace, "marker.txt"))
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
   test "orchestrator snapshot reflects last codex update and session id" do
     issue_id = "issue-snapshot"
 
@@ -981,9 +931,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         prompt: "Policy {{ policy.policy_ref }} target {{ policy.delivery.pr_target }}"
       )
 
-      ProfileBindings.set(%{
-        projects: [%{project_slug: "project", profile: "strict"}]
-      })
+      Config.set_profile_override("strict")
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
@@ -1058,9 +1006,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         prompt: "Policy {{ policy.policy_ref }}"
       )
 
-      ProfileBindings.set(%{
-        projects: [%{project_slug: "project", profile: "strict"}]
-      })
+      Config.set_profile_override("strict")
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
@@ -1269,7 +1215,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  })
       end)
 
-    assert log =~ "Linear project slug missing in selected workflow config"
+    assert log =~ "Linear project_id or project_slug missing in selected workflow config"
     refute log =~ "Failed to fetch from Linear"
   end
 

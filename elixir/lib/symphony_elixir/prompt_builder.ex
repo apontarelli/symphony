@@ -77,14 +77,8 @@ defmodule SymphonyElixir.PromptBuilder do
 
   defp resolve_prompt_policy(issue) do
     case Config.issue_policy(issue) do
-      {:ok, policy} ->
-        policy
-
-      _ ->
-        case Config.effective_policy() do
-          {:ok, policy} -> policy
-          _ -> %{}
-        end
+      {:ok, policy} -> policy
+      _ -> %{}
     end
   end
 

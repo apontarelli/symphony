@@ -1005,15 +1005,8 @@ defmodule SymphonyElixir.Orchestrator do
             spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, policy)
         end
 
-      {:skip, reason} ->
-        Logger.info(
-          "Skipping dispatch; no matching Linear profile binding for #{issue_context(issue)} reason=#{inspect(reason)} project_id=#{inspect(issue.project_id)} project_slug=#{inspect(issue.project_slug)}"
-        )
-
-        state
-
       {:error, reason} ->
-        Logger.error("Skipping dispatch; Linear profile binding failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.error("Skipping dispatch; workflow policy failed for #{issue_context(issue)} reason=#{inspect(reason)}")
         state
     end
   end
@@ -1478,15 +1471,8 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, _policy} ->
         true
 
-      {:skip, reason} ->
-        Logger.info(
-          "Skipping dispatch; no matching Linear profile binding for #{issue_context(issue)} reason=#{inspect(reason)} project_id=#{inspect(issue.project_id)} project_slug=#{inspect(issue.project_slug)}"
-        )
-
-        false
-
       {:error, reason} ->
-        Logger.error("Skipping dispatch; Linear profile binding failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+        Logger.error("Skipping dispatch; workflow policy failed for #{issue_context(issue)} reason=#{inspect(reason)}")
         false
     end
   end

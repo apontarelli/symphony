@@ -17,7 +17,6 @@ Options:
   --no-env-file               Do not call `op run`; use the current environment.
   --port <port>               Dashboard/API port. Defaults to PORT, then 4000.
   --logs-root <path>          Logs dir. Default: <symphony-elixir-dir>/log.
-  --linear-bindings <path>    Override local Linear profile bindings.
   --profile <name>            Select one workflow profile for this process.
   --dev-root <path>           Project root directory. Default: ~/dev.
   --skip-build                Do not rebuild elixir/bin/symphony before launch.
@@ -91,7 +90,6 @@ run_elixir() {
   local workflow="${SYMPHONY_WORKFLOW:-}"
   local port="${SYMPHONY_PORT:-${PORT:-4000}}"
   local logs_root="${SYMPHONY_LOGS_ROOT:-"$symphony_home/log"}"
-  local linear_bindings="${SYMPHONY_LINEAR_BINDINGS:-}"
   local profile="${SYMPHONY_PROFILE:-}"
   local args
 
@@ -128,10 +126,6 @@ run_elixir() {
     --logs-root "$logs_root"
   )
 
-  if [[ -n "$linear_bindings" ]]; then
-    args+=(--linear-bindings "$linear_bindings")
-  fi
-
   if [[ -n "$profile" ]]; then
     args+=(--profile "$profile")
   fi
@@ -157,7 +151,6 @@ main() {
   local workflow=""
   local port=""
   local logs_root=""
-  local linear_bindings=""
   local profile=""
   local arg
 
@@ -187,11 +180,6 @@ main() {
       --logs-root)
         require_value "$arg" "${2:-}"
         logs_root="$2"
-        shift 2
-        ;;
-      --linear-bindings)
-        require_value "$arg" "${2:-}"
-        linear_bindings="$2"
         shift 2
         ;;
       --profile)
@@ -238,7 +226,6 @@ main() {
   env_file="$(expand_path "$env_file")"
   workflow="$(expand_path "$workflow")"
   logs_root="$(expand_path "$logs_root")"
-  linear_bindings="$(expand_path "$linear_bindings")"
 
   symphony_home="$(absolute_path "$symphony_home")"
   dev_root="$(absolute_path "$dev_root")"
@@ -246,10 +233,6 @@ main() {
 
   if [[ -n "$logs_root" ]]; then
     logs_root="$(absolute_path "$logs_root")"
-  fi
-
-  if [[ -n "$linear_bindings" ]]; then
-    linear_bindings="$(absolute_path "$linear_bindings")"
   fi
 
   local project_name=""
@@ -302,10 +285,6 @@ main() {
 
   if [[ -n "$port" ]]; then
     runtime_env+=("SYMPHONY_PORT=$port")
-  fi
-
-  if [[ -n "$linear_bindings" ]]; then
-    runtime_env+=("SYMPHONY_LINEAR_BINDINGS=$linear_bindings")
   fi
 
   if [[ -n "$profile" ]]; then

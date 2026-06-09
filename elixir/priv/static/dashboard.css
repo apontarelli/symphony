@@ -637,28 +637,6 @@ pre,
   margin-top: 0.9rem;
 }
 
-.binding-list {
-  display: grid;
-  gap: 0.65rem;
-  margin: 0;
-}
-
-.binding-list div {
-  display: grid;
-  gap: 0.18rem;
-  padding-top: 0.65rem;
-  border-top: 1px solid var(--line);
-}
-
-.binding-list dt {
-  font-weight: 800;
-}
-
-.binding-list dd {
-  margin: 0;
-  color: var(--muted);
-}
-
 .error-card {
   padding: 1rem;
   background: var(--danger-soft);

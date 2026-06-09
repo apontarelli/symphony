@@ -394,12 +394,17 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_project_link_lines do
+    tracker = Config.settings!().tracker
+
     project_part =
-      case Config.settings!().tracker.project_slug do
+      case tracker.project_slug do
         project_slug when is_binary(project_slug) and project_slug != "" ->
           colorize(linear_project_url(project_slug), @ansi_cyan)
 
-        _ ->
+        _ when is_binary(tracker.project_id) and tracker.project_id != "" ->
+          colorize(tracker.project_id, @ansi_cyan)
+
+        _project ->
           colorize("n/a", @ansi_gray)
       end
 

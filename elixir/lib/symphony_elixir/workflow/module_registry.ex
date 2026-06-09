@@ -129,6 +129,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "kind" => "linear",
           "endpoint" => "https://api.linear.app/graphql",
           "api_key" => "$LINEAR_API_KEY",
+          "project_id" => nil,
           "project_slug" => nil,
           "active_states" => ["Todo", "In Progress", "Merging", "Rework"],
           "terminal_states" => @terminal_states
@@ -999,9 +1000,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp module_manifest_diagnostics(_name, _manifest), do: []
 
   defp module_manifest_config("tracker.linear", manifest) do
-    case get_in(manifest, ["project", "slug"]) do
-      slug when is_binary(slug) -> %{"tracker" => %{"project_slug" => slug}}
-      _slug -> %{}
+    project = Map.get(manifest, "project", %{})
+
+    %{}
+    |> maybe_put_tracker_value("project_id", Map.get(project, "id"))
+    |> maybe_put_tracker_value("project_slug", Map.get(project, "slug"))
+    |> case do
+      tracker when map_size(tracker) > 0 -> %{"tracker" => tracker}
+      _tracker -> %{}
     end
   end
 
@@ -1018,6 +1024,9 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   end
 
   defp module_manifest_config(_name, _manifest), do: %{}
+
+  defp maybe_put_tracker_value(config, key, value) when is_binary(value) and value != "", do: Map.put(config, key, value)
+  defp maybe_put_tracker_value(config, _key, _value), do: config
 
   defp product_visual_review_config(manifest) do
     attrs =

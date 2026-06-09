@@ -15,8 +15,6 @@ defmodule SymphonyElixir.MixProject do
         ignore_modules: [
           Mix.Tasks.Incident.LinearIssue,
           SymphonyElixir.Config,
-          SymphonyElixir.Config.ProfileBindingAdmin,
-          SymphonyElixir.Config.ProfileBindings,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,
           SymphonyElixir.Workflow.Manifest,

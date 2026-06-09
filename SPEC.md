@@ -1063,8 +1063,6 @@ it.
 - `automation` (object): automation posture, currently `unattended` or `manual`.
 - `harness` (object): optional `codex_home`; `null` means the implementation derives a managed
   harness CODEX_HOME.
-- `bindings` (object): optional operator-local binding file metadata. A committed manifest SHOULD
-  refer to a local binding file rather than storing operator-local Linear project identifiers.
 - `recovery` and `deployment` (objects): optional implementation metadata.
 
 CLI commands:
@@ -1073,7 +1071,7 @@ CLI commands:
   existing manifest unless the operator passes an explicit replacement flag.
 - `symphony workflow check` validates manifest schema, selected preset/modules, repo doc
   entrypoints, validation command shape, VCS/delivery defaults, configured harness CODEX_HOME
-  readiness, and required local binding files.
+  readiness, and tracker project scope.
 - `symphony workflow print` prints the resolved preset/modules/defaults. It MAY include the
   compiled workflow config and prompt without writing generated prompt files into the target repo.
 
@@ -1152,16 +1150,13 @@ Validation checks:
 - Compiled workflow can be produced and validated.
 - `runtime.tracker.kind` is present and supported.
 - `runtime.tracker.api_key` is present after `$` resolution.
-- `runtime.tracker.project_slug` is present when REQUIRED by the selected tracker kind. A Linear
-  implementation MAY satisfy this requirement with operator-local project profile bindings instead
-  of a committed manifest `project_slug`.
+- `runtime.tracker.project_id` or `runtime.tracker.project_slug` is present when required by the
+  selected tracker kind. Linear polling prefers `project_id` and falls back to `project_slug`.
 - `runtime.codex.command` is present and non-empty.
 - `harness.codex_home` and harness global instructions are available.
 - Every selected workflow profile resolves to an effective policy with a string
   `delivery.pr_target`.
-- Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides
-  and external tracker bindings.
-- External binding config with ambiguous exact selectors fails validation before dispatch.
+- Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides.
 
 ## 7. Orchestration State Machine
 
@@ -1748,14 +1743,14 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
 - `runtime.tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
-- `runtime.tracker.project_slug` maps to Linear project `slugId` for legacy single-project polling.
-- External project bindings MAY define one or more Linear `project_id` or `project_slug` selectors
-  outside the manifest; candidate polling filters each bound project, or filters a configured team
-  when catch-all matching is enabled
+- `runtime.tracker.project_id` maps to Linear project `id` and is the preferred candidate polling
+  selector.
+- `runtime.tracker.project_slug` maps to Linear project `slugId` and is used only when
+  `project_id` is absent.
 - Candidate and issue-state refresh queries include issue labels. Required label filtering happens
   after normalization so refresh can observe label removal and stop or release existing work.
-- Candidate issue query filters single-project polling using `project: { slugId: { eq:
-  $projectSlug } }`.
+- Candidate issue query filters by `project: { id: { eq: $projectId } }` when `project_id` is set,
+  or by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -1789,7 +1784,7 @@ RECOMMENDED error categories:
 
 - `unsupported_tracker_kind`
 - `missing_tracker_api_key`
-- `missing_tracker_project_slug`
+- `missing_tracker_project_scope`
 - `linear_api_request` (transport failures)
 - `linear_api_status` (non-200 HTTP)
 - `linear_graphql_errors`
@@ -1814,49 +1809,20 @@ Symphony does not require first-class tracker write APIs in the orchestrator.
 - If the `linear_graphql` client-side tool extension is implemented, it is still part of the agent
   toolchain rather than orchestrator business logic.
 
-### 11.6 Linear Profile Binding Resolution
+### 11.6 Workflow Profile Resolution
 
-Linear project/profile bindings are operator-local runtime config, not committed workflow policy.
-They map issue routing context to repository-owned `profiles`.
-
-Implementations MAY load a default operator-local binding file named
-`linear-profile-bindings.local.yml` from the same directory as the selected `symphony.yml` manifest
-when no explicit binding file is provided. Repositories SHOULD commit a placeholder
-`linear-profile-bindings.example.yml` and ignore the real local binding file.
-
-Example:
-
-```yaml
-team_key: SID
-projects:
-  - project_slug: project-alpha
-    profile: project_integration
-    pr_target: project/alpha
-labels:
-  - label: strict
-    profile: strict_review
-catch_all:
-  enabled: false
-  profile: default
-allow_default: false
-```
+Workflow profiles are repository-owned policy. Linear project scope is configured separately under
+`runtime.tracker` and does not select profiles.
 
 Selection precedence:
 
-1. CLI profile override for the current process.
-2. Exact Linear project binding by `project_id` or `project_slug`. Each project binding MUST use
-   exactly one project selector. Each project binding MAY set `pr_target`; when absent, resolution
-   falls back to the selected profile's `delivery.pr_target`.
-3. One label refinement within the selected project binding.
-4. Explicit catch-all/team-level binding when enabled and no project binding matches.
-5. `default` profile only when explicitly allowed by runtime bindings, or when no external binding
-   config is present.
+1. CLI/runtime profile override for the current process.
+2. `default` profile from the selected workflow config.
 
-At any precedence, more than one matching selector MUST block dispatch with an operator-visible
-error. Project bindings referencing unknown profiles MUST fail startup/readiness validation.
-Unprojected issues MUST NOT dispatch unless catch-all is enabled. Label refinements MAY adjust
-validation, review, and prompt policy, but MUST NOT change the selected project binding's
-effective `delivery.pr_target`.
+Unknown profile overrides MUST fail startup/readiness validation. Resolved policies MUST include a
+stable `policy_ref`, `policy_metadata.profile`, and `delivery.pr_target`. The `default` profile uses
+`policy_metadata.source == "default_profile"`; explicit process overrides use
+`policy_metadata.source == "profile_override"`.
 
 ### 11.7 Completion Route Contract
 
@@ -2950,7 +2916,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI can initialize a target repo `symphony.yml` without overwriting an existing manifest unless
   explicitly forced
 - CLI can check a target repo manifest and fail nonzero with field-level remediation for schema,
-  module, doc, local binding, or configured harness problems
+  module, doc, tracker scope, or configured harness problems
 - CLI can print the resolved workflow preset/modules/defaults and optionally include the compiled
   workflow config/prompt
 - CLI surfaces startup failure cleanly

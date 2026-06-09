@@ -3,11 +3,12 @@ defmodule SymphonyElixir.Config do
   Runtime configuration loaded from `symphony.yml`.
   """
 
-  alias SymphonyElixir.Config.ProfileBindings
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workflow.ModuleRegistry
+
+  @profile_override_env_key :workflow_profile_override
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
@@ -84,7 +85,7 @@ defmodule SymphonyElixir.Config do
   def validate! do
     with {:ok, settings} <- settings() do
       with :ok <- validate_semantics(settings) do
-        ProfileBindings.validate(settings, ProfileBindings.current())
+        validate_profile_override(settings)
       end
     end
   end
@@ -96,16 +97,40 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @spec issue_policy(Issue.t(), keyword()) :: {:ok, map()} | {:skip, term()} | {:error, term()}
+  @spec issue_policy(Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def issue_policy(%Issue{} = issue, opts \\ []) do
     with {:ok, settings} <- settings() do
-      ProfileBindings.select_policy(settings, issue, ProfileBindings.current(), opts)
+      profile = normalized_string(Keyword.get(opts, :profile_override) || profile_override()) || "default"
+
+      Schema.resolve_effective_policy(settings, profile, [],
+        metadata: %{
+          source: policy_source(profile),
+          profile: profile,
+          project_id: issue.project_id,
+          project_slug: issue.project_slug
+        }
+      )
     end
   end
 
-  @spec linear_profile_bindings() :: ProfileBindings.binding_config()
-  def linear_profile_bindings do
-    ProfileBindings.current()
+  @spec set_profile_override(String.t() | nil) :: :ok
+  def set_profile_override(nil), do: clear_profile_override()
+
+  def set_profile_override(profile) when is_binary(profile) do
+    Application.put_env(:symphony_elixir, @profile_override_env_key, profile)
+    :ok
+  end
+
+  @spec clear_profile_override() :: :ok
+  def clear_profile_override do
+    Application.delete_env(:symphony_elixir, @profile_override_env_key)
+    :ok
+  end
+
+  @spec profile_override() :: String.t() | nil
+  def profile_override do
+    Application.get_env(:symphony_elixir, @profile_override_env_key)
+    |> normalized_string()
   end
 
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
@@ -175,7 +200,7 @@ defmodule SymphonyElixir.Config do
   @spec format_error(term()) :: String.t()
   def format_error(:missing_linear_api_token), do: "Linear API token missing in selected workflow config"
 
-  def format_error(:missing_linear_project_slug), do: "Linear project slug missing in selected workflow config"
+  def format_error(:missing_linear_project_scope), do: "Linear project_id or project_slug missing in selected workflow config"
 
   def format_error(:missing_tracker_kind), do: "Tracker kind missing in selected workflow config"
 
@@ -192,28 +217,21 @@ defmodule SymphonyElixir.Config do
   def format_error({:missing_manifest_file, path, raw_reason}),
     do: "Missing symphony.yml at #{path}: #{inspect(raw_reason)}"
 
-  def format_error({:invalid_linear_profile_bindings, message}), do: "Invalid Linear profile bindings: #{message}"
-
-  def format_error({:unknown_linear_profile_binding, source, profile, reason}),
-    do: "Invalid Linear profile binding source=#{inspect(source)} profile=#{inspect(profile)} reason=#{inspect(reason)}"
-
-  def format_error(:missing_linear_catch_all_team_selector),
-    do: "Linear catch-all profile binding requires external team_id or team_key"
+  def format_error({:unknown_workflow_profile_override, profile, reason}),
+    do: "Invalid workflow profile override profile=#{inspect(profile)} reason=#{inspect(reason)}"
 
   def format_error(other), do: "Invalid workflow config: #{inspect(other)}"
 
   @spec config_error?(term()) :: boolean()
   def config_error?(:missing_linear_api_token), do: true
-  def config_error?(:missing_linear_project_slug), do: true
+  def config_error?(:missing_linear_project_scope), do: true
   def config_error?(:missing_tracker_kind), do: true
   def config_error?({:unsupported_tracker_kind, _kind}), do: true
   def config_error?({:invalid_workflow_config, _message}), do: true
   def config_error?({:manifest_parse_error, _reason}), do: true
   def config_error?({:invalid_manifest, _diagnostics}), do: true
   def config_error?({:missing_manifest_file, _path, _reason}), do: true
-  def config_error?({:invalid_linear_profile_bindings, _message}), do: true
-  def config_error?({:unknown_linear_profile_binding, _source, _profile, _reason}), do: true
-  def config_error?(:missing_linear_catch_all_team_selector), do: true
+  def config_error?({:unknown_workflow_profile_override, _profile, _reason}), do: true
   def config_error?(_reason), do: false
 
   defp validate_semantics(settings) do
@@ -228,14 +246,39 @@ defmodule SymphonyElixir.Config do
         {:error, :missing_linear_api_token}
 
       settings.tracker.kind == "linear" and
-        not is_binary(settings.tracker.project_slug) and
-          not ProfileBindings.dispatch_scope_configured?(ProfileBindings.current()) ->
-        {:error, :missing_linear_project_slug}
+        not is_binary(settings.tracker.project_id) and
+          not is_binary(settings.tracker.project_slug) ->
+        {:error, :missing_linear_project_scope}
 
       true ->
         :ok
     end
   end
+
+  defp validate_profile_override(settings) do
+    case profile_override() do
+      nil ->
+        :ok
+
+      profile ->
+        case Schema.resolve_effective_policy(settings, profile) do
+          {:ok, _policy} -> :ok
+          {:error, reason} -> {:error, {:unknown_workflow_profile_override, profile, reason}}
+        end
+    end
+  end
+
+  defp policy_source("default"), do: "default_profile"
+  defp policy_source(_profile), do: "profile_override"
+
+  defp normalized_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalized_string(_value), do: nil
 
   defp default_prompt_template do
     case ModuleRegistry.compile_default_preset() do

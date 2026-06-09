@@ -5,26 +5,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
-  alias SymphonyElixir.Config.ProfileBindingAdmin
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
   @impl true
   def mount(_params, _session, socket) do
-    admin = ProfileBindingAdmin.facts()
-
     socket =
       socket
       |> assign(:payload, load_payload())
-      |> assign(:admin, admin)
-      |> assign(:discovered_projects, [])
-      |> assign(:draft_projects, nil)
-      |> assign(:scope_editor_open, false)
-      |> assign(:project_search_query, "")
-      |> assign(:project_status_filter, "active")
       |> assign(:diagnostics_open, false)
-      |> assign(:admin_message, nil)
-      |> assign(:admin_error, nil)
       |> assign(:now, DateTime.utc_now())
 
     if connected?(socket) do
@@ -60,85 +49,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("refresh_projects", _params, socket) do
-    case ProfileBindingAdmin.discover_projects() do
-      {:ok, projects} ->
-        {:noreply,
-         socket
-         |> assign(:discovered_projects, projects)
-         |> assign(:draft_projects, nil)
-         |> assign(:scope_editor_open, true)
-         |> assign(:admin, ProfileBindingAdmin.facts())
-         |> assign(:admin_message, "Project list refreshed.")
-         |> assign(:admin_error, nil)}
-
-      {:error, reason} ->
-        admin = ProfileBindingAdmin.facts()
-
-        {:noreply,
-         socket
-         |> assign(:admin, admin)
-         |> assign(:admin_message, nil)
-         |> assign(:admin_error, discovery_error_message(reason, admin))}
-    end
-  end
-
-  def handle_event("save_bindings", %{"projects" => project_params}, socket) do
-    projects = socket.assigns.draft_projects || ProfileBindingAdmin.parse_project_params(project_params)
-
-    case ProfileBindingAdmin.save_project_bindings(projects) do
-      {:ok, _bindings} ->
-        maybe_schedule_runtime_tick(socket.assigns.payload)
-
-        {:noreply,
-         socket
-         |> assign(:admin, ProfileBindingAdmin.facts())
-         |> assign(:draft_projects, nil)
-         |> assign(:scope_editor_open, false)
-         |> assign(:admin_message, "Bindings saved and applied.")
-         |> assign(:admin_error, nil)}
-
-      {:error, reason} ->
-        {:noreply,
-         socket
-         |> assign(:admin, ProfileBindingAdmin.facts())
-         |> assign(:admin_message, nil)
-         |> assign(:admin_error, "Save failed: #{inspect(reason)}")}
-    end
-  end
-
-  def handle_event("save_bindings", _params, socket), do: handle_event("save_bindings", %{"projects" => %{}}, socket)
-
-  def handle_event("change_bindings", %{"projects" => project_params}, socket) do
-    {:noreply, assign(socket, :draft_projects, ProfileBindingAdmin.parse_project_params(project_params))}
-  end
-
-  def handle_event("change_bindings", _params, socket), do: {:noreply, assign(socket, :draft_projects, [])}
-
-  def handle_event("open_scope_editor", _params, socket) do
-    {:noreply, assign(socket, :scope_editor_open, true)}
-  end
-
-  def handle_event("close_scope_editor", _params, socket) do
-    socket =
-      socket
-      |> assign(:scope_editor_open, false)
-      |> assign(:draft_projects, nil)
-
-    if not control_interaction_active?(socket) do
-      maybe_schedule_runtime_tick(socket.assigns.payload)
-    end
-
-    {:noreply, socket}
-  end
-
-  def handle_event("change_project_search", params, socket) do
-    {:noreply,
-     socket
-     |> assign(:project_search_query, Map.get(params, "project_search", ""))
-     |> assign(:project_status_filter, Map.get(params, "project_status", "active"))}
-  end
-
   def handle_event("toggle_diagnostics", _params, socket) do
     socket = update(socket, :diagnostics_open, &(!&1))
 
@@ -156,8 +66,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <header class="control-panel">
         <div>
           <p class="eyebrow">Symphony Control Panel</p>
-          <h1 class="panel-title"><%= panel_title(@admin) %></h1>
-          <p :if={panel_context(@admin)} class="panel-copy"><%= panel_context(@admin) %></p>
+          <h1 class="panel-title"><%= panel_title(@payload) %></h1>
+          <p :if={panel_context(@payload)} class="panel-copy"><%= panel_context(@payload) %></p>
         </div>
 
         <div class="status-stack">
@@ -218,195 +128,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
-        <section class="section-card admin-panel">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Automation scope</h2>
-              <p class="section-copy">Saved locally for this repo. Eligible projects still follow workflow gates.</p>
-            </div>
-            <button type="button" phx-click="open_scope_editor">Edit scope</button>
-          </div>
-
-          <%= if @admin_message do %>
-            <p class="notice-copy"><%= @admin_message %></p>
-          <% end %>
-
-          <%= if @admin_error do %>
-            <p class="error-inline"><%= @admin_error %></p>
-          <% end %>
-
-          <%= if scope_summary_rows(@draft_projects) == [] do %>
-            <p class="empty-state">No projects are in automation scope.</p>
-          <% else %>
-            <div class="scope-summary-list">
-              <article :for={row <- scope_summary_rows(@draft_projects)} class="scope-summary-row">
-                <div class="issue-stack">
-                  <span class="issue-id"><%= row.name %></span>
-                  <span :if={row.slug_id} class="muted mono"><%= row.slug_id %></span>
-                </div>
-                <span class={scope_status_class(row.status_label)}><%= row.status_label %></span>
-                <span class="muted"><%= row.profile %></span>
-                <span class="muted"><%= row.pr_target || "Profile default" %></span>
-              </article>
-            </div>
-          <% end %>
-
-          <div :if={@scope_editor_open} class="scope-editor-panel">
-            <div class="section-header">
-              <div>
-                <h3 class="section-title">Project search</h3>
-                <p class="section-copy">Search and filter Linear team projects before adding them to scope.</p>
-              </div>
-              <button type="button" class="subtle-button" phx-click="close_scope_editor">Close</button>
-            </div>
-
-            <form phx-change="change_project_search" class="search-controls">
-              <label>
-                <span>Search</span>
-                <input type="search" name="project_search" value={@project_search_query} placeholder="Filter by project name or slug" />
-              </label>
-              <label>
-                <span>Status</span>
-                <select name="project_status">
-                  <option value="active" selected={@project_status_filter == "active"}>Active</option>
-                  <option value="all" selected={@project_status_filter == "all"}>All</option>
-                  <option value="completed" selected={@project_status_filter == "completed"}>Completed</option>
-                </select>
-              </label>
-              <button type="button" phx-click="refresh_projects">Discover projects</button>
-            </form>
-
-            <form phx-change="change_bindings" phx-submit="save_bindings">
-              <%= if project_search_rows(@discovered_projects, @draft_projects, @project_search_query, @project_status_filter) == [] do %>
-                <p class="empty-state">No matching projects. Try another search or status filter.</p>
-              <% else %>
-                <div class="table-wrap">
-                  <table class="data-table admin-table">
-                    <thead>
-                      <tr>
-                        <th>Automate</th>
-                        <th>Project</th>
-                        <th>Status</th>
-                        <th>Profile</th>
-                        <th>PR target</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr :for={{row, index} <- Enum.with_index(project_search_rows(@discovered_projects, @draft_projects, @project_search_query, @project_status_filter))}>
-                        <td data-label="Automate">
-                          <label class="scope-toggle">
-                            <input type="checkbox" name={"projects[#{index}][include]"} value="true" checked={row.bound?} />
-                            <span><%= if row.bound?, do: "Automated", else: "Not automated" %></span>
-                          </label>
-                          <input type="hidden" name={"projects[#{index}][selector_kind]"} value={row.selector_kind} />
-                          <input type="hidden" name={"projects[#{index}][selector_value]"} value={row.selector_value} />
-                        </td>
-                        <td data-label="Project">
-                          <div class="issue-stack">
-                            <span class="issue-id"><%= row.name %></span>
-                            <span :if={row.slug_id} class="muted mono"><%= row.slug_id %></span>
-                          </div>
-                        </td>
-                        <td data-label="Status">
-                          <div class="detail-stack">
-                            <span class={scope_status_class(row.status_label)}><%= row.status_label %></span>
-                            <span class="muted"><%= row.status_detail %></span>
-                          </div>
-                        </td>
-                        <td data-label="Profile">
-                          <select name={"projects[#{index}][profile]"}>
-                            <option
-                              :for={profile <- @admin.profiles}
-                              value={profile.name}
-                              selected={profile.name == row.profile}
-                            >
-                              <%= profile.name %>
-                            </option>
-                          </select>
-                        </td>
-                        <td data-label="PR target">
-                          <div class="target-control">
-                            <select name={"projects[#{index}][pr_target_mode]"}>
-                              <option value="profile" selected={row.pr_target_mode == "profile"}>Profile default</option>
-                              <option value="main" selected={row.pr_target_mode == "main"}>main</option>
-                              <option
-                                :if={row.generated_pr_target}
-                                value="generated"
-                                selected={row.pr_target_mode == "generated"}
-                              >
-                                <%= row.generated_pr_target %>
-                              </option>
-                              <option value="custom" selected={row.pr_target_mode == "custom"}>Custom</option>
-                            </select>
-                            <input
-                              type="text"
-                              name={"projects[#{index}][pr_target_custom]"}
-                              value={row.pr_target_custom || ""}
-                              placeholder="custom/base-branch"
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-                <button type="submit">Save bindings</button>
-              <% end %>
-            </form>
-          </div>
-
-          <div class="admin-section">
-            <button type="button" class="subtle-button" phx-click="toggle_diagnostics">
-              <%= if @diagnostics_open, do: "Hide profiles and diagnostics", else: "Show profiles and diagnostics" %>
-            </button>
-            <div :if={@diagnostics_open} class="admin-content">
-              <div class="profile-strip">
-                <span :for={profile <- @admin.profiles} class="profile-pill">
-                  <%= profile.name %>
-                  <span class="muted"><%= profile.pr_target || "n/a" %></span>
-                </span>
-              </div>
-
-              <div class="admin-grid">
-                <div class="admin-facts">
-                  <h3>Workflow</h3>
-                  <dl>
-                    <dt>File</dt>
-                    <dd class="mono"><%= @admin.workflow_path %></dd>
-                    <dt>Tracker</dt>
-                    <dd><%= @admin.workflow.tracker_kind %></dd>
-                    <dt><%= team_selector_key(@admin) %></dt>
-                    <dd><%= team_selector_value(@admin) %></dd>
-                    <dt>Active states</dt>
-                    <dd><%= Enum.join(@admin.workflow.active_states, ", ") %></dd>
-                    <dt>Terminal states</dt>
-                    <dd><%= Enum.join(@admin.workflow.terminal_states, ", ") %></dd>
-                  </dl>
-                </div>
-
-                <div class="admin-facts">
-                  <h3>Binding source</h3>
-                  <dl>
-                    <dt>Source</dt>
-                    <dd class="mono"><%= @admin.binding_source.path %></dd>
-                    <dt>Mode</dt>
-                    <dd><%= if @admin.binding_source.explicit?, do: "explicit", else: "default" %></dd>
-                    <dt>Validation</dt>
-                    <dd><%= @admin.validation.message %></dd>
-                    <dt>Fallback</dt>
-                    <dd><%= fallback_summary(@admin.bindings) %></dd>
-                  </dl>
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
         <section class="section-card">
           <div class="section-header">
             <div>
               <h2 class="section-title">Project views</h2>
-              <p class="section-copy">Running and retrying issues grouped by selected binding metadata.</p>
+              <p class="section-copy">Running and retrying issues grouped by tracker metadata.</p>
             </div>
           </div>
 
@@ -436,12 +162,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <div class="section-header">
             <div>
               <h2 class="section-title">Project status</h2>
-              <p class="section-copy">Bound project health, active work, retry pressure, and warnings.</p>
+              <p class="section-copy">Configured project health, active work, retry pressure, and warnings.</p>
             </div>
           </div>
 
           <%= if @payload.project_statuses == [] do %>
-            <p class="empty-state">No bound projects are configured.</p>
+            <p class="empty-state">No tracker project is configured.</p>
           <% else %>
             <div class="table-wrap">
               <table class="data-table project-table">
@@ -787,68 +513,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp put_project_groups(%{error: _error} = payload), do: payload
   defp put_project_groups(payload), do: Map.put(payload, :project_groups, project_groups(payload))
 
-  defp panel_title(admin) do
-    case team_selector_value(admin) do
-      "missing" -> repo_name(admin)
-      team -> "#{repo_name(admin)} / #{team}"
-    end
-  end
+  defp panel_title(%{project_statuses: [%{project: project} | _projects]}) when is_binary(project), do: project
+  defp panel_title(_payload), do: "Symphony"
 
-  defp panel_context(admin) do
-    case team_selector_key(admin) do
-      "missing" -> nil
-      key -> "#{key}=#{team_selector_value(admin)}"
-    end
-  end
-
-  defp repo_name(%{workflow_path: workflow_path}) when is_binary(workflow_path) do
-    workflow_path
-    |> Path.dirname()
-    |> repo_root()
-    |> Path.basename()
-  end
-
-  defp repo_name(_admin), do: "Symphony"
-
-  defp team_selector_key(%{bindings: %{team_key: team_key}}) when is_binary(team_key), do: "team_key"
-  defp team_selector_key(%{bindings: %{team_id: team_id}}) when is_binary(team_id), do: "team_id"
-  defp team_selector_key(_admin), do: "missing"
-
-  defp team_selector_value(%{bindings: %{team_key: team_key}}) when is_binary(team_key), do: team_key
-  defp team_selector_value(%{bindings: %{team_id: team_id}}) when is_binary(team_id), do: team_id
-  defp team_selector_value(_admin), do: "missing"
-
-  defp fallback_summary(%{catch_all: %{enabled: true}, allow_default: true}), do: "catch_all and default fallback enabled"
-  defp fallback_summary(%{catch_all: %{enabled: true}}), do: "catch_all enabled"
-  defp fallback_summary(%{allow_default: true}), do: "default fallback enabled"
-  defp fallback_summary(_bindings), do: "explicit projects only"
+  defp panel_context(%{project_statuses: [%{project_slug: slug} | _projects]}) when is_binary(slug), do: slug
+  defp panel_context(%{project_statuses: [%{project_id: id} | _projects]}) when is_binary(id), do: "project_id=#{id}"
+  defp panel_context(_payload), do: nil
 
   defp signal_count(payload) do
     length(payload.work_errors) + length(payload.config_warnings) + length(payload.stale_warnings)
-  end
-
-  defp discovery_error_message({:linear_api_status, status}, admin) do
-    discovery_error_message({:linear_api_status, status, []}, admin)
-  end
-
-  defp discovery_error_message({:linear_api_status, status, errors}, admin) do
-    detail =
-      case errors do
-        [%{message: message} | _rest] when is_binary(message) -> " Linear says: #{message}"
-        _errors -> ""
-      end
-
-    "Linear setup blocked while discovering projects for #{team_selector_key(admin)}=#{team_selector_value(admin)}. " <>
-      "Linear rejected the request with HTTP #{status}; verify the token, team selector, and Linear permissions, then retry." <>
-      detail
-  end
-
-  defp discovery_error_message(:missing_linear_project_discovery_team_selector, _admin) do
-    "Linear setup blocked: configure team_key or team_id before discovering projects."
-  end
-
-  defp discovery_error_message(reason, admin) do
-    "Linear setup blocked while discovering projects for #{team_selector_key(admin)}=#{team_selector_value(admin)}: #{inspect(reason)}"
   end
 
   defp project_groups(%{running: running, retrying: retrying}) do
@@ -972,10 +645,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     "Highest active: #{hotspot.issue_identifier} with #{format_int(hotspot.total_tokens)} tokens."
   end
 
-  defp scope_status_class("Automated"), do: "state-badge state-badge-active"
-  defp scope_status_class("Needs attention"), do: "state-badge state-badge-warning"
-  defp scope_status_class(_status), do: "state-badge state-badge-idle"
-
   defp project_status_label("config_warning"), do: "Config warning"
   defp project_status_label("work_error"), do: "Work error"
   defp project_status_label("retrying"), do: "Retrying"
@@ -998,65 +667,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp repo_root(path) do
-    cond do
-      File.dir?(Path.join(path, ".git")) or File.dir?(Path.join(path, ".jj")) ->
-        path
-
-      Path.dirname(path) == path ->
-        path
-
-      true ->
-        repo_root(Path.dirname(path))
-    end
-  end
-
-  defp admin_project_rows(projects, nil), do: ProfileBindingAdmin.project_rows(projects)
-  defp admin_project_rows(projects, draft_projects), do: ProfileBindingAdmin.project_rows(projects, draft_projects)
-
-  defp scope_summary_rows(draft_projects) do
-    []
-    |> admin_project_rows(draft_projects)
-    |> Enum.filter(& &1.bound?)
-  end
-
-  defp project_search_rows(projects, draft_projects, query, status_filter) do
-    current_rows = admin_project_rows(projects, nil)
-    draft_rows = admin_project_rows(projects, draft_projects)
-
-    retained_bound_keys =
-      (current_rows ++ draft_rows)
-      |> Enum.filter(& &1.bound?)
-      |> Enum.map(& &1.selector_key)
-      |> MapSet.new()
-
-    draft_rows
-    |> Enum.filter(&(MapSet.member?(retained_bound_keys, &1.selector_key) or project_row_matches?(&1, query, status_filter)))
-    |> Enum.sort_by(fn row -> {if(row.bound?, do: 0, else: 1), String.downcase(row.name || "")} end)
-  end
-
-  defp project_row_matches?(row, query, status_filter) do
-    project_row_matches_status?(row, status_filter) and project_row_matches_query?(row, query)
-  end
-
-  defp project_row_matches_status?(row, "all"), do: not row.deleted?
-  defp project_row_matches_status?(row, "completed"), do: not row.deleted? and not row.active?
-  defp project_row_matches_status?(row, _active), do: row.active?
-
-  defp project_row_matches_query?(_row, nil), do: true
-  defp project_row_matches_query?(_row, ""), do: true
-
-  defp project_row_matches_query?(row, query) do
-    normalized_query = query |> to_string() |> String.trim() |> String.downcase()
-
-    [row.name, row.slug_id, row.id, row.project_url]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.any?(fn value -> String.contains?(String.downcase(to_string(value)), normalized_query) end)
-  end
-
-  defp control_interaction_active?(socket) do
-    not is_nil(socket.assigns.draft_projects) or socket.assigns.diagnostics_open or socket.assigns.scope_editor_open
-  end
+  defp control_interaction_active?(socket), do: socket.assigns.diagnostics_open
 
   defp maybe_schedule_runtime_tick(%{running: running}) when running != [] do
     Process.send_after(self(), :runtime_tick, @runtime_tick_ms)

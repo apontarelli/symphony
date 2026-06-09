@@ -109,7 +109,6 @@ defmodule SymphonyElixir.AgentRunner do
   defp resolve_policy_for_issue(issue) do
     case Config.issue_policy(issue) do
       {:ok, policy} -> {:ok, policy}
-      {:skip, reason} -> {:error, {:issue_profile_binding_skipped, reason}}
       {:error, reason} -> {:error, reason}
     end
   end

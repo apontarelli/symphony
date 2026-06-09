@@ -15,8 +15,7 @@ defmodule SymphonyElixir.Workflow.Renderer do
       value_lines(get_in(manifest, ["docs", "entrypoints"]) || []),
       "validation:",
       validation_lines(get_in(manifest, ["validation", "commands"]) || []),
-      "harness.codex_home: #{harness_summary(manifest)}",
-      "bindings.local_file: #{bindings_summary(repo_root, manifest)}"
+      "harness.codex_home: #{harness_summary(manifest)}"
     ]
 
     lines |> List.flatten() |> Enum.join("\n")
@@ -81,16 +80,6 @@ defmodule SymphonyElixir.Workflow.Renderer do
     case get_in(manifest, ["harness", "codex_home"]) do
       nil -> "managed default"
       path -> path
-    end
-  end
-
-  defp bindings_summary(repo_root, manifest) do
-    local_file = get_in(manifest, ["bindings", "local_file"]) || ".symphony.local.yml"
-
-    if File.regular?(Path.join(repo_root, local_file)) do
-      "#{local_file} present"
-    else
-      "#{local_file} optional"
     end
   end
 
@@ -160,10 +149,9 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "posture",
       "harness",
       "codex_home",
-      "bindings",
-      "local_file",
-      "require_local",
       "tracker",
+      "project_id",
+      "project_slug",
       "active_states",
       "terminal_states",
       "polling",

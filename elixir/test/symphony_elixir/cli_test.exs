@@ -26,21 +26,9 @@ defmodule SymphonyElixir.CLITest do
         send(parent, :port_set)
         :ok
       end,
-      set_linear_profile_bindings: fn _bindings ->
-        send(parent, :bindings_set)
-        :ok
-      end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? ->
-        send(parent, :bindings_source_set)
-        :ok
-      end,
       set_profile_override: fn _profile ->
         send(parent, :profile_set)
         :ok
-      end,
-      load_linear_profile_bindings: fn _path ->
-        send(parent, :bindings_loaded)
-        {:ok, %{}}
       end,
       ensure_all_started: fn ->
         send(parent, :started)
@@ -57,10 +45,7 @@ defmodule SymphonyElixir.CLITest do
     refute_received :workflow_set
     refute_received :logs_root_set
     refute_received :port_set
-    refute_received :bindings_set
-    refute_received :bindings_source_set
     refute_received :profile_set
-    refute_received :bindings_loaded
     refute_received :started
   end
 
@@ -70,10 +55,7 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
@@ -95,10 +77,7 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
@@ -123,10 +102,7 @@ defmodule SymphonyElixir.CLITest do
       end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
@@ -146,10 +122,7 @@ defmodule SymphonyElixir.CLITest do
         :ok
       end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
@@ -164,10 +137,7 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
@@ -181,10 +151,7 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:error, :boom} end
     }
 
@@ -199,17 +166,14 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings -> :ok end,
-      set_linear_profile_bindings_source_path: fn _path, _explicit? -> :ok end,
       set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path -> {:ok, %{}} end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
     assert :ok = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
   end
 
-  test "accepts external Linear bindings and one-process profile override" do
+  test "accepts one-process profile override" do
     parent = self()
 
     deps = %{
@@ -217,138 +181,15 @@ defmodule SymphonyElixir.CLITest do
       set_workflow_file_path: fn _path -> :ok end,
       set_logs_root: fn _path -> :ok end,
       set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn bindings ->
-        send(parent, {:bindings, bindings})
-        :ok
-      end,
-      set_linear_profile_bindings_source_path: fn path, explicit? ->
-        send(parent, {:bindings_source, path, explicit?})
-        :ok
-      end,
       set_profile_override: fn profile ->
         send(parent, {:profile, profile})
         :ok
       end,
-      load_linear_profile_bindings: fn path ->
-        send(parent, {:bindings_path, path})
-        {:ok, %{"projects" => [%{"project_slug" => "project-a", "profile" => "strict"}]}}
-      end,
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
-    assert :ok =
-             CLI.evaluate(
-               [@ack_flag, "--linear-bindings", "ops/bindings.yml", "--profile", "strict", "symphony.yml"],
-               deps
-             )
-
-    assert_received {:bindings_path, expanded_path}
-    assert expanded_path == Path.expand("ops/bindings.yml")
-    assert_received {:bindings_source, ^expanded_path, true}
-    assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "strict"}]}}
+    assert :ok = CLI.evaluate([@ack_flag, "--profile", "strict", "symphony.yml"], deps)
     assert_received {:profile, "strict"}
-  end
-
-  test "loads default local Linear bindings next to the manifest" do
-    parent = self()
-    workflow_path = Path.expand("tmp/project/symphony.yml")
-    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
-
-    deps = %{
-      file_regular?: fn path ->
-        path in [workflow_path, default_bindings_path]
-      end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn bindings ->
-        send(parent, {:bindings, bindings})
-        :ok
-      end,
-      set_linear_profile_bindings_source_path: fn path, explicit? ->
-        send(parent, {:bindings_source, path, explicit?})
-        :ok
-      end,
-      set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn path ->
-        send(parent, {:bindings_path, path})
-        {:ok, %{"projects" => [%{"project_slug" => "project-a", "profile" => "default"}]}}
-      end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
-    assert_received {:bindings_source, ^default_bindings_path, false}
-    assert_received {:bindings_path, ^default_bindings_path}
-    assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-a", "profile" => "default"}]}}
-  end
-
-  test "skips default local Linear bindings when the file is absent" do
-    parent = self()
-    workflow_path = Path.expand("tmp/project/symphony.yml")
-
-    deps = %{
-      file_regular?: fn path -> path == workflow_path end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn _bindings ->
-        send(parent, :bindings_set)
-        :ok
-      end,
-      set_linear_profile_bindings_source_path: fn path, explicit? ->
-        send(parent, {:bindings_source, path, explicit?})
-        :ok
-      end,
-      set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn _path ->
-        send(parent, :bindings_loaded)
-        {:ok, %{}}
-      end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, workflow_path], deps)
-    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
-    assert_received {:bindings_source, ^default_bindings_path, false}
-    refute_received :bindings_loaded
-    refute_received :bindings_set
-  end
-
-  test "explicit Linear bindings override the default local bindings path" do
-    parent = self()
-    workflow_path = Path.expand("tmp/project/symphony.yml")
-    explicit_path = Path.expand("tmp/ops/bindings.yml")
-    default_bindings_path = Path.expand("tmp/project/linear-profile-bindings.local.yml")
-
-    deps = %{
-      file_regular?: fn path ->
-        path in [workflow_path, default_bindings_path]
-      end,
-      set_workflow_file_path: fn _path -> :ok end,
-      set_logs_root: fn _path -> :ok end,
-      set_server_port_override: fn _port -> :ok end,
-      set_linear_profile_bindings: fn bindings ->
-        send(parent, {:bindings, bindings})
-        :ok
-      end,
-      set_linear_profile_bindings_source_path: fn path, explicit? ->
-        send(parent, {:bindings_source, path, explicit?})
-        :ok
-      end,
-      set_profile_override: fn _profile -> :ok end,
-      load_linear_profile_bindings: fn path ->
-        send(parent, {:bindings_path, path})
-        {:ok, %{"projects" => [%{"project_slug" => "project-explicit", "profile" => "strict"}]}}
-      end,
-      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
-    }
-
-    assert :ok = CLI.evaluate([@ack_flag, "--linear-bindings", explicit_path, workflow_path], deps)
-    assert_received {:bindings_source, ^explicit_path, true}
-    assert_received {:bindings_path, ^explicit_path}
-    assert_received {:bindings, %{"projects" => [%{"project_slug" => "project-explicit", "profile" => "strict"}]}}
-    refute_received {:bindings_path, ^default_bindings_path}
   end
 
   test "workflow init creates a thin manifest from repo inspection" do
@@ -414,9 +255,6 @@ defmodule SymphonyElixir.CLITest do
       posture: unattended
     harness:
       codex_home: .symphony/codex-home
-    bindings:
-      local_file: .symphony.local.yml
-      require_local: true
     """)
 
     assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
@@ -427,10 +265,9 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "AGENTS.md"
     assert output =~ "harness.codex_home"
     assert output =~ ".symphony/codex-home"
-    assert output =~ "bindings.local_file"
   end
 
-  test "workflow check rejects docs and binding paths that escape the repo" do
+  test "workflow check rejects docs paths that escape the repo" do
     repo = tmp_repo!("symphony-elixir-check-path-escape")
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
 
@@ -456,15 +293,11 @@ defmodule SymphonyElixir.CLITest do
       posture: unattended
     harness:
       codex_home: null
-    bindings:
-      local_file: ../.symphony.local.yml
-      require_local: false
     """)
 
     assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
     assert output =~ "docs.entrypoints[0]"
     assert output =~ "must stay inside the repo"
-    assert output =~ "bindings.local_file"
   end
 
   test "workflow check gives setup remediation when manifest is missing or malformed" do
@@ -481,13 +314,12 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "symphony workflow init --force"
   end
 
-  test "workflow check passes for a ready manifest and local binding file" do
+  test "workflow check passes for a ready manifest" do
     repo = tmp_repo!("symphony-elixir-check-success")
     File.write!(Path.join(repo, "README.md"), "repo docs\n")
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
     File.mkdir_p!(Path.join([repo, ".symphony", "codex-home"]))
     File.write!(Path.join([repo, ".symphony", "codex-home", "AGENTS.md"]), "harness\n")
-    File.write!(Path.join(repo, ".symphony.local.yml"), "linear:\n  project_slug: local-project\n")
 
     assert {:ok, _output} = CLI.evaluate(["workflow", "init", "--repo", repo])
     assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])

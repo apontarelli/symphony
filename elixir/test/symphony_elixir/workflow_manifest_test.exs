@@ -381,7 +381,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       workflow: bad
       runtime: bad
       harness: bad
-      bindings: bad
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
@@ -395,7 +394,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert %{path: "workflow", message: "must be a map"} in diagnostics
     assert %{path: "runtime", message: "must be a map"} in diagnostics
     assert %{path: "harness", message: "must be a map"} in diagnostics
-    assert %{path: "bindings", message: "must be a map"} in diagnostics
   end
 
   test "invalid nested field types return field-level diagnostics" do
@@ -431,9 +429,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       review_routing: true
       harness:
         codex_home: []
-      bindings:
-        local_file: []
-        require_local: yes
       """)
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
@@ -460,8 +455,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert %{path: "workflow.modules", message: "must be a list"} in diagnostics
     assert %{path: "review_routing", message: "must be a map"} in diagnostics
     assert %{path: "harness.codex_home", message: "must be a string"} in diagnostics
-    assert %{path: "bindings.local_file", message: "must be a string"} in diagnostics
-    assert %{path: "bindings.require_local", message: "must be a boolean"} in diagnostics
   end
 
   test "invalid validation commands and list entries return indexed diagnostics" do
@@ -511,7 +504,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         preset: default
         modules:
       harness: {}
-      bindings: {}
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
@@ -521,7 +513,6 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["checks"] == []
     assert config["completion_requirements"] == []
     assert config["manifest"]["harness"]["codex_home"] == nil
-    assert config["manifest"]["bindings"] == %{"local_file" => ".symphony.local.yml", "require_local" => false}
 
     assert config["manifest"]["workflow"]["modules"] == [
              "repo.docs",
@@ -696,8 +687,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert Config.format_error(:missing_linear_api_token) ==
              "Linear API token missing in selected workflow config"
 
-    assert Config.format_error(:missing_linear_project_slug) ==
-             "Linear project slug missing in selected workflow config"
+    assert Config.format_error(:missing_linear_project_scope) ==
+             "Linear project_id or project_slug missing in selected workflow config"
 
     assert Config.format_error(:missing_tracker_kind) ==
              "Tracker kind missing in selected workflow config"
