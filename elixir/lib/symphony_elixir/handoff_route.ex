@@ -7,7 +7,7 @@ defmodule SymphonyElixir.HandoffRoute do
   Rework.
   """
 
-  alias SymphonyElixir.HandoffRoute.PublishPreflightEvidence
+  alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishPreflightEvidence}
 
   defmodule Evidence do
     @moduledoc "Supporting fact used to select a handoff route."
@@ -95,7 +95,6 @@ defmodule SymphonyElixir.HandoffRoute do
   @passed_statuses MapSet.new([:passed, :pass, :success, :clean, :ok])
   @failed_statuses MapSet.new([:failed, :failure, :error, :fix_required, :blocked])
   @decision_statuses MapSet.new([:decision_needed, :needs_decision, :needs_input])
-  @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
   @known_keys %{
     "artifacts" => :artifacts,
     "auto_land" => :auto_land,
@@ -258,6 +257,7 @@ defmodule SymphonyElixir.HandoffRoute do
     publish_preflight = fetch(input, :publish_preflight, nil) |> PublishPreflightEvidence.normalize()
     blocker = normalize_blocker(fetch(input, :blocker, nil)) || PublishPreflightEvidence.blocker(publish_preflight)
     labels = fetch(input, :labels, fetch(input, :issue_labels, [])) |> normalize_label_list()
+    auto_land = AutoLandPolicy.evaluate(%{checks: checks, labels: labels, policy: policy})
 
     evidence_context = %{
       checks: checks,
@@ -268,7 +268,8 @@ defmodule SymphonyElixir.HandoffRoute do
       blocker: blocker,
       decision: decision,
       labels: labels,
-      publish_preflight: publish_preflight
+      publish_preflight: publish_preflight,
+      auto_land: auto_land
     }
 
     %{
@@ -281,6 +282,7 @@ defmodule SymphonyElixir.HandoffRoute do
       publish_preflight: publish_preflight,
       blocker: blocker,
       labels: labels,
+      auto_land: auto_land,
       evidence: base_evidence(evidence_context)
     }
   end
@@ -301,7 +303,7 @@ defmodule SymphonyElixir.HandoffRoute do
   defp missing_auto_land_evidence_decision(context) do
     %Decision{
       route: :blocked,
-      target_state: auto_land_blocked_state(context.policy),
+      target_state: context.auto_land.blocked_state,
       summary: "Missing required auto-land evidence.",
       recommendation: "Record the missing evidence before final route classification.",
       evidence: context.evidence,
@@ -430,7 +432,7 @@ defmodule SymphonyElixir.HandoffRoute do
 
   defp auto_land_candidate?(context) do
     context.checks != [] and
-      auto_land_enabled?(context.policy) and
+      context.auto_land.enabled? and
       not missing_auto_land_evidence?(context) and
       Enum.all?(context.checks, &(Map.get(&1, :status) in @passed_statuses)) and
       Map.get(context.review, :status) in @passed_statuses and
@@ -442,17 +444,9 @@ defmodule SymphonyElixir.HandoffRoute do
       fetch(policy, :requires_human_review, false) == true
   end
 
-  defp auto_land_force_human_review_label?(context) do
-    not is_nil(matched_auto_land_force_human_review_label(context))
-  end
+  defp auto_land_force_human_review_label?(context), do: not is_nil(context.auto_land.matched_force_human_review_label)
 
-  defp auto_land_enabled?(policy) do
-    auto_land = fetch(policy, :auto_land, %{}) |> normalize_map()
-
-    fetch(policy, :auto_land_enabled, false) == true or
-      fetch(auto_land, :enabled, false) == true or
-      (manifest_auto_land_policy?(auto_land) and fetch(auto_land, :posture, "permissive") != "off")
-  end
+  defp missing_auto_land_evidence?(context), do: context.auto_land.missing_checks != []
 
   defp base_evidence(context) do
     []
@@ -463,8 +457,7 @@ defmodule SymphonyElixir.HandoffRoute do
     |> Kernel.++(route_gate_evidence(context.review, context.decision))
     |> Kernel.++(surface_evidence(context.changed_surfaces))
     |> Kernel.++(policy_evidence(context.policy))
-    |> Kernel.++(auto_land_force_label_evidence(%{labels: context.labels, policy: context.policy}))
-    |> Kernel.++(auto_land_evidence(%{checks: context.checks, policy: context.policy}))
+    |> Kernel.++(context.auto_land.evidence)
     |> Kernel.++(artifact_evidence(context.artifacts))
   end
 
@@ -584,118 +577,6 @@ defmodule SymphonyElixir.HandoffRoute do
         metadata: policy
       }
     ]
-  end
-
-  defp auto_land_force_label_evidence(context) do
-    case matched_auto_land_force_human_review_label(context) do
-      nil ->
-        []
-
-      label ->
-        [
-          %Evidence{
-            kind: :policy,
-            status: :applied,
-            summary: "Auto-land forced to human review by issue label: #{label}"
-          }
-        ]
-    end
-  end
-
-  defp auto_land_evidence(context) do
-    required_checks = auto_land_required_checks(context)
-
-    cond do
-      required_checks == [] ->
-        []
-
-      missing_auto_land_evidence?(context) ->
-        [
-          %Evidence{
-            kind: :auto_land,
-            status: :missing,
-            summary: "Missing required auto-land evidence: #{Enum.join(missing_auto_land_checks(context), ", ")}"
-          }
-        ]
-
-      true ->
-        [
-          %Evidence{
-            kind: :auto_land,
-            status: :passed,
-            summary: "Required auto-land evidence is present: #{Enum.join(required_checks, ", ")}"
-          }
-        ]
-    end
-  end
-
-  defp missing_auto_land_evidence?(context) do
-    missing_auto_land_checks(context) != []
-  end
-
-  defp missing_auto_land_checks(context) do
-    required_checks = auto_land_required_checks(context)
-    passed_checks = auto_land_passed_checks(context.checks)
-    required_checks -- passed_checks
-  end
-
-  defp auto_land_passed_checks(checks) do
-    checks
-    |> Enum.filter(&(Map.get(&1, :status) in @passed_statuses))
-    |> Enum.map(& &1.name)
-  end
-
-  defp auto_land_required_checks(%{policy: policy}) do
-    auto_land = fetch(policy, :auto_land, %{}) |> normalize_map()
-
-    if manifest_auto_land_policy?(auto_land) and fetch(auto_land, :posture, "permissive") != "off" do
-      policy
-      |> default_auto_land_required_checks(auto_land)
-      |> Kernel.++(fetch(auto_land, :required_checks, []) |> normalize_string_list())
-      |> Enum.uniq()
-    else
-      []
-    end
-  end
-
-  defp default_auto_land_required_checks(policy, auto_land) do
-    if strict_auto_land_policy?(policy, auto_land) do
-      ~w(tests quality_gates automated_review route_classification sync recovery)
-    else
-      ~w(tests quality_gates automated_review route_classification sync)
-    end
-  end
-
-  defp strict_auto_land_policy?(policy, auto_land) do
-    project = fetch(policy, :project, %{}) |> normalize_map()
-
-    fetch(auto_land, :posture, nil) == "strict" or
-      fetch(project, :criticality, nil) == "production" or
-      fetch(project, :deployment_coupling, nil) in ["production", "production_web"]
-  end
-
-  defp manifest_auto_land_policy?(auto_land) do
-    Enum.any?([:posture, :dry_run, :required_checks, :blocked_state, :failure_state], &Map.has_key?(auto_land, &1))
-  end
-
-  defp matched_auto_land_force_human_review_label(%{labels: labels, policy: policy}) do
-    auto_land = fetch(policy, :auto_land, %{}) |> normalize_map()
-
-    if manifest_auto_land_policy?(auto_land) do
-      label_set = MapSet.new(labels)
-
-      auto_land
-      |> fetch(:force_human_review_labels, @default_force_human_review_labels)
-      |> normalize_label_list()
-      |> Enum.find(&MapSet.member?(label_set, &1))
-    end
-  end
-
-  defp auto_land_blocked_state(policy) do
-    policy
-    |> fetch(:auto_land, %{})
-    |> normalize_map()
-    |> fetch(:blocked_state, "Human Review")
   end
 
   defp artifact_evidence([]), do: []

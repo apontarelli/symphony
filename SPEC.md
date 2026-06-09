@@ -638,7 +638,16 @@ Fields:
 Default required evidence:
 
 - `permissive`: `tests`, `quality_gates`, `automated_review`, `route_classification`, `sync`.
-- `strict`: permissive checks plus `recovery`.
+- `strict`: permissive checks plus explicit production recovery evidence:
+  `deployment_status`, `rollback_plan`, `monitoring_source`, and `incident_issue_creation`.
+  `rollback`, `rollback-plan`, or `rollback_path` evidence may satisfy `rollback_plan` when the
+  implementation normalizes check names, but a generic `recovery` check alone is not sufficient.
+
+For strict policy, the project that owns the production surface owns the deployment status,
+rollback or rollback-plan proof, monitoring source, and incident issue creation path. Symphony's
+auto-land classifier only verifies that this evidence was recorded before selecting dry-run
+`auto_land`; v1 MUST NOT infer deployments from `main`, enable real auto-merge, or create a
+rollback path on behalf of the project.
 
 Decision routes:
 

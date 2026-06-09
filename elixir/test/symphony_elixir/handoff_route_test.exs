@@ -122,44 +122,6 @@ defmodule SymphonyElixir.HandoffRouteTest do
            )
   end
 
-  test "production auto-land policy requires recovery evidence" do
-    decision =
-      HandoffRoute.classify(%{
-        checks: [
-          %{name: "tests", status: :passed},
-          %{name: "quality_gates", status: :passed},
-          %{name: "automated_review", status: :passed},
-          %{name: "route_classification", status: :passed},
-          %{name: "sync", status: :passed}
-        ],
-        review: %{status: :clean},
-        changed_surfaces: [:docs],
-        policy: %{
-          project: %{criticality: "prototype", deployment_coupling: "production_web"},
-          auto_land: %{dry_run: true}
-        }
-      })
-
-    assert decision.route == :blocked
-    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.summary =~ "recovery"))
-  end
-
-  test "strict auto-land posture requires recovery evidence" do
-    decision =
-      HandoffRoute.classify(%{
-        checks: auto_land_checks(),
-        review: %{status: :clean},
-        changed_surfaces: [:docs],
-        policy: %{
-          project: %{criticality: "prototype", deployment_coupling: "none"},
-          auto_land: %{posture: "strict", required_checks: "security-review", dry_run: true}
-        }
-      })
-
-    assert decision.route == :blocked
-    assert Enum.any?(decision.evidence, &(&1.kind == :auto_land and &1.summary =~ "recovery"))
-  end
-
   test "auto-land posture off routes through human review" do
     decision =
       HandoffRoute.classify(%{
@@ -389,7 +351,8 @@ defmodule SymphonyElixir.HandoffRouteTest do
         review: %{status: :commented},
         changed_surfaces: ["unknown surface"],
         policy: %{auto_land: true},
-        decision: %{options: "not a list"}
+        decision: %{options: "not a list"},
+        labels: "not a list"
       })
 
     assert conservative.route == :human_review
