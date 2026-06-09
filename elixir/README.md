@@ -187,6 +187,8 @@ validation:
   commands:
     - name: tests
       command: make test
+delivery:
+  pr_target: main
 automation:
   posture: unattended
   profile: default
@@ -195,7 +197,10 @@ workflow:
 ```
 
 When `project.repository` is present, the default `workspace` module uses it to populate new issue
-workspaces with `git clone --depth 1 <repository> .`.
+workspaces with `git clone --depth 1 <repository> .`. For the default GitHub PR delivery workflow,
+`workflow check` also validates that `project.repository` is a GitHub repository URL and that
+`delivery.pr_target` is explicitly set; `workflow print` shows the resolved publish target as
+`owner/repo:branch`.
 
 Repository-owned profile overrides can live under `runtime.profiles` in committed `symphony.yml`.
 They describe policy available to every run of the repo and should not contain Linear project IDs:
@@ -218,7 +223,8 @@ landing.
 
 Notes:
 
-- If a value is missing, defaults are used.
+- If a value is missing, defaults are used unless a selected workflow module documents a stricter
+  validation requirement, such as the default GitHub PR publish target checks.
 - `tracker.required_labels` is optional. When set, an issue must have every configured label to
   dispatch or continue running. Label matching ignores case and surrounding whitespace. A blank
   configured label matches no issue.

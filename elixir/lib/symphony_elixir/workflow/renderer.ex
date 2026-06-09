@@ -15,6 +15,8 @@ defmodule SymphonyElixir.Workflow.Renderer do
       value_lines(get_in(manifest, ["docs", "entrypoints"]) || []),
       "validation:",
       validation_lines(get_in(manifest, ["validation", "commands"]) || []),
+      "publish target:",
+      publish_target_lines(manifest),
       "harness.codex_home: #{harness_summary(manifest)}"
     ]
 
@@ -41,6 +43,8 @@ defmodule SymphonyElixir.Workflow.Renderer do
         "  delivery.pr_target: #{get_in(manifest, ["delivery", "pr_target"])}",
         "  vcs.mode: #{get_in(manifest, ["vcs", "mode"])}",
         "  harness.codex_home: #{harness_summary(manifest)}",
+        "publish target:",
+        publish_target_lines(manifest),
         "docs:",
         value_lines(get_in(manifest, ["docs", "entrypoints"]) || []),
         "validation:",
@@ -74,6 +78,20 @@ defmodule SymphonyElixir.Workflow.Renderer do
     Enum.map(commands, fn command ->
       "  - #{Map.get(command, "name")}: #{Map.get(command, "command")}"
     end)
+  end
+
+  defp publish_target_lines(manifest) do
+    case Manifest.publish_target(manifest) do
+      %{"display" => display, "repository" => repository, "pr_target" => pr_target} ->
+        [
+          "  repository: #{repository}",
+          "  pr_target: #{pr_target}",
+          "  resolved: #{display}"
+        ]
+
+      _target ->
+        ["  - none"]
+    end
   end
 
   defp harness_summary(manifest) do

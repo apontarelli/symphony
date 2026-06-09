@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Workflow.ModuleRegistry do
   @moduledoc false
 
+  alias SymphonyElixir.Workflow.PublishTarget
   alias SymphonyElixir.WorkflowModules.ProductVisualReview
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
 
@@ -12,7 +13,11 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     delivery_targets: ["main", "non-main"]
   }
 
-  @type diagnostic :: %{path: String.t(), message: String.t()}
+  @type diagnostic :: %{
+          required(:path) => String.t(),
+          required(:message) => String.t(),
+          optional(:remediation) => String.t()
+        }
   @type workflow_module :: %{
           id: String.t(),
           version: String.t(),
@@ -997,6 +1002,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     end
   end
 
+  defp module_manifest_diagnostics("delivery.github_pr", manifest), do: PublishTarget.diagnostics(manifest)
+
   defp module_manifest_diagnostics(_name, _manifest), do: []
 
   defp module_manifest_config("tracker.linear", manifest) do
@@ -1017,6 +1024,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       _repository -> %{}
     end
   end
+
+  defp module_manifest_config("delivery.github_pr", manifest), do: PublishTarget.config(manifest)
 
   defp module_manifest_config("product_visual_review", manifest) do
     {:ok, config} = product_visual_review_config(manifest)

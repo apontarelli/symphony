@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.ModuleRegistry
+  alias SymphonyElixir.Workflow.PublishTarget
 
   test "valid manifest resolves registry defaults into a runtime workflow" do
     assert Manifest.manifest_file_name() == "symphony.yml"
@@ -77,6 +78,14 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["checks"] == [%{"name" => "unit", "command" => "mix test"}]
     assert config["completion_requirements"] == ["tests-green"]
     assert config["delivery"]["pr_target"] == "release/next"
+
+    assert config["publish_target"] == %{
+             "repository" => "github.com/example/target-repo",
+             "pr_target" => "release/next",
+             "github_repository" => "example/target-repo",
+             "display" => "example/target-repo:release/next"
+           }
+
     assert config["policy_metadata"]["profile"] == "default"
     assert config["policy_metadata"]["source"] == "symphony_manifest"
 
@@ -91,6 +100,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert policy["checks"] == [%{"name" => "unit", "command" => "mix test"}]
     assert policy["completion_requirements"] == ["tests-green"]
     assert policy["delivery"]["pr_target"] == "release/next"
+    assert policy["publish_target"]["display"] == "example/target-repo:release/next"
     assert policy["review"] == %{"required" => true}
     assert policy["policy_metadata"]["profile"] == "default"
     assert policy["policy_metadata"]["project_slug"] == "target-repo"
@@ -120,6 +130,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         repository: github.com/example/target-repo
         kind: elixir
         app_kind: web
+      delivery:
+        pr_target: main
       workflow:
         preset: default
         modules:
@@ -150,6 +162,9 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         name: Target Repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       workflow:
         preset: default
         modules:
@@ -177,6 +192,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         name: Target Repo
+        repository: github.com/example/target-repo
       delivery:
         pr_target: main
       review_routing:
@@ -239,8 +255,11 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         name: Target Repo
+        repository: github.com/example/target-repo
         criticality: prototype
         deployment_coupling: none
+      delivery:
+        pr_target: main
       auto_land:
         posture: permissive
         required_checks:
@@ -288,6 +307,10 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     path =
       write_manifest!("""
       version: 1
+      project:
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       auto_land:
         posture: permissive
         dry_run: true
@@ -338,6 +361,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       docs: {}
       validation: {}
       workflow:
@@ -495,6 +520,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         slug: target-repo
         repository: github.com/example/target-repo
         facts:
+      delivery:
+        pr_target: main
       docs:
       validation: {}
       automation:
@@ -530,6 +557,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       workflow:
         preset: release-channel
       """)
@@ -542,6 +571,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       project:
         slug: target-repo
         repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       workflow:
         modules:
           - observability
@@ -592,12 +623,80 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              ModuleRegistry.module_config("product_visual_review", 0, invalid_product_visual_review_manifest)
   end
 
+  test "module registry owns GitHub PR delivery publish target diagnostics and config" do
+    invalid_publish_manifest = %{
+      "project" => %{"repository" => "https://gitlab.com/example/target-repo"},
+      "delivery" => %{"pr_target" => "origin/main"},
+      "_field_sources" => %{"delivery_pr_target_explicit" => true}
+    }
+
+    assert ModuleRegistry.module_diagnostics("delivery.github_pr", 0, invalid_publish_manifest) == [
+             %{
+               path: "project.repository",
+               message: "must be a GitHub repository URL for publish handoff",
+               remediation: "Set `project.repository` to a GitHub HTTPS or SSH URL."
+             },
+             %{
+               path: "delivery.pr_target",
+               message: "must be an unambiguous branch name for publish handoff",
+               remediation: "Use a branch name such as `main`, not `origin/main`."
+             }
+           ]
+
+    valid_publish_manifest = %{
+      "project" => %{"repository" => "git@github.com:example/target-repo.git"},
+      "delivery" => %{"pr_target" => "project/integration"},
+      "_field_sources" => %{"delivery_pr_target_explicit" => true}
+    }
+
+    assert {:ok, config} = ModuleRegistry.module_config("delivery.github_pr", 0, valid_publish_manifest)
+
+    assert config["publish_target"] == %{
+             "repository" => "git@github.com:example/target-repo.git",
+             "pr_target" => "project/integration",
+             "github_repository" => "example/target-repo",
+             "display" => "example/target-repo:project/integration"
+           }
+  end
+
+  test "publish target accepts supported GitHub URL forms and rejects defensive invalids" do
+    assert PublishTarget.build("ssh://git@github.com/example/target-repo.git", "main") == %{
+             "repository" => "ssh://git@github.com/example/target-repo.git",
+             "pr_target" => "main",
+             "github_repository" => "example/target-repo",
+             "display" => "example/target-repo:main"
+           }
+
+    assert PublishTarget.build(123, "main") == nil
+    assert PublishTarget.build("https://github.com/example", "main") == nil
+    assert PublishTarget.config(%{"project" => %{"repository" => "https://github.com/example"}}) == %{}
+    assert PublishTarget.ambiguous_pr_target?(123)
+  end
+
+  test "module registry prompt omits optional repository context when absent" do
+    path =
+      write_manifest!("""
+      project:
+        slug: no-repo
+      delivery:
+        pr_target: main
+      """)
+
+    assert {:ok, manifest} = Manifest.read(path)
+    assert {:ok, %{prompt: prompt}} = ModuleRegistry.compile_manifest(manifest)
+
+    assert prompt =~ "Project slug: no-repo"
+    refute prompt =~ "Repository:"
+  end
+
   test "default resolution does not require release-channel fields" do
     path =
       write_manifest!("""
       project:
         slug: target-repo
         repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
@@ -619,6 +718,20 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["delivery"]["pr_target"] == "main"
   end
 
+  test "publish validation is skipped when GitHub PR delivery is not enabled" do
+    repo_root = Path.join(System.tmp_dir!(), "symphony-non-publish-test-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(repo_root)
+
+    manifest =
+      Manifest.default(repo_root, [])
+      |> put_in(["workflow", "modules"], ["repo.docs", "validation.commands"])
+
+    report = Manifest.validate(repo_root, manifest)
+
+    refute Enum.any?(report.errors, &(&1.path == "project.repository"))
+    refute Enum.any?(report.errors, &(&1.path == "delivery.pr_target"))
+  end
+
   test "manifest defaults validate through typed daemon config and render retry context" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
@@ -634,6 +747,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         app_kind: web
         facts:
           owner: platform
+      delivery:
+        pr_target: main
       vcs:
         mode: jj
         posture: stacked

@@ -132,7 +132,12 @@ defmodule SymphonyElixir.ExtensionsTest do
   test "workflow store keeps last good manifest when manifest reload fails" do
     ensure_workflow_store_running()
     manifest_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "symphony.yml")
-    File.write!(manifest_path, "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\n")
+
+    File.write!(
+      manifest_path,
+      "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\ndelivery:\n  pr_target: main\n"
+    )
+
     Workflow.set_workflow_file_path(manifest_path)
 
     assert {:ok, %{config: config}} = Workflow.current()
@@ -162,7 +167,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     File.write!(
       manifest_path,
-      "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\n"
+      "project:\n  slug: manifest-repo\n  repository: github.com/example/manifest-repo\ndelivery:\n  pr_target: main\n"
     )
 
     Application.delete_env(:symphony_elixir, :workflow_file_path)
