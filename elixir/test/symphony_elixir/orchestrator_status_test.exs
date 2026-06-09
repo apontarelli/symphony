@@ -492,7 +492,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         "symphony-elixir-orchestrator-preflight-#{System.unique_integer([:positive])}"
       )
 
-    File.mkdir_p!(workspace)
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
     on_exit(fn -> File.rm_rf(workspace) end)
 
     issue_id = "issue-publish-preflight"
@@ -529,6 +530,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       workspace_path: workspace,
       worker_host: nil,
       policy: %{
+        "publish_target" => %{
+          "repository" => "https://github.com/example/project",
+          "pr_target" => "main",
+          "github_repository" => "example/project",
+          "display" => "example/project:main"
+        },
         "manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}},
         "delivery" => %{"pr_target" => "main"}
       },
@@ -548,7 +555,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
          completion: %{
-           checks: [%{name: "tests", status: :passed}]
+           checks: [%{name: "tests", status: :passed}],
+           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "tests", status: "passed"}]}
          }
        }}
     )
@@ -566,6 +574,150 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              evidence,
              &(&1.kind == "publish_preflight" and &1.status == "blocked" and &1.metadata.failure_class == :remote_push_unavailable)
            )
+  end
+
+  test "normal worker exit publishes validated completion and records PR evidence" do
+    parent = self()
+    previous_preflight_runner = Application.get_env(:symphony_elixir, :publish_preflight_runner)
+    previous_publish_runner = Application.get_env(:symphony_elixir, :publish_handoff_runner)
+
+    on_exit(fn ->
+      case previous_preflight_runner do
+        nil -> Application.delete_env(:symphony_elixir, :publish_preflight_runner)
+        runner -> Application.put_env(:symphony_elixir, :publish_preflight_runner, runner)
+      end
+
+      case previous_publish_runner do
+        nil -> Application.delete_env(:symphony_elixir, :publish_handoff_runner)
+        runner -> Application.put_env(:symphony_elixir, :publish_handoff_runner, runner)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :publish_preflight_runner, fn %{step: _step} ->
+      {:ok, %{status: 0, output: "ok"}}
+    end)
+
+    Application.put_env(:symphony_elixir, :publish_handoff_runner, fn %{step: step, command: command, args: args} ->
+      send(parent, {:publish_handoff_command, step, command, args})
+
+      output =
+        case step do
+          :jj_remote_list -> "origin https://github.com/example/project.git\n"
+          :jj_changed_files -> "lib/source.ex\n"
+          :pr_view -> "no pull request found"
+          :pr_create -> "https://github.com/example/project/pull/309\n"
+          :jj_current -> "abcdefgh 1234567\n"
+          _step -> "ok\n"
+        end
+
+      status = if step == :pr_view, do: 1, else: 0
+      {:ok, %{status: status, output: output}}
+    end)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-orchestrator-publish-handoff-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue_id = "issue-publish-handoff"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "SID-309",
+      title: "Publish validated workspace changes",
+      state: "In Progress",
+      url: "https://example.org/issues/SID-309"
+    }
+
+    orchestrator_name = Module.concat(__MODULE__, :PublishHandoffOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+    process_ref = make_ref()
+
+    running_entry = %{
+      pid: self(),
+      ref: process_ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: nil,
+      last_codex_message: nil,
+      last_codex_timestamp: nil,
+      last_codex_event: nil,
+      workspace_path: workspace,
+      worker_host: nil,
+      policy: %{
+        "publish_target" => %{
+          "repository" => "https://github.com/example/project",
+          "pr_target" => "main",
+          "github_repository" => "example/project",
+          "display" => "example/project:main"
+        },
+        "manifest" => %{
+          "project" => %{"repository" => "https://github.com/example/project"},
+          "vcs" => %{"mode" => "jj"}
+        },
+        "delivery" => %{"pr_target" => "main"}
+      },
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.utc_now(),
+         completion: %{
+           checks: [%{name: "all", status: :passed, summary: "all passed"}],
+           review: %{status: :clean, summary: "automated review passed"},
+           changed_surfaces: ["workflow"],
+           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "all", status: "passed"}]}
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, process_ref, :process, self(), :normal})
+    completed_state = :sys.get_state(pid)
+
+    assert_receive {:publish_handoff_command, :jj_push, "jj", ["git", "push", "--remote", "origin", "-b", "ticket/sid-309", "--allow-new"]}
+    assert_receive {:memory_tracker_comment, ^issue_id, comment}
+    assert comment =~ "publish/passed: Published PR https://github.com/example/project/pull/309 targeting example/project:main."
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+
+    assert %{
+             route: "human_review",
+             target_state: "Human Review",
+             evidence: evidence
+           } = completed_state.handoff_routes[issue_id]
+
+    assert Enum.any?(evidence, fn evidence ->
+             evidence.kind == "publish" and evidence.status == "passed" and
+               evidence.metadata.pr_url == "https://github.com/example/project/pull/309" and
+               evidence.metadata.target == "example/project:main" and
+               evidence.metadata.branch == "ticket/sid-309" and
+               evidence.metadata.linear_issue.identifier == "SID-309"
+           end)
   end
 
   test "normal worker exit without completion metadata does not run publish preflight" do

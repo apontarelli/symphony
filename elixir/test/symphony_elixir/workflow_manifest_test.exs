@@ -667,6 +667,32 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              "display" => "example/target-repo:main"
            }
 
+    assert PublishTarget.resolve_policy(%{
+             publish_target: %{
+               repository: " https://github.com/example/target-repo.git ",
+               pr_target: " main ",
+               github_repository: "stale/wrong"
+             }
+           }) == %{
+             repository: "https://github.com/example/target-repo.git",
+             base_branch: "main",
+             github_repository: "example/target-repo"
+           }
+
+    assert PublishTarget.resolve_policy(nil) == nil
+
+    assert PublishTarget.resolve_policy(%{"publish_target" => %{"repository" => " ", "pr_target" => " "}}) == %{
+             repository: nil,
+             base_branch: nil,
+             github_repository: nil
+           }
+
+    assert PublishTarget.github_repository_slug(123) == nil
+    assert PublishTarget.github_repository_slug("https://gitlab.com/example/target-repo") == nil
+    assert PublishTarget.remote_matches?(%{github_repository: "example/target-repo"}, "git@github.com:example/target-repo.git")
+    refute PublishTarget.remote_matches?(%{github_repository: nil}, "git@github.com:example/target-repo.git")
+    refute PublishTarget.remote_matches?(%{github_repository: "example/target-repo"}, "https://gitlab.com/example/target-repo")
+
     assert PublishTarget.build(123, "main") == nil
     assert PublishTarget.build("https://github.com/example", "main") == nil
     assert PublishTarget.config(%{"project" => %{"repository" => "https://github.com/example"}}) == %{}

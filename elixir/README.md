@@ -49,6 +49,14 @@ normalized workspace paths. Absolute paths, traversal, symlink escapes, generate
 logs, caches, temporary app data, local secrets, and operator-local config are rejected with
 structured route evidence.
 
+When publish-target validation, host preflight, and changed-file manifest validation all pass,
+Symphony publishes the completed workspace under host control. The host creates or updates a
+deterministic `ticket/<issue-id>` branch or jj bookmark, pushes it to the resolved GitHub repository,
+opens or updates a PR against the configured base branch, and records the PR URL, target repository,
+base branch, branch or change id, validation summary, and Linear issue evidence in the handoff
+route. Publish failures are recorded as structured blocked evidence instead of moving the issue as
+ready for merge.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

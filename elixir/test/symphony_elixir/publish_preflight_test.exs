@@ -56,7 +56,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
 
     assert result.status == :blocked
     assert result.repository == nil
-    assert result.base_branch == "main"
+    assert result.base_branch == nil
     assert Enum.map(result.failures, & &1.class) == [:workspace_vcs_metadata_unavailable, :pr_creation_unavailable]
   end
 
@@ -78,6 +78,64 @@ defmodule SymphonyElixir.PublishPreflightTest do
     refute result.capabilities.remote_push
     assert result.capabilities.pr_creation
     assert Enum.map(result.failures, & &1.class) == [:remote_push_unavailable]
+  end
+
+  test "uses jj remote push dry-run when git compatibility commands are unavailable" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-publish-preflight-jj-push-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      fake_bin = Path.join(test_root, "bin")
+      command_log = Path.join(test_root, "commands.log")
+
+      File.mkdir_p!(workspace)
+      File.mkdir_p!(fake_bin)
+
+      File.write!(Path.join(fake_bin, "git"), """
+      #!/bin/sh
+      printf 'git %s\\n' "$*" >> "$COMMAND_LOG"
+      exit 1
+      """)
+
+      File.write!(Path.join(fake_bin, "jj"), """
+      #!/bin/sh
+      printf 'jj %s\\n' "$*" >> "$COMMAND_LOG"
+      if [ "$1" = "root" ]; then
+        exit 0
+      fi
+      if [ "$1" = "git" ] && [ "$2" = "remote" ] && [ "$3" = "list" ]; then
+        printf 'origin https://github.com/example/project\\n'
+        exit 0
+      fi
+      if [ "$1" = "git" ] && [ "$2" = "push" ]; then
+        exit 0
+      fi
+      exit 1
+      """)
+
+      File.write!(Path.join(fake_bin, "gh"), "#!/bin/sh\nexit 0\n")
+
+      Enum.each(["git", "jj", "gh"], &File.chmod!(Path.join(fake_bin, &1), 0o755))
+
+      result =
+        PublishPreflight.run(workspace, publish_policy(), env: [{"PATH", fake_bin <> ":" <> System.get_env("PATH", "")}, {"COMMAND_LOG", command_log}])
+
+      assert result.status == :passed
+      assert result.capabilities.workspace_vcs_metadata
+      assert result.capabilities.remote_push
+      assert result.capabilities.pr_creation
+      assert result.failures == []
+
+      commands = File.read!(command_log)
+      assert commands =~ "jj git remote list"
+      assert commands =~ "jj git push --dry-run --remote origin --change @"
+    after
+      File.rm_rf(test_root)
+    end
   end
 
   test "reports PR creation unavailable separately from remote push" do
@@ -138,6 +196,49 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert blank_values.repository == nil
     assert blank_values.base_branch == nil
     assert Enum.map(blank_values.failures, & &1.class) == [:pr_creation_unavailable]
+  end
+
+  test "reports incomplete resolved publish targets before PR capability checks" do
+    workspace = preflight_workspace!()
+
+    missing_base =
+      PublishPreflight.run(
+        workspace,
+        %{
+          "publish_target" => %{
+            "repository" => "https://github.com/example/project.git",
+            "github_repository" => "example/project"
+          }
+        },
+        runner:
+          preflight_runner(%{
+            workspace_vcs_metadata: {0, "ok"},
+            remote_push: {0, "ok"}
+          })
+      )
+
+    assert missing_base.status == :blocked
+    assert [%{class: :pr_creation_unavailable, details: "publish base branch is missing"}] = missing_base.failures
+
+    invalid_repository =
+      PublishPreflight.run(
+        workspace,
+        %{
+          "publish_target" => %{
+            "repository" => "https://example.com/project.git",
+            "pr_target" => "main",
+            "github_repository" => "example/project"
+          }
+        },
+        runner:
+          preflight_runner(%{
+            workspace_vcs_metadata: {0, "ok"},
+            remote_push: {0, "ok"}
+          })
+      )
+
+    assert invalid_repository.status == :blocked
+    assert [%{class: :pr_creation_unavailable, details: "publish repository is not a GitHub repository"}] = invalid_repository.failures
   end
 
   test "reports command runner errors" do
@@ -295,6 +396,12 @@ defmodule SymphonyElixir.PublishPreflightTest do
 
   defp publish_policy do
     %{
+      "publish_target" => %{
+        "repository" => "https://github.com/example/project",
+        "pr_target" => "release/next",
+        "github_repository" => "example/project",
+        "display" => "example/project:release/next"
+      },
       "manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}},
       "delivery" => %{"pr_target" => "release/next"}
     }

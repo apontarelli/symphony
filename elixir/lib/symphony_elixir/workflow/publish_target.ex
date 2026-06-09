@@ -6,6 +6,15 @@ defmodule SymphonyElixir.Workflow.PublishTarget do
           required(:message) => String.t(),
           optional(:remediation) => String.t()
         }
+  @type resolved :: %{
+          repository: String.t() | nil,
+          base_branch: String.t() | nil,
+          github_repository: String.t() | nil
+        }
+  @target_fields %{
+    "repository" => :repository,
+    "pr_target" => :pr_target
+  }
 
   @spec build(String.t() | nil, String.t() | nil) :: map() | nil
   def build(repository, pr_target) when is_binary(repository) and is_binary(pr_target) do
@@ -24,6 +33,44 @@ defmodule SymphonyElixir.Workflow.PublishTarget do
   end
 
   def build(_repository, _pr_target), do: nil
+
+  @spec resolve_policy(map()) :: resolved() | nil
+  def resolve_policy(policy) when is_map(policy) do
+    case Map.get(policy, "publish_target", Map.get(policy, :publish_target)) do
+      target when is_map(target) ->
+        repository = target_field(target, "repository")
+        base_branch = target_field(target, "pr_target")
+
+        %{
+          repository: repository,
+          base_branch: base_branch,
+          github_repository: github_repository_slug(repository)
+        }
+
+      _target ->
+        nil
+    end
+  end
+
+  def resolve_policy(_policy), do: nil
+
+  @spec github_repository_slug(String.t() | nil) :: String.t() | nil
+  def github_repository_slug(repository) when is_binary(repository) do
+    case github_repository_path(repository) do
+      {:ok, slug} -> slug
+      :error -> nil
+    end
+  end
+
+  def github_repository_slug(_repository), do: nil
+
+  @spec remote_matches?(resolved(), String.t()) :: boolean()
+  def remote_matches?(%{github_repository: github_repository}, remote_url)
+      when is_binary(github_repository) and is_binary(remote_url) do
+    github_repository_slug(remote_url) == github_repository
+  end
+
+  def remote_matches?(_target, _remote_url), do: false
 
   @spec diagnostics(map()) :: [diagnostic()]
   def diagnostics(manifest) when is_map(manifest) do
@@ -78,6 +125,26 @@ defmodule SymphonyElixir.Workflow.PublishTarget do
           }
           | errors
         ]
+    end
+  end
+
+  defp target_field(target, field) when is_map(target) do
+    atom_key = Map.fetch!(@target_fields, field)
+
+    target
+    |> Map.get(field, Map.get(target, atom_key))
+    |> optional_trimmed_string()
+  end
+
+  defp optional_trimmed_string(nil), do: nil
+
+  defp optional_trimmed_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      trimmed -> trimmed
     end
   end
 

@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     HandoffRoute,
     HandoffRouteRecorder,
+    PublishHandoff,
     PublishPreflight,
     StatusDashboard,
     Tracker,
@@ -19,6 +20,7 @@ defmodule SymphonyElixir.Orchestrator do
   }
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Workflow.PublishTarget
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -1111,6 +1113,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp complete_issue(%State{} = state, issue_id, running_entry) do
     running_entry = maybe_put_publish_preflight(running_entry)
+    running_entry = maybe_put_publish_handoff(running_entry)
     handoff_route = handoff_decision_for_running_entry(running_entry, nil)
 
     if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
@@ -1424,7 +1427,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp policy_tracking_fields(_policy), do: %{}
 
   defp maybe_put_publish_preflight(%{policy: policy} = running_entry) when is_map(policy) do
-    if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
+    if publish_handoff_policy?(policy) and HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
       preflight =
         running_entry
         |> Map.get(:workspace_path)
@@ -1440,6 +1443,60 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_put_publish_preflight(running_entry), do: running_entry
+
+  defp maybe_put_publish_handoff(%{policy: policy, completion: completion} = running_entry)
+       when is_map(policy) and is_map(completion) do
+    if publish_handoff_policy?(policy) and publish_handoff_needed?(completion) do
+      running_entry
+      |> run_publish_handoff(policy, completion)
+      |> maybe_store_publish_handoff(running_entry)
+    else
+      running_entry
+    end
+  end
+
+  defp maybe_put_publish_handoff(running_entry), do: running_entry
+
+  defp publish_handoff_policy?(policy) when is_map(policy), do: not is_nil(PublishTarget.resolve_policy(policy))
+
+  defp publish_handoff_needed?(completion) do
+    HandoffRouteRecorder.completion_metadata?(completion) and
+      is_nil(completion_field(completion, :publish_handoff))
+  end
+
+  defp run_publish_handoff(running_entry, policy, completion) do
+    PublishHandoff.run(
+      Map.get(running_entry, :workspace_path),
+      policy,
+      Map.get(running_entry, :issue),
+      completion,
+      worker_host: Map.get(running_entry, :worker_host)
+    )
+  end
+
+  defp maybe_store_publish_handoff(%{status: :passed} = publish_handoff, running_entry) do
+    put_publish_handoff(running_entry, publish_handoff)
+  end
+
+  defp maybe_store_publish_handoff(%{attempted: true} = publish_handoff, running_entry) do
+    put_publish_handoff(running_entry, publish_handoff)
+  end
+
+  defp maybe_store_publish_handoff(_publish_handoff, running_entry), do: running_entry
+
+  defp put_publish_handoff(running_entry, publish_handoff) do
+    Map.update(running_entry, :completion, %{publish_handoff: publish_handoff}, fn
+      completion when is_map(completion) ->
+        Map.put(completion, :publish_handoff, publish_handoff)
+
+      _completion ->
+        %{publish_handoff: publish_handoff}
+    end)
+  end
+
+  defp completion_field(completion, key) when is_map(completion) do
+    Map.get(completion, key, Map.get(completion, to_string(key)))
+  end
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
