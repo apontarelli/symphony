@@ -431,7 +431,6 @@ Optional manifest fields:
 - `auto_land.required_checks` (list of strings, default `[]`)
 - `auto_land.force_human_review_labels` (list of strings, default includes `force-human-review`,
   `human-review`, `manual-review`, and `no-auto-land`)
-- `auto_land.failure_state` (string, default `Rework`)
 - `auto_land.blocked_state` (string, default `Human Review`)
 - `auto_land.dry_run` (boolean, default `true`)
 - `review_routing` (object)
@@ -607,9 +606,10 @@ MUST be deterministic for a given preset ref and implementation version.
 
 #### 5.3.8 `auto_land` (object, OPTIONAL extension)
 
-`auto_land` describes the side-effect-free classification policy used before final handoff. It can
-select dry-run auto-land, human review, rework, or blocked routing, but v1 MUST NOT merge or land a
-PR from auto-land.
+`auto_land` describes the classification policy used before final handoff. It can select dry-run
+auto-land, guarded real auto-land, human review, rework, or blocked routing. Real auto-land MUST use
+the configured land/merge flow for the final merge; classifiers MUST NOT bypass that flow with a
+direct merge command.
 
 Fields:
 
@@ -623,21 +623,23 @@ Fields:
 - `force_human_review_labels` (list of strings)
   - Default: `force-human-review`, `human-review`, `manual-review`, `no-auto-land`.
   - Any matching issue label forces the route to human review.
-- `failure_state` (string)
-  - Default: `Rework`.
-  - Target tracker state for failed required evidence when the workflow applies the decision.
 - `blocked_state` (string)
   - Default: `Human Review`.
   - Target tracker state for missing required evidence when the workflow applies the decision.
 - `dry_run` (boolean)
   - Default: `true`.
   - When true, Symphony may classify and record an `auto_land` decision but MUST NOT merge or land
-    the PR.
-  - v1 implementations MUST reject or ignore `false` until landing integration is implemented.
+    the PR; the selected tracker state remains the human-review visibility state.
+  - When false, the repository has explicitly opted into guarded real auto-land. A successful
+    `auto_land` decision MAY move the issue to `Merging`, where the land flow performs final
+    check/review polling and the merge.
 
 Default required evidence:
 
 - `permissive`: `tests`, `quality_gates`, `automated_review`, `route_classification`, `sync`.
+- Real auto-land (`dry_run: false`) additionally requires `pr_feedback` evidence proving top-level
+  PR comments, inline review comments, and review summaries were swept with no unresolved
+  actionable feedback.
 - `strict`: permissive checks plus explicit production recovery evidence:
   `deployment_status`, `rollback_plan`, `monitoring_source`, and `incident_issue_creation`.
   `rollback`, `rollback-plan`, or `rollback_path` evidence may satisfy `rollback_plan` when the
@@ -645,13 +647,13 @@ Default required evidence:
 
 For strict policy, the project that owns the production surface owns the deployment status,
 rollback or rollback-plan proof, monitoring source, and incident issue creation path. Symphony's
-auto-land classifier only verifies that this evidence was recorded before selecting dry-run
-`auto_land`; v1 MUST NOT infer deployments from `main`, enable real auto-merge, or create a
-rollback path on behalf of the project.
+auto-land classifier only verifies that this evidence was recorded before selecting `auto_land`;
+Symphony MUST NOT infer deployments from `main` or create a rollback path on behalf of the project.
 
 Decision routes:
 
-- `auto_land`: all required evidence passed and no force-human-review override matched.
+- `auto_land`: all required evidence passed and no force-human-review override matched. Dry-run
+  auto-land targets the human-review visibility state; real auto-land targets `Merging`.
 - `human_review`: posture is `off`, or a force-human-review label matched.
 - `rework`: one or more required evidence checks failed.
 - `blocked`: one or more required evidence checks are missing.
@@ -1860,6 +1862,9 @@ Route types:
   - Allowed only when all required checks pass, automated review has no blocking findings, PR or
     merge checks are green if a PR is used, no actionable reviewer feedback is outstanding, and the
     risk/surface evidence stays within the configured auto-land envelope.
+  - Dry-run auto-land records eligibility without merging. Real auto-land requires explicit
+    repository opt-in and should transition to `Merging` so the land flow owns final polling and
+    merge execution.
 - `human_review`
   - Use when work is complete and validated, but policy or risk requires Antonio or another human to
     review before merge/land.

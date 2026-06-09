@@ -86,7 +86,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
         "Maintain exactly one active `## Codex Workpad` comment as the source of truth for plan, acceptance criteria, validation, review evidence, and blockers.",
         "Before implementation, reproduce the current behavior, refine the plan, and sync the delivery target.",
         "Execute ticket-provided validation and the strongest feasible quality gate before handoff.",
-        "Before Human Review, publish the PR, link it to the issue, ensure required PR metadata, sweep top-level and inline PR feedback, and confirm checks are green.",
+        "Before Human Review or guarded auto-land routing, publish the PR, link it to the issue, ensure required PR metadata, sweep top-level and inline PR feedback, and confirm checks are green.",
         "Stop early only for missing required auth, permissions, or secrets; document the blocker and unblock action in the workpad.",
         "Final responses report completed actions and blockers only."
       ]
@@ -143,7 +143,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       prompt_sections: [
         "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
         "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
-        "`Merging` means approval was granted; run the configured land skill/flow and never bypass it with a direct merge command.",
+        "`Merging` means human approval or guarded auto-land approval was granted; run the configured land skill/flow and never bypass it with a direct merge command.",
         "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
       ],
       content: nil,
@@ -435,7 +435,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     %{
       id: "auto-land-routing",
       version: "v1",
-      summary: "Dry-run auto-land classification before final ticket routing.",
+      summary: "Guarded auto-land classification before final ticket routing.",
       default?: true,
       compatibility: @compatibility,
       pins: %{registry: @registry_pin, module: "auto-land-routing@v1"},
@@ -443,23 +443,26 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       prompt_sections: [],
       content: """
       Before final routing, run Auto-land route classification with the current workflow policy,
-      issue labels, validation evidence, PR checks, automated review result, and sync result.
+      issue labels, validation evidence, PR checks, structured PR feedback sweep, automated review result, and
+      sync result.
 
       Record structured completion evidence for the handoff route classifier: validation checks,
-      quality gates, automated review, route classification, sync evidence, issue labels, changed_files
-      or change_manifest.changed_files, and any project-specific required auto-land checks. Changed
-      file paths must be relative, normalized workspace paths; host validation rejects absolute
-      paths, traversal, symlink escapes, generated runtime state, caches, logs, temporary app data,
-      local secret files, and operator-local config. Record the selected handoff route in the
-      workpad. When a PR exists, also record the decision in a PR handoff comment or existing PR
-      handoff location.
+      quality gates, automated review, structured PR feedback sweep, route classification, sync
+      evidence, issue labels, changed_files or change_manifest.changed_files, and any project-specific
+      required auto-land checks. Changed file paths must be relative, normalized workspace paths; host
+      validation rejects absolute paths, traversal, symlink escapes, generated runtime state, caches,
+      logs, temporary app data, local secret files, and operator-local config. Record the selected
+      handoff route in the workpad. When a PR exists, also record the decision in a PR handoff comment
+      or existing PR handoff location.
 
       Treat dry-run auto-land as a visibility route: record that Symphony selected dry-run
-      auto-land, move the issue to Human Review for v1 visibility, and do not merge. In v1,
-      no merge or landing command is allowed from auto-land. If the decision selects human_review, rework,
-      or blocked, move the issue to the selected state after recording diagnostics.
+      auto-land, move the issue to Human Review for visibility, and do not merge. Treat real
+      auto-land as guarded landing only when the project explicitly sets `auto_land.dry_run: false`
+      and all required evidence is present; route the issue to Merging so the existing land flow
+      performs final check/review polling and the merge. If the decision selects human_review,
+      rework, or blocked, move the issue to the selected state after recording diagnostics.
       """,
-      description: "Dry-run auto-land classification before final ticket routing"
+      description: "Guarded auto-land classification before final ticket routing"
     },
     %{
       id: "land-merge",

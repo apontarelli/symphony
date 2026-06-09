@@ -1142,11 +1142,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert auto_land.force_human_review_labels == ["manual-review"]
   end
 
-  test "auto-land config rejects real landing until integration exists" do
+  test "auto-land config accepts explicit real landing opt-in" do
     changeset = AutoLand.changeset(%AutoLand{}, %{"dry_run" => false})
 
-    assert {:dry_run, {"must be true until landing integration is enabled", _metadata}} =
-             List.keyfind(changeset.errors, :dry_run, 0)
+    assert {:ok, auto_land} = Changeset.apply_action(changeset, :validate)
+    assert auto_land.dry_run == false
   end
 
   test "config resolves $VAR references for env-backed secret and path values" do

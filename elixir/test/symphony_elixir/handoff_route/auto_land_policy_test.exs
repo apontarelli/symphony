@@ -3,6 +3,63 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicyTest do
 
   alias SymphonyElixir.HandoffRoute.AutoLandPolicy
 
+  test "real permissive auto-land requires PR feedback sweep evidence" do
+    result =
+      AutoLandPolicy.evaluate(%{
+        checks: auto_land_checks([]),
+        labels: [],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: false}
+        }
+      })
+
+    assert result.enabled?
+    assert result.dry_run? == false
+    assert "pr_feedback" in result.required_checks
+    assert result.missing_checks == ["pr_feedback"]
+  end
+
+  test "real permissive auto-land requires each default evidence gate" do
+    required_checks = ~w(tests quality_gates automated_review route_classification sync pr_feedback)
+
+    for omitted_check <- required_checks do
+      checks =
+        required_checks
+        |> List.delete(omitted_check)
+        |> Enum.map(&auto_land_check/1)
+
+      result =
+        AutoLandPolicy.evaluate(%{
+          checks: checks,
+          labels: [],
+          policy: %{
+            project: %{criticality: "prototype", deployment_coupling: "none"},
+            auto_land: %{posture: "permissive", dry_run: false}
+          }
+        })
+
+      assert omitted_check in result.missing_checks
+    end
+  end
+
+  test "dry-run permissive auto-land preserves existing evidence requirements" do
+    result =
+      AutoLandPolicy.evaluate(%{
+        checks: auto_land_checks([]),
+        labels: [],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: true}
+        }
+      })
+
+    assert result.enabled?
+    assert result.dry_run?
+    refute "pr_feedback" in result.required_checks
+    assert result.missing_checks == []
+  end
+
   test "strict production policy requires rollback plan evidence instead of generic recovery" do
     result =
       AutoLandPolicy.evaluate(%{
@@ -40,6 +97,29 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicyTest do
              result.evidence,
              &(&1.kind == :auto_land and &1.status == :passed and &1.summary =~ "rollback_plan")
            )
+  end
+
+  test "strict production policy requires each recovery evidence gate" do
+    recovery_checks = strict_recovery_checks()
+
+    for omitted_check <- recovery_checks do
+      checks =
+        recovery_checks
+        |> List.delete(omitted_check)
+        |> auto_land_checks()
+
+      result =
+        AutoLandPolicy.evaluate(%{
+          checks: checks,
+          labels: [],
+          policy: %{
+            project: %{criticality: "prototype", deployment_coupling: "production_web"},
+            auto_land: %{dry_run: true}
+          }
+        })
+
+      assert omitted_check in result.missing_checks
+    end
   end
 
   test "strict auto-land posture accepts rollback-plan alias as rollback plan proof" do
@@ -139,10 +219,16 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicyTest do
   defp auto_land_checks(extra_checks) do
     ~w(tests quality_gates automated_review route_classification sync)
     |> Kernel.++(extra_checks)
-    |> Enum.map(&%{name: &1, status: :passed})
+    |> Enum.map(&auto_land_check/1)
   end
 
   defp strict_recovery_checks do
     ~w(deployment_status rollback_plan monitoring_source incident_issue_creation)
   end
+
+  defp auto_land_check("pr_feedback") do
+    %{name: "pr_feedback", status: :passed, metadata: %{structured_pr_feedback: true}}
+  end
+
+  defp auto_land_check(name), do: %{name: name, status: :passed}
 end

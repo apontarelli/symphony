@@ -2,9 +2,9 @@ defmodule SymphonyElixir.HandoffRoute do
   @moduledoc """
   Classifies completed Symphony work into a structured handoff route.
 
-  The classifier is intentionally conservative: it can identify auto-land
-  eligibility, but v1 still targets Human Review unless the selected route is
-  Rework.
+  The classifier is intentionally conservative: dry-run auto-land still targets
+  Human Review, while explicitly opted-in real auto-land moves qualified work to
+  the existing Merging land flow.
   """
 
   alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishHandoffEvidence, PublishPreflightEvidence}
@@ -110,10 +110,12 @@ defmodule SymphonyElixir.HandoffRoute do
     "deployment_coupling" => :deployment_coupling,
     "dry_run" => :dry_run,
     "enabled" => :enabled,
-    "failure_state" => :failure_state,
     "force_human_review_labels" => :force_human_review_labels,
     "findings" => :findings,
+    "checked" => :checked,
+    "checked_at" => :checked_at,
     "id" => :id,
+    "inline_review_comments" => :inline_review_comments,
     "issue_labels" => :issue_labels,
     "kind" => :kind,
     "label" => :label,
@@ -123,6 +125,8 @@ defmodule SymphonyElixir.HandoffRoute do
     "options" => :options,
     "policy" => :policy,
     "posture" => :posture,
+    "pr_feedback" => :pr_feedback,
+    "pr_number" => :pr_number,
     "pr_target" => :pr_target,
     "project" => :project,
     "publish_handoff" => :publish_handoff,
@@ -134,8 +138,14 @@ defmodule SymphonyElixir.HandoffRoute do
     "required_checks" => :required_checks,
     "requires_human_review" => :requires_human_review,
     "review" => :review,
+    "review_summaries" => :review_summaries,
+    "source" => :source,
     "status" => :status,
+    "structured_pr_feedback" => :structured_pr_feedback,
     "summary" => :summary,
+    "top_level_comments" => :top_level_comments,
+    "unresolved_actionable" => :unresolved_actionable,
+    "unresolved_actionable_count" => :unresolved_actionable_count,
     "url" => :url
   }
   @status_tokens %{
@@ -251,7 +261,14 @@ defmodule SymphonyElixir.HandoffRoute do
   end
 
   defp normalize_input(input) do
-    checks = fetch(input, :checks, []) |> normalize_checks()
+    pr_feedback = fetch(input, :pr_feedback, nil) |> normalize_pr_feedback()
+
+    checks =
+      input
+      |> fetch(:checks, [])
+      |> normalize_checks()
+      |> Kernel.++(pr_feedback_checks(pr_feedback))
+
     review = fetch(input, :review, %{}) |> normalize_review()
     changed_surfaces = fetch(input, :changed_surfaces, []) |> normalize_surfaces()
     policy = fetch(input, :policy, %{}) |> normalize_map()
@@ -277,6 +294,7 @@ defmodule SymphonyElixir.HandoffRoute do
       blocker: blocker,
       decision: decision,
       labels: labels,
+      pr_feedback: pr_feedback,
       publish_preflight: publish_preflight,
       publish_handoff: publish_handoff,
       auto_land: auto_land
@@ -293,6 +311,7 @@ defmodule SymphonyElixir.HandoffRoute do
       publish_handoff: publish_handoff,
       blocker: blocker,
       labels: labels,
+      pr_feedback: pr_feedback,
       auto_land: auto_land,
       evidence: base_evidence(evidence_context)
     }
@@ -370,14 +389,36 @@ defmodule SymphonyElixir.HandoffRoute do
   defp auto_land_decision(context) do
     %Decision{
       route: :auto_land,
-      target_state: "Human Review",
-      summary: "Auto-land eligible, held for Human Review until the land executor exists.",
-      recommendation: "Auto-land eligible by checks, review, changed surfaces, and policy.",
+      target_state: auto_land_target_state(context.auto_land),
+      summary: auto_land_summary(context.auto_land),
+      recommendation: auto_land_recommendation(context.auto_land),
       evidence: context.evidence,
       artifacts: context.artifacts,
-      metadata: %{auto_land_executor: "not_implemented"}
+      metadata: auto_land_metadata(context.auto_land)
     }
   end
+
+  defp auto_land_target_state(%{dry_run?: true}), do: "Human Review"
+  defp auto_land_target_state(%{dry_run?: false}), do: "Merging"
+
+  defp auto_land_summary(%{dry_run?: true}) do
+    "Dry-run auto-land eligible, held for Human Review without merging."
+  end
+
+  defp auto_land_summary(%{dry_run?: false}) do
+    "Auto-land eligible for guarded landing through the Merging flow."
+  end
+
+  defp auto_land_recommendation(%{dry_run?: true}) do
+    "Auto-land eligible by checks, review, changed surfaces, and policy; dry-run keeps the PR in Human Review."
+  end
+
+  defp auto_land_recommendation(%{dry_run?: false}) do
+    "Run the existing Merging land flow after confirming checks and feedback remain clear."
+  end
+
+  defp auto_land_metadata(%{dry_run?: true}), do: %{auto_land_executor: "dry_run", dry_run: true}
+  defp auto_land_metadata(%{dry_run?: false}), do: %{auto_land_executor: "land_merge", dry_run: false}
 
   defp failed_route_gate?(context) do
     Enum.any?(context.checks, &(Map.get(&1, :status) in @failed_statuses)) or
@@ -635,6 +676,127 @@ defmodule SymphonyElixir.HandoffRoute do
   end
 
   defp normalize_checks(_checks), do: []
+
+  defp normalize_pr_feedback(nil), do: nil
+
+  defp normalize_pr_feedback(feedback) when is_map(feedback) do
+    feedback = normalize_map(feedback)
+
+    %{
+      status: fetch(feedback, :status, :unknown) |> normalize_pr_feedback_status(),
+      pr_number: fetch(feedback, :pr_number, nil),
+      checked_at: fetch(feedback, :checked_at, nil) |> optional_trimmed_string(),
+      top_level_comments: feedback |> fetch(:top_level_comments, %{}) |> normalize_pr_feedback_channel(),
+      inline_review_comments: feedback |> fetch(:inline_review_comments, %{}) |> normalize_pr_feedback_channel(),
+      review_summaries: feedback |> fetch(:review_summaries, %{}) |> normalize_pr_feedback_channel()
+    }
+  end
+
+  defp normalize_pr_feedback(_feedback), do: nil
+
+  defp normalize_pr_feedback_channel(channel) when is_map(channel) do
+    channel = normalize_map(channel)
+
+    %{
+      checked: fetch(channel, :checked, false) == true,
+      source: channel |> fetch(:source, nil) |> optional_trimmed_string(),
+      unresolved_actionable_count:
+        channel
+        |> fetch(:unresolved_actionable_count, fetch(channel, :unresolved_actionable, nil))
+        |> normalize_non_negative_integer()
+    }
+  end
+
+  defp normalize_pr_feedback_channel(_channel), do: %{checked: false, source: nil, unresolved_actionable_count: nil}
+
+  defp pr_feedback_checks(nil), do: []
+
+  defp pr_feedback_checks(pr_feedback) do
+    cond do
+      pr_feedback_clean?(pr_feedback) ->
+        [pr_feedback_check(:passed, "PR feedback sweep completed.", pr_feedback)]
+
+      pr_feedback_failed?(pr_feedback) ->
+        [pr_feedback_check(:failed, "Actionable PR feedback is unresolved.", pr_feedback)]
+
+      true ->
+        []
+    end
+  end
+
+  defp pr_feedback_check(status, summary, pr_feedback) do
+    %{
+      name: "pr_feedback",
+      status: status,
+      summary: summary,
+      metadata: Map.put(pr_feedback, :structured_pr_feedback, true)
+    }
+  end
+
+  defp pr_feedback_clean?(pr_feedback) do
+    pr_feedback.status in [:none, :addressed, :pushback_posted] and
+      pr_feedback_channels_proven?(pr_feedback) and
+      pr_feedback_unresolved_count(pr_feedback) == 0
+  end
+
+  defp pr_feedback_failed?(pr_feedback) do
+    pr_feedback.status == :outstanding or
+      (pr_feedback_channels_proven?(pr_feedback) and pr_feedback_unresolved_count(pr_feedback) > 0)
+  end
+
+  defp pr_feedback_channels_proven?(pr_feedback) do
+    Enum.all?(pr_feedback_channels(pr_feedback), fn channel ->
+      channel.checked and is_binary(channel.source) and is_integer(channel.unresolved_actionable_count)
+    end)
+  end
+
+  defp pr_feedback_unresolved_count(pr_feedback) do
+    pr_feedback
+    |> pr_feedback_channels()
+    |> Enum.map(& &1.unresolved_actionable_count)
+    |> Enum.filter(&is_integer/1)
+    |> Enum.sum()
+  end
+
+  defp pr_feedback_channels(pr_feedback) do
+    [
+      pr_feedback.top_level_comments,
+      pr_feedback.inline_review_comments,
+      pr_feedback.review_summaries
+    ]
+  end
+
+  defp normalize_pr_feedback_status(value) when is_atom(value) do
+    value
+    |> Atom.to_string()
+    |> normalize_pr_feedback_status()
+  end
+
+  defp normalize_pr_feedback_status(value) when is_binary(value) do
+    value
+    |> normalize_string_token()
+    |> case do
+      "none" -> :none
+      "addressed" -> :addressed
+      "pushback_posted" -> :pushback_posted
+      "outstanding" -> :outstanding
+      "not_applicable" -> :not_applicable
+      _value -> :unknown
+    end
+  end
+
+  defp normalize_pr_feedback_status(_value), do: :unknown
+
+  defp normalize_non_negative_integer(value) when is_integer(value) and value >= 0, do: value
+
+  defp normalize_non_negative_integer(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {integer, ""} when integer >= 0 -> integer
+      _result -> nil
+    end
+  end
+
+  defp normalize_non_negative_integer(_value), do: nil
 
   defp normalize_review(review) when is_map(review) do
     review = normalize_map(review)

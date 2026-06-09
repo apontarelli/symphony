@@ -1773,13 +1773,20 @@ defmodule SymphonyElixir.Orchestrator do
     |> HandoffRouteRecorder.classify_completion(
       blocker,
       Map.get(running_entry, :workspace_path),
-      Map.get(running_entry, :worker_host)
+      Map.get(running_entry, :worker_host),
+      %{
+        policy: Map.get(running_entry, :policy),
+        labels: running_entry_labels(running_entry)
+      }
     )
   end
 
   defp handoff_decision_for_running_entry(_running_entry, blocker) do
     HandoffRouteRecorder.classify_completion(%{}, blocker)
   end
+
+  defp running_entry_labels(%{issue: %{labels: labels}}) when is_list(labels), do: labels
+  defp running_entry_labels(_running_entry), do: []
 
   defp maybe_persist_handoff_route(issue_id, %HandoffRoute.Decision{} = decision)
        when is_binary(issue_id) do

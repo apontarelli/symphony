@@ -31,12 +31,20 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     :publish_handoff,
     "publish_handoff",
     :publishHandoff,
-    "publishHandoff"
+    "publishHandoff",
+    :pr_feedback,
+    "pr_feedback",
+    :prFeedback,
+    "prFeedback"
   ]
+  @completion_field_aliases %{
+    pr_feedback: [:pr_feedback, "pr_feedback", :prFeedback, "prFeedback"],
+    publish_handoff: [:publish_handoff, "publish_handoff", :publishHandoff, "publishHandoff"]
+  }
 
-  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil) ::
+  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil, map() | keyword()) ::
           HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker \\ nil, workspace \\ nil, worker_host \\ nil) do
+  def classify_completion(completion, blocker \\ nil, workspace \\ nil, worker_host \\ nil, routing_context \\ %{}) do
     completion = if is_map(completion), do: completion, else: %{}
 
     checks =
@@ -47,9 +55,11 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       checks: checks,
       review: completion_field(completion, :review, %{}),
       changed_surfaces: completion_field(completion, :changed_surfaces, []),
-      policy: completion_field(completion, :policy, %{}),
+      policy: routing_policy(completion, routing_context),
+      issue_labels: routing_labels(completion, routing_context),
       artifacts: completion_field(completion, :artifacts, []),
       decision: completion_field(completion, :decision, %{}),
+      pr_feedback: completion_field(completion, :pr_feedback, nil),
       publish_preflight: completion_field(completion, :publish_preflight, nil),
       publish_handoff: completion_field(completion, :publish_handoff, nil),
       blocker: blocker
@@ -72,8 +82,36 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   end
 
   defp completion_field(completion, key, default) do
-    Map.get(completion, key, Map.get(completion, to_string(key), default))
+    key
+    |> completion_field_keys()
+    |> Enum.reduce_while(default, fn candidate, acc ->
+      case Map.fetch(completion, candidate) do
+        {:ok, value} -> {:halt, value}
+        :error -> {:cont, acc}
+      end
+    end)
   end
+
+  defp completion_field_keys(key), do: Map.get(@completion_field_aliases, key, [key, to_string(key)])
+
+  defp routing_policy(completion, routing_context) do
+    context_field(routing_context, :policy, nil) || completion_field(completion, :policy, %{})
+  end
+
+  defp routing_labels(completion, routing_context) do
+    context_field(routing_context, :labels, context_field(routing_context, :issue_labels, nil)) ||
+      completion_field(completion, :issue_labels, completion_field(completion, :labels, []))
+  end
+
+  defp context_field(context, key, default) when is_map(context) do
+    Map.get(context, key, Map.get(context, to_string(key), default))
+  end
+
+  defp context_field(context, key, default) when is_list(context) do
+    Keyword.get(context, key, default)
+  end
+
+  defp context_field(_context, _key, default), do: default
 
   defp add_handoff_manifest_check(checks, completion, workspace, worker_host) do
     checks = if is_list(checks), do: checks, else: []
