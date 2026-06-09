@@ -4,6 +4,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
+  alias SymphonyElixir.HandoffRoute
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
 
@@ -832,6 +833,69 @@ defmodule SymphonyElixir.ExtensionsTest do
     end)
 
     refute render(view) =~ "javascript:alert"
+  end
+
+  test "dashboard and state API expose durable visual QA artifact references" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          requirement: :required,
+          status: :passed,
+          reason: "changed files match product-facing routes",
+          artifacts: [
+            %{
+              kind: :screenshot,
+              label: "Desktop screenshot",
+              url: "https://artifacts.example/SID-314/desktop.png"
+            },
+            %{
+              kind: :screenshot,
+              label: "Mobile screenshot",
+              url: "/private/tmp/symphony/mobile.png"
+            },
+            %{
+              kind: :product_design_notes,
+              label: "Product design notes",
+              summary: "Responsive states looked stable at narrow and wide widths."
+            }
+          ]
+        }
+      })
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:handoff_routes, [
+        decision
+        |> HandoffRoute.to_map()
+        |> Map.put(:issue_id, "issue-visual")
+      ])
+
+    orchestrator_name = Module.concat(__MODULE__, :VisualQaDashboardOrchestrator)
+
+    {:ok, _orchestrator_pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: true, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert [%{"route" => "product_visual_review", "artifacts" => artifacts, "evidence" => evidence}] = state_payload["handoff_routes"]
+    assert Enum.any?(artifacts, &(&1["label"] == "Desktop screenshot" and &1["url"] == "https://artifacts.example/SID-314/desktop.png"))
+    assert Enum.any?(artifacts, &(&1["label"] == "Product design notes" and &1["summary"] =~ "Responsive states"))
+    assert Enum.any?(evidence, &(&1["kind"] == "product_visual_review" and &1["status"] == "passed" and &1["summary"] =~ "changed files match"))
+    refute inspect(state_payload["handoff_routes"]) =~ "/private/tmp"
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Handoff routes"
+    assert html =~ "Desktop screenshot"
+    assert html =~ "Product design notes"
+    assert html =~ "Product visual review required passed"
+    refute html =~ "/private/tmp"
   end
 
   test "dashboard shows configured tracker project status and hides empty rate limits" do

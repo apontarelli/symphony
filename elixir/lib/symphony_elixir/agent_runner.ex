@@ -116,6 +116,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt_bundle = build_turn_prompt(issue, opts, turn_number, max_turns)
     log_workflow_module_resolution(issue, prompt_bundle)
+    send_workflow_module_resolution(codex_update_recipient, issue, prompt_bundle.workflow_module_resolution)
 
     with {:ok, turn_session} <-
            AppServer.run_turn(
@@ -182,6 +183,14 @@ defmodule SymphonyElixir.AgentRunner do
   defp log_workflow_module_resolution(_issue, _prompt_bundle) do
     :ok
   end
+
+  defp send_workflow_module_resolution(recipient, %Issue{id: issue_id}, workflow_module_resolution)
+       when is_binary(issue_id) and is_pid(recipient) and is_map(workflow_module_resolution) do
+    send(recipient, {:workflow_module_resolution, issue_id, workflow_module_resolution})
+    :ok
+  end
+
+  defp send_workflow_module_resolution(_recipient, _issue, _workflow_module_resolution), do: :ok
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do

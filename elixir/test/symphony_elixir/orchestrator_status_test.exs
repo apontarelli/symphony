@@ -69,6 +69,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     send(
       pid,
+      {:workflow_module_resolution, issue_id,
+       %{
+         policy_hash: "sha256:" <> String.duplicate("a", 64),
+         module_refs: [%{name: "product_visual_review", version: "v1"}],
+         modules: [
+           %{
+             id: "product_visual_review",
+             version: "v1",
+             config: %{"workflow_modules" => %{"product_visual_review" => %{"route_policy" => "required"}}}
+           }
+         ]
+       }}
+    )
+
+    send(
+      pid,
       {:codex_worker_update, issue_id,
        %{
          event: :session_started,
@@ -91,6 +107,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert %{running: [snapshot_entry]} = snapshot
     assert snapshot_entry.issue_id == issue_id
     assert snapshot_entry.issue_url == "https://example.org/issues/MT-188"
+    assert snapshot_entry.workflow_module_policy_hash == "sha256:" <> String.duplicate("a", 64)
+    assert snapshot_entry.workflow_modules == [%{name: "product_visual_review", version: "v1"}]
     assert snapshot_entry.session_id == "thread-live-turn-live"
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now

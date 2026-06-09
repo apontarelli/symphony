@@ -2331,6 +2331,18 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
+      assert_receive {:workflow_module_resolution, "issue-live-updates",
+                      %{
+                        policy_hash: workflow_module_policy_hash,
+                        module_refs: workflow_module_refs,
+                        modules: workflow_modules_with_config
+                      }},
+                     500
+
+      assert workflow_module_policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
+      assert %{name: "linear-operation", version: "v1"} in workflow_module_refs
+      assert Enum.any?(workflow_modules_with_config, &(&1.id == "linear-operation" and is_map(&1.config)))
+
       assert_receive {:codex_worker_update, "issue-live-updates",
                       %{
                         event: :session_started,
