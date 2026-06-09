@@ -415,6 +415,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "recorder classifies completion metadata before tracker writes" do
     assert HandoffRouteRecorder.completion_metadata?(%{"checks" => []})
+    assert HandoffRouteRecorder.completion_metadata?(%{"publish_preflight" => %{}})
     refute HandoffRouteRecorder.completion_metadata?(%{"ignored" => true})
     refute HandoffRouteRecorder.completion_metadata?("not completion metadata")
 
@@ -431,6 +432,140 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
     assert malformed.route == :human_review
     assert Enum.any?(malformed.evidence, &(&1.kind == :check and &1.status == :missing))
+  end
+
+  test "publish preflight failures route as structured blockers" do
+    decision =
+      HandoffRouteRecorder.classify_completion(%{
+        "checks" => [%{"name" => "tests", "status" => "passed"}],
+        "publish_preflight" => %{
+          "status" => "blocked",
+          "repository" => "https://github.com/example/project",
+          "base_branch" => "main",
+          "capabilities" => %{
+            "workspace_vcs_metadata" => true,
+            "remote_push" => false,
+            "pr_creation" => true
+          },
+          "failures" => [
+            %{
+              "class" => "remote_push_unavailable",
+              "summary" => "Remote push dry-run failed."
+            }
+          ]
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+    assert decision.recommendation =~ "Restore host VCS/GitHub publish capability"
+
+    assert Enum.any?(
+             decision.evidence,
+             &publish_preflight_remote_push_failure?/1
+           )
+
+    assert %{evidence: evidence} = HandoffRoute.to_map(decision)
+
+    assert Enum.any?(
+             evidence,
+             &(&1.kind == "publish_preflight" and &1.metadata.failure_class == :remote_push_unavailable)
+           )
+  end
+
+  test "publish preflight passed evidence does not block handoff" do
+    decision =
+      HandoffRouteRecorder.classify_completion(%{
+        "checks" => [%{"name" => "tests", "status" => "passed"}],
+        "review" => %{"status" => "clean"},
+        "publish_preflight" => %{
+          "repository" => "https://github.com/example/project",
+          "base_branch" => "main",
+          "capabilities" => %{
+            "workspace_vcs_metadata" => true,
+            "remote_push" => true,
+            "pr_creation" => true
+          },
+          "failures" => []
+        }
+      })
+
+    assert decision.route == :human_review
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :publish_preflight and &1.status == :passed and &1.summary =~ "main")
+           )
+  end
+
+  test "normalizes malformed publish preflight metadata conservatively" do
+    malformed = HandoffRoute.classify(%{publish_preflight: "not a map"})
+    assert malformed.route == :human_review
+    refute Enum.any?(malformed.evidence, &(&1.kind == :publish_preflight))
+
+    no_failures =
+      HandoffRoute.classify(%{
+        checks: [%{name: "tests", status: :passed}],
+        publish_preflight: %{
+          failures: "not a list",
+          capabilities: %{},
+          repository: "https://github.com/example/project",
+          base_branch: "main"
+        }
+      })
+
+    assert Enum.any?(no_failures.evidence, &(&1.kind == :publish_preflight and &1.status == :passed))
+
+    invalid_failures =
+      HandoffRoute.classify(%{
+        checks: [%{name: "tests", status: :passed}],
+        publish_preflight: %{
+          failures: [%{}, "not a map"],
+          capabilities: %{},
+          repository: "https://github.com/example/project",
+          base_branch: "main"
+        }
+      })
+
+    assert Enum.any?(invalid_failures.evidence, &(&1.kind == :publish_preflight and &1.status == :passed))
+
+    malformed_fields =
+      HandoffRoute.classify(%{
+        publish_preflight: %{
+          123 => "ignored",
+          status: 123,
+          repository: " ",
+          base_branch: 123,
+          capabilities: "not a map",
+          failures: [
+            %{
+              456 => "ignored",
+              class: 123,
+              summary: "Publish preflight failed.",
+              command: 42,
+              details: %{}
+            },
+            "not a map"
+          ]
+        }
+      })
+
+    assert malformed_fields.route == :blocked
+
+    assert [
+             %{
+               kind: :publish_preflight,
+               status: :blocked,
+               metadata: %{
+                 repository: nil,
+                 base_branch: nil,
+                 capabilities: %{workspace_vcs_metadata: false, remote_push: false, pr_creation: false},
+                 failure_class: :unknown,
+                 command: "42",
+                 details: nil
+               }
+             }
+           ] = Enum.filter(malformed_fields.evidence, &(&1.kind == :publish_preflight))
   end
 
   test "recorder writes the route comment and moves the selected state" do
@@ -455,5 +590,11 @@ defmodule SymphonyElixir.HandoffRouteTest do
     ~w(tests quality_gates automated_review route_classification sync)
     |> Kernel.++(extra_checks)
     |> Enum.map(&%{name: &1, status: :passed})
+  end
+
+  defp publish_preflight_remote_push_failure?(evidence) do
+    evidence.kind == :publish_preflight and
+      evidence.status == :blocked and
+      evidence.metadata.failure_class == :remote_push_unavailable
   end
 end

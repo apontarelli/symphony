@@ -7,7 +7,17 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, HandoffRoute, HandoffRouteRecorder, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    HandoffRoute,
+    HandoffRouteRecorder,
+    PublishPreflight,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
@@ -1100,6 +1110,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id, running_entry) do
+    running_entry = maybe_put_publish_preflight(running_entry)
     handoff_route = handoff_decision_for_running_entry(running_entry, nil)
 
     if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
@@ -1411,6 +1422,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp policy_tracking_fields(_policy), do: %{}
+
+  defp maybe_put_publish_preflight(%{policy: policy} = running_entry) when is_map(policy) do
+    if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
+      preflight =
+        running_entry
+        |> Map.get(:workspace_path)
+        |> PublishPreflight.run(policy, worker_host: Map.get(running_entry, :worker_host))
+
+      Map.update(running_entry, :completion, %{publish_preflight: preflight}, fn
+        completion when is_map(completion) -> Map.put(completion, :publish_preflight, preflight)
+        _completion -> %{publish_preflight: preflight}
+      end)
+    else
+      running_entry
+    end
+  end
+
+  defp maybe_put_publish_preflight(running_entry), do: running_entry
 
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 

@@ -37,6 +37,12 @@ The route captures the selected Linear target state, recommendation, evidence, a
 artifacts so operators can inspect why work is headed to Human Review, Rework, product review, or a
 decision-needed handoff.
 
+After a worker finishes source edits, Symphony runs a host-owned publish preflight before handoff
+route classification. The preflight checks whether the workspace VCS metadata is available to the
+host, whether the configured remote accepts a push dry-run, and whether the configured GitHub
+repository/base branch can support PR creation. The checks return structured capability and failure
+data without creating commits, branches, pushes, or pull requests.
+
 ## How to use it
 
 1. Make sure your codebase is set up to work well with agents: see

@@ -17,7 +17,9 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     :artifacts,
     "artifacts",
     :decision,
-    "decision"
+    "decision",
+    :publish_preflight,
+    "publish_preflight"
   ]
 
   @spec classify_completion(map(), map() | nil) :: HandoffRoute.Decision.t()
@@ -31,6 +33,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       policy: completion_field(completion, :policy, %{}),
       artifacts: completion_field(completion, :artifacts, []),
       decision: completion_field(completion, :decision, %{}),
+      publish_preflight: completion_field(completion, :publish_preflight, nil),
       blocker: blocker
     }
     |> HandoffRoute.classify()
