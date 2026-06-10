@@ -182,6 +182,20 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  def handle_info({:workflow_module_resolution, issue_id, workflow_module_resolution}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(workflow_module_resolution) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated_running_entry = Map.put(running_entry, :workflow_module_resolution, workflow_module_resolution)
+
+        notify_dashboard()
+        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+    end
+  end
+
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
@@ -1059,6 +1073,7 @@ defmodule SymphonyElixir.Orchestrator do
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             policy: policy,
+            workflow_module_resolution: nil,
             started_at: DateTime.utc_now()
           }
           |> Map.merge(policy_tracking_fields(policy))
@@ -1662,6 +1677,8 @@ defmodule SymphonyElixir.Orchestrator do
           target: Map.get(metadata, :target),
           policy_ref: Map.get(metadata, :policy_ref),
           policy: Map.get(metadata, :policy),
+          workflow_module_policy_hash: workflow_module_policy_hash(Map.get(metadata, :workflow_module_resolution)),
+          workflow_modules: workflow_module_refs(Map.get(metadata, :workflow_module_resolution)),
           session_id: metadata.session_id,
           last_codex_progress_timestamp: Map.get(metadata, :last_codex_progress_timestamp),
           codex_app_server_pid: metadata.codex_app_server_pid,
@@ -1776,8 +1793,10 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(running_entry, :worker_host),
       %{
         policy: Map.get(running_entry, :policy),
-        labels: running_entry_labels(running_entry)
-      }
+        labels: running_entry_labels(running_entry),
+        workflow_module_resolution: Map.get(running_entry, :workflow_module_resolution)
+      },
+      Map.get(running_entry, :issue)
     )
   end
 
@@ -1787,6 +1806,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp running_entry_labels(%{issue: %{labels: labels}}) when is_list(labels), do: labels
   defp running_entry_labels(_running_entry), do: []
+
+  defp workflow_module_policy_hash(%{policy_hash: policy_hash}) when is_binary(policy_hash), do: policy_hash
+  defp workflow_module_policy_hash(%{"policy_hash" => policy_hash}) when is_binary(policy_hash), do: policy_hash
+  defp workflow_module_policy_hash(_resolution), do: nil
+
+  defp workflow_module_refs(%{module_refs: refs}) when is_list(refs), do: refs
+  defp workflow_module_refs(%{"module_refs" => refs}) when is_list(refs), do: refs
+  defp workflow_module_refs(_resolution), do: []
 
   defp maybe_persist_handoff_route(issue_id, %HandoffRoute.Decision{} = decision)
        when is_binary(issue_id) do

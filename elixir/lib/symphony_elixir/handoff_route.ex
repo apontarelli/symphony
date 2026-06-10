@@ -7,7 +7,12 @@ defmodule SymphonyElixir.HandoffRoute do
   the existing Merging land flow.
   """
 
-  alias SymphonyElixir.HandoffRoute.{AutoLandPolicy, PublishHandoffEvidence, PublishPreflightEvidence}
+  alias SymphonyElixir.HandoffRoute.{
+    AutoLandPolicy,
+    ProductVisualReviewEvidence,
+    PublishHandoffEvidence,
+    PublishPreflightEvidence
+  }
 
   @manifest_check_name "change_manifest"
   defmodule Evidence do
@@ -38,12 +43,14 @@ defmodule SymphonyElixir.HandoffRoute do
   defmodule Artifact do
     @moduledoc "Screenshot, video, or other route-relevant review artifact."
 
-    defstruct [:kind, :label, :url]
+    defstruct [:kind, :label, :url, :summary, metadata: %{}]
 
     @type t :: %__MODULE__{
             kind: atom(),
             label: String.t(),
-            url: String.t()
+            url: String.t() | nil,
+            summary: String.t() | nil,
+            metadata: map()
           }
   end
 
@@ -92,7 +99,16 @@ defmodule SymphonyElixir.HandoffRoute do
                   ])
 
   @product_surfaces MapSet.new([:external_user_ui, :product, :visual, :visual_design, :web_ui])
-  @artifact_review_kinds MapSet.new([:screenshot, :video, :recording])
+  @artifact_review_kinds MapSet.new([
+                           :interaction_notes,
+                           :product_design_notes,
+                           :recording,
+                           :responsive_state,
+                           :screenshot,
+                           :video,
+                           :viewport_screenshot,
+                           :visual_qa_manifest
+                         ])
   @passed_statuses MapSet.new([:passed, :pass, :success, :clean, :ok])
   @failed_statuses MapSet.new([:failed, :failure, :error, :fix_required, :blocked])
   @decision_statuses MapSet.new([:decision_needed, :needs_decision, :needs_input])
@@ -110,16 +126,22 @@ defmodule SymphonyElixir.HandoffRoute do
     "deployment_coupling" => :deployment_coupling,
     "dry_run" => :dry_run,
     "enabled" => :enabled,
+    "expected_artifacts" => :expected_artifacts,
+    "expected_checks" => :expected_checks,
+    "failure_state" => :failure_state,
     "force_human_review_labels" => :force_human_review_labels,
     "findings" => :findings,
     "checked" => :checked,
     "checked_at" => :checked_at,
+    "href" => :href,
     "id" => :id,
     "inline_review_comments" => :inline_review_comments,
     "issue_labels" => :issue_labels,
     "kind" => :kind,
     "label" => :label,
     "labels" => :labels,
+    "matched_files" => :matched_files,
+    "matched_labels" => :matched_labels,
     "metadata" => :metadata,
     "name" => :name,
     "options" => :options,
@@ -128,17 +150,24 @@ defmodule SymphonyElixir.HandoffRoute do
     "pr_feedback" => :pr_feedback,
     "pr_number" => :pr_number,
     "pr_target" => :pr_target,
+    "productVisualReview" => :product_visual_review,
+    "productvisualreview" => :product_visual_review,
+    "product_visual_review" => :product_visual_review,
     "project" => :project,
+    "project_kind" => :project_kind,
     "publish_handoff" => :publish_handoff,
     "question" => :question,
     "reason" => :reason,
     "recommendation" => :recommendation,
+    "reference" => :reference,
     "require_human_review" => :require_human_review,
     "required_action" => :required_action,
+    "requirement" => :requirement,
     "required_checks" => :required_checks,
     "requires_human_review" => :requires_human_review,
     "review" => :review,
     "review_summaries" => :review_summaries,
+    "route_policy" => :route_policy,
     "source" => :source,
     "status" => :status,
     "structured_pr_feedback" => :structured_pr_feedback,
@@ -161,6 +190,8 @@ defmodule SymphonyElixir.HandoffRoute do
     "ok" => :ok,
     "pass" => :pass,
     "passed" => :passed,
+    "missing" => :missing,
+    "skipped" => :skipped,
     "success" => :success,
     "unknown" => :unknown
   }
@@ -185,11 +216,15 @@ defmodule SymphonyElixir.HandoffRoute do
   }
   @artifact_kind_tokens %{
     "artifact" => :artifact,
+    "interaction_notes" => :interaction_notes,
+    "product_design_notes" => :product_design_notes,
     "recording" => :recording,
+    "responsive_state" => :responsive_state,
     "screenshot" => :screenshot,
-    "video" => :video
+    "video" => :video,
+    "viewport_screenshot" => :viewport_screenshot,
+    "visual_qa_manifest" => :visual_qa_manifest
   }
-
   @type input :: map()
 
   @spec classify(input()) :: Decision.t()
@@ -276,11 +311,14 @@ defmodule SymphonyElixir.HandoffRoute do
     decision = fetch(input, :decision, %{}) |> normalize_decision()
     publish_preflight = fetch(input, :publish_preflight, nil) |> PublishPreflightEvidence.normalize()
     publish_handoff = fetch(input, :publish_handoff, nil) |> PublishHandoffEvidence.normalize()
+    product_visual_review = fetch(input, :product_visual_review, nil) |> ProductVisualReviewEvidence.normalize()
+    artifacts = artifacts ++ ProductVisualReviewEvidence.artifacts(product_visual_review)
 
     blocker =
       normalize_blocker(fetch(input, :blocker, nil)) ||
         PublishPreflightEvidence.blocker(publish_preflight) ||
-        PublishHandoffEvidence.blocker(publish_handoff)
+        PublishHandoffEvidence.blocker(publish_handoff) ||
+        ProductVisualReviewEvidence.blocker(product_visual_review)
 
     labels = fetch(input, :labels, fetch(input, :issue_labels, [])) |> normalize_label_list()
     auto_land = AutoLandPolicy.evaluate(%{checks: checks, labels: labels, policy: policy})
@@ -293,6 +331,7 @@ defmodule SymphonyElixir.HandoffRoute do
       artifacts: artifacts,
       blocker: blocker,
       decision: decision,
+      product_visual_review: product_visual_review,
       labels: labels,
       pr_feedback: pr_feedback,
       publish_preflight: publish_preflight,
@@ -307,6 +346,7 @@ defmodule SymphonyElixir.HandoffRoute do
       policy: policy,
       artifacts: artifacts,
       decision: decision,
+      product_visual_review: product_visual_review,
       publish_preflight: publish_preflight,
       publish_handoff: publish_handoff,
       blocker: blocker,
@@ -473,9 +513,16 @@ defmodule SymphonyElixir.HandoffRoute do
   end
 
   defp product_visual_review?(context) do
-    Enum.any?(context.changed_surfaces, &MapSet.member?(@product_surfaces, &1)) or
+    product_visual_review_requested?(context.product_visual_review) or
+      Enum.any?(context.changed_surfaces, &MapSet.member?(@product_surfaces, &1)) or
       Enum.any?(context.artifacts, &MapSet.member?(@artifact_review_kinds, &1.kind))
   end
+
+  defp product_visual_review_requested?(%{requirement: requirement, status: status})
+       when requirement in [:required, :recommended] and status != :skipped,
+       do: true
+
+  defp product_visual_review_requested?(_product_visual_review), do: false
 
   defp risky?(context) do
     Enum.any?(context.changed_surfaces, &MapSet.member?(@risky_surfaces, &1)) or
@@ -513,6 +560,7 @@ defmodule SymphonyElixir.HandoffRoute do
     |> Kernel.++(review_evidence(context.review))
     |> Kernel.++(route_gate_evidence(context.review, context.decision))
     |> Kernel.++(surface_evidence(context.changed_surfaces))
+    |> Kernel.++(ProductVisualReviewEvidence.evidence(context.product_visual_review))
     |> Kernel.++(policy_evidence(context.policy))
     |> Kernel.++(context.auto_land.evidence)
     |> Kernel.++(artifact_evidence(context.artifacts))
@@ -817,19 +865,82 @@ defmodule SymphonyElixir.HandoffRoute do
 
   defp normalize_surfaces(_surfaces), do: []
 
-  defp normalize_artifacts(artifacts) when is_list(artifacts) do
-    Enum.map(artifacts, fn artifact ->
-      artifact = normalize_map(artifact)
-
-      %Artifact{
-        kind: fetch(artifact, :kind, :artifact) |> normalize_artifact_kind(),
-        label: fetch(artifact, :label, "artifact") |> to_string(),
-        url: fetch(artifact, :url, "") |> to_string()
-      }
-    end)
+  defp normalize_artifacts(artifacts) do
+    {artifacts, _rejected_artifacts} = normalize_artifacts_with_rejections(artifacts)
+    artifacts
   end
 
-  defp normalize_artifacts(_artifacts), do: []
+  defp normalize_artifacts_with_rejections(artifacts) when is_list(artifacts) do
+    {artifacts, rejected_artifacts} =
+      Enum.reduce(artifacts, {[], []}, fn artifact, {accepted, rejected} ->
+        case normalize_artifact(artifact) do
+          {:ok, artifact} -> {[artifact | accepted], rejected}
+          {:error, rejection} -> {accepted, [rejection | rejected]}
+        end
+      end)
+
+    {Enum.reverse(artifacts), Enum.reverse(rejected_artifacts)}
+  end
+
+  defp normalize_artifacts_with_rejections(_artifacts), do: {[], []}
+
+  defp normalize_artifact(artifact) when is_map(artifact) do
+    artifact = normalize_map(artifact)
+    kind = fetch(artifact, :kind, :artifact) |> normalize_artifact_kind()
+    label = fetch(artifact, :label, "artifact") |> to_string()
+    summary = fetch(artifact, :summary, nil) |> optional_string()
+    metadata = fetch(artifact, :metadata, %{}) |> normalize_map()
+
+    artifact
+    |> artifact_reference()
+    |> normalize_artifact_reference()
+    |> case do
+      {:ok, url} ->
+        {:ok, %Artifact{kind: kind, label: label, url: url, summary: summary, metadata: metadata}}
+
+      {:error, reason} ->
+        {:error, %{kind: kind, label: label, reason: reason}}
+    end
+  end
+
+  defp normalize_artifact(artifact) do
+    artifact
+    |> to_string()
+    |> optional_trimmed_string()
+    |> case do
+      nil -> {:error, %{kind: :artifact, label: "artifact", reason: :invalid_artifact}}
+      summary -> {:ok, %Artifact{kind: :artifact, label: "artifact", summary: summary, metadata: %{}}}
+    end
+  end
+
+  defp artifact_reference(artifact) do
+    fetch(artifact, :url, fetch(artifact, :href, fetch(artifact, :reference, nil)))
+  end
+
+  defp normalize_artifact_reference(nil), do: {:ok, nil}
+
+  defp normalize_artifact_reference(reference) do
+    reference
+    |> optional_trimmed_string()
+    |> case do
+      nil ->
+        {:ok, nil}
+
+      reference ->
+        if durable_artifact_url?(reference) do
+          {:ok, reference}
+        else
+          {:error, :local_artifact_path}
+        end
+    end
+  end
+
+  defp durable_artifact_url?(reference) when is_binary(reference) do
+    case URI.parse(reference) do
+      %URI{scheme: scheme, host: host} when scheme in ["http", "https"] and is_binary(host) -> true
+      _uri -> false
+    end
+  end
 
   defp normalize_string_list(values) when is_list(values) do
     values
@@ -970,7 +1081,14 @@ defmodule SymphonyElixir.HandoffRoute do
 
   defp artifact_lines(artifacts) do
     Enum.map(artifacts, fn artifact ->
-      "- #{artifact.kind} #{artifact.label}: #{artifact.url}"
+      artifact_detail =
+        cond do
+          is_binary(artifact.url) and artifact.url != "" -> artifact.url
+          is_binary(artifact.summary) and artifact.summary != "" -> artifact.summary
+          true -> "recorded"
+        end
+
+      "- #{artifact.kind} #{artifact.label}: #{artifact_detail}"
     end)
   end
 
@@ -988,6 +1106,12 @@ defmodule SymphonyElixir.HandoffRoute do
   end
 
   defp artifact_to_map(%Artifact{} = artifact) do
-    %{kind: Atom.to_string(artifact.kind), label: artifact.label, url: artifact.url}
+    %{
+      kind: Atom.to_string(artifact.kind),
+      label: artifact.label,
+      url: artifact.url,
+      summary: artifact.summary,
+      metadata: artifact.metadata
+    }
   end
 end

@@ -2361,7 +2361,8 @@ Extension config:
 
 - `runtime.workflow_modules.product_visual_review.enabled` (boolean, default `false`)
   - When true and `product_visual_review` is selected in `workflow.modules`, the first-turn agent
-    prompt includes the `product_visual_review` module.
+    prompt includes the `product_visual_review` module and completed runs record structured
+    product visual review evidence in the handoff route.
 - `runtime.workflow_modules.product_visual_review.project_kind` (`web`, `mobile`, or `desktop`, default
   `web`)
   - Selects the app family used to phrase visual QA evidence instructions.
@@ -2385,6 +2386,11 @@ Extension config:
 
 When this extension is enabled, backend, infra, docs, or test-only work SHOULD record that
 `product_visual_review` was skipped rather than paying visual QA runtime cost by default.
+Required or recommended product-facing routes SHOULD record desktop/mobile screenshot or media
+links, interaction smoke notes, responsive-state evidence, and product/design notes when available.
+Implementations MUST NOT expose local temp/file paths as visual QA artifact links in dashboard or
+API output; missing or unavailable capture tooling MUST be represented as structured blocked or
+human-review evidence.
 
 ## 14. Failure Model and Recovery Strategy
 

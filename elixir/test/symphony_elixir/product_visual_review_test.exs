@@ -191,4 +191,48 @@ defmodule SymphonyElixir.ProductVisualReviewTest do
     assert config.checks == ["viewport_screenshots"]
     assert config.artifacts == ["manifest"]
   end
+
+  test "route evidence records required, recommended, skipped, and malformed payload states" do
+    recommended = %ProductVisualReviewConfig{enabled: true, route_policy: "recommended"}
+
+    assert %{
+             requirement: :recommended,
+             status: :missing,
+             reason: "route policy recommended",
+             required_action: nil
+           } = ProductVisualReview.route_evidence(recommended, [], nil, nil)
+
+    required = %ProductVisualReviewConfig{enabled: true, route_policy: "required"}
+
+    assert %{
+             requirement: :required,
+             status: :blocked,
+             required_action: "Run product visual QA or attach structured desktop/mobile evidence before handoff."
+           } = ProductVisualReview.route_evidence(required, [], nil, %{})
+
+    assert %{
+             status: :blocked,
+             checks: [],
+             artifacts: [],
+             required_action: "Run product visual QA or attach structured desktop/mobile evidence before handoff."
+           } =
+             ProductVisualReview.route_evidence(required, "not a file list", nil, %{
+               status: :passed,
+               checks: "not a list",
+               artifacts: "not a list",
+               reason: " "
+             })
+
+    assert %{status: :blocked, reason: "numeric status"} =
+             ProductVisualReview.route_evidence(required, [], nil, %{status: 123, reason: "numeric status"})
+
+    assert %{status: :blocked, reason: "visual diffs remain"} =
+             ProductVisualReview.route_evidence(required, [], nil, %{status: "fix_required", reason: "visual diffs remain"})
+
+    assert %{status: :blocked, reason: "agent skipped required visual QA"} =
+             ProductVisualReview.route_evidence(required, [], nil, %{status: "skipped", reason: "agent skipped required visual QA"})
+
+    assert %{status: :skipped, reason: "route policy off"} =
+             ProductVisualReview.route_evidence(%ProductVisualReviewConfig{enabled: false}, [], nil, %{status: 123})
+  end
 end

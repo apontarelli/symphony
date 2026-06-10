@@ -382,6 +382,68 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
         </section>
 
+        <section :if={@payload.handoff_routes != []} class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Handoff routes</h2>
+              <p class="section-copy">Completed route decisions, evidence summaries, and review artifacts.</p>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table class="data-table" style="min-width: 900px;">
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Route</th>
+                  <th>Target</th>
+                  <th>Evidence</th>
+                  <th>Artifacts</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={route <- @payload.handoff_routes}>
+                  <td data-label="Issue">
+                    <span class="issue-id"><%= route_value(route, :issue_id) || "n/a" %></span>
+                  </td>
+                  <td data-label="Route">
+                    <span class={state_badge_class(route_value(route, :route) || "")}>
+                      <%= route_label(route_value(route, :route)) %>
+                    </span>
+                  </td>
+                  <td data-label="Target"><%= route_value(route, :target_state) || "n/a" %></td>
+                  <td data-label="Evidence">
+                    <div class="detail-stack">
+                      <span><%= route_value(route, :summary) || "n/a" %></span>
+                      <span :if={route_evidence_text(route)} class="muted"><%= route_evidence_text(route) %></span>
+                    </div>
+                  </td>
+                  <td data-label="Artifacts">
+                    <div class="action-stack">
+                      <%= if route_artifacts(route) == [] do %>
+                        <span class="muted">n/a</span>
+                      <% else %>
+                        <%= for artifact <- route_artifacts(route) do %>
+                          <a
+                            :if={external_issue_url(artifact_url(artifact))}
+                            class="table-action"
+                            href={artifact_url(artifact)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                          ><%= artifact_label(artifact) %></a>
+                          <span :if={!external_issue_url(artifact_url(artifact))} class="muted">
+                            <%= artifact_text(artifact) %>
+                          </span>
+                        <% end %>
+                      <% end %>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>
@@ -560,6 +622,60 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp entry_target(entry) do
     Map.get(entry, :target) || Map.get(entry, :pr_target) || "n/a"
+  end
+
+  defp route_value(route, key) when is_map(route) do
+    Map.get(route, key) || Map.get(route, Atom.to_string(key))
+  end
+
+  defp route_value(_route, _key), do: nil
+
+  defp route_label(nil), do: "n/a"
+
+  defp route_label(route) do
+    route
+    |> to_string()
+    |> String.replace("_", " ")
+  end
+
+  defp route_evidence_text(route) do
+    route
+    |> route_value(:evidence)
+    |> case do
+      evidence when is_list(evidence) ->
+        evidence
+        |> Enum.filter(&(route_value(&1, :kind) == "product_visual_review"))
+        |> Enum.map(&route_value(&1, :summary))
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" ")
+        |> case do
+          "" -> nil
+          text -> text
+        end
+
+      _evidence ->
+        nil
+    end
+  end
+
+  defp route_artifacts(route) do
+    case route_value(route, :artifacts) do
+      artifacts when is_list(artifacts) -> artifacts
+      _artifacts -> []
+    end
+  end
+
+  defp artifact_url(artifact), do: route_value(artifact, :url)
+
+  defp artifact_label(artifact) do
+    route_value(artifact, :label) || route_value(artifact, :kind) || "artifact"
+  end
+
+  defp artifact_text(artifact) do
+    case route_value(artifact, :summary) do
+      summary when is_binary(summary) and summary != "" -> "#{artifact_label(artifact)}: #{summary}"
+      _summary -> artifact_label(artifact)
+    end
   end
 
   defp orchestrator do

@@ -143,6 +143,22 @@ defmodule SymphonyElixir.WorkflowModules.ProductVisualReview do
           matched_labels: [String.t()]
         }
 
+  @type route_evidence :: %{
+          module: String.t(),
+          requirement: requirement(),
+          status: atom(),
+          reason: String.t(),
+          required_action: String.t() | nil,
+          project_kind: String.t(),
+          route_policy: String.t(),
+          checks: [map()],
+          artifacts: [map()],
+          expected_checks: [String.t()],
+          expected_artifacts: [String.t()],
+          matched_files: [String.t()],
+          matched_labels: [String.t()]
+        }
+
   @spec classify(Config.t(), [String.t()]) :: decision()
   def classify(%Config{} = config, changed_files) when is_list(changed_files) do
     classify(config, changed_files, nil)
@@ -180,6 +196,36 @@ defmodule SymphonyElixir.WorkflowModules.ProductVisualReview do
         skip(config, changed_files, issue, "no product-facing route trigger matched")
     end
   end
+
+  @spec route_evidence(Config.t(), [String.t()], Issue.t() | nil, term()) :: route_evidence() | nil
+  def route_evidence(%Config{enabled: false}, _changed_files, _issue, payload) do
+    if payload_present?(payload), do: route_evidence(%Config{enabled: true, route_policy: "off"}, [], nil, payload)
+  end
+
+  def route_evidence(%Config{} = config, changed_files, issue, payload) when is_list(changed_files) do
+    decision = classify(config, changed_files, issue)
+    payload = normalize_payload(payload)
+    status = evidence_status(decision.requirement, payload)
+    reason = payload_text(payload, :reason) || payload_text(payload, :summary) || decision.reason
+
+    %{
+      module: "product_visual_review",
+      requirement: decision.requirement,
+      status: status,
+      reason: reason,
+      required_action: payload_text(payload, :required_action) || default_required_action(decision.requirement, status),
+      project_kind: decision.project_kind,
+      route_policy: decision.route_policy,
+      checks: payload_list(payload, :checks),
+      artifacts: payload_list(payload, :artifacts),
+      expected_checks: decision.checks,
+      expected_artifacts: decision.artifacts,
+      matched_files: decision.matched_files,
+      matched_labels: decision.matched_labels
+    }
+  end
+
+  def route_evidence(%Config{} = config, _changed_files, issue, payload), do: route_evidence(config, [], issue, payload)
 
   @spec prompt_section(Config.t() | nil) :: String.t() | nil
   def prompt_section(nil), do: nil
@@ -238,6 +284,103 @@ defmodule SymphonyElixir.WorkflowModules.ProductVisualReview do
 
   defp skip(config, changed_files, issue, reason) do
     decision(:skip, config, changed_files, issue, reason)
+  end
+
+  @evidence_status_tokens %{
+    "blocked" => :blocked,
+    "clean" => :passed,
+    "error" => :blocked,
+    "failed" => :blocked,
+    "failure" => :blocked,
+    "fix_required" => :blocked,
+    "missing" => :missing,
+    "ok" => :passed,
+    "pass" => :passed,
+    "passed" => :passed,
+    "skipped" => :skipped,
+    "success" => :passed
+  }
+
+  defp evidence_status(:skip, _payload), do: :skipped
+
+  defp evidence_status(:required, payload) do
+    case payload_status(payload) do
+      :passed -> if(payload_evidence?(payload), do: :passed, else: :blocked)
+      _status -> :blocked
+    end
+  end
+
+  defp evidence_status(:recommended, payload) do
+    case payload_status(payload) do
+      :passed -> if(payload_evidence?(payload), do: :passed, else: :missing)
+      :blocked -> :blocked
+      _status -> :missing
+    end
+  end
+
+  defp payload_status(payload) when is_map(payload) do
+    payload
+    |> fetch_payload(:status, nil)
+    |> normalize_status()
+  end
+
+  defp normalize_status(status) when is_atom(status) do
+    status
+    |> Atom.to_string()
+    |> normalize_status()
+  end
+
+  defp normalize_status(status) when is_binary(status) do
+    Map.get(@evidence_status_tokens, normalize_label(status))
+  end
+
+  defp normalize_status(_status), do: nil
+
+  defp default_required_action(:required, status) when status in [:blocked, :missing] do
+    "Run product visual QA or attach structured desktop/mobile evidence before handoff."
+  end
+
+  defp default_required_action(_requirement, _status), do: nil
+
+  defp payload_present?(payload) when is_map(payload), do: map_size(payload) > 0
+  defp payload_present?(_payload), do: false
+
+  defp payload_evidence?(payload) when is_map(payload) do
+    payload_list(payload, :checks) != [] or payload_list(payload, :artifacts) != []
+  end
+
+  defp payload_evidence?(_payload), do: false
+
+  defp normalize_payload(payload) when is_map(payload), do: payload
+  defp normalize_payload(_payload), do: %{}
+
+  defp payload_text(payload, key) do
+    payload
+    |> fetch_payload(key, nil)
+    |> optional_trimmed_string()
+  end
+
+  defp payload_list(payload, key) do
+    case fetch_payload(payload, key, []) do
+      values when is_list(values) -> values
+      _value -> []
+    end
+  end
+
+  defp fetch_payload(payload, key, default) when is_map(payload) do
+    Map.get(payload, key, Map.get(payload, to_string(key), default))
+  end
+
+  defp optional_trimmed_string(nil), do: nil
+
+  defp optional_trimmed_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      trimmed -> trimmed
+    end
   end
 
   defp effective_checks(:skip, _config), do: []

@@ -331,11 +331,14 @@ runtime:
   each run records module names, versions, and a policy hash. The default delivery workflow does not
   require globally installed Symphony delivery skills.
 - `product_visual_review` can be selected in `workflow.modules` and configured under
-  `runtime.workflow_modules.product_visual_review` to enable product/design QA in the first-turn
-  agent prompt. Set `enabled: true`, choose `project_kind: web | mobile | desktop`, and use
-  `route_policy: auto | required | recommended | off`. In `auto`, the agent classifies the final
-  diff against configured `changed_file_triggers` and issue labels, runs Browser/Playwright-oriented
-  web checks when product-facing changes are present, and records visual evidence for handoff.
+  `runtime.workflow_modules.product_visual_review` to enable product/design QA prompts and durable
+  handoff-route evidence. Set `enabled: true`, choose `project_kind: web | mobile | desktop`, and
+  use `route_policy: auto | required | recommended | off`. In `auto`, Symphony classifies the final
+  validated changed-file manifest against configured `changed_file_triggers` and issue labels,
+  records whether visual QA was required, recommended, skipped, or blocked, and keeps durable
+  screenshot/media links plus interaction, responsive-state, and product/design notes in the
+  handoff route. Local temp/file paths are rejected instead of being exposed as dashboard/API
+  artifact links.
 - Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
   turns run in jj-native workspaces and do not need to write Git metadata directly. Use
   `git clone ... .` only for repos that cannot run under jj compatibility.
@@ -402,6 +405,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - A primary project status table for the configured tracker project plus runtime project rows
 - Running session detail with issue state, profile/target, runtime, last Codex update,
   copyable session ID, and token split
+- Handoff route detail with completion route, target state, product visual review evidence, and
+  durable artifact references
 - Optional Admin details for runtime metadata and rate-limit diagnostics only when upstream
   rate-limit data is present
 - JSON API for operational debugging under `/api/v1/*`

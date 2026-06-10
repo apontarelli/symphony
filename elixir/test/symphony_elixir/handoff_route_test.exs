@@ -613,6 +613,421 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert body =~ "Interaction capture"
   end
 
+  test "recorder records backend-only product visual review skip evidence" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-skip-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/symphony_elixir"))
+      File.write!(Path.join([workspace, "lib/symphony_elixir/orchestrator.ex"]), "defmodule Orchestrator, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/symphony_elixir/orchestrator.ex"]
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :human_review
+
+      assert %{kind: :product_visual_review, status: :skipped, metadata: %{requirement: :skip}} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder ignores malformed precomputed changed-file metadata for visual QA classification" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    decision =
+      HandoffRouteRecorder.classify_completion(%{
+        "checks" => [
+          123,
+          %{"name" => "change_manifest", "status" => :passed, "metadata" => %{"changed_files" => "not a list"}}
+        ],
+        "product_visual_review" => %{"status" => "passed"}
+      })
+
+    assert decision.route == :rework
+
+    assert %{kind: :product_visual_review, status: :skipped, metadata: %{matched_files: []}} =
+             Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+  end
+
+  test "recorder classifies visual QA from host-validated manifest instead of stale completion check" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-trusted-manifest-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [
+              %{
+                "name" => "change_manifest",
+                "status" => :passed,
+                "metadata" => %{"changed_files" => []}
+              }
+            ],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"]
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :blocked
+
+      assert %{kind: :product_visual_review, status: :blocked, metadata: %{matched_files: matched_files}} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert matched_files == ["lib/example_web/live/dashboard_live.ex"]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder preserves durable product visual review artifacts and rejects local temp paths" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-artifacts-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "product_visual_review" => %{
+              "status" => "passed",
+              "checks" => [
+                %{"name" => "viewport_screenshots", "status" => "passed", "summary" => "desktop and mobile captured"},
+                %{"name" => "interaction_smoke", "status" => "passed", "summary" => "filter toggle worked"}
+              ],
+              "artifacts" => [
+                %{
+                  "kind" => "screenshot",
+                  "label" => "Desktop screenshot",
+                  "url" => "https://artifacts.example/SID-314/desktop.png"
+                },
+                %{
+                  "kind" => "screenshot",
+                  "label" => "Mobile screenshot",
+                  "url" => "/private/tmp/symphony/mobile.png"
+                },
+                %{
+                  "kind" => "interaction_notes",
+                  "label" => "Interaction smoke",
+                  "summary" => "Toggled the filter and confirmed the result count changed."
+                },
+                %{
+                  "kind" => "product_design_notes",
+                  "label" => "Product design notes",
+                  "summary" => "Empty and loading states were unchanged."
+                }
+              ]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :product_visual_review
+      assert Enum.map(decision.artifacts, & &1.label) == ["Desktop screenshot", "Interaction smoke", "Product design notes"]
+      refute Enum.any?(decision.artifacts, &(&1.url == "/private/tmp/symphony/mobile.png"))
+
+      assert %{metadata: %{rejected_artifacts: [%{label: "Mobile screenshot", reason: :local_artifact_path}]}} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert %{artifacts: artifacts} = HandoffRoute.to_map(decision)
+      assert Enum.any?(artifacts, &(&1.label == "Desktop screenshot" and &1.url == "https://artifacts.example/SID-314/desktop.png"))
+      assert Enum.any?(artifacts, &(&1.label == "Interaction smoke" and &1.summary =~ "Toggled the filter"))
+      refute inspect(artifacts) =~ "/private/tmp"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "missing required visual capture tooling routes as structured blocked evidence" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "product_visual_review" => %{
+              "status" => "blocked",
+              "reason" => "Browser capture tooling is unavailable.",
+              "required_action" => "Attach desktop and mobile screenshots before handoff."
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :blocked
+      assert decision.recommendation == "Attach desktop and mobile screenshots before handoff."
+
+      assert %{kind: :product_visual_review, status: :blocked, summary: summary} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert summary =~ "Browser capture tooling is unavailable"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "product visual review evidence handles missing recommended review and local-only artifacts" do
+    recommended =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          requirement: "recommended",
+          status: "missing",
+          reason: "issue labels indicate product-facing work",
+          checks: "not a list"
+        }
+      })
+
+    assert recommended.route == :product_visual_review
+
+    assert %{kind: :product_visual_review, status: :missing, summary: summary} =
+             Enum.find(recommended.evidence, &(&1.kind == :product_visual_review))
+
+    assert summary =~ "issue labels indicate product-facing work"
+
+    blocked =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          requirement: :required,
+          status: :passed,
+          artifacts: [
+            %{kind: :screenshot, label: "Desktop screenshot", url: "file:///tmp/symphony/desktop.png"}
+          ]
+        }
+      })
+
+    assert blocked.route == :blocked
+    assert blocked.artifacts == []
+
+    assert %{metadata: %{rejected_artifacts: [%{label: "Desktop screenshot", reason: :local_artifact_path}]}} =
+             Enum.find(blocked.evidence, &(&1.kind == :product_visual_review))
+
+    malformed =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: "not a map",
+        artifacts: [
+          "Manual artifact note",
+          %{kind: :artifact, label: "Reference without URL"},
+          %{kind: :artifact, label: "Blank URL reference", url: " "},
+          nil
+        ]
+      })
+
+    assert malformed.route == :human_review
+    assert Enum.map(malformed.artifacts, & &1.summary) == ["Manual artifact note", nil, nil]
+  end
+
+  test "product visual review rejects non-durable absolute artifact references" do
+    blocked =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          requirement: :required,
+          status: :passed,
+          artifacts: [
+            %{kind: :screenshot, label: "Workspace screenshot", url: "/workspace/SID-314/desktop.png"},
+            %{kind: :screenshot, label: "Repo screenshot", url: "/repo/screenshots/mobile.png"},
+            %{kind: :screenshot, label: "Durable screenshot", url: "https://artifacts.example/SID-314/desktop.png"}
+          ]
+        }
+      })
+
+    assert blocked.route == :product_visual_review
+    assert Enum.map(blocked.artifacts, & &1.label) == ["Durable screenshot"]
+    refute inspect(HandoffRoute.to_map(blocked)) =~ "/workspace"
+    refute inspect(HandoffRoute.to_map(blocked)) =~ "/repo/screenshots"
+
+    assert %{metadata: %{rejected_artifacts: rejected_artifacts}} =
+             Enum.find(blocked.evidence, &(&1.kind == :product_visual_review))
+
+    assert Enum.map(rejected_artifacts, & &1.label) == ["Workspace screenshot", "Repo screenshot"]
+  end
+
+  test "recorder uses run-resolved product visual review config from routing context" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "off"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-run-config-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"]
+          },
+          nil,
+          workspace,
+          nil,
+          %{
+            workflow_module_resolution: %{
+              modules: [
+                %{
+                  id: "product_visual_review",
+                  version: "v1",
+                  config: %{"enabled" => true, "route_policy" => "required"}
+                }
+              ]
+            }
+          }
+        )
+
+      assert decision.route == :blocked
+
+      assert %{kind: :product_visual_review, status: :blocked, metadata: %{route_policy: "required"}} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder treats run module snapshot without product visual review as disabled" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "required"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-no-run-module-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"]
+          },
+          nil,
+          workspace,
+          nil,
+          %{
+            workflow_module_resolution: %{
+              modules: [
+                %{id: "repo.docs", version: "v1", config: %{}}
+              ]
+            }
+          }
+        )
+
+      refute decision.route in [:blocked, :product_visual_review]
+      refute Enum.any?(decision.evidence, &(&1.kind == :product_visual_review))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "handoff comment renders artifact notes and empty artifact details" do
+    body =
+      HandoffRoute.format_comment(%HandoffRoute.Decision{
+        route: :human_review,
+        target_state: "Human Review",
+        summary: "Manual review.",
+        recommendation: "Review evidence.",
+        evidence: [],
+        options: [],
+        artifacts: [
+          %HandoffRoute.Artifact{kind: :interaction_notes, label: "Interaction smoke", summary: "Menu toggled."},
+          %HandoffRoute.Artifact{kind: :artifact, label: "Reference without URL"}
+        ]
+      })
+
+    assert body =~ "interaction_notes Interaction smoke: Menu toggled."
+    assert body =~ "artifact Reference without URL: recorded"
+  end
+
   test "normalizes malformed optional route input conservatively" do
     blocked =
       HandoffRoute.classify(%{

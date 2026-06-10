@@ -3,8 +3,12 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   Records structured handoff route decisions to the configured tracker.
   """
 
-  alias SymphonyElixir.{HandoffManifest, HandoffRoute, PathSafety, Tracker}
+  alias SymphonyElixir.{Config, HandoffManifest, HandoffRoute, PathSafety, Tracker}
+  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.WorkflowModules.ProductVisualReview
+  alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
 
+  @manifest_check_name "change_manifest"
   @completion_keys [
     :checks,
     "checks",
@@ -35,21 +39,43 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     :pr_feedback,
     "pr_feedback",
     :prFeedback,
-    "prFeedback"
+    "prFeedback",
+    :product_visual_review,
+    "product_visual_review",
+    :productVisualReview,
+    "productVisualReview"
   ]
   @completion_field_aliases %{
     pr_feedback: [:pr_feedback, "pr_feedback", :prFeedback, "prFeedback"],
     publish_handoff: [:publish_handoff, "publish_handoff", :publishHandoff, "publishHandoff"]
   }
 
-  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil, map() | keyword()) ::
+  @spec classify_completion(
+          term(),
+          map() | nil,
+          Path.t() | nil,
+          String.t() | nil,
+          map() | keyword(),
+          Issue.t() | nil
+        ) ::
           HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker \\ nil, workspace \\ nil, worker_host \\ nil, routing_context \\ %{}) do
+
+  def classify_completion(
+        completion,
+        blocker \\ nil,
+        workspace \\ nil,
+        worker_host \\ nil,
+        routing_context \\ %{},
+        issue \\ nil
+      ) do
     completion = if is_map(completion), do: completion, else: %{}
 
+    manifest_check = handoff_manifest_check_for_completion(completion, workspace, worker_host)
+
     checks =
-      completion_field(completion, :checks, [])
-      |> add_handoff_manifest_check(completion, workspace, worker_host)
+      completion
+      |> completion_field(:checks, [])
+      |> append_handoff_manifest_check(manifest_check)
 
     %{
       checks: checks,
@@ -62,6 +88,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       pr_feedback: completion_field(completion, :pr_feedback, nil),
       publish_preflight: completion_field(completion, :publish_preflight, nil),
       publish_handoff: completion_field(completion, :publish_handoff, nil),
+      product_visual_review: product_visual_review_evidence(completion, manifest_check, routing_context, issue),
       blocker: blocker
     }
     |> HandoffRoute.classify()
@@ -113,22 +140,157 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
   defp context_field(_context, _key, default), do: default
 
-  defp add_handoff_manifest_check(checks, completion, workspace, worker_host) do
-    checks = if is_list(checks), do: checks, else: []
+  defp completion_alias(completion, key, camel_key, default) do
+    completion
+    |> completion_field(key, completion_field(completion, camel_key, default))
+  end
 
+  defp product_visual_review_evidence(completion, manifest_check, routing_context, issue) do
+    completion
+    |> completion_alias(:product_visual_review, :productVisualReview, nil)
+    |> then(fn payload ->
+      ProductVisualReview.route_evidence(
+        product_visual_review_config(routing_context),
+        changed_files_from_manifest_check(manifest_check),
+        issue,
+        payload
+      )
+    end)
+  end
+
+  defp product_visual_review_config(routing_context) do
+    explicit_config =
+      routing_context
+      |> context_field(:product_visual_review_config, nil)
+      |> product_visual_review_config_from_value()
+
+    workflow_module_resolution = context_field(routing_context, :workflow_module_resolution, nil)
+
+    case explicit_config do
+      %ProductVisualReviewConfig{} = config ->
+        config
+
+      nil ->
+        if is_nil(workflow_module_resolution) do
+          Config.settings!().workflow_modules.product_visual_review
+        else
+          product_visual_review_config_from_resolution(workflow_module_resolution) ||
+            disabled_product_visual_review_config()
+        end
+    end
+  end
+
+  defp product_visual_review_config_from_resolution(%{modules: modules}) when is_list(modules) do
+    Enum.find_value(modules, fn module ->
+      if module_field(module, :id) == "product_visual_review" do
+        module
+        |> module_field(:config)
+        |> product_visual_review_config_from_value()
+      end
+    end)
+  end
+
+  defp product_visual_review_config_from_resolution(%{"modules" => modules}) when is_list(modules) do
+    product_visual_review_config_from_resolution(%{modules: modules})
+  end
+
+  defp product_visual_review_config_from_resolution(_resolution), do: nil
+
+  defp product_visual_review_config_from_value(%ProductVisualReviewConfig{} = config), do: config
+
+  defp product_visual_review_config_from_value(config) when is_map(config) do
+    attrs = nested_product_visual_review_config(config) || config
+
+    %ProductVisualReviewConfig{}
+    |> ProductVisualReviewConfig.changeset(attrs)
+    |> Ecto.Changeset.apply_action(:validate)
+    |> case do
+      {:ok, config} -> config
+      {:error, _changeset} -> nil
+    end
+  end
+
+  defp product_visual_review_config_from_value(_config), do: nil
+
+  defp disabled_product_visual_review_config do
+    %ProductVisualReviewConfig{enabled: false, route_policy: "off"}
+  end
+
+  defp nested_product_visual_review_config(config) when is_map(config) do
+    workflow_modules = module_field(config, :workflow_modules)
+
+    if is_map(workflow_modules) do
+      module_field(workflow_modules, :product_visual_review)
+    end
+  end
+
+  defp module_field(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, to_string(key)))
+  defp module_field(_map, _key), do: nil
+
+  defp changed_files_from_manifest_check(%{} = check) do
+    if check_name(check) == @manifest_check_name and check_status(check) == :passed do
+      check
+      |> check_metadata()
+      |> completion_field(:changed_files, [])
+      |> case do
+        files when is_list(files) -> files
+        _files -> []
+      end
+    else
+      []
+    end
+  end
+
+  defp changed_files_from_manifest_check(_check), do: []
+
+  defp check_name(check) when is_map(check), do: completion_field(check, :name, nil)
+  defp check_name(_check), do: nil
+
+  defp check_status(check) when is_map(check) do
+    check
+    |> completion_field(:status, nil)
+    |> normalize_check_status()
+  end
+
+  defp check_metadata(check) when is_map(check), do: completion_field(check, :metadata, %{})
+
+  defp normalize_check_status(status) when status in [:passed, :pass, :success, :clean, :ok], do: :passed
+
+  defp normalize_check_status(status) when is_binary(status) do
+    status
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace(~r/[\s-]+/, "_")
+    |> case do
+      status when status in ["passed", "pass", "success", "clean", "ok"] -> :passed
+      _status -> nil
+    end
+  end
+
+  defp normalize_check_status(_status), do: nil
+
+  defp append_handoff_manifest_check(checks, nil) do
+    checks = if is_list(checks), do: checks, else: []
+    checks
+  end
+
+  defp append_handoff_manifest_check(checks, manifest_check) when is_map(manifest_check) do
+    checks = if is_list(checks), do: checks, else: []
+    checks ++ [manifest_check]
+  end
+
+  defp handoff_manifest_check_for_completion(completion, workspace, worker_host) do
     case HandoffManifest.source(completion) do
       :absent ->
         if completion_metadata?(completion) do
-          checks ++ [handoff_manifest_check(%{}, workspace, worker_host)]
-        else
-          checks
+          handoff_manifest_check(%{}, workspace, worker_host)
         end
 
       {:present, manifest} ->
-        checks ++ [handoff_manifest_check(manifest, workspace, worker_host)]
+        handoff_manifest_check(manifest, workspace, worker_host)
 
       {:failed, failure} ->
-        checks ++ [failed_handoff_manifest_check(failure)]
+        failed_handoff_manifest_check(failure)
     end
   end
 
