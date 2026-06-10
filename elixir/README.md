@@ -318,8 +318,9 @@ runtime:
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
-  `turn_sandbox_policy` overrides. Use this sparingly for scoped work like repo skill authoring
-  that needs to edit protected `.agents/` paths; keep the global `codex` defaults sandboxed.
+  `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
+  authoring that needs to edit protected `.agents/` paths; profile overrides do not make globally
+  installed `symphony-*` skills part of unattended runtime execution.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into

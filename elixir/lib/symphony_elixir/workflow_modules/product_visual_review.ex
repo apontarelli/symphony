@@ -349,8 +349,6 @@ defmodule SymphonyElixir.WorkflowModules.ProductVisualReview do
     payload_list(payload, :checks) != [] or payload_list(payload, :artifacts) != []
   end
 
-  defp payload_evidence?(_payload), do: false
-
   defp normalize_payload(payload) when is_map(payload), do: payload
   defp normalize_payload(_payload), do: %{}
 

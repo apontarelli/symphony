@@ -322,6 +322,13 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       Reproduce the current behavior before source edits. The reproduction can be a command,
       deterministic rendered output, screenshot, or failing test. Record the signal in the workpad.
 
+      Use test-first development only when expected behavior is clear and the change has a
+      meaningful public seam, such as bug reproduction, domain rules, storage behavior, API or
+      workflow contracts, permission logic, or non-trivial refactors.
+
+      Do not force TDD for docs-only, harness/config, cosmetic, prototype, mechanical, or unclear
+      product work; record the reason briefly in the workpad when skipping it.
+
       Implement the smallest change that satisfies the issue. Keep the workpad checklist current
       after each meaningful milestone. If tests are added or changed, use high-signal tests that
       protect observable behavior and avoid framework or wiring assertions.
@@ -344,6 +351,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       Prefer Jujutsu when the workspace is a jj repository. Use git only when the repository is not
       jj-backed or a tool explicitly requires git compatibility. Inspect status and diff before
       committing or publishing.
+
+      Commit and publish only after implementation validation, required quality gates, and automated review
+      have no unresolved fix-required findings. Keep PR link evidence in Linear or the workpad before
+      final handoff routing.
 
       Describe the current change with a Conventional Commit subject that includes the ticket ID,
       for example `feat(SID-292): create core workflow modules`. Commit only intended files and
@@ -522,6 +533,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       work satisfies the requirement outcome. Record validation evidence, gaps, and the final
       requirement decision in the workpad. If a requirement gap needs implementation, create or link
       a separate implementation issue instead of editing from the Requirement.
+
+      A Requirement with no blocking implementation issue is a setup defect unless the project has
+      explicitly deferred or canceled it. Record the missing blocker relationship in the workpad and
+      do not validate it as standalone prose or docs-only scope.
       """,
       description: "Requirement issue validation after implementation blockers finish"
     },
@@ -541,6 +556,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
       Closeout may edit repo docs when needed, but it should not reopen solved implementation scope.
       Summarize shipped, deferred, and blocked items in the workpad with validation evidence.
+
+      If unresolved Requirement issues remain, or if unresolved Requirements are not linked as
+      blockers, record that relationship gap in the workpad and stop closeout until every
+      Requirement has a final disposition.
       """,
       description: "Project closeout validation, durable docs reconciliation, and follow-up creation"
     },

@@ -50,6 +50,26 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     publish_handoff: [:publish_handoff, "publish_handoff", :publishHandoff, "publishHandoff"]
   }
 
+  @spec classify_completion(term()) :: HandoffRoute.Decision.t()
+  def classify_completion(completion), do: classify_completion(completion, nil, nil, nil, %{}, nil)
+
+  @spec classify_completion(term(), map() | nil) :: HandoffRoute.Decision.t()
+  def classify_completion(completion, blocker), do: classify_completion(completion, blocker, nil, nil, %{}, nil)
+
+  @spec classify_completion(term(), map() | nil, Path.t() | nil) :: HandoffRoute.Decision.t()
+  def classify_completion(completion, blocker, workspace), do: classify_completion(completion, blocker, workspace, nil, %{}, nil)
+
+  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil) :: HandoffRoute.Decision.t()
+  def classify_completion(completion, blocker, workspace, worker_host) do
+    classify_completion(completion, blocker, workspace, worker_host, %{}, nil)
+  end
+
+  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil, map() | keyword()) ::
+          HandoffRoute.Decision.t()
+  def classify_completion(completion, blocker, workspace, worker_host, routing_context) do
+    classify_completion(completion, blocker, workspace, worker_host, routing_context, nil)
+  end
+
   @spec classify_completion(
           term(),
           map() | nil,
@@ -59,14 +79,13 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
           Issue.t() | nil
         ) ::
           HandoffRoute.Decision.t()
-
   def classify_completion(
         completion,
-        blocker \\ nil,
-        workspace \\ nil,
-        worker_host \\ nil,
-        routing_context \\ %{},
-        issue \\ nil
+        blocker,
+        workspace,
+        worker_host,
+        routing_context,
+        issue
       ) do
     completion = if is_map(completion), do: completion, else: %{}
 
@@ -227,47 +246,16 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   defp module_field(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, to_string(key)))
   defp module_field(_map, _key), do: nil
 
-  defp changed_files_from_manifest_check(%{} = check) do
-    if check_name(check) == @manifest_check_name and check_status(check) == :passed do
-      check
-      |> check_metadata()
-      |> completion_field(:changed_files, [])
-      |> case do
-        files when is_list(files) -> files
-        _files -> []
-      end
-    else
-      []
-    end
+  defp changed_files_from_manifest_check(%{
+         name: @manifest_check_name,
+         status: :passed,
+         metadata: %{changed_files: changed_files}
+       })
+       when is_list(changed_files) do
+    changed_files
   end
 
   defp changed_files_from_manifest_check(_check), do: []
-
-  defp check_name(check) when is_map(check), do: completion_field(check, :name, nil)
-  defp check_name(_check), do: nil
-
-  defp check_status(check) when is_map(check) do
-    check
-    |> completion_field(:status, nil)
-    |> normalize_check_status()
-  end
-
-  defp check_metadata(check) when is_map(check), do: completion_field(check, :metadata, %{})
-
-  defp normalize_check_status(status) when status in [:passed, :pass, :success, :clean, :ok], do: :passed
-
-  defp normalize_check_status(status) when is_binary(status) do
-    status
-    |> String.trim()
-    |> String.downcase()
-    |> String.replace(~r/[\s-]+/, "_")
-    |> case do
-      status when status in ["passed", "pass", "success", "clean", "ok"] -> :passed
-      _status -> nil
-    end
-  end
-
-  defp normalize_check_status(_status), do: nil
 
   defp append_handoff_manifest_check(checks, nil) do
     checks = if is_list(checks), do: checks, else: []

@@ -967,7 +967,8 @@ Harness model:
 - The harness `CODEX_HOME` is owned by Symphony, not by the target repository and not by the
   operator's ambient `~/.codex`.
 - The harness contains Symphony global `AGENTS.md`, runtime config, hooks, prompts, module-rendered
-  support files, and any Symphony-managed skills/plugins required for the run.
+  support files, and any implementation-bundled skills/plugins required by selected extensions. The
+  core delivery lifecycle MUST NOT depend on globally installed `symphony-*` delivery skills.
 - Generated harness files SHOULD be outside the target repo workspace or in an implementation-owned
   runtime directory inside the workspace root. They MUST NOT be committed as target repo source.
 - The target repo remains readable/writable as the issue workspace according to sandbox policy.

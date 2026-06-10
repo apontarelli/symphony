@@ -234,5 +234,16 @@ defmodule SymphonyElixir.ProductVisualReviewTest do
 
     assert %{status: :skipped, reason: "route policy off"} =
              ProductVisualReview.route_evidence(%ProductVisualReviewConfig{enabled: false}, [], nil, %{status: 123})
+
+    recommended = %ProductVisualReviewConfig{enabled: true, route_policy: "recommended"}
+
+    assert %{status: :missing, reason: "recommended but no evidence"} =
+             ProductVisualReview.route_evidence(recommended, [], nil, %{status: "passed", reason: "recommended but no evidence"})
+
+    assert %{status: :blocked, reason: "visual QA has blocking findings"} =
+             ProductVisualReview.route_evidence(recommended, [], nil, %{
+               status: "blocked",
+               reason: "visual QA has blocking findings"
+             })
   end
 end
