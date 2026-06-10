@@ -2900,7 +2900,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
-- Requirement issues are eligible from `Todo` after all implementation blockers are terminal
+- Requirement issues are eligible from `Todo` only when they have at least one blocking
+  implementation issue and all blockers are terminal
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace

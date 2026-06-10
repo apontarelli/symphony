@@ -108,7 +108,13 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "Use test-first development only when expected behavior is clear"
     assert prompt =~ "Do not force TDD for docs-only"
     assert prompt =~ "high-signal tests"
+    assert prompt =~ "Prefer simple, obvious designs"
+    assert prompt =~ "plan runtime QA against the changed journey"
     assert prompt =~ "Commit and publish only after implementation validation"
+    assert prompt =~ "Required gates are changed-scope by default"
+    assert prompt =~ "scenario QA to"
+    assert prompt =~ "Review the changed scope with these lenses"
+    assert prompt =~ "Fix-required findings start another repair pass"
     assert prompt =~ "A Requirement with no blocking implementation issue is a setup defect"
     assert prompt =~ "If unresolved Requirement issues remain"
     assert prompt =~ "### Acceptance Criteria"
@@ -126,6 +132,17 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert implementation_loop.content =~ "Use test-first development only when expected behavior is clear"
     assert implementation_loop.content =~ "Do not force TDD for docs-only"
     assert implementation_loop.content =~ "high-signal tests"
+    assert implementation_loop.content =~ "Prefer simple, obvious designs"
+    assert implementation_loop.content =~ "plan runtime QA against the changed journey"
+
+    assert {:ok, quality_gates} = ModuleRegistry.module_defaults("quality-gates", 0)
+    assert quality_gates.content =~ "Required gates are changed-scope by default"
+    assert quality_gates.content =~ "scenario QA to"
+    assert quality_gates.content =~ "product visual review when that module is selected"
+
+    assert {:ok, automated_review} = ModuleRegistry.module_defaults("automated-review", 0)
+    assert automated_review.content =~ "Review the changed scope with these lenses"
+    assert automated_review.content =~ "Fix-required findings start another repair pass"
 
     assert {:ok, vcs_commit_push} = ModuleRegistry.module_defaults("vcs-commit-push", 0)
     assert vcs_commit_push.content =~ "after implementation validation, required quality gates"
@@ -141,6 +158,8 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
 
     for workflow_module <- [
           implementation_loop,
+          quality_gates,
+          automated_review,
           vcs_commit_push,
           requirement_validation,
           project_closeout

@@ -278,8 +278,9 @@ runtime:
   `--profile` is a process-wide override for policy selection; otherwise the `default` profile is
   used.
 - Ticket class labels have generic Symphony behavior independent of tracker project scope:
-  - `Requirement` issues are validation artifacts. They are dispatched from `Todo` only after
-    all blocking implementation issues are terminal.
+  - `Requirement` issues are validation artifacts. They require at least one blocking
+    implementation issue and are dispatched from `Todo` only after all blockers are terminal.
+    Zero blockers is a setup defect, not a dispatchable state.
   - `Project Closeout` issues use the project closeout workflow and should be blocked by unresolved
     Requirement issues.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,

@@ -333,6 +333,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       after each meaningful milestone. If tests are added or changed, use high-signal tests that
       protect observable behavior and avoid framework or wiring assertions.
 
+      Prefer simple, obvious designs. Treat wrappers, pass-through helpers, generic interfaces,
+      compatibility layers, and speculative abstractions as liabilities unless they remove real
+      complexity, encode a useful boundary, or protect shipped behavior.
+
+      For app, CLI, UI, or operator workflow changes, plan runtime QA against the changed journey
+      before handoff. If the journey cannot run because of required external systems, record the
+      exact blocked leg and human-verification need instead of calling the work complete.
+
       Only stop early for missing required auth, permissions, secrets, or unavailable required tools.
       For meaningful out-of-scope work, create a separate Backlog issue instead of expanding scope.
       """,
@@ -400,10 +408,13 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       After implementation validation, classify the diff before handoff. Run expensive gates only
       when the issue, labels, touched files, or risk profile require them.
 
-      Tests added or changed require a test-quality review of the touched scope. Docs, commands,
-      setup, CI, deployment, architecture, workflow, or runbooks require a touched-scope document
-      alignment check. Security, auth, billing, persistence, migrations, external side effects, data
-      integrity, or shared architecture seams require deeper automated review.
+      Required gates are changed-scope by default. Tests added or changed require a test-quality
+      review of the touched scope. App, CLI, UI, or operator workflow changes require scenario QA to
+      the true end state when runtime evidence is feasible. Product-facing UI changes require
+      product visual review when that module is selected. Docs, commands, setup, CI, deployment,
+      architecture, workflow, or runbooks require a touched-scope document alignment check.
+      Security, auth, billing, persistence, migrations, external side effects, data integrity, or
+      shared architecture seams require deeper automated review.
 
       Record the classifier result, required gates, command evidence, and pass/fix/block decision in
       the workpad. Do not move to Human Review while a required gate has unresolved fix-required
@@ -425,12 +436,20 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       workpad, validation evidence, and relevant repo instructions. Prefer read-only reviewers for
       correctness, validation gaps, and maintainability when those resources are available.
 
+      Review the changed scope with these lenses when relevant: correctness/regression risk,
+      tests and validation quality, API/contracts/data flow, security and external side effects,
+      performance or migrations, maintainability/code-quality/deslop, and source-of-truth drift.
+      Verify surprising claims against the code before keeping them.
+
       Classify findings as fix-required, human-input-required, follow-up, or no-action.
       Fix-required findings block handoff until addressed and revalidated. Human-input-required
       findings are only for decisions or access that cannot be resolved autonomously. Follow-up
       findings must not expand the current ticket unless they invalidate acceptance criteria.
 
-      Record review mode, reviewers, findings, fixes, and final decision in the workpad.
+      Fix-required findings start another repair pass: fix the root cause, update or add honest
+      regression coverage when behavior changed, rerun affected validation, and repeat review on the
+      touched scope until no fix-required findings remain. Record review mode, reviewers, findings,
+      fixes, rejected false positives, follow-ups, and final decision in the workpad.
 
       Before moving to Human Review, run a PR feedback sweep when a PR is attached or exists for the
       current branch. Identify the PR number, read top-level PR comments with `gh pr view --comments`,
@@ -458,13 +477,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       sync result.
 
       Record structured completion evidence for the handoff route classifier: validation checks,
-      quality gates, automated review, structured PR feedback sweep, route classification, sync
-      evidence, issue labels, changed_files or change_manifest.changed_files, and any project-specific
-      required auto-land checks. Changed file paths must be relative, normalized workspace paths; host
-      validation rejects absolute paths, traversal, symlink escapes, generated runtime state, caches,
-      logs, temporary app data, local secret files, and operator-local config. Record the selected
-      handoff route in the workpad. When a PR exists, also record the decision in a PR handoff comment
-      or existing PR handoff location.
+      quality gates, scenario QA or blocked human-verification notes when relevant, product visual
+      review evidence when selected, automated review, structured PR feedback sweep, route
+      classification, sync evidence, issue labels, changed_files or change_manifest.changed_files,
+      and any project-specific required auto-land checks. Changed file paths must be relative,
+      normalized workspace paths; host validation rejects absolute paths, traversal, symlink escapes,
+      generated runtime state, caches, logs, temporary app data, local secret files, and
+      operator-local config. Record the selected handoff route in the workpad. When a PR exists, also
+      record the decision in a PR handoff comment or existing PR handoff location.
 
       Treat dry-run auto-land as a visibility route: record that Symphony selected dry-run
       auto-land, move the issue to Human Review for visibility, and do not merge. Treat real

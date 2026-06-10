@@ -260,6 +260,11 @@ defmodule SymphonyElixir.WorkflowModules.ProductVisualReview do
     Artifact evidence:
     #{code_bullet_list(config.artifacts)}
 
+    Review focus:
+    - Judge the changed product surface, not only whether screenshots exist.
+    - Check visual hierarchy, design-system consistency, copy clarity, accessibility basics, focus/touch states, responsive states, overflow, empty/loading/error states, and interaction feedback.
+    - Prefer existing components, tokens, icons, and product patterns unless the change intentionally updates the visual system.
+
     Handoff:
     - Record whether `product_visual_review` was required, recommended, or skipped.
     - When run, tell Antonio which route/screen/state changed, which checks passed, where screenshots or media are attached, and what remains for human product/design review.

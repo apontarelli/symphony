@@ -149,6 +149,10 @@ defmodule SymphonyElixir.ProductVisualReviewTest do
     assert prompt =~ "Project kind: `web`"
     assert prompt =~ "Route policy: `auto`"
     assert prompt =~ "`viewport_screenshots`: capture Browser/Playwright screenshots"
+    assert prompt =~ "Judge the changed product surface"
+    assert prompt =~ "visual hierarchy, design-system consistency"
+    assert prompt =~ "focus/touch states"
+    assert prompt =~ "Prefer existing components, tokens, icons"
     assert prompt =~ "tell Antonio which route/screen/state changed"
   end
 
