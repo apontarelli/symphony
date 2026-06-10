@@ -118,6 +118,11 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Completion requirements:\n- tests-green"
     assert prompt =~ "Review policy:\n- required: true"
     assert prompt =~ "Use the dashboard and status APIs as operator-visible evidence"
+
+    assert prompt =~
+             "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command."
+
+    refute prompt =~ "skill/flow"
   end
 
   test "product visual review module compiles through registry-backed workflow modules" do

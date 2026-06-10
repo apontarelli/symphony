@@ -284,8 +284,8 @@ runtime:
     Requirement issues.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
   including `policy.policy_ref`, `delivery.pr_target`, and `policy.policy_metadata` when the
-  runtime attaches metadata. Delivery skills use `delivery.pr_target` for branch sync, PR base
-  selection, review gates, and landing guardrails. Symphony also appends a compact
+  runtime attaches metadata. Delivery workflow modules use `delivery.pr_target` for branch sync, PR
+  base selection, review gates, and landing guardrails. Symphony also appends a compact
   selected-profile block to the first agent prompt with the exact workpad stamp, profile prompt
   rules (`prompt.rules`, `prompt_rules`, or `prompt_requirements`), validation requirements
   (`checks`, `validation`, or `validation_requirements`), and review requirements (`review` or
@@ -328,8 +328,9 @@ runtime:
   closeout, and run recovery.
 - Bundled core workflow modules resolve through `SymphonyElixir.Workflow.ModuleRegistry` during
   prompt compilation. A custom workflow prompt can render them with `{{ workflow.modules }}`, and
-  each run records module names, versions, and a policy hash. The default delivery workflow does not
-  require globally installed Symphony delivery skills.
+  each run records module names, versions, and a policy hash. The default delivery workflow is
+  self-contained in bundled modules selected through `workflow.modules`; runtime behavior comes from
+  the registry, manifest, and recorded module policy hash.
 - `product_visual_review` can be selected in `workflow.modules` and configured under
   `runtime.workflow_modules.product_visual_review` to enable product/design QA prompts and durable
   handoff-route evidence. Set `enabled: true`, choose `project_kind: web | mobile | desktop`, and

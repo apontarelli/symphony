@@ -143,7 +143,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       prompt_sections: [
         "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
         "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
-        "`Merging` means human approval or guarded auto-land approval was granted; run the configured land skill/flow and never bypass it with a direct merge command.",
+        "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command.",
         "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
       ],
       content: nil,
