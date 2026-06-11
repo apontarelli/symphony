@@ -55,10 +55,7 @@ defmodule SymphonyElixir.QualityGate.Synthesis do
 
   @spec synthesize([map()]) :: result()
   def synthesize(job_results) when is_list(job_results) do
-    findings =
-      job_results
-      |> Enum.flat_map(&findings_for_job/1)
-      |> dedupe_findings()
+    findings = normalize_findings(job_results)
 
     unresolved_human_review_reasons =
       job_results
@@ -74,6 +71,13 @@ defmodule SymphonyElixir.QualityGate.Synthesis do
       findings: findings,
       unresolved_human_review_reasons: unresolved_human_review_reasons
     }
+  end
+
+  @spec normalize_findings([map()]) :: [finding()]
+  def normalize_findings(job_results) when is_list(job_results) do
+    job_results
+    |> Enum.flat_map(&findings_for_job/1)
+    |> dedupe_findings()
   end
 
   @spec affected_categories(result(), [map()]) :: [atom()]

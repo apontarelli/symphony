@@ -4,7 +4,7 @@ defmodule SymphonyElixir.HandoffManifest do
   @change_manifest_keys [:change_manifest, "change_manifest", :changeManifest, "changeManifest"]
   @changed_file_keys [:changed_files, "changed_files", :changedFiles, "changedFiles", :files, "files"]
 
-  @type source_result :: :absent | {:present, map()} | {:failed, map()}
+  @type source_result :: :absent | {:present, term()} | {:failed, map()}
 
   @spec source(term()) :: source_result()
   def source(completion) when is_map(completion) do

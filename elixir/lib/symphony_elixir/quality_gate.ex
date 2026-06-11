@@ -274,8 +274,6 @@ defmodule SymphonyElixir.QualityGate do
     end
   end
 
-  defp repair_scope_completion(_repair_result), do: nil
-
   defp scope_completion?(completion) when is_map(completion) do
     Enum.any?(
       [

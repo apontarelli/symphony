@@ -44,6 +44,8 @@ defmodule SymphonyElixir.TestSupport do
         workflow_file = Path.join(workflow_root, "symphony.yml")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
+        previous_log_file = Application.get_env(:symphony_elixir, :log_file)
+        Application.put_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file(Path.join(workflow_root, "runtime")))
         if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
         stop_default_http_server()
 
@@ -56,6 +58,12 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :publish_handoff_runner)
           Application.delete_env(:symphony_elixir, :publish_preflight_runner)
           Application.delete_env(:symphony_elixir, :quality_gate_runner)
+
+          case previous_log_file do
+            nil -> Application.delete_env(:symphony_elixir, :log_file)
+            log_file -> Application.put_env(:symphony_elixir, :log_file, log_file)
+          end
+
           File.rm_rf(workflow_root)
         end)
 

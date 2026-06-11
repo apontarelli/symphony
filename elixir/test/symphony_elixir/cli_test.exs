@@ -192,6 +192,63 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:profile, "strict"}
   end
 
+  test "review-records commands list, show, and export without starting the daemon" do
+    logs_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-cli-review-records-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    assert {:ok, _record} =
+             SymphonyElixir.ReviewRecords.write_quality_gate_run(%{
+               logs_root: logs_root,
+               project: %{slug: "symphony"},
+               issue: %{id: "issue-320", identifier: "SID-320"},
+               workflow: %{profile: "default", policy_ref: "640c639998cf", target: "main"},
+               run: %{id: "run-320", session_id: "run-320", completed_at: "2026-06-11T16:05:00Z"},
+               quality_gate: %{
+                 status: :passed,
+                 planner: %{changed_files: ["lib/source.ex"], changed_surfaces: [:workflow], jobs: []},
+                 jobs: [
+                   %{
+                     id: "source_correctness:initial",
+                     category: :source_correctness,
+                     status: :passed,
+                     execution: :executed,
+                     findings: []
+                   }
+                 ],
+                 synthesis: %{status: :passed, findings: []},
+                 repair_passes: []
+               },
+               handoff_route: %{route: "human_review", target_state: "Human Review", summary: "Ready for review."}
+             })
+
+    deps = %{
+      file_regular?: fn _path -> flunk("review-records should not check manifest files") end,
+      set_workflow_file_path: fn _path -> flunk("review-records should not set workflow files") end,
+      set_logs_root: fn _path -> flunk("review-records should not start daemon logging") end,
+      set_server_port_override: fn _port -> flunk("review-records should not set server ports") end,
+      set_profile_override: fn _profile -> flunk("review-records should not set profiles") end,
+      ensure_all_started: fn -> flunk("review-records should not start the application") end
+    }
+
+    assert {:ok, list_output} = CLI.evaluate(["review-records", "list", "--logs-root", logs_root], deps)
+    assert list_output =~ "SID-320"
+    assert list_output =~ "run-320"
+
+    assert {:ok, show_output} = CLI.evaluate(["review-records", "show", "run-320", "--logs-root", logs_root], deps)
+    assert show_output =~ "Review record run-320"
+    assert show_output =~ "Quality gate: passed"
+    refute show_output =~ System.tmp_dir!()
+
+    assert {:ok, export_output} = CLI.evaluate(["review-records", "export", "--logs-root", logs_root], deps)
+    assert export_output =~ "# Symphony Quality-Gate Retrospective Input"
+    assert export_output =~ "Records: 1"
+  end
+
   test "workflow init creates a thin manifest from repo inspection" do
     repo = tmp_repo!("symphony-elixir-init")
     File.write!(Path.join(repo, "README.md"), "repo docs\n")

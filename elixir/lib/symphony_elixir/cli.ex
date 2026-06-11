@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.LogFile
+  alias SymphonyElixir.ReviewRecords.Command, as: ReviewRecordsCommand
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [
@@ -49,6 +50,10 @@ defmodule SymphonyElixir.CLI do
   @spec evaluate([String.t()], deps()) :: :ok | {:ok, String.t()} | {:error, String.t()}
   def evaluate(["workflow" | workflow_args], _deps) do
     SymphonyElixir.WorkflowCLI.evaluate(workflow_args)
+  end
+
+  def evaluate(["review-records" | review_record_args], _deps) do
+    ReviewRecordsCommand.evaluate(review_record_args)
   end
 
   def evaluate(args, deps) do

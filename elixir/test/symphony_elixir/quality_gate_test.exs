@@ -189,6 +189,89 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:reviewed, :security_data_migration, {:repair, 1}}
   end
 
+  test "quality gate handles nested and no-op repair completion scopes" do
+    issue = %Issue{identifier: "SID-319", title: "Quality gate fanout", labels: []}
+
+    nested_parent = self()
+
+    nested =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        issue,
+        %{changed_files: ["lib/source.ex"]},
+        runner: fn
+          %{kind: :review, job: %{category: :source_correctness}, phase: :initial} ->
+            {:ok,
+             %{
+               status: :fix_required,
+               findings: [
+                 %{
+                   category: :source_correctness,
+                   evidence: "Repair reports nested completion scope.",
+                   recommended_disposition: :fix_required
+                 }
+               ]
+             }}
+
+          %{kind: :repair, attempt: 1} ->
+            %{
+              status: :passed,
+              completion: %{changed_files: ["priv/repo/migrations/add_quality_gate.exs"]}
+            }
+
+          %{kind: :review, job: %{category: category}, phase: {:repair, 1}} ->
+            send(nested_parent, {:nested_rerun, category})
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review} ->
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert nested.status == :passed
+    assert_receive {:nested_rerun, :source_correctness}
+    assert_receive {:nested_rerun, :security_data_migration}
+
+    noop_parent = self()
+
+    noop =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        issue,
+        %{changed_files: ["test/source_test.exs"]},
+        runner: fn
+          %{kind: :review, job: %{category: :test_quality}, phase: :initial} ->
+            {:ok,
+             %{
+               status: :fix_required,
+               findings: [
+                 %{
+                   category: :test_quality,
+                   evidence: "Repair reports an empty changed-file scope.",
+                   recommended_disposition: :fix_required
+                 }
+               ]
+             }}
+
+          %{kind: :repair, attempt: 1} ->
+            %{status: :passed, completion: %{changed_files: []}}
+
+          %{kind: :review, job: %{category: category}, phase: {:repair, 1}} ->
+            send(noop_parent, {:noop_rerun, category})
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review} ->
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert noop.status == :passed
+    assert_receive {:noop_rerun, :test_quality}
+    refute_receive {:noop_rerun, :security_data_migration}, 50
+  end
+
   test "codex execution profiles provide conservative typed defaults and command overrides" do
     settings = Config.settings!()
 
@@ -359,6 +442,113 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(state.handoff_routes[issue_id].evidence, fn evidence ->
              evidence.kind == "check" and evidence.status == "passed" and evidence.summary =~ "quality_gate"
            end)
+  end
+
+  test "orchestrator writes a quality gate review record after handoff routing" do
+    parent = self()
+    previous_runner = Application.get_env(:symphony_elixir, :quality_gate_runner)
+    previous_log_file = Application.get_env(:symphony_elixir, :log_file)
+    logs_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-records-#{System.unique_integer([:positive])}")
+
+    write_workflow_file!(Workflow.workflow_file_path(), quality_gate_enabled: true)
+    Application.put_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file(logs_root))
+
+    on_exit(fn ->
+      case previous_runner do
+        nil -> Application.delete_env(:symphony_elixir, :quality_gate_runner)
+        runner -> Application.put_env(:symphony_elixir, :quality_gate_runner, runner)
+      end
+
+      case previous_log_file do
+        nil -> Application.delete_env(:symphony_elixir, :log_file)
+        log_file -> Application.put_env(:symphony_elixir, :log_file, log_file)
+      end
+
+      File.rm_rf(logs_root)
+    end)
+
+    Application.put_env(:symphony_elixir, :quality_gate_runner, fn
+      %{kind: :review, job: %{category: category}} ->
+        send(parent, {:quality_gate_review, category})
+        {:ok, %{status: :passed, findings: []}}
+    end)
+
+    workspace =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-quality-gate-record-orchestrator-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(Path.join(workspace, "lib"))
+    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
+    on_exit(fn -> File.rm_rf(workspace) end)
+
+    issue_id = "issue-quality-gate-record"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :QualityGateRecordOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "SID-320",
+      issue: %Issue{
+        id: issue_id,
+        identifier: "SID-320",
+        title: "Persist quality-gate records",
+        state: "In Progress",
+        url: "https://linear.app/example/issue/SID-320/example"
+      },
+      session_id: "session-320",
+      workspace_path: workspace,
+      policy: %{
+        "policy_metadata" => %{"profile" => "default", "project_slug" => "symphony"},
+        "policy_ref" => "640c639998cf",
+        "delivery" => %{"pr_target" => "main"},
+        "project" => %{"slug" => "symphony", "repository" => "https://github.com/apontarelli/symphony"}
+      },
+      started_at: DateTime.from_naive!(~N[2026-06-11 16:00:00], "Etc/UTC")
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.from_naive!(~N[2026-06-11 16:05:00], "Etc/UTC"),
+         session_id: "session-320",
+         completion: %{
+           checks: [%{name: "mix test", status: :passed}],
+           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "mix test", status: "passed"}]}
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+
+    assert_receive {:quality_gate_review, :source_correctness}
+    assert_receive {:quality_gate_review, :test_quality}
+
+    assert {:ok, record} = SymphonyElixir.ReviewRecords.show(logs_root, "session-320")
+    assert record.metadata["issue"]["identifier"] == "SID-320"
+    assert record.metadata["workflow"]["policy_ref"] == "640c639998cf"
+    assert record.quality_gate["status"] == "passed"
+    assert record.handoff_route["route"]["target_state"] == "Human Review"
   end
 
   test "orchestrator host quality gate overrides worker gate and blocks publish side effects" do
@@ -537,6 +727,14 @@ defmodule SymphonyElixir.QualityGateTest do
     assert malformed_manifest.changed_files == []
     assert malformed_manifest.changed_surfaces == []
 
+    non_list_files =
+      Planner.plan(%{
+        completion: %{changed_files: "lib/source.ex"},
+        settings: %Schema.QualityGate{}
+      })
+
+    assert non_list_files.changed_files == []
+
     docs =
       Planner.plan(%{
         completion: %{"changed_files" => ["docs/README.md"]},
@@ -711,6 +909,36 @@ defmodule SymphonyElixir.QualityGateTest do
     assert read_only.status == :passed
     assert_receive {:review_policy, policy}
     assert get_in(policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+
+    QualityGate.run(
+      "/tmp/symphony-workspace",
+      "not a policy",
+      issue,
+      %{changed_files: ["lib/source.ex"]},
+      settings: %Schema.QualityGate{max_repair_passes: 0},
+      runner: fn %{kind: :review, policy: policy} ->
+        send(parent, {:review_policy_from_non_map, policy})
+        {:ok, %{status: :passed, findings: []}}
+      end
+    )
+
+    assert_receive {:review_policy_from_non_map, non_map_policy}
+    assert get_in(non_map_policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+
+    QualityGate.run(
+      "/tmp/symphony-workspace",
+      %{"codex" => "not a map"},
+      issue,
+      %{changed_files: ["lib/source.ex"]},
+      settings: %Schema.QualityGate{max_repair_passes: 0},
+      runner: fn %{kind: :review, policy: policy} ->
+        send(parent, {:review_policy_from_malformed_codex, policy})
+        {:ok, %{status: :passed, findings: []}}
+      end
+    )
+
+    assert_receive {:review_policy_from_malformed_codex, malformed_codex_policy}
+    assert get_in(malformed_codex_policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
     runner = fn
       %{kind: :review, job: %{category: :source_correctness}} ->

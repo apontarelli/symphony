@@ -220,6 +220,26 @@ Optional flags:
 - `--port` also starts the Phoenix observability service (default: disabled)
 - `--profile` selects one workflow profile for the current process
 
+Quality-gate review records are stored under the same root selected by `--logs-root`, in
+`review-records/quality-gates/<project-slug>/<issue-identifier>/<run-id>/`. The daemon derives this
+root from the configured log file path, so records are host-owned runtime artifacts rather than files
+written into the target repository workspace. Operators can inspect them without starting the daemon:
+
+```bash
+./bin/symphony review-records list --logs-root /path/to/logs-root
+./bin/symphony review-records show <run-id> --logs-root /path/to/logs-root
+./bin/symphony review-records export --since last --logs-root /path/to/logs-root
+```
+
+Each record directory contains stable `metadata.json`, `quality_gate.json`, `findings.json`, and
+`handoff_route.json` files plus a mutable `disposition.json` sidecar. `findings.json` is not rewritten
+after creation; update `disposition.json` when a finding is accepted, fixed, rejected as a false
+positive, deferred, or left for operator decision. The export command groups findings by category,
+disposition, file/surface, false-positive pattern, and follow-up candidate. It also writes
+parallel-review-compatible sidecars under `review-records/parallel-review/<project-slug>/<run-id>/`
+so the shared `review-retrospective` workflow can mine Symphony quality-gate records by pointing
+`AGENT_RECORDS_HOME` at the `review-records` root.
+
 The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
 modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.
 
@@ -366,7 +386,9 @@ runtime:
   trigger up to `quality_gate.max_repair_passes` bounded repair turns, followed by replanning from
   repair completion scope and rerunning the affected reviewer subset. The final `quality_gate`
   bundle is recorded as handoff evidence and can route work to Rework or Blocked before
-  publish/human-review routing.
+  publish/human-review routing. After route classification, Symphony writes the same quality-gate
+  bundle to the host-owned review-record directory so later retrospectives can distinguish fixed,
+  rejected false-positive, deferred, no-action, and operator-decision findings.
 - If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into
   the prompt template. The default preset includes Symphony-owned modules for Linear operation,
   implementation, sync, quality gates, review, landing, rework, requirement validation, project
