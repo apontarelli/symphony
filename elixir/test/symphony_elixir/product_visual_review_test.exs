@@ -250,4 +250,26 @@ defmodule SymphonyElixir.ProductVisualReviewTest do
                reason: "visual QA has blocking findings"
              })
   end
+
+  test "route evidence only passes recommended visual QA when evidence is present" do
+    recommended = %ProductVisualReviewConfig{enabled: true, route_policy: "recommended"}
+
+    assert %{status: :passed, checks: [%{"name" => "viewport_screenshots"}]} =
+             ProductVisualReview.route_evidence(recommended, [], nil, %{
+               status: "passed",
+               checks: [%{"name" => "viewport_screenshots"}]
+             })
+
+    assert %{status: :missing, artifacts: []} =
+             ProductVisualReview.route_evidence(recommended, [], nil, %{
+               status: "passed",
+               artifacts: []
+             })
+
+    assert %{status: :blocked, reason: "visual QA failed"} =
+             ProductVisualReview.route_evidence(recommended, [], nil, %{
+               status: "blocked",
+               reason: "visual QA failed"
+             })
+  end
 end

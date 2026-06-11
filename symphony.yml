@@ -1,4 +1,8 @@
 version: 1
+# This committed manifest is this fork's dogfood configuration for running Symphony on itself.
+# For another repository, generate a fresh manifest with `symphony workflow init` and replace the
+# repository, tracker, workspace, validation, delivery, and Codex settings with project-local
+# values.
 project:
   slug: symphony
   name: Symphony
@@ -34,11 +38,13 @@ harness:
   codex_home: null
 runtime:
   tracker:
+    # Dogfood Linear project scope for this repository's unattended runs.
     project_id: d3c9fafa-42b4-4b08-82d1-a54429b90346
     project_slug: symphony-self-contained-workflow-modules-72083cd8c253
   polling:
     interval_ms: 5000
   workspace:
+    # Dogfood workspace root used by this repository's local Symphony runner.
     root: ~/code/symphony-workspaces
   hooks:
     after_create: |
@@ -59,6 +65,7 @@ runtime:
     max_concurrent_agents: 10
     max_turns: 20
   codex:
+    # Dogfood Codex launch policy for this repository's unattended automation.
     command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
     approval_policy: never
     thread_sandbox: workspace-write
@@ -81,6 +88,6 @@ runtime:
           type: dangerFullAccess
       prompt:
         rules:
-          - This profile is for explicit, interactive repo skill-authoring work that must edit repo-owned `.agents/` paths.
+          - This profile is for explicit, interactive repo skill-authoring work that must edit repo-owned `.codex/skills/` or another ticket-specified repo-local skills directory.
           - It does not make globally installed `symphony-*` skills part of unattended runtime execution; default core workflow modules are self-contained.
           - Keep global Codex defaults sandboxed; use this profile only for explicit skill-authoring work.

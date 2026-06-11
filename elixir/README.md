@@ -1,11 +1,13 @@
 # Symphony Elixir
 
-This directory contains the current Elixir/OTP implementation of Symphony, based on
-[`SPEC.md`](../SPEC.md) at the repository root.
+This directory contains the current Elixir/OTP implementation of Symphony in this fork, based on
+[`SPEC.md`](../SPEC.md) at the repository root. The root [`README.md`](../README.md) is the public
+fork overview; this file is the implementation setup and operation guide.
 
 > [!WARNING]
-> Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
-> We recommend implementing your own hardened version based on `SPEC.md`.
+> Symphony Elixir is prototype software intended for evaluation in trusted environments. This fork
+> is an independent public fork, not an official OpenAI distribution. Harden and operate it under
+> your own policies before using it on sensitive repositories.
 
 ## Screenshot
 
@@ -63,11 +65,12 @@ ready for merge.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Build the CLI and run `symphony workflow init` from the target repo root to create
+3. Build the Elixir escript and run `./bin/symphony workflow init --repo /path/to/repo` to create
    `symphony.yml`.
-4. Run `symphony workflow check` to validate the manifest, repo docs, and any configured harness
-   CODEX_HOME.
-5. Run `symphony workflow print --compiled` to inspect the resolved workflow config and prompt.
+4. Run `./bin/symphony workflow check --repo /path/to/repo` to validate the manifest, repo docs,
+   and any configured harness CODEX_HOME.
+5. Run `./bin/symphony workflow print --repo /path/to/repo --compiled` to inspect the resolved
+   workflow config and prompt.
 6. Customize the generated `symphony.yml` for your project.
    - Prefer the Linear project ID in committed `runtime.tracker.project_id`; add
      `runtime.tracker.project_slug` when the dashboard should render a project URL.
@@ -75,6 +78,12 @@ ready for merge.
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
 7. Follow the instructions below to install the required runtime dependencies and start the service.
+
+The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood manifest. It
+intentionally contains this fork's public repository URL, local workspace defaults, Linear project
+scope, and Codex launch policy for running Symphony on itself. For another repository, create a
+fresh manifest with `workflow init` and replace tracker, workspace, repository, validation, and
+delivery fields with that project's values.
 
 ## Prerequisites
 
@@ -88,20 +97,32 @@ mise exec -- elixir --version
 ## Run
 
 ```bash
-git clone https://github.com/openai/symphony
+git clone https://github.com/apontarelli/symphony
 cd symphony/elixir
 mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ../symphony.yml
+export LINEAR_API_KEY=...
+mise exec -- ./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/project/symphony.yml
 ```
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
-It keeps local shell glue in this repo instead of dotfiles, resolves project workflows, loads
-`~/.config/symphony/.env` through `op run`, and rebuilds the escript before launching:
+It keeps local shell glue in this repo instead of dotfiles, resolves project workflows, optionally
+loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching, and passes
+the raw escript's local-run acknowledgement flag.
+
+Use the current shell environment when secrets are already exported:
 
 ```bash
+export LINEAR_API_KEY=...
+../bin/symphony --no-env-file --workflow /path/to/project/symphony.yml
+```
+
+Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references:
+
+```bash
+mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony my-project
 ../bin/symphony --workflow /path/to/project/symphony.yml
@@ -122,10 +143,14 @@ Target repos can use a committed `symphony.yml` manifest for setup and audit:
 
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
 left unchanged unless `--force` is passed. `check` validates the manifest schema, selected modules,
-repo doc entrypoints, validation command shape, and a configured harness `CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
-workflow config and prompt without writing generated prompt files into the target repo.
+repo doc entrypoints, validation command shape, and a configured harness `CODEX_HOME`. `print`
+shows the resolved preset/modules/defaults and can include the compiled workflow config and prompt
+without writing generated prompt files into the target repo.
 
 `symphony.yml` v1 contains:
+
+This is a neutral starting point for another repository, not a copy of this fork's dogfood
+manifest:
 
 ```yaml
 version: 1
@@ -157,15 +182,16 @@ harness:
 `harness.codex_home: null` means Symphony derives a managed harness CODEX_HOME. If a path is set,
 `workflow check` requires that directory and its `AGENTS.md` to exist.
 
-Pass a manifest path to `./bin/symphony` when starting the service:
+Pass a manifest path to `./bin/symphony` when starting the service directly:
 
 ```bash
-./bin/symphony ../symphony.yml
+./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails ../symphony.yml
 ```
 
-If no path is passed, the Elixir escript uses `./symphony.yml` from the current directory. From this
-repository, use `../symphony.yml` or the higher-level `../bin/symphony` launcher so local runs use
-the single root manifest.
+The raw escript requires the local-run acknowledgement flag. If no path is passed, it uses
+`./symphony.yml` from the current directory. From this repository, prefer the higher-level
+`../bin/symphony` launcher so local runs use the single root manifest and the launcher passes the
+acknowledgement flag for you.
 
 `project.criticality` and `project.deployment_coupling` describe how risky the project is to land
 automatically. Local, prototype, and internal work default to permissive auto-land policy; production
@@ -320,8 +346,9 @@ runtime:
   by the Codex turn sandbox.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
-  authoring that needs to edit protected `.agents/` paths; profile overrides do not make globally
-  installed `symphony-*` skills part of unattended runtime execution.
+  authoring that needs to edit protected repo-local skill or tooling paths. Profile overrides do
+  not make globally installed `symphony-*` skills part of unattended runtime execution; keep the
+  global `codex` defaults sandboxed.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into
@@ -368,7 +395,7 @@ hooks:
   before_run: |
     jj status || true
 codex:
-  command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server"
+  command: "$CODEX_BIN app-server"
 ```
 
 - If the selected manifest is missing or invalid at startup, Symphony does not boot.
@@ -422,7 +449,8 @@ The observability UI now runs on a minimal Phoenix stack:
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
 - `../symphony.yml`: root dogfood manifest used by local runs and CLI `workflow check`/`print`
-- `../.codex/`: repository-local Codex skills and setup helpers
+- `../.codex/`: repo-local Codex/Symphony helpers used by this fork's own automation runs; target
+  repos do not need to install these globally for bundled workflow modules to run
 
 ## Testing
 
@@ -470,8 +498,8 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
-you.
+Launch `codex` in your repo, give it this fork's URL, and ask it to create and check a local
+`symphony.yml` for that repository.
 
 ## License
 

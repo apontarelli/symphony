@@ -1021,6 +1021,85 @@ defmodule SymphonyElixir.HandoffRouteTest do
            ).route == :rework
   end
 
+  test "top-level product artifacts reject local paths while preserving durable links" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        artifacts: [
+          %{kind: :screenshot, label: "Local screenshot", url: "/tmp/symphony/local.png"},
+          %{kind: :screenshot, label: "Durable screenshot", url: "https://artifacts.example/SID-314/desktop.png"}
+        ]
+      })
+
+    assert decision.route == :product_visual_review
+    assert Enum.map(decision.artifacts, & &1.label) == ["Durable screenshot"]
+    refute inspect(HandoffRoute.to_map(decision)) =~ "/tmp/symphony"
+  end
+
+  test "handoff route classifies malformed product visual review payloads conservatively" do
+    assert ProductVisualReviewEvidence.artifacts("not normalized evidence") == []
+
+    skipped =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{requirement: :required, status: :skipped, reason: "agent skipped visual QA"}
+      })
+
+    assert skipped.route == :blocked
+
+    required_unknown =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{requirement: :required, status: "unknown", artifacts: "not a list"}
+      })
+
+    assert required_unknown.route == :blocked
+
+    blocked_with_rejection =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          requirement: :required,
+          status: :blocked,
+          artifacts: [%{kind: :screenshot, label: "Local capture", url: "/tmp/local.png"}]
+        }
+      })
+
+    assert blocked_with_rejection.route == :blocked
+
+    assert %{metadata: %{rejected_artifacts: [%{label: "Local capture", reason: :local_artifact_path}]}} =
+             Enum.find(blocked_with_rejection.evidence, &(&1.kind == :product_visual_review))
+
+    unknown =
+      HandoffRoute.classify(%{
+        checks: [%{name: "all", status: :passed}],
+        review: %{status: :clean},
+        product_visual_review: %{
+          123 => "ignored",
+          requirement: 123,
+          status: 123,
+          reason: " ",
+          expected_checks: "not a list",
+          artifacts: [
+            "",
+            "Manual note",
+            %{kind: 123, label: "Blank URL", url: " ", metadata: "not a map"}
+          ],
+          checks: [%{name: "viewport_screenshots", status: "passed", metadata: "not a map"}]
+        }
+      })
+
+    assert unknown.route == :human_review
+    assert Enum.map(unknown.artifacts, & &1.summary) == ["Manual note", nil]
+
+    assert %{metadata: %{expected_checks: [], rejected_artifacts: [%{reason: :invalid_artifact}]}} =
+             Enum.find(unknown.evidence, &(&1.kind == :product_visual_review))
+  end
+
   test "recorder uses run-resolved product visual review config from routing context" do
     write_workflow_file!(Workflow.workflow_file_path(),
       workflow_module_ids: ["product_visual_review"],
@@ -1054,7 +1133,11 @@ defmodule SymphonyElixir.HandoffRouteTest do
                 %{
                   id: "product_visual_review",
                   version: "v1",
-                  config: %{"enabled" => true, "route_policy" => "required"}
+                  config: %{
+                    "workflow_modules" => %{
+                      "product_visual_review" => %{"enabled" => true, "route_policy" => "required"}
+                    }
+                  }
                 }
               ]
             }
@@ -1163,7 +1246,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       for decision <- [invalid_resolution, malformed_resolution] do
-        refute decision.route in [:blocked, :product_visual_review]
+        assert decision.route == :human_review
         refute Enum.any?(decision.evidence, &(&1.kind == :product_visual_review))
       end
     after
