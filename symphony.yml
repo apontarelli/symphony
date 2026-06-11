@@ -81,5 +81,6 @@ runtime:
           type: dangerFullAccess
       prompt:
         rules:
-          - This ticket may create or edit repo-owned agent skills under `.agents/`.
+          - This profile is for explicit, interactive repo skill-authoring work that must edit repo-owned `.agents/` paths.
+          - It does not make globally installed `symphony-*` skills part of unattended runtime execution; default core workflow modules are self-contained.
           - Keep global Codex defaults sandboxed; use this profile only for explicit skill-authoring work.

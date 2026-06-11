@@ -278,8 +278,9 @@ runtime:
   `--profile` is a process-wide override for policy selection; otherwise the `default` profile is
   used.
 - Ticket class labels have generic Symphony behavior independent of tracker project scope:
-  - `Requirement` issues are validation artifacts. They are dispatched from `Todo` only after
-    all blocking implementation issues are terminal.
+  - `Requirement` issues are validation artifacts. They require at least one blocking
+    implementation issue and are dispatched from `Todo` only after all blockers are terminal.
+    Zero blockers is a setup defect, not a dispatchable state.
   - `Project Closeout` issues use the project closeout workflow and should be blocked by unresolved
     Requirement issues.
 - Prompt templates receive the resolved policy as `{{ policy }}` and `{{ policy_json }}`,
@@ -318,8 +319,9 @@ runtime:
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
-  `turn_sandbox_policy` overrides. Use this sparingly for scoped work like repo skill authoring
-  that needs to edit protected `.agents/` paths; keep the global `codex` defaults sandboxed.
+  `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
+  authoring that needs to edit protected `.agents/` paths; profile overrides do not make globally
+  installed `symphony-*` skills part of unattended runtime execution.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into

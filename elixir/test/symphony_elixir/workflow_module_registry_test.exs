@@ -105,6 +105,18 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "### Auto Land Routing"
     assert prompt =~ "structured completion evidence"
     assert prompt =~ "<host>:<abs-workdir>@<short-sha>"
+    assert prompt =~ "Use test-first development only when expected behavior is clear"
+    assert prompt =~ "Do not force TDD for docs-only"
+    assert prompt =~ "high-signal tests"
+    assert prompt =~ "Prefer simple, obvious designs"
+    assert prompt =~ "plan runtime QA against the changed journey"
+    assert prompt =~ "Commit and publish only after implementation validation"
+    assert prompt =~ "Required gates are changed-scope by default"
+    assert prompt =~ "scenario QA to"
+    assert prompt =~ "Review the changed scope with these lenses"
+    assert prompt =~ "Fix-required findings start another repair pass"
+    assert prompt =~ "A Requirement with no blocking implementation issue is a setup defect"
+    assert prompt =~ "If unresolved Requirement issues remain"
     assert prompt =~ "### Acceptance Criteria"
     assert prompt =~ "### Confusions"
     assert prompt =~ "gh pr view --comments"
@@ -113,6 +125,48 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     refute prompt =~ "## Related skills"
     refute prompt =~ ".codex/skills"
     refute Regex.match?(~r/`symphony-[a-z-]+`/, prompt)
+  end
+
+  test "core modules encode SDLC doctrine without global delivery skill dependencies" do
+    assert {:ok, implementation_loop} = ModuleRegistry.module_defaults("implementation-loop", 0)
+    assert implementation_loop.content =~ "Use test-first development only when expected behavior is clear"
+    assert implementation_loop.content =~ "Do not force TDD for docs-only"
+    assert implementation_loop.content =~ "high-signal tests"
+    assert implementation_loop.content =~ "Prefer simple, obvious designs"
+    assert implementation_loop.content =~ "plan runtime QA against the changed journey"
+
+    assert {:ok, quality_gates} = ModuleRegistry.module_defaults("quality-gates", 0)
+    assert quality_gates.content =~ "Required gates are changed-scope by default"
+    assert quality_gates.content =~ "scenario QA to"
+    assert quality_gates.content =~ "product visual review when that module is selected"
+
+    assert {:ok, automated_review} = ModuleRegistry.module_defaults("automated-review", 0)
+    assert automated_review.content =~ "Review the changed scope with these lenses"
+    assert automated_review.content =~ "Fix-required findings start another repair pass"
+
+    assert {:ok, vcs_commit_push} = ModuleRegistry.module_defaults("vcs-commit-push", 0)
+    assert vcs_commit_push.content =~ "after implementation validation, required quality gates"
+    assert vcs_commit_push.content =~ "no unresolved fix-required findings"
+
+    assert {:ok, requirement_validation} = ModuleRegistry.module_defaults("requirement-validation", 0)
+    assert requirement_validation.content =~ "validation artifacts, not implementation tickets"
+    assert requirement_validation.content =~ "no blocking implementation issue is a setup defect"
+
+    assert {:ok, project_closeout} = ModuleRegistry.module_defaults("project-closeout", 0)
+    assert project_closeout.content =~ "durable repository docs"
+    assert project_closeout.content =~ "If unresolved Requirement issues remain"
+
+    for workflow_module <- [
+          implementation_loop,
+          quality_gates,
+          automated_review,
+          vcs_commit_push,
+          requirement_validation,
+          project_closeout
+        ] do
+      refute Regex.match?(~r/`symphony-[a-z-]+`/, workflow_module.content)
+      refute workflow_module.content =~ "WORKFLOW.md"
+    end
   end
 
   test "preset compiler reports missing module ids" do

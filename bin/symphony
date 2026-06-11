@@ -6,6 +6,7 @@ usage() {
 Usage:
   symphony [project-name] [--workflow /path/to/symphony.yml] [options]
   symphony --workflow /path/to/symphony.yml [options]
+  symphony workflow <init|check|print> [options]
 
 Project resolution:
   project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.yml.
@@ -133,6 +134,39 @@ run_elixir() {
   exec mise exec -- ./bin/symphony "${args[@]}"
 }
 
+run_workflow_cli() {
+  local repo_root="$1"
+  shift
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+
+  [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
+
+  export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/nix/var/nix/profiles/default/bin:${PATH}"
+
+  command -v mise >/dev/null 2>&1 || {
+    printf 'error: mise not found on PATH\n' >&2
+    printf 'hint: install mise, then rerun symphony\n' >&2
+    exit 127
+  }
+
+  cd "$symphony_home"
+
+  if [[ "${SYMPHONY_SKIP_BUILD:-0}" != "1" ]]; then
+    if [[ ! -d deps ]]; then
+      mise exec -- mix setup
+    fi
+
+    mise exec -- mix escript.build
+  elif [[ ! -x ./bin/symphony ]]; then
+    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
+    printf 'hint: rerun without SYMPHONY_SKIP_BUILD=1 so the launcher can build it\n' >&2
+    exit 127
+  fi
+
+  exec mise exec -- ./bin/symphony "$@"
+}
+
 main() {
   local repo_root
   repo_root="$(resolve_repo_root)"
@@ -140,6 +174,10 @@ main() {
   if [[ "${1:-}" == "__run" ]]; then
     shift
     run_elixir "$repo_root"
+  fi
+
+  if [[ "${1:-}" == "workflow" ]]; then
+    run_workflow_cli "$repo_root" "$@"
   fi
 
   local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
