@@ -1,0 +1,149 @@
+defmodule SymphonyElixir.Codex.ExecutionProfile do
+  @moduledoc """
+  Resolves typed Codex execution profiles into launch settings.
+  """
+
+  alias SymphonyElixir.{Config, Shell}
+  alias SymphonyElixir.Config.Schema
+
+  @type t :: %{
+          name: String.t(),
+          reasoning_effort: String.t() | nil,
+          budget: String.t(),
+          timeout_ms: pos_integer(),
+          max_retries: non_neg_integer(),
+          command: String.t() | nil,
+          model: String.t() | nil
+        }
+
+  @defaults %{
+    "implementation" => %{"reasoning_effort" => nil, "budget" => "standard"},
+    "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
+    "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+    "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+    "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+    "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
+    "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+    "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
+    "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+  }
+
+  @valid_reasoning_efforts MapSet.new(~w(low medium high xhigh))
+
+  @spec resolve(Schema.t(), String.t() | atom() | nil) :: t()
+  def resolve(%Schema{} = settings, profile_ref) do
+    name = normalize_profile_name(profile_ref)
+
+    profile =
+      @defaults
+      |> Map.get(name, @defaults["source_reviewer"])
+      |> Map.merge(settings.codex.execution_profiles |> normalize_profiles() |> Map.get(name, %{}))
+
+    %{
+      name: name,
+      reasoning_effort: normalize_reasoning_effort(Map.get(profile, "reasoning_effort")),
+      budget: normalized_string(Map.get(profile, "budget")) || "standard",
+      timeout_ms: positive_integer(Map.get(profile, "timeout_ms")) || default_timeout(settings),
+      max_retries: non_negative_integer(Map.get(profile, "max_retries")) || settings.quality_gate.reviewer_max_retries,
+      command: normalized_string(Map.get(profile, "command")),
+      model: normalized_string(Map.get(profile, "model"))
+    }
+  end
+
+  @spec resolve(String.t() | atom() | nil) :: t()
+  def resolve(profile_ref), do: Config.settings!() |> resolve(profile_ref)
+
+  @spec command(String.t(), t()) :: String.t()
+  def command(_base_command, %{command: command}) when is_binary(command), do: command
+
+  def command(base_command, profile) when is_binary(base_command) and is_map(profile) do
+    additions =
+      []
+      |> maybe_add_model_config(Map.get(profile, :model))
+      |> maybe_add_reasoning_config(Map.get(profile, :reasoning_effort))
+      |> Enum.reverse()
+      |> Enum.join(" ")
+
+    cond do
+      additions == "" ->
+        base_command
+
+      String.match?(base_command, ~r/\sapp-server\s*$/) ->
+        Regex.replace(~r/\sapp-server\s*$/, base_command, " #{additions} app-server")
+
+      true ->
+        base_command <> " " <> additions
+    end
+  end
+
+  defp normalize_profiles(profiles) when is_map(profiles) do
+    Map.new(profiles, fn {name, profile} ->
+      {normalize_profile_name(name), normalize_profile(profile)}
+    end)
+  end
+
+  defp normalize_profiles(_profiles), do: %{}
+
+  defp normalize_profile(profile) when is_map(profile) do
+    Map.new(profile, fn {key, value} -> {to_string(key), value} end)
+  end
+
+  defp normalize_profile(_profile), do: %{}
+
+  defp normalize_profile_name(nil), do: "implementation"
+
+  defp normalize_profile_name(name) do
+    name
+    |> to_string()
+    |> String.trim()
+    |> String.downcase()
+    |> String.replace("-", "_")
+    |> case do
+      "" -> "implementation"
+      normalized -> normalized
+    end
+  end
+
+  defp normalize_reasoning_effort(nil), do: nil
+
+  defp normalize_reasoning_effort(value) do
+    effort =
+      value
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+      |> String.replace("x-high", "xhigh")
+
+    if MapSet.member?(@valid_reasoning_efforts, effort), do: effort
+  end
+
+  defp maybe_add_model_config(configs, nil), do: configs
+  defp maybe_add_model_config(configs, model), do: ["--config #{Shell.escape(~s(model=\"#{model}\"))}" | configs]
+
+  defp maybe_add_reasoning_config(configs, nil), do: configs
+
+  defp maybe_add_reasoning_config(configs, effort) do
+    ["--config model_reasoning_effort=#{effort}" | configs]
+  end
+
+  defp default_timeout(%Schema{quality_gate: %{reviewer_timeout_ms: timeout}}) when is_integer(timeout), do: timeout
+  defp default_timeout(%Schema{codex: %{turn_timeout_ms: timeout}}) when is_integer(timeout), do: timeout
+
+  defp normalized_string(nil), do: nil
+
+  defp normalized_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      string -> string
+    end
+  end
+
+  defp positive_integer(value) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value), do: nil
+
+  defp non_negative_integer(value) when is_integer(value) and value >= 0, do: value
+  defp non_negative_integer(_value), do: nil
+end

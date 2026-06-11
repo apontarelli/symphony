@@ -199,6 +199,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      field(:execution_profiles, :map, default: %{})
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -213,7 +214,8 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_sandbox_policy,
           :turn_timeout_ms,
           :read_timeout_ms,
-          :stall_timeout_ms
+          :stall_timeout_ms,
+          :execution_profiles
         ],
         empty_values: []
       )
@@ -221,6 +223,62 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule QualityGate do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    @runtime_isolation_modes ~w(serialized isolated_workspace blocked)
+
+    embedded_schema do
+      field(:enabled, :boolean, default: true)
+      field(:source_max_concurrency, :integer, default: 3)
+      field(:max_repair_passes, :integer, default: 1)
+      field(:runtime_isolation, :string, default: "serialized")
+      field(:reviewer_timeout_ms, :integer, default: 1_200_000)
+      field(:reviewer_max_retries, :integer, default: 0)
+    end
+
+    @type t :: %__MODULE__{
+            enabled: boolean(),
+            source_max_concurrency: pos_integer(),
+            max_repair_passes: non_neg_integer(),
+            runtime_isolation: String.t(),
+            reviewer_timeout_ms: pos_integer(),
+            reviewer_max_retries: non_neg_integer()
+          }
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :source_max_concurrency,
+          :max_repair_passes,
+          :runtime_isolation,
+          :reviewer_timeout_ms,
+          :reviewer_max_retries
+        ],
+        empty_values: []
+      )
+      |> update_change(:runtime_isolation, &normalize_runtime_isolation/1)
+      |> validate_number(:source_max_concurrency, greater_than: 0)
+      |> validate_number(:max_repair_passes, greater_than_or_equal_to: 0)
+      |> validate_number(:reviewer_timeout_ms, greater_than: 0)
+      |> validate_number(:reviewer_max_retries, greater_than_or_equal_to: 0)
+      |> validate_inclusion(:runtime_isolation, @runtime_isolation_modes)
+    end
+
+    defp normalize_runtime_isolation(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> String.downcase()
     end
   end
 
@@ -420,6 +478,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:project, Project, on_replace: :update, defaults_to_struct: true)
     embeds_one(:auto_land, AutoLand, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:quality_gate, QualityGate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
     field(:profiles, :map, default: %{})
@@ -544,6 +603,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:project, with: &Project.changeset/2)
     |> cast_embed(:auto_land, with: &AutoLand.changeset/2)
+    |> cast_embed(:quality_gate, with: &QualityGate.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:workflow_modules, with: &WorkflowModules.changeset/2)

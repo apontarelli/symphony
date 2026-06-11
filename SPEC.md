@@ -938,6 +938,23 @@ fields locally if they want stricter startup checks.
 - `runtime.codex.read_timeout_ms`: integer, default `5000`
 - `runtime.codex.stall_timeout_ms`: integer, default `300000`
   - If `<= 0`, stall detection is disabled.
+- `runtime.codex.execution_profiles`: map of named Codex job profiles, default implementation-defined
+  conservative profiles for `implementation`, `planner`, `source_reviewer`, `test_reviewer`,
+  `runtime_qa`, `product_visual_review`, `docs_reviewer`, `security_reviewer`, and `synthesis`.
+  Profiles MAY set `model`, `reasoning_effort`, `budget`, `timeout_ms`, `max_retries`, or an
+  explicit `command`. When `command` is omitted, implementations SHOULD derive common model and
+  reasoning settings without requiring operators to edit the raw `runtime.codex.command` string.
+
+Quality gate:
+
+- `runtime.quality_gate.enabled`: boolean, default `true`
+- `runtime.quality_gate.source_max_concurrency`: positive integer, default `3`
+- `runtime.quality_gate.max_repair_passes`: non-negative integer, default `1`
+- `runtime.quality_gate.runtime_isolation`: `serialized`, `isolated_workspace`, or `blocked`,
+  default `serialized`. `isolated_workspace` is conservative-blocked until the runtime can provision
+  disposable reviewer workspaces.
+- `runtime.quality_gate.reviewer_timeout_ms`: positive integer, default `1200000`
+- `runtime.quality_gate.reviewer_max_retries`: non-negative integer, default `0`
 
 Delivery and docs:
 
@@ -1537,6 +1554,9 @@ Subprocess launch parameters:
 Notes:
 
 - The default command is `codex app-server`.
+- Non-implementation Codex jobs MAY run through `runtime.codex.execution_profiles`; when a profile
+  supplies model or reasoning settings and no explicit command, the implementation derives a launch
+  command from `runtime.codex.command`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
 - The harness Codex home contains Symphony-owned global instructions. It MUST NOT replace the target
@@ -1716,6 +1736,8 @@ Timeouts:
 
 - `runtime.codex.read_timeout_ms`: request/response timeout during startup and sync requests
 - `runtime.codex.turn_timeout_ms`: total turn stream timeout
+- execution-profile `timeout_ms`: total turn timeout for that reviewer, QA, visual review, planner,
+  repair, or synthesis job when supplied
 - `runtime.codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   Records structured handoff route decisions to the configured tracker.
   """
 
-  alias SymphonyElixir.{Config, HandoffManifest, HandoffRoute, PathSafety, Tracker}
+  alias SymphonyElixir.{Config, HandoffManifest, HandoffRoute, PathSafety, QualityGate, Tracker}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.WorkflowModules.ProductVisualReview
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
@@ -43,7 +43,11 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     :product_visual_review,
     "product_visual_review",
     :productVisualReview,
-    "productVisualReview"
+    "productVisualReview",
+    :quality_gate,
+    "quality_gate",
+    :qualityGate,
+    "qualityGate"
   ]
   @completion_field_aliases %{
     pr_feedback: [:pr_feedback, "pr_feedback", :prFeedback, "prFeedback"],
@@ -91,14 +95,25 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
     manifest_check = handoff_manifest_check_for_completion(completion, workspace, worker_host)
 
+    quality_gate =
+      completion
+      |> completion_alias(:quality_gate, :qualityGate, nil)
+      |> QualityGate.normalize_result()
+
     checks =
       completion
       |> completion_field(:checks, [])
       |> append_handoff_manifest_check(manifest_check)
+      |> append_quality_gate_check(quality_gate)
+
+    review =
+      completion
+      |> completion_field(:review, %{})
+      |> then(&QualityGate.review(quality_gate, &1))
 
     %{
       checks: checks,
-      review: completion_field(completion, :review, %{}),
+      review: review,
       changed_surfaces: completion_field(completion, :changed_surfaces, []),
       policy: routing_policy(completion, routing_context),
       issue_labels: routing_labels(completion, routing_context),
@@ -108,7 +123,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       publish_preflight: completion_field(completion, :publish_preflight, nil),
       publish_handoff: completion_field(completion, :publish_handoff, nil),
       product_visual_review: product_visual_review_evidence(completion, manifest_check, routing_context, issue),
-      blocker: blocker
+      blocker: blocker || QualityGate.blocker(quality_gate)
     }
     |> HandoffRoute.classify()
   end
@@ -265,6 +280,13 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   defp append_handoff_manifest_check(checks, manifest_check) when is_map(manifest_check) do
     checks = if is_list(checks), do: checks, else: []
     checks ++ [manifest_check]
+  end
+
+  defp append_quality_gate_check(checks, nil), do: checks
+
+  defp append_quality_gate_check(checks, quality_gate) do
+    checks = if is_list(checks), do: checks, else: []
+    checks ++ [QualityGate.check(quality_gate)]
   end
 
   defp handoff_manifest_check_for_completion(completion, workspace, worker_host) do

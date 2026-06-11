@@ -191,7 +191,25 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "thread_sandbox" => "workspace-write",
           "turn_timeout_ms" => 3_600_000,
           "read_timeout_ms" => 5_000,
-          "stall_timeout_ms" => 300_000
+          "stall_timeout_ms" => 300_000,
+          "execution_profiles" => %{
+            "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
+            "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+            "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+            "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+            "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
+            "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+            "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
+            "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+          }
+        },
+        "quality_gate" => %{
+          "enabled" => true,
+          "source_max_concurrency" => 3,
+          "max_repair_passes" => 1,
+          "runtime_isolation" => "serialized",
+          "reviewer_timeout_ms" => 1_200_000,
+          "reviewer_max_retries" => 0
         }
       },
       prompt_sections: [

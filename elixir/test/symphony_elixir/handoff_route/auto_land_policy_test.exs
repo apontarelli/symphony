@@ -60,6 +60,26 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicyTest do
     assert result.missing_checks == []
   end
 
+  test "dry-run permissive auto-land accepts singular quality gate evidence alias" do
+    result =
+      AutoLandPolicy.evaluate(%{
+        checks: [
+          %{name: "tests", status: :passed},
+          %{name: "quality_gate", status: :passed},
+          %{name: "automated_review", status: :passed},
+          %{name: "route_classification", status: :passed},
+          %{name: "sync", status: :passed}
+        ],
+        labels: [],
+        policy: %{
+          project: %{criticality: "prototype", deployment_coupling: "none"},
+          auto_land: %{posture: "permissive", dry_run: true}
+        }
+      })
+
+    assert result.missing_checks == []
+  end
+
   test "strict production policy requires rollback plan evidence instead of generic recovery" do
     result =
       AutoLandPolicy.evaluate(%{

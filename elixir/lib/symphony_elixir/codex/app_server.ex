@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.Launch, Config, PathSafety}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.ExecutionProfile, Codex.Launch, Config, PathSafety}
 
   @initialize_id 1
   @thread_start_id 2
@@ -43,8 +43,12 @@ defmodule SymphonyElixir.Codex.AppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
 
+    settings = Config.settings!()
+    execution_profile = ExecutionProfile.resolve(settings, Keyword.get(opts, :execution_profile, "implementation"))
+    codex_command = ExecutionProfile.command(settings.codex.command, execution_profile)
+
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
-         {:ok, launch} <- Launch.start(expanded_workspace, worker_host, Config.settings!().codex.command, line: @port_line_bytes) do
+         {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
       port = launch.port
       metadata = port_metadata(port, worker_host)
 
@@ -94,6 +98,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
+    timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.settings!().codex.turn_timeout_ms)
+
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
@@ -114,7 +120,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           turn_id: turn_id
         }
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_context) do
+        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_context, timeout_ms) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -300,12 +306,12 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_context) do
+  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, turn_context, timeout_ms) do
     receive_loop(
       %{
         port: port,
         on_message: on_message,
-        timeout_ms: Config.settings!().codex.turn_timeout_ms,
+        timeout_ms: timeout_ms,
         tool_executor: tool_executor,
         auto_approve_requests: auto_approve_requests,
         turn_context: turn_context,

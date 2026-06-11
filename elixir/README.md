@@ -344,6 +344,11 @@ runtime:
 - Workflows that run package managers or other commands that resolve external hosts should set
   `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
+- `codex.execution_profiles` lets the host run implementation, planner, reviewer, runtime QA,
+  product visual review, security review, and synthesis jobs with typed reasoning, timeout, retry,
+  budget, model, or command settings. The common path derives model/reasoning flags from
+  `codex.command`; operators do not need to rewrite the raw command string for normal profile
+  tuning.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
   authoring that needs to edit protected repo-local skill or tooling paths. Profile overrides do
@@ -351,6 +356,17 @@ runtime:
   global `codex` defaults sandboxed.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
+- `quality_gate.enabled` controls the host-owned post-implementation review fanout. When enabled,
+  Symphony plans required source, test-quality, scenario QA, product visual, docs/source-of-truth,
+  and security/data/migration review jobs from changed files, changed surfaces, policy, and issue
+  labels. Review jobs run with a read-only Codex turn policy. Source-only jobs run under
+  `quality_gate.source_max_concurrency`; runtime QA and product visual review use
+  `quality_gate.runtime_isolation` and default to serialized execution. `isolated_workspace`
+  conservative-blocks until disposable reviewer workspaces are available. Fix-required findings
+  trigger up to `quality_gate.max_repair_passes` bounded repair turns, followed by replanning from
+  repair completion scope and rerunning the affected reviewer subset. The final `quality_gate`
+  bundle is recorded as handoff evidence and can route work to Rework or Blocked before
+  publish/human-review routing.
 - If the Markdown body is blank, Symphony compiles the built-in v1 core workflow module preset into
   the prompt template. The default preset includes Symphony-owned modules for Linear operation,
   implementation, sync, quality gates, review, landing, rework, requirement validation, project

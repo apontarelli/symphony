@@ -45,7 +45,9 @@ defmodule SymphonyElixir.HandoffRoute.AutoLandPolicy do
     "rollback_path" => "rollback_plan",
     "rollback-path" => "rollback_plan",
     "monitoring-source" => "monitoring_source",
-    "monitoring" => "monitoring_source"
+    "monitoring" => "monitoring_source",
+    "quality-gate" => "quality_gates",
+    "quality_gate" => "quality_gates"
   }
   @known_keys %{
     "auto_land" => :auto_land,

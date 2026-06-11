@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
     HandoffRouteRecorder,
     PublishHandoff,
     PublishPreflight,
+    QualityGate,
     StatusDashboard,
     Tracker,
     Workspace
@@ -1127,8 +1128,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
   defp complete_issue(%State{} = state, issue_id, running_entry) do
-    running_entry = maybe_put_publish_preflight(running_entry)
-    running_entry = maybe_put_publish_handoff(running_entry)
+    running_entry =
+      running_entry
+      |> run_quality_gate()
+      |> run_publish_steps_if_allowed()
+
     handoff_route = handoff_decision_for_running_entry(running_entry, nil)
 
     if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
@@ -1441,7 +1445,41 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp policy_tracking_fields(_policy), do: %{}
 
-  defp maybe_put_publish_preflight(%{policy: policy} = running_entry) when is_map(policy) do
+  defp run_quality_gate(%{completion: completion} = running_entry) when is_map(completion) do
+    if quality_gate_needed?(completion) do
+      quality_gate =
+        QualityGate.run(
+          Map.get(running_entry, :workspace_path),
+          Map.get(running_entry, :policy, %{}),
+          Map.get(running_entry, :issue),
+          completion,
+          quality_gate_opts()
+        )
+
+      Map.update(running_entry, :completion, %{quality_gate: quality_gate}, fn
+        completion when is_map(completion) -> Map.put(completion, :quality_gate, quality_gate)
+        _completion -> %{quality_gate: quality_gate}
+      end)
+    else
+      running_entry
+    end
+  end
+
+  defp run_quality_gate(running_entry), do: running_entry
+
+  defp quality_gate_needed?(completion) when is_map(completion) do
+    Config.settings!().quality_gate.enabled and
+      HandoffRouteRecorder.completion_metadata?(completion)
+  end
+
+  defp quality_gate_opts do
+    case Application.get_env(:symphony_elixir, :quality_gate_runner) do
+      nil -> []
+      runner -> [runner: runner]
+    end
+  end
+
+  defp run_publish_preflight(%{policy: policy} = running_entry) when is_map(policy) do
     if publish_handoff_policy?(policy) and HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
       preflight =
         running_entry
@@ -1457,9 +1495,9 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_put_publish_preflight(running_entry), do: running_entry
+  defp run_publish_preflight(running_entry), do: running_entry
 
-  defp maybe_put_publish_handoff(%{policy: policy, completion: completion} = running_entry)
+  defp run_publish_handoff(%{policy: policy, completion: completion} = running_entry)
        when is_map(policy) and is_map(completion) do
     if publish_handoff_policy?(policy) and publish_handoff_needed?(completion) do
       running_entry
@@ -1470,7 +1508,27 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp maybe_put_publish_handoff(running_entry), do: running_entry
+  defp run_publish_handoff(running_entry), do: running_entry
+
+  defp run_publish_steps_if_allowed(running_entry) do
+    if quality_gate_allows_publish?(Map.get(running_entry, :completion)) do
+      running_entry
+      |> run_publish_preflight()
+      |> run_publish_handoff()
+    else
+      running_entry
+    end
+  end
+
+  defp quality_gate_allows_publish?(completion) when is_map(completion) do
+    case completion |> completion_field(:quality_gate) |> QualityGate.normalize_result() do
+      nil -> true
+      %{status: :passed} -> true
+      _quality_gate -> false
+    end
+  end
+
+  defp quality_gate_allows_publish?(_completion), do: true
 
   defp publish_handoff_policy?(policy) when is_map(policy), do: not is_nil(PublishTarget.resolve_policy(policy))
 

@@ -39,6 +39,9 @@ OpenAI project include:
   target-repo `AGENTS.md` and docs after the harness instructions.
 - Workflow inspection commands: the Elixir CLI can initialize, validate, and print compiled
   workflow policy with `workflow init`, `workflow check`, and `workflow print --compiled`.
+- Host-owned quality gates: completed implementation turns can fan out deterministic reviewer jobs
+  for source correctness, tests, scenario QA, product visual review, docs alignment, and risky
+  security/data/migration seams, then synthesize findings before handoff.
 - Publish and handoff evidence: completed workspaces are checked for publishability, pushed under a
   deterministic branch or jj bookmark, attached to a GitHub PR, and routed with structured handoff
   evidence.

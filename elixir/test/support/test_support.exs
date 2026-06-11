@@ -55,6 +55,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :publish_handoff_runner)
           Application.delete_env(:symphony_elixir, :publish_preflight_runner)
+          Application.delete_env(:symphony_elixir, :quality_gate_runner)
           File.rm_rf(workflow_root)
         end)
 
@@ -145,6 +146,12 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 5_000,
           codex_stall_timeout_ms: 300_000,
+          quality_gate_enabled: false,
+          quality_gate_source_max_concurrency: 3,
+          quality_gate_max_repair_passes: 1,
+          quality_gate_runtime_isolation: "serialized",
+          quality_gate_reviewer_timeout_ms: 1_200_000,
+          quality_gate_reviewer_max_retries: 0,
           profiles: %{default: %{delivery: %{pr_target: "main"}}},
           harness_codex_home: nil,
           hook_after_create: nil,
@@ -190,6 +197,12 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    quality_gate_enabled = Keyword.get(config, :quality_gate_enabled)
+    quality_gate_source_max_concurrency = Keyword.get(config, :quality_gate_source_max_concurrency)
+    quality_gate_max_repair_passes = Keyword.get(config, :quality_gate_max_repair_passes)
+    quality_gate_runtime_isolation = Keyword.get(config, :quality_gate_runtime_isolation)
+    quality_gate_reviewer_timeout_ms = Keyword.get(config, :quality_gate_reviewer_timeout_ms)
+    quality_gate_reviewer_max_retries = Keyword.get(config, :quality_gate_reviewer_max_retries)
     profiles = Keyword.get(config, :profiles)
     harness_codex_home = Keyword.get(config, :harness_codex_home)
     hook_after_create = Keyword.get(config, :hook_after_create)
@@ -238,6 +251,13 @@ defmodule SymphonyElixir.TestSupport do
         "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "quality_gate:",
+        "  enabled: #{yaml_value(quality_gate_enabled)}",
+        "  source_max_concurrency: #{yaml_value(quality_gate_source_max_concurrency)}",
+        "  max_repair_passes: #{yaml_value(quality_gate_max_repair_passes)}",
+        "  runtime_isolation: #{yaml_value(quality_gate_runtime_isolation)}",
+        "  reviewer_timeout_ms: #{yaml_value(quality_gate_reviewer_timeout_ms)}",
+        "  reviewer_max_retries: #{yaml_value(quality_gate_reviewer_max_retries)}",
         "profiles: #{yaml_value(profiles)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
