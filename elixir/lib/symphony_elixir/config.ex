@@ -81,6 +81,11 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec log_file(Path.t()) :: Path.t()
+  def log_file(default) when is_binary(default) do
+    Application.get_env(:symphony_elixir, :log_file, default)
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do

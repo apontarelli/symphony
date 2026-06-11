@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Orchestrator do
     PublishHandoff,
     PublishPreflight,
     QualityGate,
+    ReviewRecords,
     StatusDashboard,
     Tracker,
     Workspace
@@ -1135,6 +1136,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     handoff_route = handoff_decision_for_running_entry(running_entry, nil)
 
+    maybe_persist_quality_gate_review_record(issue_id, running_entry, handoff_route)
+
     if HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
       maybe_persist_handoff_route(issue_id, handoff_route)
     end
@@ -1672,6 +1675,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp running_entry_session_id(_running_entry), do: "n/a"
 
+  defp running_entry_issue_identifier(%{issue: %Issue{identifier: identifier}}) when is_binary(identifier),
+    do: identifier
+
+  defp running_entry_issue_identifier(%{issue: %{identifier: identifier}}) when is_binary(identifier),
+    do: identifier
+
+  defp running_entry_issue_identifier(%{identifier: identifier}) when is_binary(identifier),
+    do: identifier
+
+  defp running_entry_issue_identifier(_running_entry), do: "n/a"
+
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
@@ -1884,6 +1898,50 @@ defmodule SymphonyElixir.Orchestrator do
         :ok
     end
   end
+
+  defp maybe_persist_quality_gate_review_record(issue_id, running_entry, %HandoffRoute.Decision{} = decision)
+       when is_binary(issue_id) and is_map(running_entry) do
+    completion = Map.get(running_entry, :completion, %{})
+
+    case completion_field(completion, :quality_gate) do
+      quality_gate when is_map(quality_gate) ->
+        params = %{
+          policy: Map.get(running_entry, :policy, %{}),
+          issue: Map.get(running_entry, :issue, %{id: issue_id, identifier: Map.get(running_entry, :identifier)}),
+          workflow: %{
+            profile: Map.get(running_entry, :profile),
+            target: Map.get(running_entry, :target),
+            policy_ref: Map.get(running_entry, :policy_ref)
+          },
+          run: %{
+            session_id: Map.get(running_entry, :session_id),
+            started_at: Map.get(running_entry, :started_at),
+            completed_at: DateTime.utc_now()
+          },
+          workspace: Map.get(running_entry, :workspace_path),
+          quality_gate: quality_gate,
+          handoff_route: decision
+        }
+
+        case ReviewRecords.write_quality_gate_run(params) do
+          {:ok, _record} ->
+            :ok
+
+          {:error, reason} ->
+            session_id = running_entry_session_id(running_entry)
+            identifier = running_entry_issue_identifier(running_entry)
+
+            Logger.warning("Unable to persist quality-gate review record for issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}: #{inspect(reason)}")
+
+            :ok
+        end
+
+      _quality_gate ->
+        :ok
+    end
+  end
+
+  defp maybe_persist_quality_gate_review_record(_issue_id, _running_entry, _decision), do: :ok
 
   defp maybe_put_completion(running_entry, update) do
     case completion_for_update(update) do

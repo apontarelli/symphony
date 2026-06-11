@@ -178,8 +178,11 @@ defmodule SymphonyElixir.QualityGate.Planner do
 
   defp changed_files(completion) when is_map(completion) do
     case HandoffManifest.source(completion) do
-      {:present, manifest} ->
+      {:present, manifest} when is_map(manifest) ->
         manifest_changed_files(manifest)
+
+      {:present, _manifest} ->
+        []
 
       _source ->
         []
@@ -201,8 +204,6 @@ defmodule SymphonyElixir.QualityGate.Planner do
       fetch_value(manifest, :changedFiles) ||
       fetch_value(manifest, :files)
   end
-
-  defp manifest_changed_files(_manifest), do: []
 
   defp changed_surfaces(completion) when is_map(completion) do
     completion
@@ -333,7 +334,5 @@ defmodule SymphonyElixir.QualityGate.Planner do
     Enum.map_join(items, "\n", &"- #{&1}")
   end
 
-  defp fetch_value(nil, _key), do: nil
   defp fetch_value(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, to_string(key)))
-  defp fetch_value(_value, _key), do: nil
 end

@@ -956,6 +956,42 @@ Quality gate:
 - `runtime.quality_gate.reviewer_timeout_ms`: positive integer, default `1200000`
 - `runtime.quality_gate.reviewer_max_retries`: non-negative integer, default `0`
 
+Implementations that run host-owned quality gates SHOULD persist each completed quality-gate run as a
+host-owned review record after synthesis and handoff-route classification. The default records root
+SHOULD be derived from the implementation's logs root, for example
+`<logs-root>/review-records/quality-gates/<project-slug>/<issue-identifier>/<run-id>/`, unless an
+operator explicitly configures a different runtime records root. Implementations MUST NOT write these
+records into the target repository workspace by default.
+
+The stable record files are:
+
+- `metadata.json`: schema version, project/repository identity, issue id/identifier/url, workflow
+  profile, policy ref, run/session ids, timestamps, changed files/surfaces, and record-relative
+  artifact paths.
+- `quality_gate.json`: planner decision, requested/executed/blocked/skipped jobs, normalized
+  reviewer outputs, synthesis, repair passes, and unresolved human-review reasons.
+- `findings.json`: immutable normalized findings with stable ids, category, severity, evidence,
+  affected files, source job, recommended disposition, and repair/rerun linkage when known.
+- `handoff_route.json`: final route decision and the quality-gate evidence consumed by routing.
+
+`disposition.json` is the mutable sidecar. It SHOULD be initialized from synthesis and repair
+evidence using statuses suitable for later mining, including `accepted`, `fixed`,
+`rejected_false_positive`, `deferred_followup`, `needs_user_decision`, `no_action`, and
+`untriaged`. Repair-loop fixes SHOULD be represented as `fixed` or linked to the repair/rerun
+evidence. Follow-up, human-input-required, rejected-false-positive, blocked, and skipped review
+outcomes MUST remain distinguishable instead of being flattened into pass/fail summaries.
+
+Operator read surfaces SHOULD support listing records, showing a single run, and exporting
+retrospective input grouped by finding category, disposition, affected files/surfaces,
+false-positive patterns, and follow-up candidates. Exports MAY include a compatibility adapter for a
+shared retrospective workflow, but MUST stop at evidence and proposals; they MUST NOT automatically
+edit workflow modules, instructions, skills, repo docs, or tracker issues.
+
+Review-record payloads and read surfaces MUST redact or omit raw credentials, secret-shaped fields,
+local temp paths, unsafe absolute workspace paths, caches, logs, and operator-local configuration
+paths. Changed-file and affected-file references exposed to operators SHOULD be repo-relative,
+normalized paths whenever possible.
+
 Delivery and docs:
 
 - `delivery.pr_target`: string, default `main`

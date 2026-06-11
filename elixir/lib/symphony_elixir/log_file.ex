@@ -3,6 +3,8 @@ defmodule SymphonyElixir.LogFile do
   Configures OTP's built-in rotating disk log handler for application logs.
   """
 
+  alias SymphonyElixir.Config
+
   require Logger
 
   @handler_id :symphony_disk_log
@@ -22,7 +24,7 @@ defmodule SymphonyElixir.LogFile do
 
   @spec configure() :: :ok
   def configure do
-    log_file = Application.get_env(:symphony_elixir, :log_file, default_log_file())
+    log_file = Config.log_file(default_log_file())
     max_bytes = Application.get_env(:symphony_elixir, :log_file_max_bytes, @default_max_bytes)
     max_files = Application.get_env(:symphony_elixir, :log_file_max_files, @default_max_files)
 

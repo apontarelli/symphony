@@ -25,6 +25,11 @@ This directory contains the Elixir agent orchestration service that polls Linear
 - Orchestrator behavior is stateful and concurrency-sensitive; preserve retry, reconciliation, and cleanup semantics.
 - Follow `docs/logging.md` for logging conventions and required issue/session context fields.
 
+## Durable Artifact Contracts
+
+- When persisting review, handoff, retrospective, or compatibility artifacts, derive fields from canonical host-owned modules such as `QualityGate.Synthesis`, `HandoffManifest`, `PathSafety`, or an explicit schema adapter. Do not duplicate enum, disposition, or path-safety rules inside artifact writers.
+- New durable artifact writers or compatibility exports need focused fixture coverage for unknown tokens, empty `fix_required` findings, unsafe paths and credentials, schema-vocabulary projection, and idempotent run identifiers. Prefer shared test helpers over new lint rules unless another adapter repeats the same omissions.
+
 ## Tests and Validation
 
 Run targeted tests while iterating, then run full gates before handoff.
