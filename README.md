@@ -52,9 +52,9 @@ OpenAI project include:
 
 ## Current architecture
 
-The durable architecture contract lives in [`SPEC.md`](SPEC.md). The current implementation is the
-Elixir/OTP service in [`elixir/`](elixir/), with local setup and commands documented in
-[`elixir/README.md`](elixir/README.md).
+Product posture and prioritization live in [`PRODUCT.md`](PRODUCT.md). The durable architecture
+contract lives in [`SPEC.md`](SPEC.md). The current implementation is the Elixir/OTP service in
+[`elixir/`](elixir/), with local setup and commands documented in [`elixir/README.md`](elixir/README.md).
 
 The root [`symphony.yml`](symphony.yml) is this fork's dogfood manifest for running Symphony on
 itself. It intentionally contains this fork's public repository URL, local workspace defaults, a

@@ -396,10 +396,10 @@ Loader behavior:
 `symphony.yml` is a YAML manifest. It declares repository facts and selected Symphony-owned workflow
 modules, then compiles to the runtime workflow object used by the daemon.
 
-Required fields for the default preset:
+Manifest fields for the default preset:
 
-Optional manifest fields:
-
+- `version` (integer, default `1` when omitted)
+  - Currently only version `1` is supported.
 - `project.slug` (string)
   - Used by the default `tracker.linear` module as `runtime.tracker.project_slug` when present.
 - `project.name` (string, defaults to `project.slug`)
@@ -453,6 +453,7 @@ Manifest resolution rules:
 Minimal manifest example:
 
 ```yaml
+version: 1
 project:
   slug: hard-sets
   name: Hard Sets
@@ -1084,7 +1085,7 @@ Fallback prompt behavior:
 - Manifest, module, compile, or template errors are configuration/validation errors and SHOULD NOT silently fall
   back to a prompt.
 
-### 5.4.1 Core Workflow Modules
+### 6.6 Internal Workflow Module Registry
 
 Implementations MAY provide an internal workflow module registry for reusable prompt policy.
 
@@ -1104,7 +1105,7 @@ The default module set SHOULD cover Linear operation, implementation loop, VCS/c
 pull/sync, quality gates, automated review, land/merge, rework, requirement validation, project
 closeout, and debugging/run recovery.
 
-### 5.5 Workflow Validation and Error Surface
+### 6.7 Runtime Workflow Validation Error Surface
 
 Error classes:
 
@@ -1121,7 +1122,7 @@ Dispatch gating behavior:
 - Manifest read/YAML/module errors block new dispatches until fixed.
 - Template errors fail only the affected run attempt.
 
-### 5.6 Target Repo Manifest CLI Contract
+### 6.8 Target Repo Manifest CLI Contract
 
 Implementations MAY expose a target-repo manifest named `symphony.yml` as the operator-facing setup
 contract. The manifest records durable repo facts and workflow selections, while the implementation
@@ -1130,7 +1131,7 @@ it.
 
 `symphony.yml` v1 fields:
 
-- `version` (integer): REQUIRED, currently `1`.
+- `version` (integer): OPTIONAL, defaults to `1` when omitted; currently only `1` is supported.
 - `project` (object): `name`, `kind`, and `app_kind`.
 - `workflow` (object): `preset` plus optional extra `modules`.
 - `docs` (object): repo-relative `entrypoints` that agents should read for repo instructions and
@@ -1156,32 +1157,13 @@ CLI commands:
 CLI validation failures MUST exit nonzero and point to the manifest field or missing repo/harness
 evidence with concise remediation.
 
-## 6. Configuration Specification
+### 6.9 Dynamic Runtime Configuration
 
-### 6.1 Configuration Resolution Pipeline
+Dynamic runtime configuration uses the resolution pipeline in Section 6.2. Reloaded config MUST be
+the fully parsed, module-resolved, deployment-merged, compiled, environment-resolved, and coerced
+runtime workflow before it can affect dispatch.
 
-Configuration is resolved in this order:
-
-1. Select the manifest file path (explicit runtime setting, otherwise cwd default).
-2. Parse the YAML manifest into a raw config map.
- 3. Apply built-in defaults for missing OPTIONAL fields.
- 4. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
- 5. Coerce and validate typed values.
-
-Environment variables do not globally override YAML values. They are used only when a config value
-explicitly references them.
-
-Value coercion semantics:
-
-- Path/command fields support:
-  - `~` home expansion
-  - `$VAR` expansion for env-backed path values
-  - Apply expansion only to values intended to be local filesystem paths; do not rewrite URIs or
-    arbitrary shell command strings.
-- Relative `workspace.root` values resolve relative to the directory containing the selected
-  `symphony.yml`.
-
-### 6.2 Dynamic Reload Semantics
+#### 6.9.1 Dynamic Reload Semantics
 
 Dynamic reload is REQUIRED:
 
@@ -1204,7 +1186,7 @@ Dynamic reload is REQUIRED:
 - Invalid reloads MUST NOT crash the service; keep operating with the last known good compiled
   workflow and emit an operator-visible error.
 
-### 6.7 Dispatch Preflight Validation
+#### 6.9.2 Dispatch Preflight Validation
 
 This validation is a scheduler preflight run before attempting to dispatch new work. It validates
 the manifest, compiled workflow, and runtime config needed to poll and launch workers, not a full

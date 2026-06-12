@@ -668,7 +668,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
   end
 
   defp cli_detect_doc_entrypoints(repo_root) do
-    ["AGENTS.md", "README.md", "SPEC.md", "elixir/AGENTS.md", "elixir/README.md"]
+    ["AGENTS.md", "README.md", "PRODUCT.md", "SPEC.md", "elixir/AGENTS.md", "elixir/README.md"]
     |> Enum.filter(&File.regular?(Path.join(repo_root, &1)))
   end
 

@@ -16,6 +16,7 @@ workflow:
 docs:
   entrypoints:
     - README.md
+    - PRODUCT.md
     - SPEC.md
     - elixir/AGENTS.md
     - elixir/README.md

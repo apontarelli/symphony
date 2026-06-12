@@ -65,7 +65,9 @@ mix pr_body.check --file /path/to/pr_body.md
 
 If behavior/config changes, update docs in the same PR:
 
-- `../README.md` for project concept and goals.
+- `../PRODUCT.md` for product posture, operator promise, strategic horizon, and durable product
+  boundaries.
+- `../README.md` for public overview, quickstart, and source-of-truth routing.
 - `README.md` for Elixir implementation and run instructions.
 - workflow contract docs (`symphony.yml`, module registry behavior, or related examples) for
   workflow/config contract changes.

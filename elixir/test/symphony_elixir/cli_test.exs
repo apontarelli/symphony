@@ -252,6 +252,7 @@ defmodule SymphonyElixir.CLITest do
   test "workflow init creates a thin manifest from repo inspection" do
     repo = tmp_repo!("symphony-elixir-init")
     File.write!(Path.join(repo, "README.md"), "repo docs\n")
+    File.write!(Path.join(repo, "PRODUCT.md"), "product doctrine\n")
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
     File.write!(Path.join(repo, "mix.exs"), "defmodule Example.MixProject do\nend\n")
 
@@ -265,7 +266,7 @@ defmodule SymphonyElixir.CLITest do
     assert manifest["project"]["kind"] == "elixir"
     assert manifest["workflow"]["preset"] == "default"
     assert manifest["workflow"]["modules"] == []
-    assert manifest["docs"]["entrypoints"] == ["AGENTS.md", "README.md"]
+    assert manifest["docs"]["entrypoints"] == ["AGENTS.md", "README.md", "PRODUCT.md"]
     assert [%{"name" => "test", "command" => "mix test"}] = manifest["validation"]["commands"]
   end
 

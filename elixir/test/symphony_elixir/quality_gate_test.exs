@@ -69,6 +69,23 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert nested_alias.changed_files == ["docs/README.md"]
     assert Enum.any?(nested_alias.jobs, &(&1.category == :docs_source_of_truth))
+
+    configured_entrypoint =
+      Planner.plan(%{
+        completion: %{"changed_files" => ["DESIGN.md"]},
+        policy: %{"manifest" => %{"docs" => %{"entrypoints" => ["DESIGN.md"]}}},
+        settings: %Schema.QualityGate{}
+      })
+
+    assert Enum.any?(configured_entrypoint.jobs, &(&1.category == :docs_source_of_truth))
+
+    product_doc =
+      Planner.plan(%{
+        completion: %{"changed_files" => ["PRODUCT.md"]},
+        settings: %Schema.QualityGate{}
+      })
+
+    assert Enum.any?(product_doc.jobs, &(&1.category == :docs_source_of_truth))
   end
 
   test "quality gate repairs fix-required findings and reruns the affected review subset" do
@@ -742,6 +759,15 @@ defmodule SymphonyElixir.QualityGateTest do
       })
 
     assert Enum.any?(docs.jobs, &(&1.category == :docs_source_of_truth))
+
+    malformed_doc_entrypoints =
+      Planner.plan(%{
+        completion: %{"changed_files" => ["DESIGN.md"]},
+        policy: %{"manifest" => %{"docs" => %{"entrypoints" => "DESIGN.md"}}},
+        settings: %Schema.QualityGate{}
+      })
+
+    refute Enum.any?(malformed_doc_entrypoints.jobs, &(&1.category == :docs_source_of_truth))
 
     scenario =
       Planner.plan(%{

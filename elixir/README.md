@@ -1,8 +1,9 @@
 # Symphony Elixir
 
 This directory contains the current Elixir/OTP implementation of Symphony in this fork, based on
-[`SPEC.md`](../SPEC.md) at the repository root. The root [`README.md`](../README.md) is the public
-fork overview; this file is the implementation setup and operation guide.
+[`SPEC.md`](../SPEC.md) at the repository root. The root [`PRODUCT.md`](../PRODUCT.md) owns product
+posture and prioritization; the root [`README.md`](../README.md) is the public fork overview. This
+file is the implementation setup and operation guide.
 
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation in trusted environments. This fork
@@ -242,10 +243,12 @@ so the shared `review-retrospective` workflow can mine Symphony quality-gate rec
 
 The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
 modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.
+`version` defaults to `1` when omitted, but examples include it explicitly for clarity.
 
 Minimal manifest example:
 
 ```yaml
+version: 1
 project:
   slug: "..."
   repository: git@github.com:your-org/your-repo.git

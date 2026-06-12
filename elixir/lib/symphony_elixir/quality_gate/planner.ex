@@ -144,8 +144,8 @@ defmodule SymphonyElixir.QualityGate.Planner do
       Enum.any?(files, &visual_file?/1)
   end
 
-  defp required?(:docs_source_of_truth, %{changed_files: files, changed_surfaces: surfaces}) do
-    :docs in surfaces or Enum.any?(files, &docs_or_source_of_truth_file?/1)
+  defp required?(:docs_source_of_truth, %{changed_files: files, changed_surfaces: surfaces, policy: policy}) do
+    :docs in surfaces or Enum.any?(files, &docs_or_source_of_truth_file?(&1, policy))
   end
 
   defp required?(:security_data_migration, %{changed_files: files, changed_surfaces: surfaces, issue: issue}) do
@@ -256,14 +256,38 @@ defmodule SymphonyElixir.QualityGate.Planner do
     ])
   end
 
-  defp docs_or_source_of_truth_file?(path) do
+  defp docs_or_source_of_truth_file?(path, policy) do
     base = Path.basename(path)
 
-    String.starts_with?(path, ["docs/", "elixir/docs/", ".github/"]) or
-      base in ["README.md", "SPEC.md", "AGENTS.md", "Makefile", "mise.toml", "Dockerfile"] or
+    path in policy_doc_entrypoints(policy) or
+      String.starts_with?(path, ["docs/", "elixir/docs/", ".github/"]) or
+      base in ["README.md", "PRODUCT.md", "SPEC.md", "AGENTS.md", "Makefile", "mise.toml", "Dockerfile"] or
       path == "symphony.yml" or
       String.ends_with?(path, ["/README.md", "/AGENTS.md"])
   end
+
+  defp policy_doc_entrypoints(policy) when is_map(policy) do
+    policy
+    |> fetch_value(:manifest)
+    |> case do
+      manifest when is_map(manifest) -> fetch_value(manifest, :docs)
+      _manifest -> nil
+    end
+    |> case do
+      docs when is_map(docs) -> fetch_value(docs, :entrypoints)
+      _docs -> []
+    end
+    |> case do
+      entrypoints when is_list(entrypoints) -> entrypoints
+      _entrypoints -> []
+    end
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp policy_doc_entrypoints(_policy), do: []
 
   defp security_file?(path) do
     downcased = String.downcase(path)
