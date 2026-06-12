@@ -89,6 +89,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
        %{
          event: :session_started,
          session_id: "thread-live-turn-live",
+         codex_command: "codex --config 'model=\"gpt-5.5\"' app-server",
+         codex_home: "/tmp/symphony/.symphony/codex_home",
+         codex_workspace: "/tmp/symphony/MT-188",
+         codex_execution_profile: "implementation",
+         codex_execution_profile_model: nil,
+         codex_execution_profile_reasoning_effort: nil,
+         codex_execution_profile_budget: "standard",
+         codex_execution_profile_timeout_ms: 3_600_000,
+         workflow_file_path: "/tmp/symphony.yml",
+         workflow_config_sha256: String.duplicate("f", 64),
          timestamp: now
        }}
     )
@@ -110,6 +120,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.workflow_module_policy_hash == "sha256:" <> String.duplicate("a", 64)
     assert snapshot_entry.workflow_modules == [%{name: "product_visual_review", version: "v1"}]
     assert snapshot_entry.session_id == "thread-live-turn-live"
+    assert snapshot_entry.codex_command == "codex --config 'model=\"gpt-5.5\"' app-server"
+    assert snapshot_entry.codex_home == "/tmp/symphony/.symphony/codex_home"
+    assert snapshot_entry.codex_workspace == "/tmp/symphony/MT-188"
+    assert snapshot_entry.codex_execution_profile == "implementation"
+    assert snapshot_entry.codex_execution_profile_model == nil
+    assert snapshot_entry.codex_execution_profile_reasoning_effort == nil
+    assert snapshot_entry.codex_execution_profile_budget == "standard"
+    assert snapshot_entry.codex_execution_profile_timeout_ms == 3_600_000
+    assert snapshot_entry.workflow_file_path == "/tmp/symphony.yml"
+    assert snapshot_entry.workflow_config_sha256 == String.duplicate("f", 64)
     assert snapshot_entry.turn_count == 1
     assert snapshot_entry.last_codex_timestamp == now
     assert snapshot_entry.last_codex_progress_timestamp == now

@@ -183,6 +183,7 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:model, :string, default: "gpt-5.5")
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -209,6 +210,7 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :model,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,

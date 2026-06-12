@@ -977,6 +977,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
+    assert config.codex.model == "gpt-5.5"
 
     assert config.codex.approval_policy == %{
              "reject" => %{
@@ -1019,6 +1020,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Config.settings!().codex.command ==
              "codex --config 'model=\"gpt-5.5\"' app-server"
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_model: "gpt-5.4")
+    assert Config.settings!().codex.model == "gpt-5.4"
 
     explicit_root =
       Path.join(

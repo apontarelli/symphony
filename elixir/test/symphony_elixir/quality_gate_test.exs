@@ -1365,6 +1365,30 @@ defmodule SymphonyElixir.QualityGateTest do
     assert "codex app-server" ==
              ExecutionProfile.command("codex app-server", %{reasoning_effort: nil, model: nil})
 
+    assert "codex --config 'model=\"gpt-5.5\"' app-server" ==
+             ExecutionProfile.command("codex app-server", %{reasoning_effort: nil, model: nil}, "gpt-5.5")
+
+    assert "codex --config 'model=\"gpt-5.5\"' app-server" ==
+             ExecutionProfile.command(
+               "codex --config 'model=\"gpt-5.5\"' app-server",
+               %{reasoning_effort: nil, model: nil},
+               "gpt-5.4"
+             )
+
+    assert "codex --model gpt-5.5 app-server" ==
+             ExecutionProfile.command(
+               "codex --model gpt-5.5 app-server",
+               %{reasoning_effort: nil, model: nil},
+               "gpt-5.4"
+             )
+
+    assert "codex --config 'model=\"gpt-5.4\"' app-server" ==
+             ExecutionProfile.command(
+               "codex app-server",
+               %{reasoning_effort: nil, model: "gpt-5.4"},
+               "gpt-5.5"
+             )
+
     assert "codex run --config 'model=\"gpt-5.5\"'" ==
              ExecutionProfile.command("codex run", %{model: "gpt-5.5", reasoning_effort: nil})
 

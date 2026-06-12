@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.ExecutionProfile, Codex.Launch, Config, PathSafety}
+  alias SymphonyElixir.{Codex.DynamicTool, Codex.ExecutionProfile, Codex.Launch, Config, PathSafety, Workflow}
 
   @initialize_id 1
   @thread_start_id 2
@@ -45,12 +45,18 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     settings = Config.settings!()
     execution_profile = ExecutionProfile.resolve(settings, Keyword.get(opts, :execution_profile, "implementation"))
-    codex_command = ExecutionProfile.command(settings.codex.command, execution_profile)
+    codex_command = ExecutionProfile.command(settings.codex.command, execution_profile, settings.codex.model)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
       port = launch.port
-      metadata = port_metadata(port, worker_host)
+
+      metadata =
+        port
+        |> port_metadata(worker_host)
+        |> Map.merge(launch_provenance(expanded_workspace, launch.codex_home, codex_command, execution_profile))
+
+      Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command}")
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
            {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
@@ -1200,6 +1206,34 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp maybe_set_usage(metadata, _payload), do: metadata
+
+  defp launch_provenance(workspace, codex_home, codex_command, execution_profile) do
+    workflow_file_path = Workflow.selected_workflow_file_path()
+
+    %{
+      codex_command: codex_command,
+      codex_home: codex_home,
+      codex_workspace: workspace,
+      codex_execution_profile: execution_profile.name,
+      codex_execution_profile_model: execution_profile.model,
+      codex_execution_profile_reasoning_effort: execution_profile.reasoning_effort,
+      codex_execution_profile_budget: execution_profile.budget,
+      codex_execution_profile_timeout_ms: execution_profile.timeout_ms,
+      workflow_file_path: workflow_file_path,
+      workflow_config_sha256: workflow_file_sha256(workflow_file_path)
+    }
+  end
+
+  defp workflow_file_sha256(path) when is_binary(path) do
+    case File.read(path) do
+      {:ok, contents} ->
+        :crypto.hash(:sha256, contents)
+        |> Base.encode16(case: :lower)
+
+      {:error, _reason} ->
+        nil
+    end
+  end
 
   defp session_started_details(session_id, thread_id, turn_id, workflow_module_resolution) do
     %{

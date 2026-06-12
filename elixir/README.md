@@ -369,9 +369,10 @@ runtime:
   by the Codex turn sandbox.
 - `codex.execution_profiles` lets the host run implementation, planner, reviewer, runtime QA,
   product visual review, security review, and synthesis jobs with typed reasoning, timeout, retry,
-  budget, model, or command settings. The common path derives model/reasoning flags from
-  `codex.command`; operators do not need to rewrite the raw command string for normal profile
-  tuning.
+  budget, model, or command settings. `codex.model` is the default launch model. Profile `model`
+  values override it for that launch, and explicit model flags already present in `codex.command`
+  control the command unchanged. Operators do not need to rewrite the raw command string for normal
+  profile tuning.
 - Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
   authoring that needs to edit protected repo-local skill or tooling paths. Profile overrides do

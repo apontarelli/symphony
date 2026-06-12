@@ -54,12 +54,17 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
   def resolve(profile_ref), do: Config.settings!() |> resolve(profile_ref)
 
   @spec command(String.t(), t()) :: String.t()
-  def command(_base_command, %{command: command}) when is_binary(command), do: command
+  def command(base_command, profile), do: command(base_command, profile, nil)
 
-  def command(base_command, profile) when is_binary(base_command) and is_map(profile) do
+  @spec command(String.t(), t(), String.t() | nil) :: String.t()
+  def command(_base_command, %{command: command}, _default_model) when is_binary(command), do: command
+
+  def command(base_command, profile, default_model) when is_binary(base_command) and is_map(profile) do
+    model = model_for_command(base_command, Map.get(profile, :model), default_model)
+
     additions =
       []
-      |> maybe_add_model_config(Map.get(profile, :model))
+      |> maybe_add_model_config(model)
       |> maybe_add_reasoning_config(Map.get(profile, :reasoning_effort))
       |> Enum.reverse()
       |> Enum.join(" ")
@@ -74,6 +79,19 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
       true ->
         base_command <> " " <> additions
     end
+  end
+
+  defp model_for_command(base_command, profile_model, default_model) do
+    cond do
+      command_sets_model?(base_command) -> nil
+      is_binary(profile_model) -> profile_model
+      true -> normalized_string(default_model)
+    end
+  end
+
+  defp command_sets_model?(command) when is_binary(command) do
+    String.match?(command, ~r/(^|\s)(-m|--model)(=|\s)/) or
+      String.match?(command, ~r/(^|\s)(-c|--config)(=|\s+)(['"])?model=/)
   end
 
   defp normalize_profiles(profiles) when is_map(profiles) do

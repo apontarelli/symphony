@@ -1155,12 +1155,16 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp humanize_codex_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])
+    command = map_value(payload, ["codex_command", :codex_command])
 
-    if is_binary(session_id) do
-      "session started (#{session_id})"
-    else
-      "session started"
-    end
+    base =
+      if is_binary(session_id) do
+        "session started (#{session_id})"
+      else
+        "session started"
+      end
+
+    if is_binary(command), do: "#{base} command=#{command}", else: base
   end
 
   defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"

@@ -841,6 +841,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.hooks.after_create == "git clone --depth 1 'github.com/example/target-repo' ."
     assert settings.agent.max_concurrent_agents == 10
     assert settings.codex.command == "codex app-server"
+    assert settings.codex.model == "gpt-5.5"
     assert settings.polling.interval_ms == 30_000
 
     prompt =

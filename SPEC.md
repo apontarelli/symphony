@@ -932,6 +932,7 @@ by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MA
 fields locally if they want stricter startup checks.
 
 - `runtime.codex.command`: shell command string, default `codex app-server`
+- `runtime.codex.model`: Codex model name, default implementation-defined
 - `runtime.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
 - `runtime.codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `runtime.codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
@@ -1572,6 +1573,9 @@ Subprocess launch parameters:
 Notes:
 
 - The default command is `codex app-server`.
+- Implementations MAY derive model and reasoning flags from typed runtime config. The default model
+  is `runtime.codex.model`; profile `model` values override it for that launch; explicit model
+  flags already present in `runtime.codex.command` control the command unchanged.
 - Non-implementation Codex jobs MAY run through `runtime.codex.execution_profiles`; when a profile
   supplies model or reasoning settings and no explicit command, the implementation derives a launch
   command from `runtime.codex.command`.

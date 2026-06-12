@@ -366,6 +366,82 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server emits launch provenance with resolved command, workflow, profile, and CODEX_HOME" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-launch-provenance-#{System.unique_integer([:positive])}"
+      )
+
+    previous_home = System.get_env("SYMPHONY_CODEX_HOME")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_CODEX_HOME", previous_home)
+    end)
+
+    System.delete_env("SYMPHONY_CODEX_HOME")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-LAUNCH-PROVENANCE")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "launch-provenance.trace")
+      test_pid = self()
+
+      File.mkdir_p!(workspace)
+      {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+      expected_codex_home = Path.join([Path.dirname(canonical_workspace), ".symphony", "codex_home"])
+
+      write_successful_fake_codex!(codex_binary, trace_file,
+        thread_id: "thread-launch-provenance",
+        turn_id: "turn-launch-provenance"
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} --config 'model=\"gpt-5.5\"' app-server"
+      )
+
+      expected_workflow_hash =
+        :crypto.hash(:sha256, File.read!(Workflow.workflow_file_path()))
+        |> Base.encode16(case: :lower)
+
+      issue = %Issue{
+        id: "issue-launch-provenance",
+        identifier: "MT-LAUNCH-PROVENANCE",
+        title: "Emit launch provenance",
+        description: "Ensure app-server reports the resolved Codex launch context",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-LAUNCH-PROVENANCE",
+        labels: ["backend"]
+      }
+
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      assert {:ok, _result} =
+               AppServer.run(workspace, "Validate launch provenance", issue, on_message: on_message)
+
+      assert_receive {:app_server_message,
+                      %{
+                        event: :session_started,
+                        codex_command: codex_command,
+                        codex_home: ^expected_codex_home,
+                        codex_workspace: ^canonical_workspace,
+                        codex_execution_profile: "implementation",
+                        codex_execution_profile_model: nil,
+                        codex_execution_profile_reasoning_effort: nil,
+                        codex_execution_profile_budget: "standard",
+                        workflow_file_path: workflow_file_path,
+                        workflow_config_sha256: ^expected_workflow_hash
+                      }}
+
+      assert codex_command == "#{codex_binary} --config 'model=\"gpt-5.5\"' app-server"
+      assert workflow_file_path == Workflow.workflow_file_path()
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server honors local Symphony CODEX_HOME override while still generating harness instructions" do
     test_root =
       Path.join(
@@ -1986,7 +2062,9 @@ defmodule SymphonyElixir.AppServerTest do
       assert argv_line =~ remote_workspace
       assert argv_line =~ "CODEX_HOME="
       assert argv_line =~ " exec "
-      assert argv_line =~ "fake-remote-codex app-server"
+      assert argv_line =~ "fake-remote-codex --config"
+      assert argv_line =~ "model=\"gpt-5.5\""
+      assert argv_line =~ "app-server"
 
       expected_turn_policy = %{
         "type" => "workspaceWrite",

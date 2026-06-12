@@ -1066,6 +1066,16 @@ defmodule SymphonyElixir.Orchestrator do
             last_codex_event: nil,
             last_codex_error_signature: nil,
             codex_app_server_pid: nil,
+            codex_command: nil,
+            codex_home: nil,
+            codex_workspace: nil,
+            codex_execution_profile: nil,
+            codex_execution_profile_model: nil,
+            codex_execution_profile_reasoning_effort: nil,
+            codex_execution_profile_budget: nil,
+            codex_execution_profile_timeout_ms: nil,
+            workflow_file_path: nil,
+            workflow_config_sha256: nil,
             codex_input_tokens: 0,
             codex_output_tokens: 0,
             codex_total_tokens: 0,
@@ -1754,6 +1764,16 @@ defmodule SymphonyElixir.Orchestrator do
           session_id: metadata.session_id,
           last_codex_progress_timestamp: Map.get(metadata, :last_codex_progress_timestamp),
           codex_app_server_pid: metadata.codex_app_server_pid,
+          codex_command: Map.get(metadata, :codex_command),
+          codex_home: Map.get(metadata, :codex_home),
+          codex_workspace: Map.get(metadata, :codex_workspace),
+          codex_execution_profile: Map.get(metadata, :codex_execution_profile),
+          codex_execution_profile_model: Map.get(metadata, :codex_execution_profile_model),
+          codex_execution_profile_reasoning_effort: Map.get(metadata, :codex_execution_profile_reasoning_effort),
+          codex_execution_profile_budget: Map.get(metadata, :codex_execution_profile_budget),
+          codex_execution_profile_timeout_ms: Map.get(metadata, :codex_execution_profile_timeout_ms),
+          workflow_file_path: Map.get(metadata, :workflow_file_path),
+          workflow_config_sha256: Map.get(metadata, :workflow_config_sha256),
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
@@ -1992,6 +2012,16 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_event: event,
         last_codex_error_signature: last_error_signature,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
+        codex_command: provenance_value_for_update(running_entry, update, :codex_command),
+        codex_home: provenance_value_for_update(running_entry, update, :codex_home),
+        codex_workspace: provenance_value_for_update(running_entry, update, :codex_workspace),
+        codex_execution_profile: provenance_value_for_update(running_entry, update, :codex_execution_profile),
+        codex_execution_profile_model: provenance_value_for_update(running_entry, update, :codex_execution_profile_model),
+        codex_execution_profile_reasoning_effort: provenance_value_for_update(running_entry, update, :codex_execution_profile_reasoning_effort),
+        codex_execution_profile_budget: provenance_value_for_update(running_entry, update, :codex_execution_profile_budget),
+        codex_execution_profile_timeout_ms: provenance_value_for_update(running_entry, update, :codex_execution_profile_timeout_ms),
+        workflow_file_path: provenance_value_for_update(running_entry, update, :workflow_file_path),
+        workflow_config_sha256: provenance_value_for_update(running_entry, update, :workflow_config_sha256),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
@@ -2017,6 +2047,13 @@ defmodule SymphonyElixir.Orchestrator do
     do: to_string(pid)
 
   defp codex_app_server_pid_for_update(existing, _update), do: existing
+
+  defp provenance_value_for_update(running_entry, update, key) do
+    case Map.fetch(update, key) do
+      {:ok, value} -> value
+      :error -> Map.get(running_entry, key)
+    end
+  end
 
   defp session_id_for_update(_existing, %{session_id: session_id}) when is_binary(session_id),
     do: session_id
