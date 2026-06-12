@@ -566,10 +566,15 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       Issues labeled Project Closeout run after implementation work is complete. Read the Linear
       Project PDR, list every in-scope user story/problem, and validate each one with concrete
       evidence from tests, manual QA, screenshots, metrics, review artifacts, or operator checks.
+      Record the result in a Story Validation Matrix with columns: user story/problem, disposition,
+      evidence, and gaps/follow-up. Use stable story text from the PDR so future host-owned
+      validators can fan out by matrix row without synthetic identifiers.
 
       Closeout may edit durable repository docs when needed, but it should not reopen solved
       implementation scope. Summarize shipped, validated, deferred, and blocked items in the
       workpad with validation evidence. Create follow-up issues for deferred gaps when needed.
+      Valid dispositions are validated, failed, deferred, and blocked. Closeout cannot complete
+      while any in-scope story/problem is failed or blocked.
 
       If unresolved implementation blockers remain, record the blocker relationship gap in the
       workpad and stop closeout until implementation is complete. If the PDR lacks in-scope user

@@ -117,6 +117,8 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "Read the Linear"
     assert prompt =~ "Project PDR"
     assert prompt =~ "validate each one with concrete"
+    assert prompt =~ "Story Validation Matrix"
+    assert prompt =~ "future host-owned"
     assert prompt =~ "### Acceptance Criteria"
     assert prompt =~ "### Confusions"
     assert prompt =~ "gh pr view --comments"
@@ -151,6 +153,9 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert {:ok, project_closeout} = ModuleRegistry.module_defaults("project-closeout", 0)
     assert project_closeout.content =~ "durable repository docs"
     assert project_closeout.content =~ "in-scope user story/problem"
+    assert project_closeout.content =~ "Story Validation Matrix"
+    assert project_closeout.content =~ "validated, failed, deferred, and blocked"
+    assert project_closeout.content =~ "future host-owned"
     assert project_closeout.content =~ "unresolved implementation blockers"
 
     for workflow_module <- [
