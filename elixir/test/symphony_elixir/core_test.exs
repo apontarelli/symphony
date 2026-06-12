@@ -1989,7 +1989,7 @@ defmodule SymphonyElixir.CoreTest do
     assert bundle.prompt =~ "hash=#{bundle.workflow_module_resolution.policy_hash}"
     assert bundle.prompt =~ "Resolved modules: linear-operation@v1"
     assert bundle.prompt =~ "### Linear Operation"
-    refute bundle.prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+    refute bundle.prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|project-closeout)/
   end
 
   test "prompt builder default template handles missing issue body" do
@@ -2104,7 +2104,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{name: "linear-operation", version: "v1"} in prompt_bundle.workflow_module_resolution.module_refs
     refute prompt =~ ".codex/skills"
     refute prompt =~ "## Related skills"
-    refute prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+    refute prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|project-closeout)/
     assert prompt =~ "never bypass it with a direct merge command"
     assert prompt =~ "Auto-land route classification"
     assert prompt =~ "structured completion evidence"
@@ -2451,7 +2451,7 @@ defmodule SymphonyElixir.CoreTest do
       assert trace =~ "Policy hash: sha256:"
 
       refute trace =~
-               ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|requirement-validation|project-closeout)/
+               ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|project-closeout)/
 
       refute File.exists?(Path.join(empty_codex_home, "skills"))
       refute File.exists?(Path.join(expected_codex_home, "skills"))

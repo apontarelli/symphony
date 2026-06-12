@@ -696,7 +696,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Issue.ticket_kind(%Issue{labels: nil}) == :implementation
   end
 
-  test "requirement issue with non-terminal implementation blockers is not dispatch-eligible" do
+  test "legacy requirement issues are not dispatch-eligible" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
 
     state = %Orchestrator.State{
@@ -710,7 +710,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = %Issue{
       id: "requirement-1",
       identifier: "MT-1100",
-      title: "Validate requirements workflow",
+      title: "Validate legacy requirement workflow",
       state: "Todo",
       labels: ["Requirement"],
       project_slug: "project",
@@ -718,57 +718,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-    assert Orchestrator.dispatch_block_reason_for_test(issue) == :blocked_by_non_terminal
-  end
-
-  test "requirement issue in todo with terminal implementation blockers is dispatch-eligible" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
-
-    state = %Orchestrator.State{
-      max_concurrent_agents: 3,
-      running: %{},
-      claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: "requirement-2",
-      identifier: "MT-1102",
-      title: "Validate completed requirement",
-      state: "Todo",
-      labels: ["Requirement"],
-      project_slug: "project",
-      blocked_by: [%{id: "implementation-2", identifier: "MT-1103", state: "Done"}]
-    }
-
-    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
-    assert is_nil(Orchestrator.dispatch_block_reason_for_test(issue))
-  end
-
-  test "requirement issue without implementation blockers is not dispatch-eligible" do
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"])
-
-    state = %Orchestrator.State{
-      max_concurrent_agents: 3,
-      running: %{},
-      claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      retry_attempts: %{}
-    }
-
-    issue = %Issue{
-      id: "requirement-3",
-      identifier: "MT-1104",
-      title: "Validate unplanned requirement",
-      state: "Todo",
-      labels: ["Requirement"],
-      project_slug: "project",
-      blocked_by: []
-    }
-
-    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
-    assert Orchestrator.dispatch_block_reason_for_test(issue) == :requirement_missing_blockers
+    assert Orchestrator.dispatch_block_reason_for_test(issue) == :unsupported_requirement_issue
   end
 
   test "dispatch revalidation skips stale todo issue once a non-terminal blocker appears" do

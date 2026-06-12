@@ -28,7 +28,7 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
-  @typep dispatch_block_reason :: :blocked_by_non_terminal | :requirement_missing_blockers
+  @typep dispatch_block_reason :: :blocked_by_non_terminal | :unsupported_requirement_issue
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -920,11 +920,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp issue_dispatch_block_reason(%Issue{} = issue, terminal_states) do
     cond do
-      requirement_issue_missing_blockers?(issue) ->
-        :requirement_missing_blockers
+      Issue.requirement?(issue) ->
+        :unsupported_requirement_issue
 
-      todo_issue_blocked_by_non_terminal?(issue, terminal_states) or
-          requirement_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
         :blocked_by_non_terminal
 
       true ->
@@ -948,26 +947,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
-
-  defp requirement_issue_blocked_by_non_terminal?(%Issue{blocked_by: blockers} = issue, terminal_states)
-       when is_list(blockers) do
-    Issue.requirement?(issue) and non_terminal_blocker?(blockers, terminal_states)
-  end
-
-  defp requirement_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
-
-  defp requirement_issue_missing_blockers?(%Issue{blocked_by: []} = issue), do: Issue.requirement?(issue)
-  defp requirement_issue_missing_blockers?(_issue), do: false
-
-  defp non_terminal_blocker?(blockers, terminal_states) when is_list(blockers) do
-    Enum.any?(blockers, fn
-      %{state: blocker_state} when is_binary(blocker_state) ->
-        !terminal_issue_state?(blocker_state, terminal_states)
-
-      _ ->
-        true
-    end)
-  end
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))

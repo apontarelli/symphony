@@ -13,7 +13,6 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     "auto-land-routing",
     "land-merge",
     "rework",
-    "requirement-validation",
     "project-closeout",
     "debug-run-recovery"
   ]
@@ -115,8 +114,9 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "scenario QA to"
     assert prompt =~ "Review the changed scope with these lenses"
     assert prompt =~ "Fix-required findings start another repair pass"
-    assert prompt =~ "A Requirement with no blocking implementation issue is a setup defect"
-    assert prompt =~ "If unresolved Requirement issues remain"
+    assert prompt =~ "Read the Linear"
+    assert prompt =~ "Project PDR"
+    assert prompt =~ "validate each one with concrete"
     assert prompt =~ "### Acceptance Criteria"
     assert prompt =~ "### Confusions"
     assert prompt =~ "gh pr view --comments"
@@ -148,20 +148,16 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert vcs_commit_push.content =~ "after implementation validation, required quality gates"
     assert vcs_commit_push.content =~ "no unresolved fix-required findings"
 
-    assert {:ok, requirement_validation} = ModuleRegistry.module_defaults("requirement-validation", 0)
-    assert requirement_validation.content =~ "validation artifacts, not implementation tickets"
-    assert requirement_validation.content =~ "no blocking implementation issue is a setup defect"
-
     assert {:ok, project_closeout} = ModuleRegistry.module_defaults("project-closeout", 0)
     assert project_closeout.content =~ "durable repository docs"
-    assert project_closeout.content =~ "If unresolved Requirement issues remain"
+    assert project_closeout.content =~ "in-scope user story/problem"
+    assert project_closeout.content =~ "unresolved implementation blockers"
 
     for workflow_module <- [
           implementation_loop,
           quality_gates,
           automated_review,
           vcs_commit_push,
-          requirement_validation,
           project_closeout
         ] do
       refute Regex.match?(~r/`symphony-[a-z-]+`/, workflow_module.content)

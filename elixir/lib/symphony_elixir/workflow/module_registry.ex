@@ -63,7 +63,6 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     "auto-land-routing",
     "land-merge",
     "rework",
-    "requirement-validation",
     "project-closeout",
     "debug-run-recovery"
   ]
@@ -555,30 +554,6 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       description: "Reviewer-requested rework reset flow"
     },
     %{
-      id: "requirement-validation",
-      version: "v1",
-      summary: "Requirement issue validation after implementation blockers finish.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "requirement-validation@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Issues labeled Requirement are validation artifacts, not implementation tickets. Do not create
-      code or docs PRs directly from a Requirement issue.
-
-      On dispatch, verify that blocking implementation issues are terminal and that their shipped
-      work satisfies the requirement outcome. Record validation evidence, gaps, and the final
-      requirement decision in the workpad. If a requirement gap needs implementation, create or link
-      a separate implementation issue instead of editing from the Requirement.
-
-      A Requirement with no blocking implementation issue is a setup defect unless the project has
-      explicitly deferred or canceled it. Record the missing blocker relationship in the workpad and
-      do not validate it as standalone prose or docs-only scope.
-      """,
-      description: "Requirement issue validation after implementation blockers finish"
-    },
-    %{
       id: "project-closeout",
       version: "v1",
       summary: "Project closeout validation, durable docs reconciliation, and follow-up creation.",
@@ -588,16 +563,17 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       config: %{},
       prompt_sections: [],
       content: """
-      Issues labeled Project Closeout run after the project's requirements are resolved. Verify the
-      shipped outcome, reconcile durable repository docs when strategy, runbooks, or operator
-      workflow changed, and create follow-up issues for deferred gaps.
+      Issues labeled Project Closeout run after implementation work is complete. Read the Linear
+      Project PDR, list every in-scope user story/problem, and validate each one with concrete
+      evidence from tests, manual QA, screenshots, metrics, review artifacts, or operator checks.
 
-      Closeout may edit repo docs when needed, but it should not reopen solved implementation scope.
-      Summarize shipped, deferred, and blocked items in the workpad with validation evidence.
+      Closeout may edit durable repository docs when needed, but it should not reopen solved
+      implementation scope. Summarize shipped, validated, deferred, and blocked items in the
+      workpad with validation evidence. Create follow-up issues for deferred gaps when needed.
 
-      If unresolved Requirement issues remain, or if unresolved Requirements are not linked as
-      blockers, record that relationship gap in the workpad and stop closeout until every
-      Requirement has a final disposition.
+      If unresolved implementation blockers remain, record the blocker relationship gap in the
+      workpad and stop closeout until implementation is complete. If the PDR lacks in-scope user
+      stories/problems, stop and ask for project planning cleanup instead of inventing scope.
       """,
       description: "Project closeout validation, durable docs reconciliation, and follow-up creation"
     },
