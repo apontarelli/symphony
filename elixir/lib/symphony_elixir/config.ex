@@ -205,7 +205,8 @@ defmodule SymphonyElixir.Config do
   @spec format_error(term()) :: String.t()
   def format_error(:missing_linear_api_token), do: "Linear API token missing in selected workflow config"
 
-  def format_error(:missing_linear_project_scope), do: "Linear project_id or project_slug missing in selected workflow config"
+  def format_error(:missing_linear_project_scope),
+    do: "Linear project_id, project_slug, or team_key missing in selected workflow config"
 
   def format_error(:missing_tracker_kind), do: "Tracker kind missing in selected workflow config"
 
@@ -250,14 +251,16 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and
-        not is_binary(settings.tracker.project_id) and
-          not is_binary(settings.tracker.project_slug) ->
+      settings.tracker.kind == "linear" and not linear_scope_configured?(settings.tracker) ->
         {:error, :missing_linear_project_scope}
 
       true ->
         :ok
     end
+  end
+
+  defp linear_scope_configured?(tracker) do
+    is_binary(tracker.project_id) or is_binary(tracker.project_slug) or is_binary(tracker.team_key)
   end
 
   defp validate_profile_override(settings) do

@@ -170,6 +170,8 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "tracker",
       "project_id",
       "project_slug",
+      "team_key",
+      "workspace_slug",
       "active_states",
       "terminal_states",
       "polling",

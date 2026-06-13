@@ -869,6 +869,42 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Route ticket states before acting"
   end
 
+  test "manifest team scope does not inherit repository slug as Linear project scope" do
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    System.put_env("LINEAR_API_KEY", "manifest-token")
+
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: hard-sets-solid
+        name: Hard Sets Solid
+        repository: github.com/example/hard-sets-solid
+      delivery:
+        pr_target: main
+      runtime:
+        tracker:
+          team_key: HAR
+          workspace_slug: antonio-pontarelli
+      """)
+
+    assert {:ok, %{config: config}} = Manifest.load(path)
+    assert config["tracker"]["project_slug"] == nil
+    assert config["tracker"]["team_key"] == "HAR"
+
+    Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    assert :ok = Config.validate!()
+
+    settings = Config.settings!()
+    assert settings.tracker.project_id == nil
+    assert settings.tracker.project_slug == nil
+    assert settings.tracker.team_key == "HAR"
+    assert settings.tracker.workspace_slug == "antonio-pontarelli"
+  end
+
   test "config error formatter reports manifest diagnostics with paths" do
     assert Config.format_error({:invalid_manifest, [%{path: "project.slug", message: "is required"}]}) ==
              "Invalid symphony.yml manifest: project.slug is required"
@@ -877,7 +913,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              "Linear API token missing in selected workflow config"
 
     assert Config.format_error(:missing_linear_project_scope) ==
-             "Linear project_id or project_slug missing in selected workflow config"
+             "Linear project_id, project_slug, or team_key missing in selected workflow config"
 
     assert Config.format_error(:missing_tracker_kind) ==
              "Tracker kind missing in selected workflow config"

@@ -944,6 +944,46 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "<pre class=\"code-panel\">n/a</pre>"
   end
 
+  test "dashboard exposes configured Linear team status link when project scope is absent" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_id: nil,
+      tracker_project_slug: nil,
+      tracker_team_key: "HAR",
+      tracker_workspace_slug: "antonio-pontarelli"
+    )
+
+    orchestrator_name = Module.concat(__MODULE__, :TeamScopeDashboardOrchestrator)
+
+    snapshot = %{
+      running: [],
+      retrying: [],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil
+    }
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert [
+             %{
+               "project" => "HAR",
+               "project_url" => "https://linear.app/antonio-pontarelli/team/HAR/all",
+               "actions" => [%{"label" => "Open Linear", "href" => "https://linear.app/antonio-pontarelli/team/HAR/all"}]
+             }
+           ] = state_payload["project_statuses"]
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ ~s(href="https://linear.app/antonio-pontarelli/team/HAR/all")
+  end
+
   test "dashboard hides unavailable n/a rate limit snapshots" do
     orchestrator_name = Module.concat(__MODULE__, :UnavailableRateLimitDashboardOrchestrator)
 

@@ -135,6 +135,8 @@ defmodule SymphonyElixir.TestSupport do
           tracker_api_token: "token",
           tracker_project_id: nil,
           tracker_project_slug: "project",
+          tracker_team_key: nil,
+          tracker_workspace_slug: nil,
           tracker_assignee: nil,
           tracker_required_labels: [],
           tracker_active_states: ["Todo", "In Progress", "Merging", "Rework"],
@@ -187,6 +189,8 @@ defmodule SymphonyElixir.TestSupport do
     tracker_api_token = Keyword.get(config, :tracker_api_token)
     tracker_project_id = Keyword.get(config, :tracker_project_id)
     tracker_project_slug = Keyword.get(config, :tracker_project_slug)
+    tracker_team_key = Keyword.get(config, :tracker_team_key)
+    tracker_workspace_slug = Keyword.get(config, :tracker_workspace_slug)
     tracker_assignee = Keyword.get(config, :tracker_assignee)
     tracker_required_labels = Keyword.get(config, :tracker_required_labels)
     tracker_active_states = Keyword.get(config, :tracker_active_states)
@@ -239,6 +243,8 @@ defmodule SymphonyElixir.TestSupport do
         "  api_key: #{yaml_value(tracker_api_token)}",
         "  project_id: #{yaml_value(tracker_project_id)}",
         "  project_slug: #{yaml_value(tracker_project_slug)}",
+        "  team_key: #{yaml_value(tracker_team_key)}",
+        "  workspace_slug: #{yaml_value(tracker_workspace_slug)}",
         "  assignee: #{yaml_value(tracker_assignee)}",
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  active_states: #{yaml_value(tracker_active_states)}",

@@ -320,29 +320,47 @@ defmodule SymphonyElixirWeb.Presenter do
       {:ok, settings} ->
         project_id = normalized_string(settings.tracker.project_id)
         project_slug = normalized_string(settings.tracker.project_slug)
-
-        case project_id || project_slug do
-          project_key when is_binary(project_key) ->
-            [
-              %{
-                id: project_key,
-                project_id: project_id,
-                name: human_project_name(project_slug || project_key) || project_key,
-                slug: project_slug,
-                url: project_slug && linear_project_url(project_slug),
-                profile: @default_profile,
-                pr_target: @default_pr_target
-              }
-            ]
-
-          _ ->
-            []
-        end
+        team_key = normalized_string(settings.tracker.team_key)
+        workspace_slug = normalized_string(settings.tracker.workspace_slug)
+        configured_scope_payload(project_id, project_slug, team_key, workspace_slug)
 
       {:error, _reason} ->
         []
     end
   end
+
+  defp configured_scope_payload(project_id, project_slug, _team_key, _workspace_slug)
+       when is_binary(project_id) or is_binary(project_slug) do
+    project_key = project_id || project_slug
+
+    [
+      %{
+        id: project_key,
+        project_id: project_id,
+        name: human_project_name(project_slug || project_key) || project_key,
+        slug: project_slug,
+        url: project_slug && linear_project_url(project_slug),
+        profile: @default_profile,
+        pr_target: @default_pr_target
+      }
+    ]
+  end
+
+  defp configured_scope_payload(nil, nil, team_key, workspace_slug) when is_binary(team_key) do
+    [
+      %{
+        id: "team:#{team_key}",
+        project_id: nil,
+        name: team_key,
+        slug: nil,
+        url: workspace_slug && linear_team_url(workspace_slug, team_key),
+        profile: @default_profile,
+        pr_target: @default_pr_target
+      }
+    ]
+  end
+
+  defp configured_scope_payload(_project_id, _project_slug, _team_key, _workspace_slug), do: []
 
   defp project_value(project, key) when is_map(project) and is_atom(key) do
     Map.get(project, key) || Map.get(project, Atom.to_string(key)) || issue_project_value(project, key)
@@ -631,9 +649,14 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp missing_linear_api_token_warning(_tracker), do: nil
 
-  defp missing_linear_project_scope_warning(%{kind: "linear", project_id: project_id, project_slug: project_slug})
-       when not is_binary(project_id) and not is_binary(project_slug) do
-    config_warning("missing_linear_project_scope", "Linear project_id or project_slug is not configured.")
+  defp missing_linear_project_scope_warning(%{
+         kind: "linear",
+         project_id: project_id,
+         project_slug: project_slug,
+         team_key: team_key
+       })
+       when not is_binary(project_id) and not is_binary(project_slug) and not is_binary(team_key) do
+    config_warning("missing_linear_project_scope", "Linear project_id, project_slug, or team_key is not configured.")
   end
 
   defp missing_linear_project_scope_warning(_tracker), do: nil
@@ -710,6 +733,7 @@ defmodule SymphonyElixirWeb.Presenter do
   defp meaningful_rate_limit_value?(_value), do: false
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
+  defp linear_team_url(workspace_slug, team_key), do: "https://linear.app/#{workspace_slug}/team/#{team_key}/all"
 
   defp workspace_path(issue_identifier, running, retry, blocked) do
     (running && Map.get(running, :workspace_path)) ||

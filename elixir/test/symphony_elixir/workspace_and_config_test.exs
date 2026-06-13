@@ -528,6 +528,53 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                     }}
   end
 
+  test "linear client fetches issues by team key when no project scope is configured" do
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_team_page, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-1",
+                 "identifier" => "HAR-701",
+                 "title" => "Pick up unprojected team work",
+                 "description" => "Use team scope when no project is set.",
+                 "priority" => 2,
+                 "state" => %{"name" => "Todo"},
+                 "team" => %{"id" => "team-har", "key" => "HAR", "name" => "Hard Sets Solid"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, [issue]} =
+             Client.fetch_by_project_selector_for_test(%{team_key: "HAR"}, ["Todo"], graphql_fun)
+
+    assert issue.identifier == "HAR-701"
+    assert issue.team_key == "HAR"
+    assert issue.project_slug == nil
+
+    assert_receive {:fetch_team_page, query,
+                    %{
+                      teamKey: "HAR",
+                      stateNames: ["Todo"],
+                      first: 50,
+                      relationFirst: 50,
+                      after: nil
+                    }}
+
+    assert query =~ "SymphonyLinearPollByTeamKey"
+    assert query =~ "team: {key: {eq: $teamKey}}"
+  end
+
   test "linear client logs response bodies for non-200 graphql responses" do
     log =
       ExUnit.CaptureLog.capture_log(fn ->
@@ -1080,6 +1127,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
     assert Config.settings!().codex.command == "codex app-server"
+  end
+
+  test "config accepts Linear team scope when project scope is absent" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_id: nil,
+      tracker_project_slug: nil,
+      tracker_team_key: "HAR",
+      tracker_workspace_slug: "antonio-pontarelli"
+    )
+
+    assert :ok = Config.validate!()
+
+    config = Config.settings!()
+    assert config.tracker.project_id == nil
+    assert config.tracker.project_slug == nil
+    assert config.tracker.team_key == "HAR"
+    assert config.tracker.workspace_slug == "antonio-pontarelli"
   end
 
   test "auto-land config normalizes optional tokens and token lists" do

@@ -1981,6 +1981,11 @@ defmodule SymphonyElixir.Orchestrator do
     turn_count = Map.get(running_entry, :turn_count, 0)
     last_progress_timestamp = progress_timestamp_for_update(running_entry, update, token_delta)
     last_error_signature = codex_error_signature_for_update(running_entry, update)
+    provenance = &provenance_value_for_update(running_entry, update, &1)
+    profile_model = provenance.(:codex_execution_profile_model)
+    profile_reasoning_effort = provenance.(:codex_execution_profile_reasoning_effort)
+    profile_budget = provenance.(:codex_execution_profile_budget)
+    profile_timeout_ms = provenance.(:codex_execution_profile_timeout_ms)
 
     {
       Map.merge(running_entry, %{
@@ -1991,16 +1996,16 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_event: event,
         last_codex_error_signature: last_error_signature,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
-        codex_command: provenance_value_for_update(running_entry, update, :codex_command),
-        codex_home: provenance_value_for_update(running_entry, update, :codex_home),
-        codex_workspace: provenance_value_for_update(running_entry, update, :codex_workspace),
-        codex_execution_profile: provenance_value_for_update(running_entry, update, :codex_execution_profile),
-        codex_execution_profile_model: provenance_value_for_update(running_entry, update, :codex_execution_profile_model),
-        codex_execution_profile_reasoning_effort: provenance_value_for_update(running_entry, update, :codex_execution_profile_reasoning_effort),
-        codex_execution_profile_budget: provenance_value_for_update(running_entry, update, :codex_execution_profile_budget),
-        codex_execution_profile_timeout_ms: provenance_value_for_update(running_entry, update, :codex_execution_profile_timeout_ms),
-        workflow_file_path: provenance_value_for_update(running_entry, update, :workflow_file_path),
-        workflow_config_sha256: provenance_value_for_update(running_entry, update, :workflow_config_sha256),
+        codex_command: provenance.(:codex_command),
+        codex_home: provenance.(:codex_home),
+        codex_workspace: provenance.(:codex_workspace),
+        codex_execution_profile: provenance.(:codex_execution_profile),
+        codex_execution_profile_model: profile_model,
+        codex_execution_profile_reasoning_effort: profile_reasoning_effort,
+        codex_execution_profile_budget: profile_budget,
+        codex_execution_profile_timeout_ms: profile_timeout_ms,
+        workflow_file_path: provenance.(:workflow_file_path),
+        workflow_config_sha256: provenance.(:workflow_config_sha256),
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,

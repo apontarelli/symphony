@@ -58,6 +58,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:api_key, :string)
       field(:project_id, :string)
       field(:project_slug, :string)
+      field(:team_key, :string)
+      field(:workspace_slug, :string)
       field(:assignee, :string)
       field(:required_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress", "Merging", "Rework"])
@@ -75,6 +77,8 @@ defmodule SymphonyElixir.Config.Schema do
           :api_key,
           :project_id,
           :project_slug,
+          :team_key,
+          :workspace_slug,
           :assignee,
           :required_labels,
           :active_states,

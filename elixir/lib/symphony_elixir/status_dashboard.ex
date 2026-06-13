@@ -395,18 +395,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_project_link_lines do
     tracker = Config.settings!().tracker
-
-    project_part =
-      case tracker.project_slug do
-        project_slug when is_binary(project_slug) and project_slug != "" ->
-          colorize(linear_project_url(project_slug), @ansi_cyan)
-
-        _ when is_binary(tracker.project_id) and tracker.project_id != "" ->
-          colorize(tracker.project_id, @ansi_cyan)
-
-        _project ->
-          colorize("n/a", @ansi_gray)
-      end
+    project_part = tracker |> tracker_scope_link() |> colorize_project_part()
 
     project_line = colorize("│ Project: ", @ansi_bold) <> project_part
 
@@ -418,6 +407,20 @@ defmodule SymphonyElixir.StatusDashboard do
         [project_line]
     end
   end
+
+  defp tracker_scope_link(%{project_slug: project_slug}) when is_binary(project_slug) and project_slug != "",
+    do: linear_project_url(project_slug)
+
+  defp tracker_scope_link(%{project_id: project_id}) when is_binary(project_id) and project_id != "", do: project_id
+
+  defp tracker_scope_link(%{team_key: team_key, workspace_slug: workspace_slug})
+       when is_binary(team_key) and team_key != "",
+       do: linear_team_url(workspace_slug, team_key)
+
+  defp tracker_scope_link(_tracker), do: nil
+
+  defp colorize_project_part(nil), do: colorize("n/a", @ansi_gray)
+  defp colorize_project_part(value), do: colorize(value, @ansi_cyan)
 
   defp format_project_refresh_line(%{checking?: true}) do
     colorize("│ Next refresh: ", @ansi_bold) <> colorize("checking now…", @ansi_cyan)
@@ -434,6 +437,11 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp linear_project_url(project_slug), do: "https://linear.app/project/#{project_slug}/issues"
+
+  defp linear_team_url(workspace_slug, team_key) when is_binary(workspace_slug) and workspace_slug != "",
+    do: "https://linear.app/#{workspace_slug}/team/#{team_key}/all"
+
+  defp linear_team_url(_workspace_slug, team_key), do: team_key
 
   defp dashboard_url do
     dashboard_url(Config.settings!().server.host, Config.server_port(), HttpServer.bound_port())

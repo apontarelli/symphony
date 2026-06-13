@@ -119,6 +119,61 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_by_team_key """
+  query SymphonyLinearPollByTeamKey($teamKey: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: {team: {key: {eq: $teamKey}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        team {
+          id
+          key
+          name
+        }
+        project {
+          id
+          slugId
+          name
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+  """
+
   @query_by_ids """
   query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {id: {in: $ids}}, first: $first) {
@@ -319,6 +374,9 @@ defmodule SymphonyElixir.Linear.Client do
       is_binary(tracker.project_slug) ->
         do_fetch_by_project_selector(%{project_slug: tracker.project_slug}, state_names, assignee_filter)
 
+      is_binary(Map.get(tracker, :team_key)) ->
+        do_fetch_by_project_selector(%{team_key: tracker.team_key}, state_names, assignee_filter)
+
       true ->
         {:error, :missing_linear_project_scope}
     end
@@ -353,6 +411,11 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, issues} -> {:ok, Enum.uniq_by(issues, &issue_identity/1)}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp do_fetch_by_project_selector(%{team_key: team_key}, state_names, assignee_filter, graphql_fun)
+       when is_binary(team_key) and is_function(graphql_fun, 2) do
+    do_fetch_by_states(@query_by_team_key, %{teamKey: team_key}, state_names, assignee_filter, graphql_fun)
   end
 
   defp do_fetch_by_project_selector(_selector, _state_names, _assignee_filter, _graphql_fun), do: {:ok, []}

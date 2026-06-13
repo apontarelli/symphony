@@ -135,6 +135,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "api_key" => "$LINEAR_API_KEY",
           "project_id" => nil,
           "project_slug" => nil,
+          "team_key" => nil,
+          "workspace_slug" => nil,
           "active_states" => ["Todo", "In Progress", "Merging", "Rework"],
           "terminal_states" => @terminal_states
         }
@@ -1052,10 +1054,11 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   defp module_manifest_config("tracker.linear", manifest) do
     project = Map.get(manifest, "project", %{})
+    project_slug = if team_scoped_tracker?(manifest), do: nil, else: Map.get(project, "slug")
 
     %{}
     |> maybe_put_tracker_value("project_id", Map.get(project, "id"))
-    |> maybe_put_tracker_value("project_slug", Map.get(project, "slug"))
+    |> maybe_put_tracker_value("project_slug", project_slug)
     |> case do
       tracker when map_size(tracker) > 0 -> %{"tracker" => tracker}
       _tracker -> %{}
@@ -1080,6 +1083,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   defp maybe_put_tracker_value(config, key, value) when is_binary(value) and value != "", do: Map.put(config, key, value)
   defp maybe_put_tracker_value(config, _key, _value), do: config
+
+  defp team_scoped_tracker?(manifest) when is_map(manifest) do
+    tracker = get_in(manifest, ["runtime", "tracker"]) || %{}
+
+    is_binary(Map.get(tracker, "team_key")) and
+      not is_binary(Map.get(tracker, "project_id")) and
+      not is_binary(Map.get(tracker, "project_slug"))
+  end
 
   defp product_visual_review_config(manifest) do
     attrs =

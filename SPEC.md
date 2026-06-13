@@ -401,7 +401,8 @@ Manifest fields for the default preset:
 - `version` (integer, default `1` when omitted)
   - Currently only version `1` is supported.
 - `project.slug` (string)
-  - Used by the default `tracker.linear` module as `runtime.tracker.project_slug` when present.
+  - Used by the default `tracker.linear` module as `runtime.tracker.project_slug` when present,
+    except when `runtime.tracker.team_key` is configured without an explicit tracker project.
 - `project.name` (string, defaults to `project.slug`)
 - `project.repository` (string)
   - Used by the default `workspace` module to populate new issue workspaces with
@@ -497,7 +498,8 @@ review_routing:
 - `slug` (string)
   - OPTIONAL.
   - Stable Symphony-facing project key.
-  - Used by the default `tracker.linear` module as the tracker project slug when present.
+  - Used by the default `tracker.linear` module as the tracker project slug when present, except
+    when `runtime.tracker.team_key` is configured without explicit tracker project scope.
 - `repository` (string)
   - OPTIONAL.
   - Repository URL used to populate new issue workspaces when present.
@@ -900,7 +902,11 @@ Tracker:
   `runtime.tracker.kind=linear`
 - `runtime.tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when
   `runtime.tracker.kind=linear`
-- `runtime.tracker.project_slug`: string, REQUIRED when `runtime.tracker.kind=linear`
+- `runtime.tracker.project_id`: string, optional Linear project ID.
+- `runtime.tracker.project_slug`: string, optional Linear project `slugId`.
+- `runtime.tracker.team_key`: string, optional Linear team key used when no project scope is set.
+- `runtime.tracker.workspace_slug`: string, optional Linear workspace URL slug used to render team
+  links such as `https://linear.app/<workspace_slug>/team/<team_key>/all`.
 - `runtime.tracker.required_labels`: list of strings, default `[]`
 - `runtime.tracker.active_states`: list of strings, default
   `["Todo", "In Progress", "Merging", "Rework"]`
@@ -1211,8 +1217,9 @@ Validation checks:
 - Compiled workflow can be produced and validated.
 - `runtime.tracker.kind` is present and supported.
 - `runtime.tracker.api_key` is present after `$` resolution.
-- `runtime.tracker.project_id` or `runtime.tracker.project_slug` is present when required by the
-  selected tracker kind. Linear polling prefers `project_id` and falls back to `project_slug`.
+- `runtime.tracker.project_id`, `runtime.tracker.project_slug`, or `runtime.tracker.team_key` is
+  present when required by the selected tracker kind. Linear polling prefers `project_id`, then
+  `project_slug`, then `team_key`.
 - `runtime.codex.command` is present and non-empty.
 - `harness.codex_home` and harness global instructions are available.
 - Every selected workflow profile resolves to an effective policy with a string
@@ -1816,10 +1823,13 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
   selector.
 - `runtime.tracker.project_slug` maps to Linear project `slugId` and is used only when
   `project_id` is absent.
+- `runtime.tracker.team_key` maps to Linear team `key` and is used only when project scope is
+  absent.
 - Candidate and issue-state refresh queries include issue labels. Required label filtering happens
   after normalization so refresh can observe label removal and stop or release existing work.
 - Candidate issue query filters by `project: { id: { eq: $projectId } }` when `project_id` is set,
-  or by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set.
+  by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set, or by
+  `team: { key: { eq: $teamKey } }` when only team scope is set.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -2453,7 +2463,7 @@ human-review evidence.
    - Invalid manifest YAML
    - Missing preset or workflow module
    - Compiled workflow validation failure
-   - Unsupported tracker kind or missing tracker credentials/project slug
+   - Unsupported tracker kind or missing tracker credentials/scope
    - Missing harness `CODEX_HOME` or harness global instructions
    - Missing coding-agent executable
 
@@ -2923,8 +2933,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.3 Issue Tracker Client
 
-- Candidate issue fetch uses active states and project slug
-- Linear query uses the specified project filter field (`slugId`)
+- Candidate issue fetch uses active states and configured project or team scope
+- Linear query uses the specified project filter field (`id`/`slugId`) or team key filter
 - Empty `fetch_issues_by_states([])` returns empty without API call
 - Pagination preserves order across multiple pages
 - Blockers are normalized from inverse relations of type `blocks`

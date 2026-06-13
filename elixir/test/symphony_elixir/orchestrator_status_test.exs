@@ -1582,7 +1582,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  })
       end)
 
-    assert log =~ "Linear project_id or project_slug missing in selected workflow config"
+    assert log =~ "Linear project_id, project_slug, or team_key missing in selected workflow config"
     refute log =~ "Failed to fetch from Linear"
   end
 
@@ -1933,6 +1933,29 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "https://linear.app/project/project/issues"
     refute rendered =~ "Dashboard:"
+  end
+
+  test "status dashboard renders Linear team link when only team scope is configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_id: nil,
+      tracker_project_slug: nil,
+      tracker_team_key: "HAR",
+      tracker_workspace_slug: "antonio-pontarelli"
+    )
+
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0)
+
+    assert rendered =~ "https://linear.app/antonio-pontarelli/team/HAR/all"
+    refute rendered =~ "https://linear.app/project/hard-sets-solid/issues"
   end
 
   test "status dashboard renders dashboard url on its own line when server port is configured" do
