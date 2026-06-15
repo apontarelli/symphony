@@ -1592,6 +1592,13 @@ Notes:
   command from `runtime.codex.command`.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
+- Browser-oriented runtime QA and product visual review jobs MUST receive a browser-capable Codex
+  sandbox policy that can launch browser tooling and access local app servers, unless the selected
+  policy already grants broader execution access.
+- Before browser-oriented review jobs run, implementations SHOULD preflight Chrome/Chromium launch
+  availability on the same worker host that will execute the job. Missing browser launch
+  infrastructure MUST block the browser review as infrastructure evidence rather than product
+  review failure.
 - The harness Codex home contains Symphony-owned global instructions. It MUST NOT replace the target
   workspace cwd, so repository-local `AGENTS.md` files and docs can still layer after the harness
   global instructions.
@@ -2456,7 +2463,8 @@ Required or recommended product-facing routes SHOULD record desktop/mobile scree
 links, interaction smoke notes, responsive-state evidence, and product/design notes when available.
 Implementations MUST NOT expose local temp/file paths as visual QA artifact links in dashboard or
 API output; missing or unavailable capture tooling MUST be represented as structured blocked or
-human-review evidence.
+human-review evidence. Browser-oriented visual review jobs SHOULD run under a browser-capable
+runtime policy and SHOULD fail fast when Chrome/Chromium launch infrastructure is unavailable.
 
 ## 14. Failure Model and Recovery Strategy
 

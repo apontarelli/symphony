@@ -1445,7 +1445,7 @@ defmodule SymphonyElixir.Orchestrator do
           Map.get(running_entry, :policy, %{}),
           Map.get(running_entry, :issue),
           completion,
-          quality_gate_opts()
+          quality_gate_opts(Map.get(running_entry, :worker_host))
         )
 
       Map.update(running_entry, :completion, %{quality_gate: quality_gate}, fn
@@ -1464,12 +1464,23 @@ defmodule SymphonyElixir.Orchestrator do
       HandoffRouteRecorder.completion_metadata?(completion)
   end
 
-  defp quality_gate_opts do
+  defp quality_gate_opts(worker_host) do
+    []
+    |> maybe_put_quality_gate_runner()
+    |> maybe_put_worker_host(worker_host)
+  end
+
+  defp maybe_put_quality_gate_runner(opts) do
     case Application.get_env(:symphony_elixir, :quality_gate_runner) do
-      nil -> []
-      runner -> [runner: runner]
+      nil -> opts
+      runner -> Keyword.put(opts, :runner, runner)
     end
   end
+
+  defp maybe_put_worker_host(opts, worker_host) when is_binary(worker_host) and worker_host != "",
+    do: Keyword.put(opts, :worker_host, worker_host)
+
+  defp maybe_put_worker_host(opts, _worker_host), do: opts
 
   defp run_publish_preflight(%{policy: policy} = running_entry) when is_map(policy) do
     if publish_handoff_policy?(policy) and HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do

@@ -4,10 +4,30 @@ defmodule SymphonyElixir.QualityGate do
   """
 
   alias SymphonyElixir.Codex.{AppServer, ExecutionProfile}
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, Linear.Issue, SSH}
   alias SymphonyElixir.QualityGate.{Planner, Synthesis}
 
   @type result :: map()
+  @browser_review_categories [:scenario_qa, :product_visual_review]
+  @browser_preflight_script """
+  chrome_path="${BROWSER_QA_CHROME_PATH:-}"
+  if [ -n "$chrome_path" ]; then
+    if [ -x "$chrome_path" ]; then
+      exit 0
+    fi
+    echo "BROWSER_QA_CHROME_PATH is not executable: $chrome_path" >&2
+    exit 1
+  fi
+  if [ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]; then
+    exit 0
+  fi
+  command -v google-chrome >/dev/null 2>&1 && exit 0
+  command -v chromium >/dev/null 2>&1 && exit 0
+  command -v chromium-browser >/dev/null 2>&1 && exit 0
+  command -v chrome >/dev/null 2>&1 && exit 0
+  echo "No executable Chrome/Chromium browser found. Set BROWSER_QA_CHROME_PATH or install Google Chrome/Chromium." >&2
+  exit 1
+  """
   @status_tokens %{
     "blocked" => :blocked,
     "clean" => :passed,
@@ -29,6 +49,9 @@ defmodule SymphonyElixir.QualityGate do
   def run(workspace, policy, issue, completion, opts) when is_map(completion) and is_list(opts) do
     settings = Keyword.get(opts, :settings, Config.settings!().quality_gate)
     runner = Keyword.get(opts, :runner, &default_runner/1)
+    browser_preflight = Keyword.get(opts, :browser_preflight, &default_browser_preflight/1)
+    worker_host = Keyword.get(opts, :worker_host)
+    review_context = review_context(issue, policy, settings, runner, browser_preflight, worker_host)
 
     plan =
       Planner.plan(%{
@@ -39,7 +62,7 @@ defmodule SymphonyElixir.QualityGate do
         settings: settings
       })
 
-    {current_results, history} = run_review_jobs(plan.jobs, plan, issue, policy, settings, runner, :initial)
+    {current_results, history} = run_review_jobs(plan.jobs, plan, review_context, :initial)
     initial_synthesis = Synthesis.synthesize(current_results)
 
     {final_results, all_job_results, repair_passes, final_synthesis} =
@@ -56,6 +79,8 @@ defmodule SymphonyElixir.QualityGate do
           policy: policy,
           settings: settings,
           runner: runner,
+          browser_preflight: browser_preflight,
+          worker_host: worker_host,
           max_attempts: max_repair_passes(settings)
         }
       )
@@ -174,10 +199,14 @@ defmodule SymphonyElixir.QualityGate do
         run_review_jobs(
           rerun_jobs,
           next_plan,
-          context.issue,
-          context.policy,
-          context.settings,
-          context.runner,
+          review_context(
+            context.issue,
+            context.policy,
+            context.settings,
+            context.runner,
+            context.browser_preflight,
+            context.worker_host
+          ),
           {:repair, attempt}
         )
 
@@ -296,15 +325,26 @@ defmodule SymphonyElixir.QualityGate do
 
   defp scope_completion?(_completion), do: false
 
-  defp run_review_jobs(jobs, plan, issue, policy, settings, runner, phase) when is_list(jobs) do
+  defp review_context(issue, policy, settings, runner, browser_preflight, worker_host) do
+    %{
+      issue: issue,
+      policy: policy,
+      settings: settings,
+      runner: runner,
+      browser_preflight: browser_preflight,
+      worker_host: worker_host
+    }
+  end
+
+  defp run_review_jobs(jobs, plan, context, phase) when is_list(jobs) do
     source_jobs = Enum.filter(jobs, &source_job?/1)
     runtime_jobs = Enum.reject(jobs, &source_job?/1)
 
     source_results =
       source_jobs
       |> Task.async_stream(
-        &run_review_job(&1, plan, issue, policy, settings, runner, phase),
-        max_concurrency: source_max_concurrency(settings),
+        &run_review_job(&1, plan, context, phase),
+        max_concurrency: source_max_concurrency(context.settings),
         ordered: true,
         timeout: :infinity
       )
@@ -317,50 +357,71 @@ defmodule SymphonyElixir.QualityGate do
           blocked_job_result(job, phase, {:source_job_exit, reason})
       end)
 
-    runtime_results =
-      Enum.map(runtime_jobs, &run_review_job(&1, plan, issue, policy, settings, runner, phase))
+    runtime_results = Enum.map(runtime_jobs, &run_review_job(&1, plan, context, phase))
 
     results = source_results ++ runtime_results
     {results, results}
   end
 
-  defp run_review_job(%{execution_mode: :blocked_runtime} = job, _plan, _issue, _policy, _settings, _runner, phase) do
+  defp run_review_job(%{execution_mode: :blocked_runtime} = job, _plan, _context, phase) do
     blocked_job_result(job, phase, :runtime_review_blocked_by_policy)
   end
 
-  defp run_review_job(%{execution_mode: :isolated_runtime} = job, _plan, _issue, _policy, _settings, _runner, phase) do
+  defp run_review_job(%{execution_mode: :isolated_runtime} = job, _plan, _context, phase) do
     blocked_job_result(job, phase, :isolated_runtime_requires_workspace_isolation)
   end
 
-  defp run_review_job(job, plan, issue, policy, settings, runner, phase) do
-    review_policy = read_only_review_policy(policy)
+  defp run_review_job(job, plan, context, phase) do
+    case maybe_run_browser_preflight(job, plan, context.browser_preflight, context.worker_host) do
+      :ok ->
+        review_policy = review_policy_for(job, plan, context.policy)
 
-    context = %{
-      kind: :review,
-      job: job,
-      plan: plan_to_map(plan),
-      issue: issue,
-      policy: review_policy,
-      settings: settings,
-      workspace: plan.workspace,
-      phase: phase
-    }
+        runner_context = %{
+          kind: :review,
+          job: job,
+          plan: plan_to_map(plan),
+          issue: context.issue,
+          policy: review_policy,
+          settings: context.settings,
+          workspace: plan.workspace,
+          phase: phase
+        }
 
-    context
-    |> runner.()
-    |> normalize_review_result(job, phase)
+        runner_context
+        |> context.runner.()
+        |> normalize_review_result(job, phase)
+
+      {:error, reason} ->
+        blocked_job_result(job, phase, reason)
+    end
   rescue
     error -> blocked_job_result(job, phase, Exception.message(error))
   catch
     kind, reason -> blocked_job_result(job, phase, {kind, reason})
   end
 
+  defp review_policy_for(%{category: category}, plan, policy) when category in @browser_review_categories do
+    browser_capable_review_policy(policy, plan.workspace)
+  end
+
+  defp review_policy_for(_job, _plan, policy), do: read_only_review_policy(policy)
+
+  defp browser_capable_review_policy(policy, workspace) when is_map(policy) do
+    codex = policy_codex(policy)
+
+    Map.put(
+      policy,
+      "codex",
+      Map.put(codex, "turn_sandbox_policy", browser_capable_turn_sandbox_policy(Map.get(codex, "turn_sandbox_policy"), workspace))
+    )
+  end
+
+  defp browser_capable_review_policy(_policy, workspace) do
+    %{"codex" => %{"turn_sandbox_policy" => browser_capable_turn_sandbox_policy(nil, workspace)}}
+  end
+
   defp read_only_review_policy(policy) when is_map(policy) do
-    codex =
-      case Map.get(policy, "codex", Map.get(policy, :codex, %{})) do
-        codex when is_map(codex) -> codex
-        _codex -> %{}
-      end
+    codex = policy_codex(policy)
 
     Map.put(policy, "codex", Map.put(codex, "turn_sandbox_policy", read_only_turn_sandbox_policy()))
   end
@@ -371,6 +432,82 @@ defmodule SymphonyElixir.QualityGate do
 
   defp read_only_turn_sandbox_policy do
     %{"type" => "readOnly", "networkAccess" => true}
+  end
+
+  defp browser_capable_turn_sandbox_policy(%{"type" => "dangerFullAccess"} = policy, _workspace), do: policy
+
+  defp browser_capable_turn_sandbox_policy(%{"type" => "workspaceWrite"} = policy, _workspace) do
+    Map.put(policy, "networkAccess", true)
+  end
+
+  defp browser_capable_turn_sandbox_policy(_policy, workspace) do
+    %{
+      "type" => "workspaceWrite",
+      "writableRoots" => Enum.reject([workspace], &is_nil/1),
+      "readOnlyAccess" => %{"type" => "fullAccess"},
+      "networkAccess" => true,
+      "excludeTmpdirEnvVar" => false,
+      "excludeSlashTmp" => false
+    }
+  end
+
+  defp policy_codex(policy) when is_map(policy) do
+    case Map.get(policy, "codex", Map.get(policy, :codex, %{})) do
+      codex when is_map(codex) -> normalize_policy_keys(codex)
+      _codex -> %{}
+    end
+  end
+
+  defp normalize_policy_keys(value) when is_map(value) do
+    Map.new(value, fn {key, field_value} -> {to_string(key), normalize_policy_keys(field_value)} end)
+  end
+
+  defp normalize_policy_keys(value) when is_list(value), do: Enum.map(value, &normalize_policy_keys/1)
+  defp normalize_policy_keys(value), do: value
+
+  defp maybe_run_browser_preflight(%{category: category}, plan, browser_preflight, worker_host)
+       when category in @browser_review_categories do
+    browser_preflight
+    |> invoke_browser_preflight(%{
+      category: category,
+      workspace: plan.workspace,
+      worker_host: optional_string(worker_host)
+    })
+    |> normalize_browser_preflight_result()
+  end
+
+  defp maybe_run_browser_preflight(_job, _plan, _browser_preflight, _worker_host), do: :ok
+
+  defp invoke_browser_preflight(browser_preflight, context) when is_function(browser_preflight, 1) do
+    browser_preflight.(context)
+  end
+
+  defp invoke_browser_preflight(_browser_preflight, _context), do: {:error, :invalid_browser_preflight}
+
+  defp normalize_browser_preflight_result(:ok), do: :ok
+  defp normalize_browser_preflight_result({:ok, _metadata}), do: :ok
+  defp normalize_browser_preflight_result({:error, reason}), do: {:error, {:browser_preflight_failed, reason}}
+  defp normalize_browser_preflight_result(other), do: {:error, {:browser_preflight_failed, {:invalid_result, other}}}
+
+  defp default_browser_preflight(%{worker_host: worker_host}) when is_binary(worker_host) do
+    case SSH.run(worker_host, @browser_preflight_script, stderr_to_stdout: true) do
+      {:ok, {_output, 0}} -> :ok
+      {:ok, {output, status}} -> {:error, {:chrome_unavailable_on_worker, worker_host, status, compact_output(output)}}
+      {:error, reason} -> {:error, {:worker_browser_preflight_unavailable, worker_host, reason}}
+    end
+  end
+
+  defp default_browser_preflight(_context) do
+    case System.cmd("/bin/sh", ["-lc", @browser_preflight_script], stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> {:error, {:chrome_unavailable, status, compact_output(output)}}
+    end
+  end
+
+  defp compact_output(output) when is_binary(output) do
+    output
+    |> String.trim()
+    |> String.slice(0, 500)
   end
 
   defp run_repair(plan, issue, policy, settings, runner, synthesis, attempt) do

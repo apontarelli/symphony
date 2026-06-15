@@ -1028,6 +1028,62 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:review_policy_from_malformed_codex, malformed_codex_policy}
     assert get_in(malformed_codex_policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
+    browser_policy =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        issue,
+        %{changed_surfaces: ["cli", "web_ui"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        browser_preflight: fn context ->
+          send(parent, {:browser_preflight, context})
+          :ok
+        end,
+        runner: fn %{kind: :review, job: %{category: category}, policy: policy} ->
+          send(parent, {:browser_review_policy, category, policy})
+          {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert browser_policy.status == :passed
+
+    assert_receive {:browser_preflight, %{category: :scenario_qa, workspace: "/tmp/symphony-workspace"}}
+    assert_receive {:browser_preflight, %{category: :product_visual_review, workspace: "/tmp/symphony-workspace"}}
+
+    assert_receive {:browser_review_policy, :scenario_qa, scenario_policy}
+    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
+
+    assert_receive {:browser_review_policy, :product_visual_review, visual_policy}
+    assert get_in(visual_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(visual_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+
+    preflight_blocked =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        issue,
+        %{changed_surfaces: ["web_ui"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        worker_host: "worker-a",
+        browser_preflight: fn context ->
+          send(parent, {:blocked_browser_preflight, context})
+          {:error, :chrome_missing}
+        end,
+        runner: fn %{kind: :review} ->
+          flunk("browser reviewer should not run when preflight fails")
+        end
+      )
+
+    assert preflight_blocked.status == :blocked
+    assert_receive {:blocked_browser_preflight, %{category: :product_visual_review, workspace: "/tmp/symphony-workspace", worker_host: "worker-a"}}
+
+    assert Enum.any?(preflight_blocked.jobs, fn job ->
+             job.category == :product_visual_review and job.blocked_reason =~ "browser_preflight_failed" and
+               job.blocked_reason =~ "chrome_missing"
+           end)
+
     runner = fn
       %{kind: :review, job: %{category: :source_correctness}} ->
         {:error, :review_failed}
@@ -1062,6 +1118,139 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert invalid.status == :blocked
     assert Enum.any?(invalid.jobs, &(&1.blocked_reason =~ "invalid_reviewer_output"))
+  end
+
+  test "browser review policies preserve explicit browser-capable sandbox shapes" do
+    {workspace_result, workspace_policy} =
+      capture_visual_review_policy(%{
+        "codex" => %{
+          "turn_sandbox_policy" => %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/custom"], "networkAccess" => false}
+        }
+      })
+
+    assert workspace_result.status == :passed
+    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/custom"]
+
+    {_atom_workspace_result, atom_workspace_policy} =
+      capture_visual_review_policy(%{
+        codex: %{
+          turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/atom"], networkAccess: false}
+        }
+      })
+
+    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/atom"]
+
+    {_danger_result, danger_policy} =
+      capture_visual_review_policy(%{
+        "codex" => %{"turn_sandbox_policy" => %{"type" => "dangerFullAccess", "reason" => "operator override"}}
+      })
+
+    assert get_in(danger_policy, ["codex", "turn_sandbox_policy"]) == %{
+             "type" => "dangerFullAccess",
+             "reason" => "operator override"
+           }
+
+    {_atom_danger_result, atom_danger_policy} =
+      capture_visual_review_policy(%{
+        codex: %{turn_sandbox_policy: %{type: "dangerFullAccess", reason: "operator override"}}
+      })
+
+    assert get_in(atom_danger_policy, ["codex", "turn_sandbox_policy"]) == %{
+             "type" => "dangerFullAccess",
+             "reason" => "operator override"
+           }
+
+    {_fallback_result, fallback_policy} = capture_visual_review_policy("not a policy")
+    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
+  end
+
+  test "browser preflight blocks malformed callbacks and invalid results" do
+    invalid_callback =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_surfaces: ["web_ui"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        browser_preflight: :not_a_function,
+        runner: fn %{kind: :review} -> flunk("browser reviewer should not run") end
+      )
+
+    assert invalid_callback.status == :blocked
+    assert Enum.any?(invalid_callback.jobs, &(&1.blocked_reason =~ "invalid_browser_preflight"))
+
+    invalid_result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_surfaces: ["web_ui"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        browser_preflight: fn _context -> :surprise end,
+        runner: fn %{kind: :review} -> flunk("browser reviewer should not run") end
+      )
+
+    assert invalid_result.status == :blocked
+    assert Enum.any?(invalid_result.jobs, &(&1.blocked_reason =~ "invalid_result"))
+  end
+
+  test "default browser preflight checks local and remote Chrome availability" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-browser-preflight-#{System.unique_integer([:positive])}")
+    fake_chrome = Path.join(test_root, "Chrome")
+    fake_bin = Path.join(test_root, "bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+
+    previous_browser_path = System.get_env("BROWSER_QA_CHROME_PATH")
+    previous_path = System.get_env("PATH")
+    previous_ssh_config = System.get_env("SYMPHONY_SSH_CONFIG")
+
+    on_exit(fn ->
+      restore_env("BROWSER_QA_CHROME_PATH", previous_browser_path)
+      restore_env("PATH", previous_path)
+      restore_env("SYMPHONY_SSH_CONFIG", previous_ssh_config)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(fake_bin)
+    File.write!(fake_chrome, "#!/bin/sh\nexit 0\n")
+    File.chmod!(fake_chrome, 0o755)
+    System.put_env("BROWSER_QA_CHROME_PATH", fake_chrome)
+
+    assert run_default_visual_preflight().status == :passed
+
+    System.put_env("BROWSER_QA_CHROME_PATH", Path.join(test_root, "missing-chrome"))
+
+    local_blocked = run_default_visual_preflight()
+    assert local_blocked.status == :blocked
+    assert Enum.any?(local_blocked.jobs, &(&1.blocked_reason =~ "chrome_unavailable"))
+
+    System.delete_env("BROWSER_QA_CHROME_PATH")
+    System.delete_env("SYMPHONY_SSH_CONFIG")
+    System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
+
+    File.write!(fake_ssh, "#!/bin/sh\nprintf 'remote ok\\n'\nexit 0\n")
+    File.chmod!(fake_ssh, 0o755)
+    assert run_default_visual_preflight(worker_host: "worker-a").status == :passed
+
+    File.write!(fake_ssh, "#!/bin/sh\nprintf 'remote missing\\n'\nexit 7\n")
+    File.chmod!(fake_ssh, 0o755)
+    remote_blocked = run_default_visual_preflight(worker_host: "worker-a")
+    assert remote_blocked.status == :blocked
+
+    assert Enum.any?(remote_blocked.jobs, fn job ->
+             job.blocked_reason =~ "chrome_unavailable_on_worker" and job.blocked_reason =~ "remote missing"
+           end)
+
+    System.put_env("PATH", "")
+    ssh_missing = run_default_visual_preflight(worker_host: "worker-a")
+    assert ssh_missing.status == :blocked
+    assert Enum.any?(ssh_missing.jobs, &(&1.blocked_reason =~ "worker_browser_preflight_unavailable"))
   end
 
   test "quality gate covers review exits and exceptions" do
@@ -1235,6 +1424,7 @@ defmodule SymphonyElixir.QualityGateTest do
         %{},
         issue,
         %{changed_surfaces: ["cli"]},
+        browser_preflight: fn _context -> :ok end,
         runner: fn
           %{kind: :review} ->
             {:ok,
@@ -1604,5 +1794,42 @@ defmodule SymphonyElixir.QualityGateTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  defp capture_visual_review_policy(policy) do
+    parent = self()
+
+    result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        policy,
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_surfaces: ["web_ui"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        browser_preflight: fn _context -> {:ok, %{browser: "checked"}} end,
+        runner: fn %{kind: :review, policy: review_policy} ->
+          send(parent, {:captured_visual_review_policy, review_policy})
+          {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert_receive {:captured_visual_review_policy, review_policy}
+    {result, review_policy}
+  end
+
+  defp run_default_visual_preflight(opts \\ []) do
+    QualityGate.run(
+      "/tmp/symphony-workspace",
+      %{},
+      %Issue{identifier: "SID-319", title: "Quality gate"},
+      %{changed_surfaces: ["web_ui"]},
+      Keyword.merge(
+        [
+          settings: %Schema.QualityGate{max_repair_passes: 0},
+          runner: fn %{kind: :review} -> {:ok, %{status: :passed, findings: []}} end
+        ],
+        opts
+      )
+    )
   end
 end

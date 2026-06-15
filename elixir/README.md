@@ -383,7 +383,14 @@ runtime:
 - `quality_gate.enabled` controls the host-owned post-implementation review fanout. When enabled,
   Symphony plans required source, test-quality, scenario QA, product visual, docs/source-of-truth,
   and security/data/migration review jobs from changed files, changed surfaces, policy, and issue
-  labels. Review jobs run with a read-only Codex turn policy. Source-only jobs run under
+  labels. Source/test/docs/security review jobs run with a read-only Codex turn policy.
+  Browser-oriented runtime QA and product visual review jobs run with a browser-capable
+  `workspaceWrite` policy with network access unless the selected policy already grants
+  `dangerFullAccess`. Before those jobs run, Symphony checks for an executable Chrome/Chromium
+  browser through `BROWSER_QA_CHROME_PATH`, the macOS Google Chrome path, or common Linux
+  Chrome/Chromium executable names; remote worker runs perform the same check over SSH on the
+  worker. Missing browser launch infrastructure blocks the browser review job as infrastructure
+  evidence instead of reporting a product failure. Source-only jobs run under
   `quality_gate.source_max_concurrency`; runtime QA and product visual review use
   `quality_gate.runtime_isolation` and default to serialized execution. `isolated_workspace`
   conservative-blocks until disposable reviewer workspaces are available. Fix-required findings
