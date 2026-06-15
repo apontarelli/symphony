@@ -88,6 +88,68 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(product_doc.jobs, &(&1.category == :docs_source_of_truth))
   end
 
+  test "planner treats package TypeScript source and tests as reviewable scope" do
+    plan =
+      Planner.plan(%{
+        completion: %{
+          changed_files: [
+            "packages/web/src/features/workoutTracking/index.ts",
+            "packages/web/src/features/workoutTracking/smartSetTargets.ts",
+            "packages/web/tests/features/workoutTracking/smartSetTargets.test.ts"
+          ]
+        },
+        settings: %Schema.QualityGate{}
+      })
+
+    assert plan.changed_files == [
+             "packages/web/src/features/workoutTracking/index.ts",
+             "packages/web/src/features/workoutTracking/smartSetTargets.ts",
+             "packages/web/tests/features/workoutTracking/smartSetTargets.test.ts"
+           ]
+
+    assert Enum.any?(plan.jobs, &(&1.category == :source_correctness))
+    assert Enum.any?(plan.jobs, &(&1.category == :test_quality))
+  end
+
+  test "planner uses manifest path classification rules before built-in language defaults" do
+    settings = %Schema.QualityGate{
+      path_classification: %{
+        "sources" => ["engine/**/*.zig"],
+        "tests" => ["spec/**/*_spec.zig", "**/*_test.go"]
+      }
+    }
+
+    plan =
+      Planner.plan(%{
+        completion: %{
+          changed_files: [
+            "engine/runtime/main.zig",
+            "spec/runtime/main_spec.zig",
+            "root_test.go"
+          ]
+        },
+        settings: settings
+      })
+
+    assert Enum.any?(plan.jobs, &(&1.category == :source_correctness))
+    assert Enum.any?(plan.jobs, &(&1.category == :test_quality))
+
+    single_pattern_plan =
+      Planner.plan(%{
+        completion: %{changed_files: ["native/runtime/foo.c"]},
+        settings: %Schema.QualityGate{path_classification: %{source: "native/**/*.c"}}
+      })
+
+    assert Enum.any?(single_pattern_plan.jobs, &(&1.category == :source_correctness))
+
+    default_settings_plan =
+      Planner.plan(%{
+        completion: %{changed_files: ["lib/fallback.ex"]}
+      })
+
+    assert Enum.any?(default_settings_plan.jobs, &(&1.category == :source_correctness))
+  end
+
   test "quality gate repairs fix-required findings and reruns the affected review subset" do
     parent = self()
     issue = %Issue{identifier: "SID-319", title: "Quality gate fanout", labels: []}

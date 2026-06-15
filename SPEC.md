@@ -963,6 +963,10 @@ Quality gate:
   disposable reviewer workspaces.
 - `runtime.quality_gate.reviewer_timeout_ms`: positive integer, default `1200000`
 - `runtime.quality_gate.reviewer_max_retries`: non-negative integer, default `0`
+- `runtime.quality_gate.path_classification`: optional map of repo-specific glob lists. Supported
+  keys include `source` / `sources` for source-correctness review and `tests` / `test` for
+  test-quality review. Built-in defaults cover common layouts, but manifests SHOULD add patterns
+  for repo-specific language or directory conventions that defaults may miss.
 
 Implementations that run host-owned quality gates SHOULD persist each completed quality-gate run as a
 host-owned review record after synthesis and handoff-route classification. The default records root

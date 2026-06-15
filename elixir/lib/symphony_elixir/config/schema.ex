@@ -247,6 +247,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:runtime_isolation, :string, default: "serialized")
       field(:reviewer_timeout_ms, :integer, default: 1_200_000)
       field(:reviewer_max_retries, :integer, default: 0)
+      field(:path_classification, :map, default: %{})
     end
 
     @type t :: %__MODULE__{
@@ -255,7 +256,8 @@ defmodule SymphonyElixir.Config.Schema do
             max_repair_passes: non_neg_integer(),
             runtime_isolation: String.t(),
             reviewer_timeout_ms: pos_integer(),
-            reviewer_max_retries: non_neg_integer()
+            reviewer_max_retries: non_neg_integer(),
+            path_classification: map()
           }
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -269,7 +271,8 @@ defmodule SymphonyElixir.Config.Schema do
           :max_repair_passes,
           :runtime_isolation,
           :reviewer_timeout_ms,
-          :reviewer_max_retries
+          :reviewer_max_retries,
+          :path_classification
         ],
         empty_values: []
       )

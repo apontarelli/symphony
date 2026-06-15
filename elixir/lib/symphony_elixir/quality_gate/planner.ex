@@ -110,7 +110,7 @@ defmodule SymphonyElixir.QualityGate.Planner do
   end
 
   defp maybe_job(category, context, settings) do
-    if required?(category, context) do
+    if required?(category, Map.put(context, :settings, settings)) do
       %{
         id: Atom.to_string(category),
         category: category,
@@ -124,12 +124,12 @@ defmodule SymphonyElixir.QualityGate.Planner do
     end
   end
 
-  defp required?(:source_correctness, %{changed_files: files}) do
-    Enum.any?(files, &source_file?/1)
+  defp required?(:source_correctness, %{changed_files: files, settings: settings}) do
+    Enum.any?(files, &(configured_path?(&1, :source, settings) or source_file?(&1)))
   end
 
-  defp required?(:test_quality, %{changed_files: files, changed_surfaces: surfaces}) do
-    Enum.any?(files, &test_file?/1) or
+  defp required?(:test_quality, %{changed_files: files, changed_surfaces: surfaces, settings: settings}) do
+    Enum.any?(files, &(configured_path?(&1, :tests, settings) or test_file?(&1))) or
       :tests in surfaces or
       Enum.any?(files, &behavior_file?/1)
   end
@@ -176,6 +176,49 @@ defmodule SymphonyElixir.QualityGate.Planner do
   defp runtime_isolation(%QualityGate{runtime_isolation: "blocked"}), do: :blocked
   defp runtime_isolation(_settings), do: :serialized
 
+  defp configured_path?(path, category, %QualityGate{path_classification: rules}) when is_binary(path) and is_map(rules) do
+    rules
+    |> configured_patterns(category)
+    |> Enum.any?(&glob_match?(&1, path))
+  end
+
+  defp configured_path?(_path, _category, _settings), do: false
+
+  defp configured_patterns(rules, category) do
+    category
+    |> path_classification_keys()
+    |> Enum.flat_map(fn key ->
+      case Map.get(rules, key, Map.get(rules, to_string(key))) do
+        patterns when is_list(patterns) -> patterns
+        pattern when is_binary(pattern) -> [pattern]
+        _patterns -> []
+      end
+    end)
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp path_classification_keys(:source), do: [:source, :sources]
+  defp path_classification_keys(:tests), do: [:tests, :test]
+
+  defp glob_match?(pattern, path) do
+    pattern
+    |> glob_regex()
+    |> Regex.match?(path)
+  end
+
+  defp glob_regex(pattern) do
+    regex =
+      pattern
+      |> Regex.escape()
+      |> String.replace("\\*\\*/", "(?:.*/)?")
+      |> String.replace("\\*\\*", ".*")
+      |> String.replace("\\*", "[^/]*")
+
+    Regex.compile!("^#{regex}$")
+  end
+
   defp changed_files(completion) when is_map(completion) do
     case HandoffManifest.source(completion) do
       {:present, manifest} when is_map(manifest) ->
@@ -219,7 +262,7 @@ defmodule SymphonyElixir.QualityGate.Planner do
   defp changed_surfaces(_completion), do: []
 
   defp source_file?(path) do
-    String.match?(path, ~r/(^|\/)(lib|bin|config|priv)\/.+\.(ex|exs|js|ts|tsx|css)$/)
+    String.match?(path, ~r/(^|\/)(lib|bin|config|priv|src|packages\/[^\/]+\/src)\/.+\.(ex|exs|js|jsx|ts|tsx|css)$/)
   end
 
   defp behavior_file?(path) do
@@ -227,8 +270,8 @@ defmodule SymphonyElixir.QualityGate.Planner do
   end
 
   defp test_file?(path) do
-    String.contains?(path, "/test/") or String.starts_with?(path, "test/") or
-      String.match?(path, ~r/(^|_)test\.exs$/)
+    String.contains?(path, ["/test/", "/tests/"]) or String.starts_with?(path, ["test/", "tests/"]) or
+      String.match?(path, ~r/(^|[._-])test\.(exs|js|jsx|ts|tsx)$/)
   end
 
   defp scenario_file?(path) do
