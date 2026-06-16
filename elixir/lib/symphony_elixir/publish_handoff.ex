@@ -97,7 +97,7 @@ defmodule SymphonyElixir.PublishHandoff do
          :ok <- validate_local_workspace(context),
          :ok <- require_preflight_passed(completion),
          {:ok, manifest_result} <- validate_change_manifest(completion, workspace),
-         pr_body <- pr_body(issue, target, branch, validation_summary),
+         pr_body <- pr_body(issue, target, branch, validation_summary, manifest_result.changed_files),
          :ok <- validate_pr_body(pr_body) do
       publish_context =
         Map.merge(context, %{
@@ -681,11 +681,12 @@ defmodule SymphonyElixir.PublishHandoff do
     end
   end
 
-  defp pr_body(issue, target, branch, validation_summary) do
+  defp pr_body(issue, target, branch, validation_summary, changed_files) do
     identifier = issue_field(issue, :identifier) || "issue"
     issue_url = issue_field(issue, :url) || "not supplied"
     target_display = "#{target.github_repository}:#{target.base_branch}"
     validation_line = validation_summary || "worker supplied validation checks"
+    reviewer_testing_lines = reviewer_testing_lines(identifier, changed_files)
 
     """
     #### Context
@@ -705,6 +706,10 @@ defmodule SymphonyElixir.PublishHandoff do
     #### Alternatives
 
     - Keep VCS mutation host-owned instead of relying on worker-side commits.
+
+    #### Reviewer Testing
+
+    #{reviewer_testing_lines}
 
     #### Test Plan
 
@@ -734,6 +739,30 @@ defmodule SymphonyElixir.PublishHandoff do
 
   defp status_label(status) when is_atom(status), do: Atom.to_string(status)
   defp status_label(status), do: to_string(status)
+
+  defp reviewer_testing_lines(identifier, changed_files) do
+    [
+      "- Review the affected workflow or surface from Linear issue `#{identifier}`.",
+      "- Start from the changed scope: #{changed_file_summary(changed_files)}.",
+      "- Confirm the primary changed behavior works before approval; leave exhaustive edge cases to the Test Plan and quality gates."
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp changed_file_summary(changed_files) do
+    visible_files =
+      changed_files
+      |> Enum.take(5)
+      |> Enum.map_join(", ", &"`#{&1}`")
+
+    remaining_count = length(changed_files) - 5
+
+    if remaining_count > 0 do
+      "#{visible_files}, and #{remaining_count} more"
+    else
+      visible_files
+    end
+  end
 
   defp linear_issue(issue) do
     %{

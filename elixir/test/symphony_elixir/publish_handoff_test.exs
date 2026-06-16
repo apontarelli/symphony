@@ -49,9 +49,69 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert_receive {:publish_command, :pr_create, "gh", pr_create_args}
     assert ["pr", "create", "--repo", "apontarelli/symphony", "--head", "apontarelli:ticket/sid-309", "--base", "main", "--title", title | rest] = pr_create_args
     assert title == "SID-309: Publish validated workspace changes"
-    assert "--body" in rest
+
+    pr_body = pr_body_arg(rest)
+    assert pr_body =~ "#### Reviewer Testing"
+    assert pr_body =~ "- Review the affected workflow or surface from Linear issue `SID-309`."
+    assert pr_body =~ "- Start from the changed scope: `lib/source.ex`."
+    assert pr_body =~ "#### Test Plan"
 
     assert_receive {:publish_command, :jj_current, "jj", ["log", "-r", "@", "--no-graph", "--template", "change_id.short() ++ \" \" ++ commit_id.short() ++ \"\\n\""]}
+  end
+
+  test "summarizes long changed-file scopes in reviewer testing instructions" do
+    changed_files = [
+      "lib/one.ex",
+      "lib/two.ex",
+      "lib/three.ex",
+      "lib/four.ex",
+      "lib/five.ex",
+      "lib/six.ex"
+    ]
+
+    workspace = workspace_with_file!("lib/one.ex", "defmodule One do\nend\n")
+
+    for relative_path <- tl(changed_files) do
+      absolute_path = Path.join(workspace, relative_path)
+      File.mkdir_p!(Path.dirname(absolute_path))
+      File.write!(absolute_path, "defmodule Extra do\nend\n")
+    end
+
+    parent = self()
+
+    result =
+      PublishHandoff.run(
+        workspace,
+        publish_policy(vcs_mode: "jj"),
+        issue("SID-309"),
+        completion_for(changed_files),
+        runner: fn %{step: step, args: args} ->
+          send(parent, {:publish_command, step, args})
+
+          output =
+            case step do
+              :jj_remote_list -> "origin https://github.com/example/project.git\n"
+              :jj_changed_files -> Enum.join(changed_files, "\n") <> "\n"
+              :pr_view -> "no pull request found"
+              :pr_create -> "https://github.com/example/project/pull/309\n"
+              :jj_current -> "abcdefgh 1234567\n"
+              _step -> "ok\n"
+            end
+
+          status = if step == :pr_view, do: 1, else: 0
+          {:ok, %{status: status, output: output}}
+        end
+      )
+
+    assert result.status == :passed
+
+    assert_receive {:publish_command, :pr_create, pr_create_args}
+    pr_body = pr_body_arg(pr_create_args)
+
+    assert pr_body =~
+             "- Start from the changed scope: `lib/one.ex`, `lib/two.ex`, `lib/three.ex`, `lib/four.ex`, `lib/five.ex`, and 1 more."
+
+    refute pr_body =~ "`lib/six.ex`"
   end
 
   test "publishes through local executables when no test runner is configured" do
@@ -812,5 +872,12 @@ defmodule SymphonyElixir.PublishHandoffTest do
 
   defp shell_quote(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  end
+
+  defp pr_body_arg(args) do
+    index = Enum.find_index(args, &(&1 == "--body"))
+
+    assert is_integer(index)
+    Enum.at(args, index + 1)
   end
 end

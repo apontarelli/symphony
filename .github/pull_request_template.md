@@ -16,6 +16,12 @@
 
 - <!-- What alternatives have been considered? Why not? -->
 
+#### Reviewer Testing
+
+- <!-- Primary path/screen/command a PM, designer, or operator should try -->
+- <!-- Expected result/state to confirm -->
+- <!-- Keep this to reviewer direction, not full UAT or edge-case criteria -->
+
 #### Test Plan
 
 - [ ] `make -C elixir all`

@@ -23,6 +23,10 @@ defmodule Mix.Tasks.PrBody.CheckTest do
 
   - <!-- Alternative bullet -->
 
+  #### Reviewer Testing
+
+  - <!-- Reviewer path -->
+
   #### Test Plan
 
   - [ ] <!-- Test checkbox -->
@@ -44,6 +48,10 @@ defmodule Mix.Tasks.PrBody.CheckTest do
   #### Alternatives
 
   - Alternative considered.
+
+  #### Reviewer Testing
+
+  - Review the changed path.
 
   #### Test Plan
 
@@ -163,6 +171,10 @@ defmodule Mix.Tasks.PrBody.CheckTest do
 
       - Alternative considered.
 
+      #### Reviewer Testing
+
+      - Review the changed path.
+
       #### Test Plan
 
       - [x] Ran targeted checks.
@@ -219,6 +231,10 @@ defmodule Mix.Tasks.PrBody.CheckTest do
       #### Alternatives
 
 
+      #### Reviewer Testing
+
+      - Review the changed path.
+
       #### Test Plan
 
       - [x] Ran targeted checks.
@@ -258,6 +274,10 @@ defmodule Mix.Tasks.PrBody.CheckTest do
 
       Also not a bullet.
 
+      #### Reviewer Testing
+
+      Also not a bullet.
+
       #### Test Plan
 
       No checkbox.
@@ -274,6 +294,7 @@ defmodule Mix.Tasks.PrBody.CheckTest do
 
       assert error_output =~ "Section must include at least one bullet item: #### Summary"
       assert error_output =~ "Section must include at least one bullet item: #### Alternatives"
+      assert error_output =~ "Section must include at least one bullet item: #### Reviewer Testing"
       assert error_output =~ "Section must include at least one bullet item: #### Test Plan"
       assert error_output =~ "Section must include at least one checkbox item: #### Test Plan"
     end)

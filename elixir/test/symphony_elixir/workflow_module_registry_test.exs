@@ -149,6 +149,8 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert {:ok, vcs_commit_push} = ModuleRegistry.module_defaults("vcs-commit-push", 0)
     assert vcs_commit_push.content =~ "after implementation validation, required quality gates"
     assert vcs_commit_push.content =~ "no unresolved fix-required findings"
+    assert vcs_commit_push.content =~ "`Reviewer Testing` section"
+    assert vcs_commit_push.content =~ "not expand this into full UAT"
 
     assert {:ok, project_closeout} = ModuleRegistry.module_defaults("project-closeout", 0)
     assert project_closeout.content =~ "durable repository docs"

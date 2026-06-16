@@ -57,8 +57,10 @@ Symphony publishes the completed workspace under host control. The host creates 
 deterministic `ticket/<issue-id>` branch or jj bookmark, pushes it to the resolved GitHub repository,
 opens or updates a PR against the configured base branch, and records the PR URL, target repository,
 base branch, branch or change id, validation summary, and Linear issue evidence in the handoff
-route. Publish failures are recorded as structured blocked evidence instead of moving the issue as
-ready for merge.
+route. The generated PR body includes a `Reviewer Testing` section that points a human reviewer to
+the changed path, screen, command, or expected state without replacing validation evidence, quality
+gates, or full UAT criteria. Publish failures are recorded as structured blocked evidence instead of
+moving the issue as ready for merge.
 
 ## How to use it
 

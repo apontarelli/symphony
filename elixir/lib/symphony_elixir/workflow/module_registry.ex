@@ -390,7 +390,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       Publish one bookmark or branch per ticket. Create or update the PR against the workflow policy
       delivery target. If the target is not main, set the PR base to that target and do not merge or
       promote work to main in v1. Ensure the PR title, body, labels, and Linear attachment reflect
-      the current scope.
+      the current scope. Include a `Reviewer Testing` section with one to three PM/designer/operator
+      checks that point a human reviewer to the changed path, screen, command, or expected state. Do
+      not expand this into full UAT or edge-case acceptance criteria; keep exhaustive proof in the
+      validation and quality-gate evidence.
       """,
       description: "Version-control inspection, commit description, branch publication, and PR creation"
     },
