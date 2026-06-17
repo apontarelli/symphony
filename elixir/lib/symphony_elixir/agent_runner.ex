@@ -145,6 +145,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+          send_max_turns_exhausted(codex_update_recipient, refreshed_issue, turn_number, max_turns)
 
           :ok
 
@@ -172,6 +173,22 @@ defmodule SymphonyElixir.AgentRunner do
       """,
       workflow_module_resolution: nil
     }
+  end
+
+  defp send_max_turns_exhausted(recipient, %Issue{} = issue, turn_number, max_turns) do
+    send_codex_update(recipient, issue, %{
+      event: :agent_max_turns_exhausted,
+      timestamp: DateTime.utc_now(),
+      completion: %{
+        outcome: :blocked,
+        blocker: %{
+          reason: "agent.max_turns reached while issue remains active",
+          required_action: "Review the workpad, resolve blockers or approve another run, then move the issue back to an active state if more agent work is appropriate."
+        }
+      },
+      turn_count: turn_number,
+      max_turns: max_turns
+    })
   end
 
   defp log_workflow_module_resolution(issue, %{workflow_module_resolution: %{module_refs: refs, policy_hash: policy_hash}}) do

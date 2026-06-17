@@ -1432,6 +1432,75 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, sent_at_ms, 500, 1_100)
   end
 
+  test "normal worker exit with blocked completion records blocker without retrying" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-blocked-completion"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :BlockedCompletionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-723",
+      issue: %Issue{id: issue_id, identifier: "MT-723", state: "In Progress"},
+      session_id: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         timestamp: DateTime.utc_now(),
+         completion: %{
+           outcome: :blocked,
+           blocker: %{
+             reason: "Stripe and Cloudflare staging access are required.",
+             required_action: "Provide Stripe test credentials and Cloudflare Access authorization."
+           }
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    assert %{
+             route: "blocked",
+             target_state: "Human Review",
+             recommendation: "Provide Stripe test credentials and Cloudflare Access authorization."
+           } = state.handoff_routes[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, route_comment}
+    assert route_comment =~ "blocked"
+    assert route_comment =~ "Stripe and Cloudflare staging access are required."
+    assert route_comment =~ "Provide Stripe test credentials and Cloudflare Access authorization."
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+  end
+
   test "normal worker exit persists route decision from completion metadata" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
@@ -2751,11 +2820,25 @@ defmodule SymphonyElixir.CoreTest do
         labels: []
       }
 
-      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      assert :ok = AgentRunner.run(issue, self(), issue_state_fetcher: state_fetcher)
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
+
+      assert_received {:codex_worker_update, "issue-max-turns",
+                       %{
+                         event: :agent_max_turns_exhausted,
+                         completion: %{
+                           outcome: :blocked,
+                           blocker: %{
+                             reason: "agent.max_turns reached while issue remains active",
+                             required_action: required_action
+                           }
+                         }
+                       }}
+
+      assert required_action =~ "Review the workpad"
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

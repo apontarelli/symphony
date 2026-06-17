@@ -240,8 +240,8 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+    if agent_blocker?(running_entry) do
+      block_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
@@ -262,14 +262,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
+    if agent_blocker?(running_entry) do
+      block_agent_down(state, issue_id, running_entry, session_id, reason)
     else
       retry_agent_down(state, issue_id, running_entry, session_id, reason)
     end
   end
 
-  defp block_input_required_agent_down(state, issue_id, running_entry, session_id, reason) do
+  defp block_agent_down(state, issue_id, running_entry, session_id, reason) do
     error = blocker_error(running_entry, "agent exited: #{inspect(reason)}")
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
@@ -641,8 +641,8 @@ defmodule SymphonyElixir.Orchestrator do
       identifier = Map.get(running_entry, :identifier, issue_id)
       session_id = running_entry_session_id(running_entry)
 
-      if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
+      if agent_blocker?(running_entry) do
+        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex reported a blocker")
 
         Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
 
@@ -693,6 +693,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp last_activity_timestamp(_running_entry), do: nil
 
+  defp agent_blocker?(running_entry) when is_map(running_entry) do
+    input_required_blocker?(running_entry) or
+      Map.get(running_entry, :last_codex_event) in [:agent_max_turns_exhausted, :max_turns_exhausted] or
+      blocked_completion?(Map.get(running_entry, :completion))
+  end
+
+  defp agent_blocker?(_running_entry), do: false
+
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
       not is_nil(input_required_completion_outcome(Map.get(running_entry, :completion))) or
@@ -708,6 +716,37 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp input_required_completion_outcome(_completion), do: nil
+
+  defp blocked_completion?(completion) when is_map(completion) do
+    not is_nil(blocked_completion_outcome(completion)) or
+      not is_nil(completion_blocker_metadata(completion))
+  end
+
+  defp blocked_completion?(_completion), do: false
+
+  defp blocked_completion_outcome(completion) when is_map(completion) do
+    completion
+    |> completion_field(:outcome)
+    |> normalize_blocked_completion_outcome()
+  end
+
+  defp blocked_completion_outcome(_completion), do: nil
+
+  defp normalize_blocked_completion_outcome(outcome)
+       when outcome in [:blocked, :agent_blocked, :human_input_required, :max_turns_exhausted],
+       do: outcome
+
+  defp normalize_blocked_completion_outcome(outcome) when is_binary(outcome) do
+    case outcome do
+      "blocked" -> :blocked
+      "agent_blocked" -> :agent_blocked
+      "human_input_required" -> :human_input_required
+      "max_turns_exhausted" -> :max_turns_exhausted
+      _ -> nil
+    end
+  end
+
+  defp normalize_blocked_completion_outcome(_outcome), do: nil
 
   defp normalize_input_required_outcome(outcome)
        when outcome in [:input_required, :needs_input, :approval_required],
@@ -725,8 +764,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_input_required_outcome(_outcome), do: nil
 
   defp blocker_error(running_entry, fallback) when is_map(running_entry) do
-    codex_event_blocker_error(Map.get(running_entry, :last_codex_event)) ||
-      completion_blocker_error(Map.get(running_entry, :completion)) ||
+    completion_blocker_error(Map.get(running_entry, :completion)) ||
+      codex_event_blocker_error(Map.get(running_entry, :last_codex_event)) ||
       codex_message_blocker_error(Map.get(running_entry, :last_codex_message)) ||
       fallback
   end
@@ -735,15 +774,104 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp codex_event_blocker_error(:turn_input_required), do: "codex turn requires operator input"
   defp codex_event_blocker_error(:approval_required), do: "codex turn requires approval"
+
+  defp codex_event_blocker_error(event) when event in [:agent_max_turns_exhausted, :max_turns_exhausted],
+    do: "agent.max_turns reached while issue remains active"
+
   defp codex_event_blocker_error(_event), do: nil
 
   defp completion_blocker_error(completion) do
+    case completion_blocker_metadata(completion) do
+      %{reason: reason} ->
+        reason
+
+      _ ->
+        completion_outcome_blocker_error(completion) ||
+          input_required_completion_blocker_error(completion)
+    end
+  end
+
+  defp completion_outcome_blocker_error(completion) do
+    case blocked_completion_outcome(completion) do
+      :max_turns_exhausted -> "agent.max_turns reached while issue remains active"
+      outcome when not is_nil(outcome) -> "agent reported an unfixable blocker"
+      nil -> nil
+    end
+  end
+
+  defp input_required_completion_blocker_error(completion) do
     case input_required_completion_outcome(completion) do
       outcome when outcome in [:input_required, :needs_input] -> "codex turn requires operator input"
       :approval_required -> "codex turn requires approval"
       nil -> nil
     end
   end
+
+  defp blocker_metadata(running_entry, fallback) when is_map(running_entry) do
+    case completion_blocker_metadata(Map.get(running_entry, :completion)) do
+      %{reason: reason} = blocker when is_binary(reason) and reason != "" ->
+        blocker
+
+      %{required_action: _} = blocker ->
+        Map.put(blocker, :reason, fallback)
+
+      _ ->
+        %{reason: fallback}
+    end
+  end
+
+  defp blocker_metadata(_running_entry, fallback), do: %{reason: fallback}
+
+  defp completion_blocker_metadata(completion) when is_map(completion) do
+    completion
+    |> map_field([:blocker, "blocker"])
+    |> normalize_completion_blocker()
+  end
+
+  defp completion_blocker_metadata(_completion), do: nil
+
+  defp normalize_completion_blocker(%{} = blocker) do
+    reason = blocker |> map_field([:reason, "reason", :message, "message", :summary, "summary"]) |> non_empty_string()
+
+    required_action =
+      blocker
+      |> map_field([:required_action, "required_action", :requiredAction, "requiredAction"])
+      |> non_empty_string()
+
+    case {reason, required_action} do
+      {nil, nil} -> nil
+      {reason, nil} -> %{reason: reason}
+      {nil, required_action} -> %{required_action: required_action}
+      {reason, required_action} -> %{reason: reason, required_action: required_action}
+    end
+  end
+
+  defp normalize_completion_blocker(blocker) when is_binary(blocker) do
+    case non_empty_string(blocker) do
+      nil -> nil
+      reason -> %{reason: reason}
+    end
+  end
+
+  defp normalize_completion_blocker(_blocker), do: nil
+
+  defp map_field(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, fn key ->
+      case Map.fetch(map, key) do
+        {:ok, value} -> value
+        :error -> nil
+      end
+    end)
+  end
+
+  defp non_empty_string(value) when is_binary(value) do
+    value = String.trim(value)
+    if value == "", do: nil, else: value
+  end
+
+  defp non_empty_string(value) when is_atom(value), do: value |> Atom.to_string() |> non_empty_string()
+  defp non_empty_string(value) when is_number(value), do: value |> to_string() |> non_empty_string()
+  defp non_empty_string(_value), do: nil
 
   defp codex_message_blocker_error(message) do
     if codex_message_method(message) == "mcpServer/elicitation/request" do
@@ -787,7 +915,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, issue_id, running_entry, error) do
-    handoff_route = handoff_decision_for_running_entry(running_entry, %{reason: error})
+    handoff_route = handoff_decision_for_running_entry(running_entry, blocker_metadata(running_entry, error))
     maybe_persist_handoff_route(issue_id, handoff_route)
 
     blocked_entry =
