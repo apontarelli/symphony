@@ -708,8 +708,6 @@ defmodule SymphonyElixir.Orchestrator do
         "mcpServer/elicitation/request"
   end
 
-  defp input_required_blocker?(_running_entry), do: false
-
   defp input_required_completion_outcome(completion) when is_map(completion) do
     outcome = Map.get(completion, :outcome) || Map.get(completion, "outcome")
     normalize_input_required_outcome(outcome)

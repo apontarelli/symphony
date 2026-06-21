@@ -385,15 +385,20 @@ runtime:
 - `quality_gate.enabled` controls the host-owned post-implementation review fanout. When enabled,
   Symphony plans required source, test-quality, scenario QA, product visual, docs/source-of-truth,
   and security/data/migration review jobs from changed files, changed surfaces, policy, and issue
-  labels. Source/test/docs/security review jobs run with a read-only Codex turn policy.
-  Browser-oriented runtime QA and product visual review jobs run with a browser-capable
-  `workspaceWrite` policy with network access unless the selected policy already grants
-  `dangerFullAccess`. Before those jobs run, Symphony checks for an executable Chrome/Chromium
-  browser through `BROWSER_QA_CHROME_PATH`, the macOS Google Chrome path, or common Linux
-  Chrome/Chromium executable names; remote worker runs perform the same check over SSH on the
-  worker. Missing browser launch infrastructure blocks the browser review job as infrastructure
-  evidence instead of reporting a product failure. Source-only jobs run under
-  `quality_gate.source_max_concurrency`; runtime QA and product visual review use
+  labels. Source/test/docs/security review jobs run with a read-only Codex turn policy. Scenario QA
+  remains browser-backed: it runs with a browser-capable `workspaceWrite` policy with network access
+  unless the selected policy already grants `dangerFullAccess`. Before those jobs run, Symphony
+  checks for an executable Chrome/Chromium browser through `BROWSER_QA_CHROME_PATH`, the macOS
+  Google Chrome path, or common Linux Chrome/Chromium executable names; remote worker runs perform
+  the same check over SSH on the worker. Product visual review can instead use the host-owned
+  `quality_gate.host_visual_qa.command` runner. That command runs outside the reviewer sandbox with
+  `SYMPHONY_VISUAL_QA_ARTIFACT_DIR`, `SYMPHONY_VISUAL_QA_MANIFEST`,
+  `SYMPHONY_VISUAL_QA_CATEGORY`, and `SYMPHONY_ISSUE_IDENTIFIER` env vars; on success the reviewer
+  receives the manifest/artifact package under a read-only policy and does not need to launch a
+  browser. If no host visual QA command is configured, product visual review falls back to the
+  browser-capable reviewer path. Missing browser launch or host visual QA infrastructure blocks the
+  affected job as infrastructure evidence instead of reporting a product failure. Source-only jobs
+  run under `quality_gate.source_max_concurrency`; runtime QA and product visual review use
   `quality_gate.runtime_isolation` and default to serialized execution. `isolated_workspace`
   conservative-blocks until disposable reviewer workspaces are available. Fix-required findings
   trigger up to `quality_gate.max_repair_passes` bounded repair turns, followed by replanning from

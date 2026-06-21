@@ -1170,6 +1170,238 @@ defmodule SymphonyElixir.QualityGateTest do
     assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
   end
 
+  test "product visual review consumes host visual QA artifacts without browser reviewer sandbox access" do
+    parent = self()
+
+    result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn context ->
+          send(parent, {:host_visual_qa, context})
+
+          {:ok,
+           %{
+             "status" => "passed",
+             "summary" => "Desktop and mobile captures passed.",
+             "checks" => [%{"name" => "viewport_screenshots", "status" => "passed"}],
+             "artifacts" => [%{"kind" => "screenshot", "label" => "Desktop", "summary" => "Desktop capture"}]
+           }}
+        end,
+        browser_preflight: fn context ->
+          send(parent, {:browser_preflight, context})
+          :ok
+        end,
+        runner: fn
+          %{kind: :review, job: %{category: :product_visual_review} = job, policy: policy} ->
+            send(parent, {:visual_reviewer, policy, job})
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review, job: %{category: :source_correctness}} ->
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review, job: %{category: :scenario_qa}} ->
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert result.status == :passed
+    assert_receive {:host_visual_qa, %{job: %{category: :product_visual_review}, workspace: "/tmp/symphony-workspace"}}
+    refute_receive {:browser_preflight, %{category: :product_visual_review}}, 50
+
+    assert_receive {:visual_reviewer, policy, job}
+    assert get_in(policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+    assert job.prompt =~ "Host visual QA artifacts"
+    assert job.prompt =~ "Desktop and mobile captures passed"
+
+    assert %{host_visual_qa: %{"summary" => "Desktop and mobile captures passed."}} =
+             Enum.find(result.jobs, &(&1.category == :product_visual_review))
+  end
+
+  test "product visual review blocks before reviewer when host visual QA fails" do
+    parent = self()
+
+    result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn context ->
+          send(parent, {:host_visual_qa, context})
+          {:error, :browser_launch_failed}
+        end,
+        browser_preflight: fn context ->
+          send(parent, {:browser_preflight, context})
+          :ok
+        end,
+        runner: fn
+          %{kind: :review, job: %{category: :product_visual_review}} ->
+            flunk("product visual reviewer should not run when host visual QA fails")
+
+          %{kind: :review, job: %{category: :source_correctness}} ->
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review, job: %{category: :scenario_qa}} ->
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert result.status == :blocked
+    assert_receive {:host_visual_qa, %{job: %{category: :product_visual_review}}}
+    refute_receive {:browser_preflight, %{category: :product_visual_review}}, 50
+
+    assert Enum.any?(result.jobs, fn job ->
+             job.category == :product_visual_review and job.blocked_reason =~ "host_visual_qa_failed" and
+               job.blocked_reason =~ "browser_launch_failed"
+           end)
+  end
+
+  test "review and repair runner contexts preserve worker host" do
+    parent = self()
+
+    result =
+      QualityGate.run(
+        "/remote/workspaces/SID-319",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/source.ex"]},
+        worker_host: "worker-a",
+        settings: %Schema.QualityGate{max_repair_passes: 1},
+        runner: fn
+          %{kind: :review, phase: :initial, worker_host: worker_host} ->
+            send(parent, {:review_worker_host, :initial, worker_host})
+
+            {:ok,
+             %{
+               status: :fix_required,
+               findings: [
+                 %{
+                   category: :source_correctness,
+                   evidence: "Needs repair",
+                   recommended_disposition: :fix_required
+                 }
+               ]
+             }}
+
+          %{kind: :repair, attempt: 1, worker_host: worker_host} ->
+            send(parent, {:repair_worker_host, worker_host})
+            {:ok, %{status: :passed}}
+
+          %{kind: :review, phase: {:repair, 1}, worker_host: worker_host} ->
+            send(parent, {:review_worker_host, {:repair, 1}, worker_host})
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert result.status == :passed
+    assert_receive {:review_worker_host, :initial, "worker-a"}
+    assert_receive {:repair_worker_host, "worker-a"}
+    assert_receive {:review_worker_host, {:repair, 1}, "worker-a"}
+  end
+
+  test "product visual review handles malformed host visual QA callbacks" do
+    invalid_callback =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: :not_a_function,
+        runner: fn %{kind: :review, job: %{category: :product_visual_review}} ->
+          flunk("product visual reviewer should not run when host visual QA callback is invalid")
+        end
+      )
+
+    assert invalid_callback.status == :blocked
+    assert Enum.any?(invalid_callback.jobs, &(&1.blocked_reason =~ "invalid_host_visual_qa"))
+
+    invalid_result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn _context -> :surprise end,
+        runner: fn %{kind: :review, job: %{category: :product_visual_review}} ->
+          flunk("product visual reviewer should not run when host visual QA result is invalid")
+        end
+      )
+
+    assert invalid_result.status == :blocked
+    assert Enum.any?(invalid_result.jobs, &(&1.blocked_reason =~ "invalid_result"))
+
+    raised =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn _context -> raise "visual qa exploded" end,
+        runner: fn %{kind: :review, job: %{category: :product_visual_review}} ->
+          flunk("product visual reviewer should not run when host visual QA raises")
+        end
+      )
+
+    assert raised.status == :blocked
+    assert Enum.any?(raised.jobs, &(&1.blocked_reason =~ "visual qa exploded"))
+
+    thrown =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn _context -> throw(:visual_qa_thrown) end,
+        runner: fn %{kind: :review, job: %{category: :product_visual_review}} ->
+          flunk("product visual reviewer should not run when host visual QA throws")
+        end
+      )
+
+    assert thrown.status == :blocked
+    assert Enum.any?(thrown.jobs, &(&1.blocked_reason =~ "visual_qa_thrown"))
+  end
+
+  test "product visual review prompt falls back to inspected host visual QA payload" do
+    parent = self()
+
+    result =
+      QualityGate.run(
+        "/tmp/symphony-workspace",
+        %{},
+        %Issue{identifier: "SID-319", title: "Quality gate"},
+        %{changed_files: ["lib/example_web/live/dashboard_live.ex"]},
+        settings: %Schema.QualityGate{max_repair_passes: 0},
+        host_visual_qa: fn _context ->
+          {:ok, %{"summary" => "Function payload captured.", "raw" => fn -> :not_json end}}
+        end,
+        runner: fn
+          %{kind: :review, job: %{category: :product_visual_review} = job} ->
+            send(parent, {:inspected_visual_prompt, job.prompt})
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review, job: %{category: :source_correctness}} ->
+            {:ok, %{status: :passed, findings: []}}
+
+          %{kind: :review, job: %{category: :scenario_qa}} ->
+            {:ok, %{status: :passed, findings: []}}
+        end
+      )
+
+    assert result.status == :passed
+    assert_receive {:inspected_visual_prompt, prompt}
+    assert prompt =~ "Function payload captured"
+    assert prompt =~ "#Function"
+  end
+
   test "browser preflight blocks malformed callbacks and invalid results" do
     invalid_callback =
       QualityGate.run(
@@ -1730,6 +1962,94 @@ defmodule SymphonyElixir.QualityGateTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "default app-server runner launches review and repair on worker host" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-remote-runner-#{System.unique_integer([:positive])}")
+    fake_bin = Path.join(test_root, "bin")
+    fake_ssh = Path.join(fake_bin, "ssh")
+    trace_file = Path.join(test_root, "ssh.trace")
+    count_file = Path.join(test_root, "turn-count")
+    remote_workspace = "/remote/workspaces/SID-319"
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+    previous_count = System.get_env("SYMP_TEST_SSH_COUNT")
+    previous_ssh_config = System.get_env("SYMPHONY_SSH_CONFIG")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+      restore_env("SYMP_TEST_SSH_COUNT", previous_count)
+      restore_env("SYMPHONY_SSH_CONFIG", previous_ssh_config)
+      File.rm_rf(test_root)
+    end)
+
+    File.mkdir_p!(fake_bin)
+    System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
+    System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+    System.put_env("SYMP_TEST_SSH_COUNT", count_file)
+    System.delete_env("SYMPHONY_SSH_CONFIG")
+
+    File.write!(fake_ssh, """
+    #!/bin/sh
+    trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-quality-gate-remote.trace}"
+    count_file="${SYMP_TEST_SSH_COUNT:-/tmp/symphony-quality-gate-remote.count}"
+    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+
+    while IFS= read -r line; do
+      printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+      if printf '%s' "$line" | grep -q '"method":"initialize"'; then
+        printf '%s\\n' '{"id":1,"result":{}}'
+      elif printf '%s' "$line" | grep -q '"method":"thread/start"'; then
+        printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality-remote"}}}'
+      elif printf '%s' "$line" | grep -q '"method":"turn/start"'; then
+        count=$(cat "$count_file" 2>/dev/null || echo 0)
+        count=$((count + 1))
+        printf '%s' "$count" > "$count_file"
+        printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality-remote"}}}'
+
+        if [ "$count" -eq 1 ]; then
+          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"fix_required","findings":[{"category":"source_correctness","evidence":"Needs repair","recommended_disposition":"fix_required"}]}}}}'
+        else
+          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
+        fi
+
+        exit 0
+      fi
+    done
+    """)
+
+    File.chmod!(fake_ssh, 0o755)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      codex_command: "fake-remote-codex app-server",
+      quality_gate_enabled: true
+    )
+
+    result =
+      QualityGate.run(
+        remote_workspace,
+        %{},
+        %Issue{identifier: "SID-319", title: "Remote default runner"},
+        %{changed_files: ["lib/source.ex"]},
+        worker_host: "worker-01:2200"
+      )
+
+    assert result.status == :passed
+    assert [%{repair_result: %{status: :passed}}] = result.repair_passes
+    assert count_file |> File.read!() |> String.to_integer() >= 3
+
+    argv_lines =
+      trace_file
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
+
+    assert length(argv_lines) >= 3
+    assert Enum.all?(argv_lines, &(&1 =~ "-T -p 2200 worker-01 bash -lc"))
+    assert Enum.all?(argv_lines, &(&1 =~ remote_workspace))
   end
 
   test "default app-server runner accepts direct and missing completion payloads" do

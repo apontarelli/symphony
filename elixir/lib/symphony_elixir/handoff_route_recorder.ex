@@ -180,16 +180,137 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   end
 
   defp product_visual_review_evidence(completion, manifest_check, routing_context, issue) do
-    completion
-    |> completion_alias(:product_visual_review, :productVisualReview, nil)
-    |> then(fn payload ->
-      ProductVisualReview.route_evidence(
-        product_visual_review_config(routing_context),
-        changed_files_from_manifest_check(manifest_check),
-        issue,
-        payload
-      )
-    end)
+    payload =
+      completion_alias(completion, :product_visual_review, :productVisualReview, nil) ||
+        product_visual_review_payload_from_quality_gate(completion_alias(completion, :quality_gate, :qualityGate, nil))
+
+    ProductVisualReview.route_evidence(
+      product_visual_review_config(routing_context),
+      changed_files_from_manifest_check(manifest_check),
+      issue,
+      payload
+    )
+  end
+
+  defp product_visual_review_payload_from_quality_gate(quality_gate) when is_map(quality_gate) do
+    quality_gate
+    |> quality_gate_jobs()
+    |> Enum.find_value(&product_visual_review_payload_from_job/1)
+  end
+
+  defp product_visual_review_payload_from_quality_gate(_quality_gate), do: nil
+
+  defp quality_gate_jobs(quality_gate) do
+    quality_gate
+    |> list_field(:final_jobs)
+    |> Kernel.++(list_field(quality_gate, :jobs))
+  end
+
+  defp product_visual_review_payload_from_job(job) when is_map(job) do
+    if normalize_token(module_field(job, :category)) == "product_visual_review" do
+      host_visual_qa = module_field(job, :host_visual_qa)
+
+      cond do
+        is_map(host_visual_qa) ->
+          host_visual_qa_route_payload(host_visual_qa, job)
+
+        host_visual_qa_blocked_job?(job) ->
+          blocked_host_visual_qa_route_payload(job)
+
+        true ->
+          nil
+      end
+    end
+  end
+
+  defp product_visual_review_payload_from_job(_job), do: nil
+
+  defp host_visual_qa_route_payload(host_visual_qa, job) do
+    summary =
+      optional_string(module_field(host_visual_qa, :summary)) ||
+        optional_string(module_field(job, :summary)) ||
+        "Host visual QA completed."
+
+    %{
+      "status" => optional_string(module_field(host_visual_qa, :status)) || optional_string(module_field(job, :status)) || "passed",
+      "summary" => summary,
+      "reason" => summary,
+      "required_action" => optional_string(module_field(host_visual_qa, :required_action)),
+      "checks" => list_field(host_visual_qa, :checks),
+      "artifacts" => host_visual_qa |> list_field(:artifacts) |> Enum.map(&route_safe_artifact/1)
+    }
+    |> drop_nil_values()
+  end
+
+  defp host_visual_qa_blocked_job?(job) do
+    blocked_reason = optional_string(module_field(job, :blocked_reason)) || ""
+    normalize_token(module_field(job, :status)) == "blocked" and String.contains?(blocked_reason, "host_visual_qa")
+  end
+
+  defp blocked_host_visual_qa_route_payload(job) do
+    reason =
+      optional_string(module_field(job, :summary)) ||
+        optional_string(module_field(job, :blocked_reason)) ||
+        "Host visual QA was blocked."
+
+    %{
+      "status" => "blocked",
+      "reason" => reason,
+      "summary" => reason,
+      "required_action" => "Fix host visual QA infrastructure or attach structured desktop/mobile evidence before handoff."
+    }
+  end
+
+  defp list_field(map, key) when is_map(map) do
+    case module_field(map, key) do
+      values when is_list(values) -> values
+      _value -> []
+    end
+  end
+
+  defp route_safe_artifact(artifact) when is_map(artifact) do
+    metadata =
+      artifact
+      |> module_field(:metadata)
+      |> route_safe_artifact_metadata()
+
+    artifact
+    |> Map.drop(["path", :path])
+    |> Map.put("metadata", metadata)
+  end
+
+  defp route_safe_artifact(artifact), do: artifact
+
+  defp route_safe_artifact_metadata(metadata) when is_map(metadata) do
+    Map.drop(metadata, ["path", :path, "artifact_dir", :artifact_dir, "manifest_path", :manifest_path])
+  end
+
+  defp route_safe_artifact_metadata(_metadata), do: %{}
+
+  defp drop_nil_values(map) do
+    Map.reject(map, fn {_key, value} -> is_nil(value) end)
+  end
+
+  defp normalize_token(value) when is_atom(value), do: normalize_token(Atom.to_string(value))
+
+  defp normalize_token(value) when is_binary(value) do
+    value
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_token(value), do: value |> to_string() |> normalize_token()
+
+  defp optional_string(nil), do: nil
+
+  defp optional_string(value) do
+    value
+    |> to_string()
+    |> String.trim()
+    |> case do
+      "" -> nil
+      string -> string
+    end
   end
 
   defp product_visual_review_config(routing_context) do
@@ -286,8 +407,39 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
   defp append_quality_gate_check(checks, quality_gate) do
     checks = if is_list(checks), do: checks, else: []
-    checks ++ [QualityGate.check(quality_gate)]
+    checks ++ [quality_gate |> route_safe_quality_gate() |> QualityGate.check()]
   end
+
+  defp route_safe_quality_gate(quality_gate) when is_map(quality_gate) do
+    Map.new(quality_gate, fn {key, value} ->
+      if normalize_token(key) == "host_visual_qa" do
+        {key, route_safe_host_visual_qa(value)}
+      else
+        {key, route_safe_quality_gate(value)}
+      end
+    end)
+  end
+
+  defp route_safe_quality_gate(values) when is_list(values), do: Enum.map(values, &route_safe_quality_gate/1)
+  defp route_safe_quality_gate(value), do: value
+
+  defp route_safe_host_visual_qa(host_visual_qa) when is_map(host_visual_qa) do
+    Enum.reduce(host_visual_qa, %{}, fn {key, value}, acc ->
+      case normalize_token(key) do
+        token when token in ["artifact_dir", "manifest_path", "raw_output"] ->
+          acc
+
+        "artifacts" when is_list(value) ->
+          Map.put(acc, key, Enum.map(value, &route_safe_artifact/1))
+
+        _token ->
+          Map.put(acc, key, route_safe_host_visual_qa(value))
+      end
+    end)
+  end
+
+  defp route_safe_host_visual_qa(values) when is_list(values), do: Enum.map(values, &route_safe_host_visual_qa/1)
+  defp route_safe_host_visual_qa(value), do: value
 
   defp handoff_manifest_check_for_completion(completion, workspace, worker_host) do
     case HandoffManifest.source(completion) do

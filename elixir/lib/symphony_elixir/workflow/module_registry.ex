@@ -210,7 +210,11 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "max_repair_passes" => 1,
           "runtime_isolation" => "serialized",
           "reviewer_timeout_ms" => 1_200_000,
-          "reviewer_max_retries" => 0
+          "reviewer_max_retries" => 0,
+          "host_visual_qa" => %{
+            "enabled" => true,
+            "timeout_ms" => 300_000
+          }
         }
       },
       prompt_sections: [

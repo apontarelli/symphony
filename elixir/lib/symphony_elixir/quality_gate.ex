@@ -5,7 +5,8 @@ defmodule SymphonyElixir.QualityGate do
 
   alias SymphonyElixir.Codex.{AppServer, ExecutionProfile}
   alias SymphonyElixir.{Config, Linear.Issue, SSH}
-  alias SymphonyElixir.QualityGate.{Planner, Synthesis}
+  alias SymphonyElixir.QualityGate.{HostVisualQa, Planner, Synthesis}
+  alias SymphonyElixir.ReviewRecords.Redaction
 
   @type result :: map()
   @browser_review_categories [:scenario_qa, :product_visual_review]
@@ -50,8 +51,9 @@ defmodule SymphonyElixir.QualityGate do
     settings = Keyword.get(opts, :settings, Config.settings!().quality_gate)
     runner = Keyword.get(opts, :runner, &default_runner/1)
     browser_preflight = Keyword.get(opts, :browser_preflight, &default_browser_preflight/1)
+    host_visual_qa = Keyword.get(opts, :host_visual_qa, &HostVisualQa.run/1)
     worker_host = Keyword.get(opts, :worker_host)
-    review_context = review_context(issue, policy, settings, runner, browser_preflight, worker_host)
+    review_context = review_context(issue, policy, settings, runner, browser_preflight, host_visual_qa, worker_host)
 
     plan =
       Planner.plan(%{
@@ -80,6 +82,7 @@ defmodule SymphonyElixir.QualityGate do
           settings: settings,
           runner: runner,
           browser_preflight: browser_preflight,
+          host_visual_qa: host_visual_qa,
           worker_host: worker_host,
           max_attempts: max_repair_passes(settings)
         }
@@ -186,7 +189,8 @@ defmodule SymphonyElixir.QualityGate do
         context.settings,
         context.runner,
         synthesis,
-        attempt
+        attempt,
+        context.worker_host
       )
 
     if repair_result.status == :passed do
@@ -205,6 +209,7 @@ defmodule SymphonyElixir.QualityGate do
             context.settings,
             context.runner,
             context.browser_preflight,
+            context.host_visual_qa,
             context.worker_host
           ),
           {:repair, attempt}
@@ -325,13 +330,14 @@ defmodule SymphonyElixir.QualityGate do
 
   defp scope_completion?(_completion), do: false
 
-  defp review_context(issue, policy, settings, runner, browser_preflight, worker_host) do
+  defp review_context(issue, policy, settings, runner, browser_preflight, host_visual_qa, worker_host) do
     %{
       issue: issue,
       policy: policy,
       settings: settings,
       runner: runner,
       browser_preflight: browser_preflight,
+      host_visual_qa: host_visual_qa,
       worker_host: worker_host
     }
   end
@@ -371,33 +377,112 @@ defmodule SymphonyElixir.QualityGate do
     blocked_job_result(job, phase, :isolated_runtime_requires_workspace_isolation)
   end
 
-  defp run_review_job(job, plan, context, phase) do
-    case maybe_run_browser_preflight(job, plan, context.browser_preflight, context.worker_host) do
-      :ok ->
-        review_policy = review_policy_for(job, plan, context.policy)
+  defp run_review_job(%{category: :product_visual_review} = job, plan, context, phase) do
+    case maybe_run_host_visual_qa(job, plan, context) do
+      {:ok, host_visual_qa} ->
+        job
+        |> attach_host_visual_qa(host_visual_qa)
+        |> run_reviewer_job(plan, context, phase, read_only_review_policy(context.policy))
 
-        runner_context = %{
-          kind: :review,
-          job: job,
-          plan: plan_to_map(plan),
-          issue: context.issue,
-          policy: review_policy,
-          settings: context.settings,
-          workspace: plan.workspace,
-          phase: phase
-        }
-
-        runner_context
-        |> context.runner.()
-        |> normalize_review_result(job, phase)
+      :skip ->
+        run_browser_backed_review_job(job, plan, context, phase)
 
       {:error, reason} ->
-        blocked_job_result(job, phase, reason)
+        blocked_job_result(job, phase, {:host_visual_qa_failed, reason})
     end
   rescue
     error -> blocked_job_result(job, phase, Exception.message(error))
   catch
     kind, reason -> blocked_job_result(job, phase, {kind, reason})
+  end
+
+  defp run_review_job(job, plan, context, phase) do
+    run_browser_backed_review_job(job, plan, context, phase)
+  rescue
+    error -> blocked_job_result(job, phase, Exception.message(error))
+  catch
+    kind, reason -> blocked_job_result(job, phase, {kind, reason})
+  end
+
+  defp run_browser_backed_review_job(job, plan, context, phase) do
+    case maybe_run_browser_preflight(job, plan, context.browser_preflight, context.worker_host) do
+      :ok ->
+        run_reviewer_job(job, plan, context, phase, review_policy_for(job, plan, context.policy))
+
+      {:error, reason} ->
+        blocked_job_result(job, phase, reason)
+    end
+  end
+
+  defp run_reviewer_job(job, plan, context, phase, review_policy) do
+    runner_context = %{
+      kind: :review,
+      job: job,
+      plan: plan_to_map(plan),
+      issue: context.issue,
+      policy: review_policy,
+      settings: context.settings,
+      workspace: plan.workspace,
+      worker_host: context.worker_host,
+      phase: phase
+    }
+
+    runner_context
+    |> context.runner.()
+    |> normalize_review_result(job, phase)
+  end
+
+  defp maybe_run_host_visual_qa(job, plan, context) do
+    invoke_host_visual_qa(context.host_visual_qa, %{
+      job: job,
+      plan: plan_to_map(plan),
+      issue: context.issue,
+      policy: context.policy,
+      settings: context.settings,
+      workspace: plan.workspace,
+      worker_host: context.worker_host
+    })
+    |> normalize_host_visual_qa_result()
+  end
+
+  defp invoke_host_visual_qa(host_visual_qa, context) when is_function(host_visual_qa, 1) do
+    host_visual_qa.(context)
+  end
+
+  defp invoke_host_visual_qa(_host_visual_qa, _context), do: {:error, :invalid_host_visual_qa}
+
+  defp normalize_host_visual_qa_result(:skip), do: :skip
+  defp normalize_host_visual_qa_result({:ok, payload}) when is_map(payload), do: {:ok, normalize_nested_map(payload)}
+  defp normalize_host_visual_qa_result({:error, reason}), do: {:error, reason}
+  defp normalize_host_visual_qa_result(other), do: {:error, {:invalid_result, other}}
+
+  defp attach_host_visual_qa(job, host_visual_qa) do
+    job
+    |> Map.put(:host_visual_qa, host_visual_qa)
+    |> Map.update(:prompt, host_visual_qa_prompt(host_visual_qa), fn prompt ->
+      [prompt, host_visual_qa_prompt(host_visual_qa)]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join("\n\n")
+    end)
+  end
+
+  defp host_visual_qa_prompt(host_visual_qa) do
+    encoded =
+      case Jason.encode(host_visual_qa, pretty: true) do
+        {:ok, json} -> json
+        {:error, _reason} -> inspect(host_visual_qa, pretty: true)
+      end
+
+    """
+    ## Host visual QA artifacts
+
+    A host-owned visual QA command already ran outside the reviewer sandbox. Review these artifacts and checks; do not launch a browser from the reviewer sandbox.
+
+    ```json
+    #{encoded}
+    ```
+    """
+    |> String.trim()
   end
 
   defp review_policy_for(%{category: category}, plan, policy) when category in @browser_review_categories do
@@ -510,7 +595,7 @@ defmodule SymphonyElixir.QualityGate do
     |> String.slice(0, 500)
   end
 
-  defp run_repair(plan, issue, policy, settings, runner, synthesis, attempt) do
+  defp run_repair(plan, issue, policy, settings, runner, synthesis, attempt, worker_host) do
     context = %{
       kind: :repair,
       attempt: attempt,
@@ -519,6 +604,7 @@ defmodule SymphonyElixir.QualityGate do
       policy: policy,
       settings: settings,
       workspace: plan.workspace,
+      worker_host: worker_host,
       synthesis: synthesis,
       prompt: repair_prompt(plan, synthesis, attempt)
     }
@@ -532,28 +618,46 @@ defmodule SymphonyElixir.QualityGate do
     kind, reason -> blocked_repair_result(attempt, {kind, reason})
   end
 
-  defp default_runner(%{kind: :review, workspace: workspace, job: job, policy: policy, issue: issue, settings: settings})
+  defp default_runner(%{
+         kind: :review,
+         workspace: workspace,
+         worker_host: worker_host,
+         job: job,
+         policy: policy,
+         issue: issue,
+         settings: settings
+       })
        when is_binary(workspace) do
-    run_codex(workspace, job.prompt, issue, policy, job.execution_profile, settings)
+    run_codex(workspace, job.prompt, issue, policy, job.execution_profile, settings, worker_host)
   end
 
   defp default_runner(%{kind: :review}) do
     {:ok, %{status: :blocked, blocked_reason: :workspace_unavailable, findings: []}}
   end
 
-  defp default_runner(%{kind: :repair, workspace: workspace, prompt: prompt, policy: policy, issue: issue, settings: settings})
+  defp default_runner(%{
+         kind: :repair,
+         workspace: workspace,
+         worker_host: worker_host,
+         prompt: prompt,
+         policy: policy,
+         issue: issue,
+         settings: settings
+       })
        when is_binary(workspace) do
-    run_codex(workspace, prompt, issue, policy, "implementation", settings)
+    run_codex(workspace, prompt, issue, policy, "implementation", settings, worker_host)
   end
 
-  defp run_codex(workspace, prompt, issue, policy, execution_profile, _settings) do
+  defp run_codex(workspace, prompt, issue, policy, execution_profile, _settings, worker_host) do
     profile = ExecutionProfile.resolve(Config.settings!(), execution_profile)
 
-    opts_base = [
-      policy: policy,
-      execution_profile: execution_profile,
-      turn_timeout_ms: profile.timeout_ms
-    ]
+    opts_base =
+      [
+        policy: policy,
+        execution_profile: execution_profile,
+        turn_timeout_ms: profile.timeout_ms
+      ]
+      |> maybe_put_worker_host(worker_host)
 
     run_codex_attempt(
       workspace,
@@ -615,6 +719,12 @@ defmodule SymphonyElixir.QualityGate do
 
   defp max_codex_attempts(_profile), do: 1
 
+  defp maybe_put_worker_host(opts, worker_host) when is_binary(worker_host) and worker_host != "" do
+    Keyword.put(opts, :worker_host, worker_host)
+  end
+
+  defp maybe_put_worker_host(opts, _worker_host), do: opts
+
   defp drain_messages(ref, acc \\ []) do
     receive do
       {^ref, message} -> drain_messages(ref, [message | acc])
@@ -667,7 +777,7 @@ defmodule SymphonyElixir.QualityGate do
   defp normalize_review_result(other, job, phase), do: blocked_job_result(job, phase, {:invalid_reviewer_output, other})
 
   defp review_result(payload, job, phase) do
-    %{
+    result = %{
       id: "#{job.id}:#{phase_label(phase)}",
       category: job.category,
       status: normalize_status(value_at(payload, :status), :blocked),
@@ -680,9 +790,16 @@ defmodule SymphonyElixir.QualityGate do
       findings: normalize_findings(value_at(payload, :findings)),
       raw_output: payload
     }
+
+    case Map.get(job, :host_visual_qa) do
+      host_visual_qa when is_map(host_visual_qa) -> Map.put(result, :host_visual_qa, host_visual_qa)
+      _host_visual_qa -> result
+    end
   end
 
   defp blocked_job_result(job, phase, reason) do
+    reason = blocked_reason(reason)
+
     %{
       id: "#{Map.get(job, :id, "review")}:#{phase_label(phase)}",
       category: Map.get(job, :category, :review),
@@ -692,8 +809,8 @@ defmodule SymphonyElixir.QualityGate do
       phase: phase,
       execution_profile: Map.get(job, :execution_profile),
       isolation: Map.get(job, :isolation),
-      blocked_reason: inspect(reason),
-      summary: "Reviewer job blocked: #{inspect(reason)}",
+      blocked_reason: reason,
+      summary: "Reviewer job blocked: #{reason}",
       findings: [],
       raw_output: %{}
     }
@@ -716,15 +833,23 @@ defmodule SymphonyElixir.QualityGate do
   end
 
   defp blocked_repair_result(attempt, reason) do
+    reason = blocked_reason(reason)
+
     %{
       id: "repair:#{attempt}",
       kind: :repair,
       attempt: attempt,
       status: :blocked,
-      blocked_reason: inspect(reason),
-      summary: "Repair pass blocked: #{inspect(reason)}",
+      blocked_reason: reason,
+      summary: "Repair pass blocked: #{reason}",
       raw_output: %{}
     }
+  end
+
+  defp blocked_reason(reason) do
+    reason
+    |> inspect()
+    |> Redaction.redact_string()
   end
 
   defp replace_results(current_results, rerun_results, rerun_categories) do

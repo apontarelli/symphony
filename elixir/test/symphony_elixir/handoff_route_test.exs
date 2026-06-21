@@ -791,6 +791,221 @@ defmodule SymphonyElixir.HandoffRouteTest do
     end
   end
 
+  test "recorder derives product visual review evidence from host quality gate artifacts" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-host-quality-gate-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "quality_gate" => %{
+              "status" => "passed",
+              "final_jobs" => [
+                %{
+                  "category" => "product_visual_review",
+                  "status" => "passed",
+                  "host_visual_qa" => %{
+                    "status" => "passed",
+                    "summary" => "Host visual QA captured desktop and mobile.",
+                    "checks" => [%{"name" => "viewport_screenshots", "status" => "passed"}],
+                    "artifacts" => [
+                      %{
+                        "kind" => "screenshot",
+                        "label" => "Desktop screenshot",
+                        "summary" => "Desktop screenshot captured.",
+                        "metadata" => %{"path" => "/tmp/symphony/desktop.png"}
+                      }
+                    ],
+                    "artifact_dir" => "/tmp/symphony"
+                  }
+                }
+              ]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :product_visual_review
+      assert Enum.map(decision.artifacts, & &1.label) == ["Desktop screenshot"]
+      assert hd(decision.artifacts).metadata == %{}
+
+      assert %{kind: :product_visual_review, status: :passed, summary: summary} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert summary =~ "Host visual QA captured desktop and mobile"
+      refute inspect(HandoffRoute.to_map(decision)) =~ "/tmp/symphony"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder derives host quality gate visual evidence from job summary and mixed artifacts" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-host-quality-gate-fallbacks-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "quality_gate" => %{
+              "status" => "passed",
+              "final_jobs" => [
+                %{"category" => nil},
+                %{
+                  "category" => "product_visual_review",
+                  "status" => "passed",
+                  "summary" => "Job summary supplied host visual QA evidence.",
+                  "host_visual_qa" => %{
+                    "status" => "passed",
+                    "summary" => " ",
+                    "artifacts" => [
+                      "raw artifact note",
+                      %{
+                        "kind" => "note",
+                        "label" => "Manual note",
+                        "summary" => "Operator attached manual note.",
+                        "metadata" => "not a metadata map"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :product_visual_review
+
+      assert %{kind: :product_visual_review, status: :passed, summary: summary} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert summary =~ "Job summary supplied host visual QA evidence"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder derives blocked product visual review evidence from host quality gate blockers" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workflow_module_ids: ["product_visual_review"],
+      workflow_modules_product_visual_review: %{enabled: true, route_policy: "auto"}
+    )
+
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-visual-host-quality-gate-blocked-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(Path.join(workspace, "lib/example_web/live"))
+      File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
+
+      decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "quality_gate" => %{
+              "status" => "blocked",
+              "final_jobs" => [
+                "not a job",
+                %{"category" => nil},
+                %{"category" => 123},
+                %{"category" => "product_visual_review", "status" => "passed"},
+                %{
+                  "category" => "product_visual_review",
+                  "status" => "blocked",
+                  "summary" => "Job summary says host visual QA infrastructure failed.",
+                  "blocked_reason" => "host_visual_qa command failed after browser capture timed out"
+                }
+              ]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert decision.route == :blocked
+
+      assert %{kind: :product_visual_review, status: :blocked, summary: summary} =
+               Enum.find(decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert summary =~ "Job summary says host visual QA infrastructure failed"
+
+      reason_only_decision =
+        HandoffRouteRecorder.classify_completion(
+          %{
+            "checks" => [%{"name" => "all", "status" => "passed"}],
+            "review" => %{"status" => "clean"},
+            "changed_files" => ["lib/example_web/live/dashboard_live.ex"],
+            "quality_gate" => %{
+              "status" => "blocked",
+              "final_jobs" => [
+                %{
+                  "category" => "product_visual_review",
+                  "status" => nil,
+                  "blocked_reason" => "host_visual_qa skipped without a status"
+                },
+                %{
+                  "category" => "product_visual_review",
+                  "status" => "blocked",
+                  "blocked_reason" => "host_visual_qa command failed without a job summary"
+                }
+              ]
+            }
+          },
+          nil,
+          workspace
+        )
+
+      assert reason_only_decision.route == :blocked
+
+      assert %{kind: :product_visual_review, status: :blocked, summary: reason_only_summary} =
+               Enum.find(reason_only_decision.evidence, &(&1.kind == :product_visual_review))
+
+      assert reason_only_summary =~ "host_visual_qa command failed without a job summary"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "missing required visual capture tooling routes as structured blocked evidence" do
     write_workflow_file!(Workflow.workflow_file_path(),
       workflow_module_ids: ["product_visual_review"],

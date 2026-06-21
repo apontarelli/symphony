@@ -967,6 +967,23 @@ Quality gate:
   keys include `source` / `sources` for source-correctness review and `tests` / `test` for
   test-quality review. Built-in defaults cover common layouts, but manifests SHOULD add patterns
   for repo-specific language or directory conventions that defaults may miss.
+- `runtime.quality_gate.host_visual_qa.enabled`: boolean, default `true`.
+- `runtime.quality_gate.host_visual_qa.command`: optional shell command. When blank, product visual
+  review uses the browser-backed reviewer path.
+- `runtime.quality_gate.host_visual_qa.timeout_ms`: positive integer, default `300000`.
+- `runtime.quality_gate.host_visual_qa.artifact_root`: optional host or worker path. When omitted,
+  implementations SHOULD create host-visual-QA artifacts under a temp root.
+
+When `runtime.quality_gate.host_visual_qa.command` is configured for product visual review, the
+implementation runs the command as a host-owned pre-review step outside the reviewer sandbox. The
+command receives a clean allowlisted environment plus `SYMPHONY_VISUAL_QA_ARTIFACT_DIR`,
+`SYMPHONY_VISUAL_QA_MANIFEST`, `SYMPHONY_VISUAL_QA_CATEGORY`, and, when available,
+`SYMPHONY_ISSUE_IDENTIFIER`. It SHOULD write a JSON manifest to `SYMPHONY_VISUAL_QA_MANIFEST`;
+stdout JSON MAY be used as a fallback for local commands. For remote worker hosts, artifact paths are
+interpreted on the worker, and implementations MUST return the manifest content to the orchestrator
+rather than assuming the worker path exists locally. Host-visual-QA failure output exposed through
+quality-gate blockers, summaries, records, or handoff routing MUST be redacted for secret-shaped
+values and unsafe local paths.
 
 Implementations that run host-owned quality gates SHOULD persist each completed quality-gate run as a
 host-owned review record after synthesis and handoff-route classification. The default records root

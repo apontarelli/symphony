@@ -240,6 +240,46 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     @runtime_isolation_modes ~w(serialized isolated_workspace blocked)
 
+    defmodule HostVisualQa do
+      @moduledoc false
+      use Ecto.Schema
+      import Ecto.Changeset
+
+      @primary_key false
+
+      embedded_schema do
+        field(:enabled, :boolean, default: true)
+        field(:command, :string)
+        field(:timeout_ms, :integer, default: 300_000)
+        field(:artifact_root, :string)
+      end
+
+      @type t :: %__MODULE__{
+              enabled: boolean(),
+              command: String.t() | nil,
+              timeout_ms: pos_integer(),
+              artifact_root: String.t() | nil
+            }
+
+      @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+      def changeset(schema, attrs) do
+        schema
+        |> cast(attrs, [:enabled, :command, :timeout_ms, :artifact_root], empty_values: [])
+        |> update_change(:command, &normalize_optional_string/1)
+        |> update_change(:artifact_root, &normalize_optional_string/1)
+        |> validate_number(:timeout_ms, greater_than: 0)
+      end
+
+      defp normalize_optional_string(value) when is_binary(value) do
+        value
+        |> String.trim()
+        |> case do
+          "" -> nil
+          trimmed -> trimmed
+        end
+      end
+    end
+
     embedded_schema do
       field(:enabled, :boolean, default: true)
       field(:source_max_concurrency, :integer, default: 3)
@@ -248,6 +288,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:reviewer_timeout_ms, :integer, default: 1_200_000)
       field(:reviewer_max_retries, :integer, default: 0)
       field(:path_classification, :map, default: %{})
+      embeds_one(:host_visual_qa, HostVisualQa, on_replace: :update, defaults_to_struct: true)
     end
 
     @type t :: %__MODULE__{
@@ -257,7 +298,8 @@ defmodule SymphonyElixir.Config.Schema do
             runtime_isolation: String.t(),
             reviewer_timeout_ms: pos_integer(),
             reviewer_max_retries: non_neg_integer(),
-            path_classification: map()
+            path_classification: map(),
+            host_visual_qa: HostVisualQa.t()
           }
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -276,6 +318,7 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
+      |> cast_embed(:host_visual_qa, with: &HostVisualQa.changeset/2)
       |> update_change(:runtime_isolation, &normalize_runtime_isolation/1)
       |> validate_number(:source_max_concurrency, greater_than: 0)
       |> validate_number(:max_repair_passes, greater_than_or_equal_to: 0)
