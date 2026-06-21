@@ -97,9 +97,10 @@ cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony --workflow /path/to/target-repo/symphony.yml
 ```
 
-The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. It can
-also enable the dashboard/API with `--port <port>` and select a workflow profile with
-`--profile <name>`.
+The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. A
+workflow can enable the dashboard/API with `runtime.server.port`; `--port <port>` or
+`SYMPHONY_PORT` overrides that value for one process. Use `--profile <name>` to select a workflow
+profile.
 
 ## Implement your own
 

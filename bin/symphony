@@ -16,7 +16,7 @@ Project resolution:
 Options:
   --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
   --no-env-file               Do not call `op run`; use the current environment.
-  --port <port>               Dashboard/API port. Defaults to PORT, then 4000.
+  --port <port>               Dashboard/API port override. Defaults to workflow runtime.server.port.
   --logs-root <path>          Logs dir. Default: <symphony-elixir-dir>/log.
   --profile <name>            Select one workflow profile for this process.
   --dev-root <path>           Project root directory. Default: ~/dev.
@@ -89,7 +89,7 @@ run_elixir() {
   local repo_root="$1"
   local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
   local workflow="${SYMPHONY_WORKFLOW:-}"
-  local port="${SYMPHONY_PORT:-${PORT:-4000}}"
+  local port="${SYMPHONY_PORT:-}"
   local logs_root="${SYMPHONY_LOGS_ROOT:-"$symphony_home/log"}"
   local profile="${SYMPHONY_PROFILE:-}"
   local args
@@ -123,9 +123,12 @@ run_elixir() {
   args=(
     --i-understand-that-this-will-be-running-without-the-usual-guardrails
     "$workflow"
-    --port "$port"
     --logs-root "$logs_root"
   )
+
+  if [[ -n "$port" ]]; then
+    args+=(--port "$port")
+  fi
 
   if [[ -n "$profile" ]]; then
     args+=(--profile "$profile")
