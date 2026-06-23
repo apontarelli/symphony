@@ -191,7 +191,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           },
           "thread_sandbox" => "workspace-write",
           "turn_timeout_ms" => 3_600_000,
-          "read_timeout_ms" => 5_000,
+          "read_timeout_ms" => 30_000,
           "stall_timeout_ms" => 300_000,
           "execution_profiles" => %{
             "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},

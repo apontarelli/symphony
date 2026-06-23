@@ -943,7 +943,7 @@ fields locally if they want stricter startup checks.
 - `runtime.codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
 - `runtime.codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
 - `runtime.codex.turn_timeout_ms`: integer, default `3600000`
-- `runtime.codex.read_timeout_ms`: integer, default `5000`
+- `runtime.codex.read_timeout_ms`: integer, default `30000`
 - `runtime.codex.stall_timeout_ms`: integer, default `300000`
   - If `<= 0`, stall detection is disabled.
 - `runtime.codex.execution_profiles`: map of named Codex job profiles, default implementation-defined
