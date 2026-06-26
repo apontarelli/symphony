@@ -54,8 +54,8 @@ Important boundary:
 - Recover from transient failures with exponential backoff.
 - Resolve a repository-owned `symphony.yml` manifest through Symphony-owned workflow modules into a
   compiled workflow used at runtime.
-- Launch Codex with a dedicated harness `CODEX_HOME` while layering target repo `AGENTS.md` and other
-  repo-local docs after the harness global instructions.
+- Launch the configured `AgentRuntime` with dedicated harness isolation while layering target repo
+  `AGENTS.md` and other repo-local docs after harness global instructions.
 - Expose operator-visible observability (at minimum structured logs).
 - Support tracker/filesystem-driven restart recovery without requiring a persistent database; exact
   in-memory scheduler state is not restored.
@@ -115,13 +115,21 @@ Important boundary:
    - Runs workspace lifecycle hooks.
    - Cleans workspaces for terminal issues.
 
-8. `Agent Runner`
-   - Creates workspace.
-   - Builds prompt from issue + compiled workflow template.
-   - Launches the coding agent app-server client with the harness `CODEX_HOME`.
-   - Streams agent updates back to the orchestrator.
+8. `AgentRuntime`
+   - Provides the runner seam between Symphony orchestration and a concrete coding-agent runtime.
+   - Starts sessions in prepared workspaces, streams normalized runtime events, stops sessions, and
+     reports runtime capabilities.
+   - The initial reference adapter is Codex app-server; future adapters MAY target other agent
+     runtimes without changing orchestrator event semantics.
 
-9. `Status Surface` (OPTIONAL)
+9. `ProcessSupervisor`
+   - Provides the shared OS process primitive used by `AgentRuntime` adapters.
+   - Spawns configured runner argv without an intermediate shell by default.
+   - Tracks process identity needed for timeout handling, process-group termination, descendant
+     cleanup, and startup stale-child recovery.
+   - Owns process lifecycle mechanics; `AgentRuntime` owns runtime protocol translation.
+
+10. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
@@ -250,8 +258,8 @@ Logical fields:
 - `tools` (map/list)
   - Tool-use guidance and optional client-side tools.
 - `harness` (map)
-  - Harness `CODEX_HOME`, global instruction path, app-server launch policy, and instruction
-    layering rules.
+  - Harness instruction root, global instruction path, runner-specific isolation files, and
+    instruction layering rules.
 - `runtime` (map)
   - Typed runtime settings consumed by the scheduler, workspace manager, and agent runner.
 
@@ -299,18 +307,20 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_progress_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `last_codex_error_signature` (compact string or null)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `session_id` (string)
+- `conversation_id` (string or null)
+- `turn_id` (string or null)
+- `runner` (string)
+- `runner_kind` (string)
+- `process_id` (string or null)
+- `last_runtime_event` (string/enum or null)
+- `last_runtime_timestamp` (timestamp or null)
+- `last_runtime_progress_timestamp` (timestamp or null)
+- `last_runtime_message` (summarized payload)
+- `last_runtime_error_signature` (compact string or null)
+- `runtime_input_tokens` (integer)
+- `runtime_output_tokens` (integer)
+- `runtime_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -342,8 +352,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `runtime_totals` (aggregate tokens + runtime seconds)
+- `runtime_rate_limits` (latest rate-limit snapshot from agent runtime events, when available)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -741,7 +751,8 @@ Module outputs MAY include:
 - `transitions`
   - State routing and handoff/merge/rework rules.
 - `harness`
-  - Harness `CODEX_HOME` files, global instructions, or Codex launch policy fragments.
+  - Harness instruction files, global instructions, runner-specific isolation files, or launch policy
+    fragments.
 
 Module resolution rules:
 
@@ -851,7 +862,7 @@ Minimal shape:
   "transitions": {},
   "tools": {},
   "harness": {
-    "codex_home": "/path/to/symphony/harness/codex-home",
+    "home": "/path/to/symphony/harness",
     "global_agents_md": "AGENTS.md",
     "instruction_layers": ["harness_global", "target_repo", "compiled_workflow", "issue"]
   },
@@ -870,7 +881,7 @@ Configuration is resolved in this order:
 2. Parse and validate the manifest.
 3. Resolve presets, modules, pins, and overrides.
 4. Merge service deployment config for host-specific values such as workspace root, credentials,
-   Codex executable, harness `CODEX_HOME`, logs, ports, and worker hosts.
+   runner commands, harness root, logs, ports, and worker hosts.
 5. Compile the workflow.
 6. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
 7. Coerce and validate typed runtime values.
@@ -908,10 +919,45 @@ Tracker:
 - `runtime.tracker.workspace_slug`: string, optional Linear workspace URL slug used to render team
   links such as `https://linear.app/<workspace_slug>/team/<team_key>/all`.
 - `runtime.tracker.required_labels`: list of strings, default `[]`
+- `runtime.tracker.excluded_labels`: list of strings, default `["human-only", "needs-info"]`
 - `runtime.tracker.active_states`: list of strings, default
   `["Todo", "In Progress", "Merging", "Rework"]`
 - `runtime.tracker.terminal_states`: list of strings, default
   `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+
+Dispatchability is a tracker-state contract:
+
+- Issues outside `active_states` are not eligible for implementation dispatch by default.
+- `Backlog` is intake/not-ready work by default, including weakly groomed issues, issues blocked on human
+  information, and valid work intentionally parked for later.
+- `Todo` is the default ready-for-dispatch state.
+- Labels explain why a Backlog issue is not dispatchable; they do not make an issue dispatchable unless
+  required labels are explicitly configured.
+- A dedicated grooming workflow may promote a Backlog issue to `Todo` only after the issue has bounded
+  scope, explicit acceptance criteria, a validation path, named repo context or entrypoints, no
+  remaining `needs-info` or `human-only` label, and no remaining `needs-grooming` label. Promotion
+  MUST remove `needs-grooming`; if the workflow cannot update labels, it MUST NOT promote the issue.
+- Grooming that changes dispatch readiness SHOULD rewrite the issue description as the authoritative
+  dispatch input. Preserve reporter facts that still matter, but do not preserve stale ambiguity just
+  to keep the original text inline; Linear history is the audit trail. Use stable sections such as
+  `## Scope`, `## Acceptance Criteria`, `## Validation`, and `## Repo Context`. Include
+  `## Open Questions` only while the issue remains blocked in Backlog. When a human answer resolves a
+  `needs-info` question, fold the answer into the authoritative sections and remove the resolved open
+  question before promoting to `Todo`. After resolving `needs-info`, the grooming workflow SHOULD
+  promote directly to `Todo` when all promotion criteria pass. It SHOULD require another human review
+  only when the answer introduces a new product, architecture, policy, or tradeoff decision that the
+  agent cannot safely normalize into the issue contract. The `## Codex Workpad` comment is for
+  grooming notes, questions, and history; it is not the authoritative source for dispatch inputs.
+- `needs-info` is the canonical label for a specific human answer required before the issue can become
+  dispatchable, and is a dispatch-exclusion label even if the issue is otherwise in an active state.
+  An agent that applies `needs-info` MUST also comment the exact question.
+- `human-review`, `force-human-review`, `manual-review`, and `no-auto-land` are final review or
+  no-auto-land routing labels for completed work; they MUST NOT be used to mean intake is blocked.
+- `human-only` means the issue should not be automated and is a dispatch-exclusion label even if the
+  issue is otherwise in an active state. Grooming agents MAY apply it when the issue is clearly not
+  repo-automation work, such as credential updates, vendor/account actions, approvals, irreversible
+  production operations, or other work whose success depends on a human action outside the repository.
+  Agents SHOULD comment the reason when applying it.
 
 Scheduler and workspace:
 
@@ -923,35 +969,47 @@ Scheduler and workspace:
 - `runtime.hooks.before_remove`: shell script or null
 - `runtime.hooks.timeout_ms`: integer, default `60000`
 - `runtime.agent.max_concurrent_agents`: integer, default `10`
+- `runtime.agent.max_concurrent_startups`: integer, default `2`
 - `runtime.agent.max_turns`: integer, default `20`
 - `runtime.agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `runtime.agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `runtime.agent.default_runner`: string, default implementation-defined while legacy Codex config is
+  supported
 
-Codex:
+Agent runtimes:
 
-For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
-`turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
-Implementors SHOULD treat them as pass-through Codex config values rather than relying on a
-hand-maintained enum in this spec. To inspect the installed Codex schema, run
-`codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions referenced
-by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate these
-fields locally if they want stricter startup checks.
+- `runtime.runners`: map of runner name to runner config, default implementation-defined
+- `runtime.runners.<name>.kind`: string, REQUIRED for configured runners; initial supported kind is
+  `codex_app_server`
+- `runtime.runners.<name>.command`: list of argv strings, REQUIRED for configured runners unless an
+  implementation provides a compatibility default
+- `runtime.runners.<name>.max_concurrent_startups`: integer or null, optional per-runner startup cap
+  that additionally constrains startup capacity for that runner
 
-- `runtime.codex.command`: shell command string, default `codex app-server`
-- `runtime.codex.model`: Codex model name, default implementation-defined
-- `runtime.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `runtime.codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `runtime.codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `runtime.codex.turn_timeout_ms`: integer, default `3600000`
-- `runtime.codex.read_timeout_ms`: integer, default `30000`
-- `runtime.codex.stall_timeout_ms`: integer, default `300000`
-  - If `<= 0`, stall detection is disabled.
-- `runtime.codex.execution_profiles`: map of named Codex job profiles, default implementation-defined
-  conservative profiles for `implementation`, `planner`, `source_reviewer`, `test_reviewer`,
-  `runtime_qa`, `product_visual_review`, `docs_reviewer`, `security_reviewer`, and `synthesis`.
-  Profiles MAY set `model`, `reasoning_effort`, `budget`, `timeout_ms`, `max_retries`, or an
-  explicit `command`. When `command` is omitted, implementations SHOULD derive common model and
-  reasoning settings without requiring operators to edit the raw `runtime.codex.command` string.
+Runner-specific config:
+
+- `runtime.runners.<name>.kind` selects the adapter-specific config schema.
+- Runner-specific fields are scoped under `runtime.runners.<name>`, not top-level
+  `runtime.codex.*` fields. Implementations MAY support legacy `runtime.codex.*` fields only through
+  a documented migration adapter; the clean v1 contract is `runtime.runners`.
+- Common runner fields include:
+  - `command`: list of argv strings.
+  - `model`: model name or runtime-specific model selector, OPTIONAL.
+  - `turn_timeout_ms`: integer, default `3600000`.
+  - `read_timeout_ms`: integer, default `30000`.
+  - `stall_timeout_ms`: integer, default `300000`; if `<= 0`, stall detection is disabled.
+  - `execution_profiles`: map of named job profiles, default implementation-defined conservative
+    profiles for `implementation`, `planner`, `source_reviewer`, `test_reviewer`, `runtime_qa`,
+    `product_visual_review`, `docs_reviewer`, `security_reviewer`, and `synthesis`. Profiles MAY set
+    `model`, runtime-specific reasoning settings, `budget`, `timeout_ms`, `max_retries`, or an
+    explicit `command`.
+
+CodexAppServer runner-specific fields such as `approval_policy`, `thread_sandbox`, and
+`turn_sandbox_policy` are pass-through Codex config values under the selected Codex runner. Supported
+values are defined by the targeted Codex app-server version. To inspect the installed Codex schema,
+run `codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions
+referenced by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate
+these fields locally if they want stricter startup checks.
 
 Quality gate:
 
@@ -1040,14 +1098,16 @@ Profile policy:
 - When `delivery.pr_target` is not `main`, v1 MUST NOT automate promotion or merge-forward from that
   target branch to `main`.
 
-### 6.4 Harness `CODEX_HOME` and Instruction Layering
+### 6.4 Harness Isolation and Instruction Layering
 
-Symphony MUST launch Codex with a dedicated harness `CODEX_HOME` for unattended workflow runs.
+Symphony MUST launch agent runtimes with a dedicated harness root for unattended workflow runs. The
+selected `AgentRuntime` adapter defines which files or environment variables it needs inside that
+harness. For CodexAppServer, the adapter maps the harness root to a managed `CODEX_HOME`.
 
 Harness model:
 
-- The harness `CODEX_HOME` is owned by Symphony, not by the target repository and not by the
-  operator's ambient `~/.codex`.
+- The harness root is owned by Symphony, not by the target repository and not by the operator's
+  ambient tool home directory such as `~/.codex`.
 - The harness contains Symphony global `AGENTS.md`, runtime config, hooks, prompts, module-rendered
   support files, and any implementation-bundled skills/plugins required by selected extensions. The
   core delivery lifecycle MUST NOT depend on globally installed `symphony-*` delivery skills.
@@ -1168,8 +1228,8 @@ it.
 - `vcs` (object): `mode`, currently `jj`, `git`, or `none`.
 - `delivery` (object): delivery defaults such as `pr_target`.
 - `automation` (object): automation posture, currently `unattended` or `manual`.
-- `harness` (object): optional `codex_home`; `null` means the implementation derives a managed
-  harness CODEX_HOME.
+- `harness` (object): optional implementation-owned harness root; `null` means the implementation
+  derives a managed harness root.
 - `recovery` and `deployment` (objects): optional implementation metadata.
 
 CLI commands:
@@ -1177,8 +1237,11 @@ CLI commands:
 - `symphony workflow init` creates `symphony.yml` from repo inspection. It MUST NOT overwrite an
   existing manifest unless the operator passes an explicit replacement flag.
 - `symphony workflow check` validates manifest schema, selected preset/modules, repo doc
-  entrypoints, validation command shape, VCS/delivery defaults, configured harness CODEX_HOME
-  readiness, and tracker project scope.
+  entrypoints, validation command shape, VCS/delivery defaults, configured harness readiness, and
+  tracker project scope.
+- The runner-agnostic cutover does not require a durable migration CLI. Operators may update
+  manifests through an explicit one-time edit during upgrade; shipped config validation should teach
+  the new `runtime.runners` shape rather than preserving legacy fields.
 - `symphony workflow print` prints the resolved preset/modules/defaults. It MAY include the
   compiled workflow config and prompt without writing generated prompt files into the target repo.
 
@@ -1241,8 +1304,13 @@ Validation checks:
 - `runtime.tracker.project_id`, `runtime.tracker.project_slug`, or `runtime.tracker.team_key` is
   present when required by the selected tracker kind. Linear polling prefers `project_id`, then
   `project_slug`, then `team_key`.
-- `runtime.codex.command` is present and non-empty.
-- `harness.codex_home` and harness global instructions are available.
+- `runtime.agent.default_runner` resolves to a configured runner.
+- The selected runner command is present, non-empty, and represented as argv.
+- Legacy `runtime.codex.*` fields are rejected after the runner-agnostic cutover with a clear error
+  that points operators to `runtime.runners.<name>`. Implementations MAY use throwaway local
+  migration scripts during development, but they SHOULD NOT ship long-lived dual config support.
+- Harness isolation required by the selected runner is available. For the CodexAppServer adapter, the
+  harness Codex home and global instructions are available.
 - Every selected workflow profile resolves to an effective policy with a string
   `delivery.pr_target`.
 - Unknown or malformed workflow profile references fail validation, including CLI/runtime overrides.
@@ -1366,6 +1434,24 @@ Tick sequence:
 5. Dispatch eligible issues while slots remain.
 6. Notify observability/status consumers of state changes.
 
+Backlog grooming is a separate intake workflow, not implementation dispatch. A backlog watcher MAY
+poll Backlog issues that carry grooming-owned labels, but it SHOULD use cheap issue metadata before
+launching an LLM grooming run:
+
+1. Poll Backlog issues with labels such as `needs-grooming` or `needs-info`.
+2. Compare the current issue `updatedAt` with the last-seen value for that issue.
+3. If unchanged, do not launch grooming.
+4. If changed, fetch comment metadata for the changed issue before launching an LLM run.
+5. Launch grooming only when metadata indicates a plausible human answer or new grooming-relevant
+   change, such as a non-Symphony comment newer than the `needs-info` question.
+6. Ignore Symphony-authored comments for `needs-info` answer detection.
+
+Backlog grooming concurrency is owned by Symphony runtime state, not by Linear state. The watcher MUST
+prevent duplicate groomers for the same issue with an internal claim or lock. The claim SHOULD expire
+after a bounded timeout so a crashed grooming run does not strand the issue. Linear state SHOULD remain
+`Backlog` while grooming; do not add a `Grooming` or `Triage` state unless operators need a first-class
+visible queue.
+
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
 
@@ -1377,6 +1463,7 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `runtime.tracker.active_states` and not in `runtime.tracker.terminal_states`.
 - It is routed to this worker by the configured assignee and contains every label in
   `runtime.tracker.required_labels`.
+- It contains no labels from `runtime.tracker.excluded_labels`.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1406,6 +1493,17 @@ Per-state limit:
 - otherwise fallback to global limit
 
 The runtime counts issues by their current tracked state in the `running` map.
+
+Startup limit:
+
+- `runtime.agent.max_concurrent_startups` caps the number of runner sessions currently in startup
+  across all runners.
+- `runtime.runners.<name>.max_concurrent_startups`, when set, additionally caps startup concurrency
+  for that runner. It does not override the global cap; a startup is allowed only when both global
+  startup capacity and that runner's startup capacity are available.
+- Startup slots are separate from active-agent slots. A run consumes a startup slot until the selected
+  `AgentRuntime` emits `session_started` or a startup failure; after that it consumes only active-agent
+  capacity.
 
 ### 8.4 Retry and Backoff
 
@@ -1446,14 +1544,13 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_progress_timestamp` if meaningful progress has been seen,
-  - otherwise `last_codex_timestamp` if any event has been seen, else
+  - `last_runtime_progress_timestamp` if meaningful progress has been seen,
+  - otherwise `last_runtime_timestamp` if any event has been seen, else
   - `started_at`
-- Generic non-progress notifications such as repeated `error` or `item/started` frames update
-  `last_codex_timestamp` for observability but MUST NOT refresh
-  `last_codex_progress_timestamp`.
-- If `elapsed_ms > runtime.codex.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `runtime.codex.stall_timeout_ms <= 0`, skip stall detection entirely.
+- Generic non-progress notifications update `last_runtime_timestamp` for observability but MUST NOT
+  refresh `last_runtime_progress_timestamp`.
+- If `elapsed_ms > selected_runner.stall_timeout_ms`, terminate the worker and queue a retry.
+- If `selected_runner.stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
 
@@ -1572,41 +1669,58 @@ Invariant 3: Workspace key is sanitized.
 - Only `[A-Za-z0-9._-]` allowed in workspace directory names.
 - Replace all other characters with `_`.
 
-## 10. Agent Runner Protocol (Coding Agent Integration)
+## 10. AgentRuntime Protocol (Coding Agent Integration)
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
-app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
-protocol schemas, message payloads, transport framing, and method names.
+This section defines Symphony's language-neutral responsibilities when integrating a concrete
+coding-agent runtime. Symphony orchestration consumes the `AgentRuntime` contract, not native runtime
+protocol events. Each adapter translates its native protocol into Symphony-normalized events and
+error categories at the boundary.
 
-Protocol source of truth:
-
-- Implementations MUST send messages that are valid for the targeted Codex app-server version.
-- Implementations MUST consult the targeted Codex app-server documentation or generated schema
-  instead of treating this specification as a protocol schema.
-- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
-  protocol controls protocol shape and transport behavior.
-- Symphony-specific requirements in this section still control orchestration behavior, workspace
-  selection, prompt construction, continuation handling, and observability extraction.
+The initial reference adapter targets Codex app-server. The targeted Codex app-server protocol remains
+the source of truth for Codex-specific message payloads, transport framing, and method names inside
+that adapter. If this specification appears to conflict with the targeted Codex app-server protocol,
+the Codex protocol controls the adapter's native transport behavior, while Symphony-specific
+requirements still control orchestration behavior, workspace selection, prompt construction,
+continuation handling, and normalized observability extraction.
 
 ### 10.1 Launch Contract
 
-Subprocess launch parameters:
+Generic `AgentRuntime` launch parameters:
 
-- Command: `runtime.codex.command`
-- Invocation: `bash -lc <runtime.codex.command>`
-- Working directory: workspace path
+- Command: configured runner argv, not a shell string.
+- Working directory: workspace path.
+- Environment: implementation-defined base environment plus runner-specific overlay.
+- Transport/framing: the transport required by the selected adapter.
+
+Implementations SHOULD launch runners without an intermediate shell unless a specific adapter
+documents why shell evaluation is required. Runner launch SHOULD use the shared process supervision
+primitive described by the implementation so timeout, process-group cleanup, and stale-child recovery
+are consistent across adapters.
+
+RECOMMENDED additional process settings:
+
+- Max line size: 10 MB (for safe buffering)
+
+#### 10.1.1 CodexAppServer Adapter v1
+
+The initial reference adapter targets Codex app-server.
+
+Codex-specific launch parameters:
+
+- Command: `runtime.runners.<name>.command` for a runner with `kind: codex_app_server`.
+- Working directory: workspace path.
 - Environment: `CODEX_HOME` points at the Symphony-owned harness Codex home for the session.
-- Transport/framing: the protocol transport required by the targeted Codex app-server version
+- Transport/framing: the protocol transport required by the targeted Codex app-server version.
 
 Notes:
 
-- The default command is `codex app-server`.
+- The legacy default command is `codex app-server`.
 - Implementations MAY derive model and reasoning flags from typed runtime config. The default model
-  is `runtime.codex.model`; profile `model` values override it for that launch; explicit model
-  flags already present in `runtime.codex.command` control the command unchanged.
-- Non-implementation Codex jobs MAY run through `runtime.codex.execution_profiles`; when a profile
-  supplies model or reasoning settings and no explicit command, the implementation derives a launch
-  command from `runtime.codex.command`.
+  is the selected runner or Codex compatibility model; profile `model` values override it for that
+  launch; explicit model flags already present in the runner command control the command unchanged.
+- Non-implementation Codex jobs MAY run through Codex execution profiles; when a profile supplies
+  model or reasoning settings and no explicit command, the implementation derives a launch command
+  from the configured Codex runner command.
 - Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
   using fields supported by the targeted Codex app-server version.
 - Browser-oriented runtime QA and product visual review jobs MUST receive a browser-capable Codex
@@ -1623,39 +1737,47 @@ Notes:
   authentication material. The harness home isolates automation instructions; it does not require
   copying Symphony skills into user-global homes.
 
-RECOMMENDED additional process settings:
-
-- Max line size: 10 MB (for safe buffering)
-
 ### 10.2 Session Startup Responsibilities
 
-Reference: https://developers.openai.com/codex/app-server/
+Startup MUST follow the selected `AgentRuntime` adapter contract. Symphony additionally requires the
+adapter to:
 
-Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
-client to:
-
-- Create or update the Symphony-owned harness Codex home before launching the app-server
-  subprocess.
-- Start the app-server subprocess in the per-issue workspace.
-- Initialize the app-server session using the targeted Codex app-server protocol.
-- Create or resume a coding-agent thread according to the targeted protocol.
-- Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
-  targeted protocol accepts cwd.
+- Start the subprocess in the per-issue workspace.
+- Initialize a runtime session using the selected adapter protocol.
+- Create or resume the runtime's conversation/session identity according to the selected adapter
+  protocol.
+- Supply the absolute per-issue workspace path as the turn working directory wherever the selected
+  protocol accepts cwd.
 - Start the first turn with the rendered issue prompt.
-- Start later in-worker continuation turns on the same live thread with continuation guidance rather
-  than resending the original issue prompt.
+- Start later in-worker continuation turns on the same live runtime session with continuation
+  guidance rather than resending the original issue prompt.
 - Supply the implementation's documented approval and sandbox policy using fields supported by the
-  targeted protocol.
-- Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
-  protocol supports turn or session titles.
-- Advertise implemented client-side tools using the targeted protocol.
+  selected runtime.
+- Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the selected
+  runtime supports turn or session titles.
+- Advertise implemented client-side tools using the selected runtime protocol when supported.
 
 Session identifiers:
 
-- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
-- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
+- Emit a stable `session_id` for normalized events when the selected runtime exposes one.
+- If the selected runtime exposes separate conversation and turn identities, implementations MAY
+  compose them as `<conversation_id>-<turn_id>`.
+- Reuse the same conversation/session identity for all continuation turns inside one worker run when
+  the selected runtime supports continuation.
+
+#### 10.2.1 CodexAppServer Startup v1
+
+Reference: https://developers.openai.com/codex/app-server/
+
+Codex startup MUST follow the targeted Codex app-server contract. The Codex adapter additionally:
+
+- Creates or updates the Symphony-owned harness Codex home before launching the app-server
+  subprocess.
+- Initializes the app-server session using the targeted Codex app-server protocol.
+- Creates or resumes a Codex thread according to the targeted protocol.
+- Extracts `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
+- Extracts `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
+- Emits `session_id = "<thread_id>-<turn_id>"`.
 
 ### 10.3 Streaming Turn Processing
 
@@ -1683,32 +1805,35 @@ Transport handling requirements:
 - For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
   handling unless the targeted protocol specifies otherwise.
 
-### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
+### 10.4 Normalized Runtime Events (Upstream to Orchestrator)
 
-The app-server client emits structured events to the orchestrator callback. Each event SHOULD
-include:
+`AgentRuntime` adapters emit normalized structured events to the orchestrator callback. Each event
+SHOULD include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `runtime` (adapter identifier)
+- `session_id` (when available)
+- OPTIONAL `native` metadata for adapter-owned diagnostics
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
 
-Important emitted events include, for example:
+Core normalized events:
 
 - `session_started`
-- `startup_failed`
+- `turn_started`
+- `message_delta`
+- `tool_call`
+- `tool_result`
 - `turn_completed`
 - `turn_failed`
-- `turn_cancelled`
-- `turn_ended_with_error`
-- `codex_error_loop`
-- `turn_input_required`
-- `approval_auto_approved`
-- `unsupported_tool_call`
-- `notification`
-- `other_message`
-- `malformed`
+- `blocked`
+
+`blocked` means the runtime/session observed that the agent cannot continue without external input,
+an unavailable capability, or another recoverable or unrecoverable blocker. It SHOULD include a
+machine-readable `reason`, such as `operator_input_requested`. A runtime `blocked` event feeds
+workflow route classification; it MUST NOT directly mutate tracker state or labels without workflow
+policy.
 
 ### 10.5 Approval, Tool Calls, and User Input Policy
 
@@ -1791,35 +1916,41 @@ User-input-required policy:
 
 Timeouts:
 
-- `runtime.codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `runtime.codex.turn_timeout_ms`: total turn stream timeout
+- `runtime.runners.<name>.read_timeout_ms`: request/response timeout during startup and sync requests
+- `runtime.runners.<name>.turn_timeout_ms`: total turn stream timeout
 - execution-profile `timeout_ms`: total turn timeout for that reviewer, QA, visual review, planner,
   repair, or synthesis job when supplied
-- `runtime.codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `runtime.runners.<name>.stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
 
-- `codex_not_found`
-- `invalid_workspace_cwd`
-- `response_timeout`
+- `startup_timeout`
+- `transport_closed`
+- `auth_missing`
+- `unsupported_model`
+- `invalid_config`
+- `runner_protocol_violation`
 - `turn_timeout`
-- `port_exit`
-- `response_error`
-- `turn_failed`
-- `turn_cancelled`
-- `turn_input_required`
+- `stall`
+- `operator_input_requested`
+Codex-specific failures SHOULD be translated into these categories at the Codex adapter boundary.
 
-### 10.7 Agent Runner Contract
+### 10.7 AgentRuntime Contract
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+An `AgentRuntime` wraps a concrete coding-agent runtime behind a small orchestration interface:
+
+1. `start(workspace, issue, opts) -> session`
+2. `send_turn(session, prompt) -> event_stream`
+3. `stop(session) -> ok`
+4. `capabilities(adapter) -> map`
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from the compiled workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
-5. On any error, fail the worker attempt (the orchestrator will retry).
+3. Start an `AgentRuntime` session.
+4. Forward normalized runtime events to orchestrator.
+5. On any error, fail the worker attempt with a normalized failure category (the orchestrator will retry).
 
 Note:
 
@@ -1853,8 +1984,9 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
   `project_id` is absent.
 - `runtime.tracker.team_key` maps to Linear team `key` and is used only when project scope is
   absent.
-- Candidate and issue-state refresh queries include issue labels. Required label filtering happens
-  after normalization so refresh can observe label removal and stop or release existing work.
+- Candidate and issue-state refresh queries include issue labels. Required-label and excluded-label
+  filtering happens after normalization so refresh can observe label changes and stop or release
+  existing work.
 - Candidate issue query filters by `project: { id: { eq: $projectId } }` when `project_id` is set,
   by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set, or by
   `team: { key: { eq: $teamKey } }` when only team scope is set.
@@ -1862,6 +1994,9 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
 - Network timeout: `30000 ms`
+- Backlog grooming watchers MAY fetch comment metadata for changed Backlog issues to distinguish a
+  new human answer from unrelated `updatedAt` changes. The normal implementation-dispatch candidate
+  query does not need to include comments.
 
 Important:
 
@@ -2205,7 +2340,7 @@ SHOULD return:
   `profile`, `target`, `policy_ref`, and the resolved `policy` object
 - `retrying` (list of retry queue rows)
 - session and retry rows SHOULD include the tracker-provided issue URL when available
-- `codex_totals`
+- `runtime_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
@@ -2350,7 +2485,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "runtime_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -2493,7 +2628,7 @@ runtime policy and SHOULD fail fast when Chrome/Chromium launch infrastructure i
    - Missing preset or workflow module
    - Compiled workflow validation failure
    - Unsupported tracker kind or missing tracker credentials/scope
-   - Missing harness `CODEX_HOME` or harness global instructions
+   - Missing harness isolation files or harness global instructions required by the selected runner
    - Missing coding-agent executable
 
 2. `Workspace Failures`
@@ -2666,8 +2801,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    runtime_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    runtime_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -2759,15 +2894,17 @@ function dispatch_issue(issue, state, attempt):
     identifier: issue.identifier,
     issue,
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    last_codex_progress_timestamp: null,
-    last_codex_error_signature: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    runner: compiled_workflow.runtime.agent.default_runner,
+    runner_kind: null,
+    process_id: null,
+    last_runtime_message: null,
+    last_runtime_event: null,
+    last_runtime_timestamp: null,
+    last_runtime_progress_timestamp: null,
+    last_runtime_error_signature: null,
+    runtime_input_tokens: 0,
+    runtime_output_tokens: 0,
+    runtime_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -2791,9 +2928,12 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   if run_hook("before_run", workspace.path) failed:
     fail_worker("before_run hook error")
 
-  session = app_server.start_session(
+  runner = agent_runtime.resolve(compiled_workflow.runtime.agent.default_runner)
+  session = agent_runtime.start(
+    runner=runner,
     workspace=workspace.path,
-    codex_home=compiled_workflow.harness.codex_home
+    issue=issue,
+    opts=compiled_workflow.runtime.runners[runner.name]
   )
   if session failed:
     run_hook_best_effort("after_run", workspace.path)
@@ -2805,25 +2945,25 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
   while true:
     prompt = build_turn_prompt(compiled_workflow.prompt_template, issue, attempt, turn_number, max_turns)
     if prompt failed:
-      app_server.stop_session(session)
+      agent_runtime.stop(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("prompt error")
 
-    turn_result = app_server.run_turn(
+    turn_result = agent_runtime.send_turn(
       session=session,
       prompt=prompt,
       issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
+      on_event=(event) -> send(orchestrator_channel, {runtime_event, issue.id, event})
     )
 
     if turn_result failed:
-      app_server.stop_session(session)
+      agent_runtime.stop(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("agent turn error")
 
     refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
     if refreshed_issue failed:
-      app_server.stop_session(session)
+      agent_runtime.stop(session)
       run_hook_best_effort("after_run", workspace.path)
       fail_worker("issue state refresh error")
 
@@ -2837,7 +2977,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 
     turn_number = turn_number + 1
 
-  app_server.stop_session(session)
+  agent_runtime.stop(session)
   run_hook_best_effort("after_run", workspace.path)
 
   exit_normal()
@@ -2935,7 +3075,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `runtime.tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works for fields that explicitly allow path expansion
-- `runtime.codex.command` is preserved as a shell command string
+- Runner commands are represented as argv lists; legacy shell-string compatibility is migration-only.
 - Per-state concurrency override map normalizes state names and rejects invalid values
 - Compiled prompt template renders `issue` and `attempt`
 - Prompt template can render bundled workflow module context
@@ -2999,16 +3139,15 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 AgentRuntime Client
 
-- Launch command uses workspace cwd and invokes `bash -lc <runtime.codex.command>`
-- Launch uses the harness `CODEX_HOME` and does not rely on the operator's ambient `~/.codex`
-- Session startup follows the targeted Codex app-server protocol.
-- Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
-  them.
-- Policy-related startup payloads use the implementation's documented approval/sandbox settings
-- Thread and turn identities exposed by the targeted protocol are extracted and used to emit
-  `session_started`
+- Launch command uses configured runner argv and workspace cwd without an intermediate shell by
+  default.
+- Launch uses the harness isolation required by the selected runner and does not rely on the
+  operator's ambient tool home.
+- Session startup follows the selected `AgentRuntime` adapter protocol.
+- Native runtime events are translated into normalized Symphony events before reaching the
+  orchestrator.
 - Request/response read timeout is enforced
 - Turn timeout is enforced
 - Transport framing required by the targeted protocol is handled correctly
@@ -3047,7 +3186,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI accepts a positional manifest path argument
 - CLI uses `./symphony.yml` when no manifest path argument is provided
 - CLI errors on nonexistent explicit manifest path or missing default manifest
-- CLI or host config accepts or derives the harness `CODEX_HOME`
+- CLI or host config accepts or derives the harness root
 - CLI can initialize a target repo `symphony.yml` without overwriting an existing manifest unless
   explicitly forced
 - CLI can check a target repo manifest and fail nonzero with field-level remediation for schema,
@@ -3088,15 +3227,15 @@ Use the same validation profiles as Section 17:
   transitions, tools, delivery config, harness config, runtime config, and docs routing
 - Typed config layer with defaults and `$` resolution
 - Dynamic manifest/module/deployment config watch/recompile/re-apply
-- Dedicated harness `CODEX_HOME` with harness global `AGENTS.md`
+- Dedicated harness root with harness global `AGENTS.md`
 - Target repo `AGENTS.md` and docs layering after harness global instructions
 - Polling orchestrator with single-authority mutable state
 - Issue tracker client with candidate fetch + state refresh + terminal fetch
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`runtime.hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`runtime.codex.command`, default `codex app-server`)
+- AgentRuntime subprocess client with normalized event stream
+- Runner launch command config under `runtime.runners.<name>.command`
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`runtime.agent.max_retry_backoff_ms`, default 5m)
@@ -3130,8 +3269,8 @@ Use the same validation profiles as Section 17:
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
 - Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
-- Verify hook execution, manifest path resolution, module resolution, and harness `CODEX_HOME` on
-  the target host OS/shell environment.
+- Verify hook execution, manifest path resolution, module resolution, and selected-runner harness
+  readiness on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
 

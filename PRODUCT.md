@@ -1,8 +1,8 @@
 # Product Doctrine
 
 Symphony is prototype automation for trusted engineering environments. It turns tracker work into
-isolated coding-agent runs that can be validated, reviewed, published, and handed off without making
-the agent the final authority.
+isolated coding-agent runs across configurable agent runtimes that can be validated, reviewed,
+published, and handed off without making the agent the final authority.
 
 ## Source of Truth
 
@@ -47,8 +47,9 @@ Symphony should make autonomous engineering work:
 - Bootstrap a target repository by committing a thin `symphony.yml` manifest and validating the
   compiled workflow before running unattended automation.
 - Poll Linear for eligible issue work and dispatch bounded concurrent agent sessions.
-- Launch Codex with a Symphony-owned harness `CODEX_HOME`, then layer target repo instructions and
-  docs after harness policy.
+- Launch the configured coding-agent runtime with Symphony-owned harness isolation, then layer target
+  repo instructions and docs after harness policy. The current reference implementation launches
+  Codex, but the product direction is runner-agnostic.
 - Validate completed work with repo-declared commands and host-owned quality gates.
 - Publish reviewable workspace changes under host control and route the result to auto-land,
   human review, product visual review, rework, decision-needed, or blocked handoff.
@@ -62,6 +63,8 @@ broader public platform packaging.
 
 Roadmap work should prioritize:
 
+- Runner-agnostic orchestration through a real runner seam, normalized runtime events, and adapter
+  contracts for multiple coding-agent runtimes.
 - Current-session and recent-event visibility for debugging active runs.
 - Stall, retry, continuation, and blocked-state semantics that distinguish real progress from noisy
   tool output.
