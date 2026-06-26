@@ -43,7 +43,7 @@ defmodule SymphonyElixir.Codex.Launch do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(codex_command)],
+            args: [~c"-lc", String.to_charlist("exec #{codex_command}")],
             cd: String.to_charlist(workspace),
             env: HarnessHome.local_port_env(codex_home),
             line: line_bytes

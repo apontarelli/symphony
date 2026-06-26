@@ -1171,6 +1171,11 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp stop_port(port) when is_port(port) do
+    os_pid = port_os_pid(port)
+    descendants = os_pid_descendants(os_pid)
+
+    signal_os_pids(descendants, "TERM")
+
     case :erlang.port_info(port) do
       :undefined ->
         :ok
@@ -1184,6 +1189,63 @@ defmodule SymphonyElixir.Codex.AppServer do
             :ok
         end
     end
+
+    signal_os_pids([os_pid | descendants], "TERM")
+    Process.sleep(100)
+    signal_os_pids([os_pid | descendants], "KILL")
+    :ok
+  end
+
+  defp port_os_pid(port) when is_port(port) do
+    case :erlang.port_info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
+      _ -> nil
+    end
+  end
+
+  defp os_pid_descendants(nil), do: []
+
+  defp os_pid_descendants(pid) when is_integer(pid) do
+    case System.cmd("ps", ["-axo", "pid=,ppid="], stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.split("\n", trim: true)
+        |> Enum.reduce(%{}, fn line, by_parent ->
+          case line |> String.trim() |> String.split(~r/\s+/, trim: true) do
+            [child, parent] ->
+              Map.update(by_parent, String.to_integer(parent), [String.to_integer(child)], &[
+                String.to_integer(child) | &1
+              ])
+
+            _ ->
+              by_parent
+          end
+        end)
+        |> collect_descendant_pids(pid)
+
+      _ ->
+        []
+    end
+  rescue
+    _ -> []
+  end
+
+  defp collect_descendant_pids(by_parent, pid) do
+    children = Map.get(by_parent, pid, [])
+    Enum.flat_map(children, &collect_descendant_pids(by_parent, &1)) ++ children
+  end
+
+  defp signal_os_pids(pids, signal) do
+    pids
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+    |> Enum.each(fn pid ->
+      System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
+    end)
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do

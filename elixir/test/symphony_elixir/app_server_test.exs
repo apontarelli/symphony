@@ -366,6 +366,77 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server stop_session terminates local codex descendant processes" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-descendant-cleanup-#{System.unique_integer([:positive])}"
+      )
+    child_pid_file = Path.join(test_root, "child.pid")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-DESCENDANT-CLEANUP")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      sleep 60 &
+      printf '%s\\n' "$!" > "#{child_pid_file}"
+
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-descendant-cleanup"}}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      assert {:ok, session} = AppServer.start_session(workspace)
+      child_pid = eventually(fn -> read_pid(child_pid_file) end)
+      assert os_pid_alive?(child_pid)
+
+      AppServer.stop_session(session)
+
+      assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+    after
+      case File.read(child_pid_file) do
+        {:ok, pid_text} ->
+          pid_text
+          |> String.trim()
+          |> Integer.parse()
+          |> case do
+            {pid, ""} -> System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+            _ -> :ok
+          end
+
+        _ ->
+          :ok
+      end
+
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server emits launch provenance with resolved command, workflow, profile, and CODEX_HOME" do
     test_root =
       Path.join(
@@ -2145,6 +2216,47 @@ defmodule SymphonyElixir.AppServerTest do
 
     File.chmod!(path, 0o755)
   end
+
+  defp read_pid(path) do
+    case File.read(path) do
+      {:ok, pid_text} ->
+        case Integer.parse(String.trim(pid_text)) do
+          {pid, ""} -> pid
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp os_pid_alive?(nil), do: false
+
+  defp os_pid_alive?(pid) when is_integer(pid) do
+    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp eventually(fun, attempts \\ 20)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    case fun.() do
+      nil ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      false ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      value ->
+        value
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 
   defp trace_codex_home_script do
     """
