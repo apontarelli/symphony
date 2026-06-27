@@ -176,26 +176,31 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       pins: %{registry: @registry_pin, module: "codex.harness@v1"},
       config: %{
         "agent" => %{
+          "default_runner" => "codex",
           "max_concurrent_agents" => 10,
+          "max_concurrent_startups" => 2,
           "max_turns" => 20,
           "max_retry_backoff_ms" => 300_000
         },
-        "codex" => %{
-          "command" => "codex app-server",
-          "approval_policy" => "on-request",
-          "thread_sandbox" => "workspace-write",
-          "turn_timeout_ms" => 3_600_000,
-          "read_timeout_ms" => 30_000,
-          "stall_timeout_ms" => 300_000,
-          "execution_profiles" => %{
-            "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
-            "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-            "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-            "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-            "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
-            "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-            "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
-            "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+        "runners" => %{
+          "codex" => %{
+            "kind" => "codex_app_server",
+            "command" => ["codex", "app-server"],
+            "approval_policy" => "on-request",
+            "thread_sandbox" => "workspace-write",
+            "turn_timeout_ms" => 3_600_000,
+            "read_timeout_ms" => 30_000,
+            "stall_timeout_ms" => 300_000,
+            "execution_profiles" => %{
+              "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
+              "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+              "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+              "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+              "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
+              "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
+              "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
+              "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+            }
           }
         },
         "quality_gate" => %{

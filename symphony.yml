@@ -62,42 +62,53 @@ runtime:
       cd elixir && mise exec -- mix workspace.before_remove
     timeout_ms: 60000
   agent:
+    default_runner: codex
     max_concurrent_agents: 10
+    max_concurrent_startups: 2
     max_turns: 20
-  codex:
+  runners:
     # Dogfood Codex launch policy for this repository's unattended automation.
-    command: codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh app-server
-    model: gpt-5.5
-    approval_policy: never
-    thread_sandbox: workspace-write
-    turn_sandbox_policy:
-      type: workspaceWrite
-      networkAccess: true
-    execution_profiles:
-      planner:
-        reasoning_effort: high
-        budget: standard
-      source_reviewer:
-        reasoning_effort: medium
-        budget: standard
-      test_reviewer:
-        reasoning_effort: medium
-        budget: standard
-      runtime_qa:
-        reasoning_effort: medium
-        budget: standard
-      product_visual_review:
-        reasoning_effort: high
-        budget: standard
-      docs_reviewer:
-        reasoning_effort: medium
-        budget: standard
-      security_reviewer:
-        reasoning_effort: high
-        budget: standard
-      synthesis:
-        reasoning_effort: high
-        budget: standard
+    codex:
+      kind: codex_app_server
+      command:
+        - codex
+        - --config
+        - shell_environment_policy.inherit=all
+        - --config
+        - model_reasoning_effort=xhigh
+        - app-server
+      model: gpt-5.5
+      approval_policy: never
+      thread_sandbox: workspace-write
+      turn_sandbox_policy:
+        type: workspaceWrite
+        networkAccess: true
+      max_concurrent_startups: 2
+      execution_profiles:
+        planner:
+          reasoning_effort: high
+          budget: standard
+        source_reviewer:
+          reasoning_effort: medium
+          budget: standard
+        test_reviewer:
+          reasoning_effort: medium
+          budget: standard
+        runtime_qa:
+          reasoning_effort: medium
+          budget: standard
+        product_visual_review:
+          reasoning_effort: high
+          budget: standard
+        docs_reviewer:
+          reasoning_effort: medium
+          budget: standard
+        security_reviewer:
+          reasoning_effort: high
+          budget: standard
+        synthesis:
+          reasoning_effort: high
+          budget: standard
   quality_gate:
     enabled: true
     source_max_concurrency: 3
@@ -114,11 +125,12 @@ runtime:
     skill_authoring:
       delivery:
         pr_target: main
-      codex:
-        approval_policy: never
-        thread_sandbox: danger-full-access
-        turn_sandbox_policy:
-          type: dangerFullAccess
+      runners:
+        codex:
+          approval_policy: never
+          thread_sandbox: danger-full-access
+          turn_sandbox_policy:
+            type: dangerFullAccess
       prompt:
         rules:
           - This profile is for explicit, interactive repo skill-authoring work that must edit repo-owned `.codex/skills/` or another ticket-specified repo-local skills directory.

@@ -248,18 +248,20 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{
         id: "issue-profile-policy",
         identifier: "MT-1002",
-        title: "Validate profile codex policy",
-        description: "Check profile-selected sandbox overrides",
+        title: "Validate profile runner policy",
+        description: "Check profile-selected runner sandbox overrides",
         state: "In Progress",
         url: "https://example.org/issues/MT-1002",
         labels: ["skill-authoring"]
       }
 
       policy = %{
-        "codex" => %{
-          "approval_policy" => "never",
-          "thread_sandbox" => "danger-full-access",
-          "turn_sandbox_policy" => %{"type" => "dangerFullAccess"}
+        "runners" => %{
+          "codex" => %{
+            "approval_policy" => "never",
+            "thread_sandbox" => "danger-full-access",
+            "turn_sandbox_policy" => %{"type" => "dangerFullAccess"}
+          }
         }
       }
 
@@ -319,7 +321,7 @@ defmodule SymphonyElixir.AppServerTest do
     try do
       workspace_root = Path.join(test_root, "workspaces")
       workspace = Path.join(workspace_root, "MT-CODEX-HOME")
-      codex_binary = Path.join(test_root, "fake-codex")
+      codex_binary = Path.join(workspace, "fake-codex")
       trace_file = Path.join(test_root, "codex-home.trace")
 
       File.mkdir_p!(workspace)
@@ -340,7 +342,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        codex_command: "#{codex_binary} app-server"
+        codex_command: "./fake-codex app-server"
       )
 
       issue = %Issue{
@@ -361,63 +363,6 @@ defmodule SymphonyElixir.AppServerTest do
       assert trace =~ "AGENTS:# Symphony Harness"
       assert File.read!(Path.join(expected_codex_home, "AGENTS.md")) =~ "Symphony Harness"
       refute File.exists?(Path.join(workspace, ".symphony"))
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "app server preserves shell expansion for string codex command" do
-    test_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-app-server-shell-command-#{System.unique_integer([:positive])}"
-      )
-
-    previous_codex_bin = System.get_env("SYMPHONY_TEST_CODEX_BIN")
-
-    on_exit(fn ->
-      restore_env("SYMPHONY_TEST_CODEX_BIN", previous_codex_bin)
-    end)
-
-    try do
-      workspace_root = Path.join(test_root, "workspaces")
-      workspace = Path.join(workspace_root, "MT-SHELL-COMMAND")
-      codex_binary = Path.join(test_root, "fake-codex")
-      trace_file = Path.join(test_root, "codex-shell-command.trace")
-
-      File.mkdir_p!(workspace)
-      System.put_env("SYMPHONY_TEST_CODEX_BIN", codex_binary)
-
-      write_successful_fake_codex!(codex_binary, trace_file,
-        thread_id: "thread-shell-command",
-        turn_id: "turn-shell-command",
-        trace_startup: """
-        printf 'ARGV:%s\\n' "$*" >> "$trace_file"
-        printf 'ENV_CODEX_HOME:%s\\n' "$CODEX_HOME" >> "$trace_file"
-        """
-      )
-
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "$SYMPHONY_TEST_CODEX_BIN app-server"
-      )
-
-      issue = %Issue{
-        id: "issue-shell-command",
-        identifier: "MT-SHELL-COMMAND",
-        title: "Preserve shell command",
-        description: "Ensure string codex.command still expands environment variables in the launched shell",
-        state: "In Progress",
-        url: "https://example.org/issues/MT-SHELL-COMMAND",
-        labels: ["backend"]
-      }
-
-      assert {:ok, _result} = AppServer.run(workspace, "Validate shell command", issue)
-
-      trace = File.read!(trace_file)
-      assert trace =~ "ARGV:"
-      assert trace =~ "app-server"
-      assert trace =~ "ENV_CODEX_HOME:"
     after
       File.rm_rf(test_root)
     end
@@ -483,6 +428,29 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert {:error, {:startup_failed, {:timeout, 90}}} =
                AppServer.run(workspace, "Validate startup deadline", issue, startup_timeout_ms: 90)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server rejects missing workspace-relative runner command" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-missing-runner-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-MISSING-RUNNER")
+      File.mkdir_p!(workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "./missing-codex app-server"
+      )
+
+      assert AppServer.start_session(workspace) == {:error, {:executable_not_found, "./missing-codex"}}
     after
       File.rm_rf(test_root)
     end

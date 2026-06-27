@@ -973,8 +973,7 @@ Scheduler and workspace:
 - `runtime.agent.max_turns`: integer, default `20`
 - `runtime.agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `runtime.agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `runtime.agent.default_runner`: string, default implementation-defined while legacy Codex config is
-  supported
+- `runtime.agent.default_runner`: string, default implementation-defined
 
 Agent runtimes:
 
@@ -990,8 +989,8 @@ Runner-specific config:
 
 - `runtime.runners.<name>.kind` selects the adapter-specific config schema.
 - Runner-specific fields are scoped under `runtime.runners.<name>`, not top-level
-  `runtime.codex.*` fields. Implementations MAY support legacy `runtime.codex.*` fields only through
-  a documented migration adapter; the clean v1 contract is `runtime.runners`.
+  `runtime.codex.*` fields. The clean v1 contract is `runtime.runners`; implementations that have
+  cut over to the runner schema reject legacy `runtime.codex.*` fields with a clear error.
 - Common runner fields include:
   - `command`: list of argv strings.
   - `model`: model name or runtime-specific model selector, OPTIONAL.
@@ -1095,8 +1094,8 @@ Profile policy:
 - Resolved profile policy MUST include `delivery.pr_target`.
 - `review_routing`: object, OPTIONAL route policy compiled from the manifest into the resolved
   profile policy.
-- Selected-profile `codex` overrides MAY set `approval_policy`, `thread_sandbox`, and
-  `turn_sandbox_policy` before the Codex thread/turn starts.
+- Selected-profile `runners.<name>` overrides MAY set `approval_policy`, `thread_sandbox`, and
+  `turn_sandbox_policy` before that runner starts a thread/turn.
 - Implementations MUST compute a stable `policy_ref` hash from the resolved effective policy.
 - When `delivery.pr_target` is not `main`, v1 MUST NOT automate promotion or merge-forward from that
   target branch to `main`.

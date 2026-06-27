@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
           budget: String.t(),
           timeout_ms: pos_integer(),
           max_retries: non_neg_integer(),
-          command: String.t() | nil,
+          command: [String.t()] | nil,
           model: String.t() | nil
         }
 
@@ -37,7 +37,7 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
     profile =
       @defaults
       |> Map.get(name, @defaults["source_reviewer"])
-      |> Map.merge(settings.codex.execution_profiles |> normalize_profiles() |> Map.get(name, %{}))
+      |> Map.merge(Config.default_runner!(settings)["execution_profiles"] |> normalize_profiles() |> Map.get(name, %{}))
 
     %{
       name: name,
@@ -45,7 +45,7 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
       budget: normalized_string(Map.get(profile, "budget")) || "standard",
       timeout_ms: positive_integer(Map.get(profile, "timeout_ms")) || default_timeout(settings),
       max_retries: non_negative_integer(Map.get(profile, "max_retries")) || settings.quality_gate.reviewer_max_retries,
-      command: normalized_string(Map.get(profile, "command")),
+      command: normalize_command(Map.get(profile, "command")),
       model: normalized_string(Map.get(profile, "model"))
     }
   end
@@ -53,31 +53,30 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
   @spec resolve(String.t() | atom() | nil) :: t()
   def resolve(profile_ref), do: Config.settings!() |> resolve(profile_ref)
 
-  @spec command(String.t(), t()) :: String.t()
+  @spec command([String.t()], t()) :: [String.t()]
   def command(base_command, profile), do: command(base_command, profile, nil)
 
-  @spec command(String.t(), t(), String.t() | nil) :: String.t()
-  def command(_base_command, %{command: command}, _default_model) when is_binary(command), do: command
+  @spec command([String.t()], t(), String.t() | nil) :: [String.t()]
+  def command(_base_command, %{command: command}, _default_model) when is_list(command), do: command
 
-  def command(base_command, profile, default_model) when is_binary(base_command) and is_map(profile) do
+  def command(base_command, profile, default_model) when is_list(base_command) and is_map(profile) do
     model = model_for_command(base_command, Map.get(profile, :model), default_model)
 
     additions =
       []
       |> maybe_add_model_config(model)
       |> maybe_add_reasoning_config(Map.get(profile, :reasoning_effort))
-      |> Enum.reverse()
-      |> Enum.join(" ")
 
     cond do
-      additions == "" ->
+      additions == [] ->
         base_command
 
-      String.match?(base_command, ~r/\sapp-server\s*$/) ->
-        Regex.replace(~r/\sapp-server\s*$/, base_command, " #{additions} app-server")
+      List.last(base_command) == "app-server" ->
+        {prefix, ["app-server"]} = Enum.split(base_command, -1)
+        prefix ++ additions ++ ["app-server"]
 
       true ->
-        base_command <> " " <> additions
+        base_command ++ additions
     end
   end
 
@@ -89,9 +88,17 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
     end
   end
 
-  defp command_sets_model?(command) when is_binary(command) do
-    String.match?(command, ~r/(^|\s)(-m|--model)(=|\s)/) or
-      String.match?(command, ~r/(^|\s)(-c|--config)(=|\s+)(['"])?model=/)
+  defp command_sets_model?(command) when is_list(command) do
+    command
+    |> Enum.with_index()
+    |> Enum.any?(fn {arg, index} ->
+      next_arg = Enum.at(command, index + 1)
+
+      arg in ["-m", "--model"] or
+        String.starts_with?(arg, "--model=") or
+        (arg in ["-c", "--config"] and is_binary(next_arg) and String.starts_with?(next_arg, "model=")) or
+        String.starts_with?(arg, "--config=model=")
+    end)
   end
 
   defp normalize_profiles(profiles) when is_map(profiles) do
@@ -135,17 +142,45 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
     if MapSet.member?(@valid_reasoning_efforts, effort), do: effort
   end
 
+  defp normalize_command(nil), do: nil
+
+  defp normalize_command(command) when is_list(command) do
+    command
+    |> Enum.map(&normalized_string/1)
+    |> Enum.reject(&is_nil/1)
+    |> case do
+      [] -> nil
+      argv -> argv
+    end
+  end
+
+  defp normalize_command(command) when is_binary(command) do
+    case Shell.split(command) do
+      {:ok, []} -> nil
+      {:ok, argv} -> argv
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp normalize_command(_command), do: nil
+
   defp maybe_add_model_config(configs, nil), do: configs
-  defp maybe_add_model_config(configs, model), do: ["--config #{Shell.escape(~s(model=\"#{model}\"))}" | configs]
+  defp maybe_add_model_config(configs, model), do: configs ++ ["--config", ~s(model="#{model}")]
 
   defp maybe_add_reasoning_config(configs, nil), do: configs
 
   defp maybe_add_reasoning_config(configs, effort) do
-    ["--config model_reasoning_effort=#{effort}" | configs]
+    configs ++ ["--config", "model_reasoning_effort=#{effort}"]
   end
 
   defp default_timeout(%Schema{quality_gate: %{reviewer_timeout_ms: timeout}}) when is_integer(timeout), do: timeout
-  defp default_timeout(%Schema{codex: %{turn_timeout_ms: timeout}}) when is_integer(timeout), do: timeout
+
+  defp default_timeout(%Schema{} = settings) do
+    case Config.default_runner!(settings)["turn_timeout_ms"] do
+      timeout when is_integer(timeout) -> timeout
+      _timeout -> 3_600_000
+    end
+  end
 
   defp normalized_string(nil), do: nil
 

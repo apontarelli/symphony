@@ -492,27 +492,26 @@ defmodule SymphonyElixir.QualityGate do
   defp review_policy_for(_job, _plan, policy), do: read_only_review_policy(policy)
 
   defp browser_capable_review_policy(policy, workspace) when is_map(policy) do
-    codex = policy_codex(policy)
+    runner = policy_runner(policy)
 
-    Map.put(
+    put_policy_runner(
       policy,
-      "codex",
-      Map.put(codex, "turn_sandbox_policy", browser_capable_turn_sandbox_policy(Map.get(codex, "turn_sandbox_policy"), workspace))
+      Map.put(runner, "turn_sandbox_policy", browser_capable_turn_sandbox_policy(Map.get(runner, "turn_sandbox_policy"), workspace))
     )
   end
 
   defp browser_capable_review_policy(_policy, workspace) do
-    %{"codex" => %{"turn_sandbox_policy" => browser_capable_turn_sandbox_policy(nil, workspace)}}
+    put_policy_runner(%{}, %{"turn_sandbox_policy" => browser_capable_turn_sandbox_policy(nil, workspace)})
   end
 
   defp read_only_review_policy(policy) when is_map(policy) do
-    codex = policy_codex(policy)
+    runner = policy_runner(policy)
 
-    Map.put(policy, "codex", Map.put(codex, "turn_sandbox_policy", read_only_turn_sandbox_policy()))
+    put_policy_runner(policy, Map.put(runner, "turn_sandbox_policy", read_only_turn_sandbox_policy()))
   end
 
   defp read_only_review_policy(_policy) do
-    %{"codex" => %{"turn_sandbox_policy" => read_only_turn_sandbox_policy()}}
+    put_policy_runner(%{}, %{"turn_sandbox_policy" => read_only_turn_sandbox_policy()})
   end
 
   defp read_only_turn_sandbox_policy do
@@ -536,11 +535,29 @@ defmodule SymphonyElixir.QualityGate do
     }
   end
 
-  defp policy_codex(policy) when is_map(policy) do
-    case Map.get(policy, "codex", Map.get(policy, :codex, %{})) do
-      codex when is_map(codex) -> normalize_policy_keys(codex)
-      _codex -> %{}
+  defp policy_runner(policy) when is_map(policy) do
+    policy = normalize_policy_keys(policy)
+    runner_name = Config.default_runner_name()
+
+    policy
+    |> get_in(["runners", runner_name])
+    |> case do
+      runner when is_map(runner) -> normalize_policy_keys(runner)
+      _runner -> %{}
     end
+  end
+
+  defp put_policy_runner(policy, runner_policy) when is_map(policy) and is_map(runner_policy) do
+    policy = policy |> normalize_policy_keys() |> Map.delete("codex")
+    runner_name = Config.default_runner_name()
+
+    runners =
+      case Map.get(policy, "runners") do
+        runners when is_map(runners) -> runners
+        _runners -> %{}
+      end
+
+    Map.put(policy, "runners", Map.put(runners, runner_name, runner_policy))
   end
 
   defp normalize_policy_keys(value) when is_map(value) do

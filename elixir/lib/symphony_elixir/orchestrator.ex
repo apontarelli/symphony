@@ -608,7 +608,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    timeout_ms = Config.runner_stall_timeout_ms()
 
     cond do
       timeout_ms <= 0 ->
@@ -985,22 +985,30 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked} = state,
+         %State{running: running} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       is_nil(issue_dispatch_block_reason(issue, terminal_states)) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      !Map.has_key?(blocked, issue.id) and
-      available_slots(state) > 0 and
+      issue_not_tracked?(issue, state) and
+      dispatch_capacity_available?(state) and
       issue_policy_allows_dispatch?(issue) and
       state_slots_available?(issue, running) and
       worker_slots_available?(state)
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp issue_not_tracked?(%Issue{id: issue_id}, %State{running: running, claimed: claimed, blocked: blocked}) do
+    !MapSet.member?(claimed, issue_id) and
+      !Map.has_key?(running, issue_id) and
+      !Map.has_key?(blocked, issue_id)
+  end
+
+  defp dispatch_capacity_available?(%State{} = state) do
+    available_slots(state) > 0 and startup_slots_available?(state)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -1009,6 +1017,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp state_slots_available?(_issue, _running), do: false
+
+  defp startup_slots_available?(%State{} = state) do
+    Config.max_concurrent_startups() > starting_issue_count(state.running)
+  end
+
+  defp starting_issue_count(running) when is_map(running) do
+    Enum.count(running, fn
+      {_issue_id, %{codex_app_server_pid: pid}} when is_binary(pid) and pid != "" -> false
+      _entry -> true
+    end)
+  end
 
   defp running_issue_count_for_state(running, issue_state) when is_map(running) do
     normalized_state = normalize_issue_state(issue_state)
@@ -2361,7 +2380,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and startup_slots_available?(state) and state_slots_available?(issue, state.running)
   end
 
   defp apply_codex_token_delta(

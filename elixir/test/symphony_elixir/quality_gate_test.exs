@@ -366,24 +366,27 @@ defmodule SymphonyElixir.QualityGateTest do
 
     command =
       ExecutionProfile.command(
-        "codex --config model_reasoning_effort=xhigh app-server",
+        ["codex", "--config", "model_reasoning_effort=xhigh", "app-server"],
         ExecutionProfile.resolve(settings, "planner")
       )
 
     assert command ==
-             "codex --config model_reasoning_effort=xhigh --config model_reasoning_effort=high app-server"
+             ["codex", "--config", "model_reasoning_effort=xhigh", "--config", "model_reasoning_effort=high", "app-server"]
 
     assert {:ok, overridden_settings} =
              Schema.parse(%{
                "profiles" => %{"default" => %{"delivery" => %{"pr_target" => "main"}}},
-               "codex" => %{
-                 "command" => "codex app-server",
-                 "execution_profiles" => %{
-                   "source_reviewer" => %{
-                     "reasoning_effort" => "low",
-                     "budget" => "cheap",
-                     "timeout_ms" => 60_000,
-                     "max_retries" => 1
+               "runners" => %{
+                 "codex" => %{
+                   "kind" => "codex_app_server",
+                   "command" => ["codex", "app-server"],
+                   "execution_profiles" => %{
+                     "source_reviewer" => %{
+                       "reasoning_effort" => "low",
+                       "budget" => "cheap",
+                       "timeout_ms" => 60_000,
+                       "max_retries" => 1
+                     }
                    }
                  }
                }
@@ -622,6 +625,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert_receive {:quality_gate_review, :source_correctness}
     assert_receive {:quality_gate_review, :test_quality}
+    :sys.get_state(pid)
 
     record = wait_for_review_record(logs_root, "session-320")
     assert record.metadata["issue"]["identifier"] == "SID-320"
@@ -984,7 +988,7 @@ defmodule SymphonyElixir.QualityGateTest do
     read_only =
       QualityGate.run(
         "/tmp/symphony-workspace",
-        %{"codex" => %{"turn_sandbox_policy" => %{"type" => "workspaceWrite"}}},
+        %{"runners" => %{"codex" => %{"turn_sandbox_policy" => %{"type" => "workspaceWrite"}}}},
         issue,
         %{changed_files: ["lib/source.ex"]},
         settings: %Schema.QualityGate{max_repair_passes: 0},
@@ -996,7 +1000,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert read_only.status == :passed
     assert_receive {:review_policy, policy}
-    assert get_in(policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+    assert get_in(policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
     QualityGate.run(
       "/tmp/symphony-workspace",
@@ -1011,22 +1015,22 @@ defmodule SymphonyElixir.QualityGateTest do
     )
 
     assert_receive {:review_policy_from_non_map, non_map_policy}
-    assert get_in(non_map_policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+    assert get_in(non_map_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
     QualityGate.run(
       "/tmp/symphony-workspace",
-      %{"codex" => "not a map"},
+      %{"runners" => %{"codex" => "not a map"}},
       issue,
       %{changed_files: ["lib/source.ex"]},
       settings: %Schema.QualityGate{max_repair_passes: 0},
       runner: fn %{kind: :review, policy: policy} ->
-        send(parent, {:review_policy_from_malformed_codex, policy})
+        send(parent, {:review_policy_from_malformed_runner, policy})
         {:ok, %{status: :passed, findings: []}}
       end
     )
 
-    assert_receive {:review_policy_from_malformed_codex, malformed_codex_policy}
-    assert get_in(malformed_codex_policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+    assert_receive {:review_policy_from_malformed_runner, malformed_codex_policy}
+    assert get_in(malformed_codex_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
     browser_policy =
       QualityGate.run(
@@ -1051,13 +1055,13 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:browser_preflight, %{category: :product_visual_review, workspace: "/tmp/symphony-workspace"}}
 
     assert_receive {:browser_review_policy, :scenario_qa, scenario_policy}
-    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
-    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
-    assert get_in(scenario_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
+    assert get_in(scenario_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(scenario_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(scenario_policy, ["runners", "codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
 
     assert_receive {:browser_review_policy, :product_visual_review, visual_policy}
-    assert get_in(visual_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
-    assert get_in(visual_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(visual_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(visual_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
 
     preflight_blocked =
       QualityGate.run(
@@ -1123,51 +1127,63 @@ defmodule SymphonyElixir.QualityGateTest do
   test "browser review policies preserve explicit browser-capable sandbox shapes" do
     {workspace_result, workspace_policy} =
       capture_visual_review_policy(%{
-        "codex" => %{
-          "turn_sandbox_policy" => %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/custom"], "networkAccess" => false}
+        "runners" => %{
+          "codex" => %{
+            "turn_sandbox_policy" => %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/custom"], "networkAccess" => false}
+          }
         }
       })
 
     assert workspace_result.status == :passed
-    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
-    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
-    assert get_in(workspace_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/custom"]
+    assert get_in(workspace_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(workspace_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(workspace_policy, ["runners", "codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/custom"]
 
     {_atom_workspace_result, atom_workspace_policy} =
       capture_visual_review_policy(%{
-        codex: %{
-          turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/atom"], networkAccess: false}
+        runners: %{
+          codex: %{
+            turn_sandbox_policy: %{type: "workspaceWrite", writableRoots: ["/tmp/atom"], networkAccess: false}
+          }
         }
       })
 
-    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
-    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
-    assert get_in(atom_workspace_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/atom"]
+    assert get_in(atom_workspace_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(atom_workspace_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert get_in(atom_workspace_policy, ["runners", "codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/atom"]
 
     {_danger_result, danger_policy} =
       capture_visual_review_policy(%{
-        "codex" => %{"turn_sandbox_policy" => %{"type" => "dangerFullAccess", "reason" => "operator override"}}
+        "runners" => %{
+          "codex" => %{"turn_sandbox_policy" => %{"type" => "dangerFullAccess", "reason" => "operator override"}}
+        }
       })
 
-    assert get_in(danger_policy, ["codex", "turn_sandbox_policy"]) == %{
+    assert get_in(danger_policy, ["runners", "codex", "turn_sandbox_policy"]) == %{
              "type" => "dangerFullAccess",
              "reason" => "operator override"
            }
 
     {_atom_danger_result, atom_danger_policy} =
       capture_visual_review_policy(%{
-        codex: %{turn_sandbox_policy: %{type: "dangerFullAccess", reason: "operator override"}}
+        runners: %{
+          codex: %{turn_sandbox_policy: %{type: "dangerFullAccess", reason: "operator override"}}
+        }
       })
 
-    assert get_in(atom_danger_policy, ["codex", "turn_sandbox_policy"]) == %{
+    assert get_in(atom_danger_policy, ["runners", "codex", "turn_sandbox_policy"]) == %{
              "type" => "dangerFullAccess",
              "reason" => "operator override"
            }
 
     {_fallback_result, fallback_policy} = capture_visual_review_policy("not a policy")
-    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
-    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "networkAccess"]) == true
-    assert get_in(fallback_policy, ["codex", "turn_sandbox_policy", "writableRoots"]) == ["/tmp/symphony-workspace"]
+    assert get_in(fallback_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert get_in(fallback_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
+    assert fallback_policy["codex"] == nil
+
+    {_legacy_bad_result, legacy_bad_policy} = capture_visual_review_policy(%{"codex" => "bad"})
+    assert get_in(legacy_bad_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "workspaceWrite"
+    assert legacy_bad_policy["codex"] == nil
   end
 
   test "product visual review consumes host visual QA artifacts without browser reviewer sandbox access" do
@@ -1213,7 +1229,7 @@ defmodule SymphonyElixir.QualityGateTest do
     refute_receive {:browser_preflight, %{category: :product_visual_review}}, 50
 
     assert_receive {:visual_reviewer, policy, job}
-    assert get_in(policy, ["codex", "turn_sandbox_policy", "type"]) == "readOnly"
+    assert get_in(policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
     assert job.prompt =~ "Host visual QA artifacts"
     assert job.prompt =~ "Desktop and mobile captures passed"
 
@@ -1839,50 +1855,54 @@ defmodule SymphonyElixir.QualityGateTest do
   test "execution profile fallbacks cover command and malformed profile inputs" do
     assert %{name: "implementation", reasoning_effort: nil} = ExecutionProfile.resolve(nil)
 
-    assert "custom app-server" ==
-             ExecutionProfile.command("codex app-server", %{
-               command: "custom app-server",
+    assert ["custom", "app-server"] ==
+             ExecutionProfile.command(["codex", "app-server"], %{
+               command: ["custom", "app-server"],
                model: "ignored",
                reasoning_effort: "high"
              })
 
-    assert "codex app-server" ==
-             ExecutionProfile.command("codex app-server", %{reasoning_effort: nil, model: nil})
+    assert ["codex", "app-server"] ==
+             ExecutionProfile.command(["codex", "app-server"], %{reasoning_effort: nil, model: nil})
 
-    assert "codex --config 'model=\"gpt-5.5\"' app-server" ==
-             ExecutionProfile.command("codex app-server", %{reasoning_effort: nil, model: nil}, "gpt-5.5")
+    assert ["codex", "--config", "model=\"gpt-5.5\"", "app-server"] ==
+             ExecutionProfile.command(["codex", "app-server"], %{reasoning_effort: nil, model: nil}, "gpt-5.5")
 
-    assert "codex --config 'model=\"gpt-5.5\"' app-server" ==
+    assert ["codex", "--config", "model=\"gpt-5.5\"", "app-server"] ==
              ExecutionProfile.command(
-               "codex --config 'model=\"gpt-5.5\"' app-server",
+               ["codex", "--config", "model=\"gpt-5.5\"", "app-server"],
                %{reasoning_effort: nil, model: nil},
                "gpt-5.4"
              )
 
-    assert "codex --model gpt-5.5 app-server" ==
+    assert ["codex", "--model", "gpt-5.5", "app-server"] ==
              ExecutionProfile.command(
-               "codex --model gpt-5.5 app-server",
+               ["codex", "--model", "gpt-5.5", "app-server"],
                %{reasoning_effort: nil, model: nil},
                "gpt-5.4"
              )
 
-    assert "codex --config 'model=\"gpt-5.4\"' app-server" ==
+    assert ["codex", "--config", "model=\"gpt-5.4\"", "app-server"] ==
              ExecutionProfile.command(
-               "codex app-server",
+               ["codex", "app-server"],
                %{reasoning_effort: nil, model: "gpt-5.4"},
                "gpt-5.5"
              )
 
-    assert "codex run --config 'model=\"gpt-5.5\"'" ==
-             ExecutionProfile.command("codex run", %{model: "gpt-5.5", reasoning_effort: nil})
+    assert ["codex", "run", "--config", "model=\"gpt-5.5\""] ==
+             ExecutionProfile.command(["codex", "run"], %{model: "gpt-5.5", reasoning_effort: nil})
 
     assert {:ok, settings} =
              Schema.parse(%{
                "profiles" => %{"default" => %{"delivery" => %{"pr_target" => "main"}}},
-               "codex" => %{
-                 "execution_profiles" => %{
-                   "" => "bad",
-                   "planner" => %{"reasoning_effort" => "x-high", "timeout_ms" => 0, "max_retries" => -1}
+               "runners" => %{
+                 "codex" => %{
+                   "kind" => "codex_app_server",
+                   "command" => ["codex", "app-server"],
+                   "execution_profiles" => %{
+                     "" => "bad",
+                     "planner" => %{"reasoning_effort" => "x-high", "timeout_ms" => 0, "max_retries" => -1}
+                   }
                  }
                },
                "quality_gate" => %{"runtime_isolation" => "BLOCKED"}
@@ -1891,7 +1911,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert settings.quality_gate.runtime_isolation == "blocked"
     assert %{reasoning_effort: "xhigh", timeout_ms: 1_200_000, max_retries: 0} = ExecutionProfile.resolve(settings, "planner")
 
-    non_map_profiles = %{settings | codex: %{settings.codex | execution_profiles: "bad"}}
+    non_map_profiles = %{settings | runners: put_in(settings.runners, ["codex", "execution_profiles"], "bad")}
     assert %{reasoning_effort: "medium"} = ExecutionProfile.resolve(non_map_profiles, "source_reviewer")
 
     codex_timeout_settings = %{settings | quality_gate: %{settings.quality_gate | reviewer_timeout_ms: nil}}
@@ -1899,10 +1919,37 @@ defmodule SymphonyElixir.QualityGateTest do
 
     blank_model_settings = %{
       settings
-      | codex: %{settings.codex | execution_profiles: %{"source_reviewer" => %{"model" => " "}}}
+      | runners: put_in(settings.runners, ["codex", "execution_profiles"], %{"source_reviewer" => %{"model" => " "}})
     }
 
     assert %{model: nil} = ExecutionProfile.resolve(blank_model_settings, "source_reviewer")
+
+    command_settings = %{
+      settings
+      | runners:
+          put_in(settings.runners, ["codex", "execution_profiles"], %{
+            "source_reviewer" => %{"command" => ["custom", nil, "app-server"]},
+            "test_reviewer" => %{"command" => "custom --flag 'two words'"},
+            "docs_reviewer" => %{"command" => ""},
+            "product_visual_review" => %{"command" => [nil, " "]},
+            "runtime_qa" => %{"command" => "'unterminated"},
+            "security_reviewer" => %{"command" => 123}
+          })
+    }
+
+    assert %{command: ["custom", "app-server"]} = ExecutionProfile.resolve(command_settings, "source_reviewer")
+    assert %{command: ["custom", "--flag", "two words"]} = ExecutionProfile.resolve(command_settings, "test_reviewer")
+    assert %{command: nil} = ExecutionProfile.resolve(command_settings, "docs_reviewer")
+    assert %{command: nil} = ExecutionProfile.resolve(command_settings, "product_visual_review")
+    assert %{command: nil} = ExecutionProfile.resolve(command_settings, "runtime_qa")
+    assert %{command: nil} = ExecutionProfile.resolve(command_settings, "security_reviewer")
+
+    invalid_timeout_settings = %{
+      codex_timeout_settings
+      | runners: put_in(codex_timeout_settings.runners, ["codex", "turn_timeout_ms"], "bad")
+    }
+
+    assert %{timeout_ms: 3_600_000} = ExecutionProfile.resolve(invalid_timeout_settings, "source_reviewer")
   end
 
   test "quality gate schema preserves non-binary runtime isolation validation errors" do

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Workflow.Manifest do
   @moduledoc false
 
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workflow.ModuleRegistry
   alias SymphonyElixir.Workflow.PublishTarget
@@ -50,11 +51,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   @spec compile(map()) :: Workflow.loaded_workflow()
   def compile(manifest) when is_map(manifest) do
-    config =
-      manifest
-      |> registry_config()
-      |> deep_merge(manifest_config(manifest))
-      |> deep_merge(manifest["runtime"])
+    config = compiled_config(manifest)
 
     {prompt, workflow_module_resolution} = prompt_template_and_resolution(manifest)
 
@@ -474,11 +471,63 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp normalize_harness(_raw), do: {%{"codex_home" => nil}, [type_error("harness", "must be a map")]}
 
   defp normalize_runtime(nil), do: {%{}, []}
-  defp normalize_runtime(raw) when is_map(raw), do: {raw, []}
+
+  defp normalize_runtime(raw) when is_map(raw) do
+    errors =
+      if Map.has_key?(raw, "codex") do
+        [
+          %{
+            path: "runtime.codex",
+            message: "is not supported; use runtime.runners.<name> (for Codex use runtime.runners.codex)"
+          }
+        ]
+      else
+        []
+      end
+
+    {raw, errors}
+  end
+
   defp normalize_runtime(_raw), do: {%{}, [type_error("runtime", "must be a map")]}
 
   defp compile_diagnostics(manifest) do
-    workflow_module_diagnostics(manifest)
+    module_diagnostics = workflow_module_diagnostics(manifest)
+
+    if module_diagnostics == [] do
+      config_schema_diagnostics(manifest)
+    else
+      module_diagnostics
+    end
+  end
+
+  defp config_schema_diagnostics(manifest) do
+    case compiled_config(manifest) do
+      config when is_map(config) -> config_schema_diagnostics_from_config(config)
+      _config -> []
+    end
+  end
+
+  defp config_schema_diagnostics_from_config(config) do
+    case Schema.parse(config) do
+      {:ok, _settings} ->
+        []
+
+      {:error, {:invalid_workflow_config, message}} ->
+        [
+          %{
+            path: "runtime",
+            message: message,
+            remediation: "Fix runtime config in symphony.yml."
+          }
+        ]
+    end
+  end
+
+  defp compiled_config(manifest) do
+    manifest
+    |> registry_config()
+    |> deep_merge(manifest_config(manifest))
+    |> deep_merge(manifest["runtime"])
   end
 
   defp registry_config(%{"workflow" => %{"preset" => preset_name, "modules" => modules}} = manifest) do
@@ -571,7 +620,10 @@ defmodule SymphonyElixir.Workflow.Manifest do
   end
 
   defp validate_workflow(errors, manifest) do
-    Enum.reduce(workflow_module_diagnostics(manifest), errors, fn diagnostic, acc ->
+    module_diagnostics = workflow_module_diagnostics(manifest)
+    diagnostics = if module_diagnostics == [], do: config_schema_diagnostics(manifest), else: module_diagnostics
+
+    Enum.reduce(diagnostics, errors, fn diagnostic, acc ->
       remediation = Map.get(diagnostic, :remediation, "Use a supported workflow module.")
       validation_error(acc, diagnostic.path, diagnostic.message, remediation)
     end)
