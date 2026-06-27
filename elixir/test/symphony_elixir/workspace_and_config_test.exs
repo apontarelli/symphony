@@ -647,7 +647,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -669,7 +669,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -693,7 +693,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -715,7 +715,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -729,6 +729,47 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     }
 
     assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "startup concurrency cap blocks dispatch separately from active agent capacity" do
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_startups: 1)
+
+    candidate = %Issue{
+      id: "issue-startup-candidate",
+      identifier: "MT-START-2",
+      title: "Candidate",
+      state: "Todo"
+    }
+
+    starting_issue = %Issue{
+      id: "issue-starting",
+      identifier: "MT-START-1",
+      title: "Starting",
+      state: "Todo"
+    }
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      max_concurrent_startups: 1,
+      running: %{
+        "issue-starting" => %{issue: starting_issue, startup_slot?: true}
+      },
+      claimed: MapSet.new(),
+      blocked: %{},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(candidate, state)
+
+    state_with_released_startup = %{
+      state
+      | running: %{
+          "issue-starting" => %{issue: starting_issue, startup_slot?: false}
+        }
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(candidate, state_with_released_startup)
   end
 
   test "issue ticket kind is derived from generic Symphony labels" do
@@ -750,7 +791,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       max_concurrent_agents: 3,
       running: %{},
       claimed: MapSet.new(),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -1059,9 +1100,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_concurrent_agents"
 
+    write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_startups: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "agent.max_concurrent_startups"
+
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 0)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "worker.max_concurrent_agents_per_host"
+
+    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_startups_per_host: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "worker.max_concurrent_startups_per_host"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1227,6 +1276,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   test "config supports per-state max concurrent agent overrides" do
     write_workflow_file!(Workflow.workflow_file_path(),
       max_concurrent_agents: 10,
+      max_concurrent_startups: 2,
       max_concurrent_agents_by_state: %{
         "todo" => 1,
         "In Progress" => 4,
@@ -1235,15 +1285,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     assert Config.settings!().agent.max_concurrent_agents == 10
+    assert Config.settings!().agent.max_concurrent_startups == 2
     assert Config.max_concurrent_agents_for_state("Todo") == 1
     assert Config.max_concurrent_agents_for_state("In Progress") == 4
     assert Config.max_concurrent_agents_for_state("Merging") == 2
     assert Config.max_concurrent_agents_for_state("Closed") == 10
     assert Config.max_concurrent_agents_for_state(:not_a_string) == 10
 
-    write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_max_concurrent_agents_per_host: 2,
+      worker_max_concurrent_startups_per_host: 1
+    )
+
     assert :ok = Config.validate!()
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
+    assert Config.settings!().worker.max_concurrent_startups_per_host == 1
   end
 
   test "schema helpers cover custom type and state limit validation" do

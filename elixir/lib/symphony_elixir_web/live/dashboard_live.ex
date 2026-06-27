@@ -123,7 +123,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
           <article class="metric-card metric-card-wide">
             <p class="metric-label">Token usage</p>
-            <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+            <p class="metric-value numeric"><%= format_int(@payload.runtime_totals.total_tokens) %></p>
             <p class="metric-detail"><%= token_hotspot_text(@payload.token_hotspot) %></p>
           </article>
         </section>
@@ -687,7 +687,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp completed_runtime_seconds(payload) do
-    payload.codex_totals.seconds_running || 0
+    payload.runtime_totals.seconds_running || 0
   end
 
   defp total_runtime_seconds(payload, now) do
