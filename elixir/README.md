@@ -27,6 +27,15 @@ During app-server sessions, Symphony also serves a client-side `linear_graphql` 
 bundled workflow modules and agents can make raw Linear GraphQL calls when the direct tracker tool
 surface is not enough.
 
+The shared `SymphonyElixir.ProcessSupervisor` primitive supports argv launch, workspace cwd,
+CODEX_HOME environment overlay, line buffering, startup timeout normalization, process identity,
+stop/kill, and best-effort descendant cleanup through the host `ps`/`kill` process tree. The
+existing string-valued `codex.command` local launch path remains a compatibility shell command so
+documented shell expansion continues to work; direct argv callers use the primitive without an
+intermediate shell. Remote worker launch remains an explicit SSH shell command; Symphony supervises
+the local ssh port, but remote process-group and descendant cleanup are not guaranteed by this local
+primitive.
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 

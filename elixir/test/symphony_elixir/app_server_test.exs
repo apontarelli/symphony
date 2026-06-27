@@ -366,7 +366,72 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
+  test "app server preserves shell expansion for string codex command" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-shell-command-#{System.unique_integer([:positive])}"
+      )
+
+    previous_codex_bin = System.get_env("SYMPHONY_TEST_CODEX_BIN")
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_TEST_CODEX_BIN", previous_codex_bin)
+    end)
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-SHELL-COMMAND")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-shell-command.trace")
+
+      File.mkdir_p!(workspace)
+      System.put_env("SYMPHONY_TEST_CODEX_BIN", codex_binary)
+
+      write_successful_fake_codex!(codex_binary, trace_file,
+        thread_id: "thread-shell-command",
+        turn_id: "turn-shell-command",
+        trace_startup: """
+        printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+        printf 'ENV_CODEX_HOME:%s\\n' "$CODEX_HOME" >> "$trace_file"
+        """
+      )
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "$SYMPHONY_TEST_CODEX_BIN app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-shell-command",
+        identifier: "MT-SHELL-COMMAND",
+        title: "Preserve shell command",
+        description: "Ensure string codex.command still expands environment variables in the launched shell",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-SHELL-COMMAND",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Validate shell command", issue)
+
+      trace = File.read!(trace_file)
+      assert trace =~ "ARGV:"
+      assert trace =~ "app-server"
+      assert trace =~ "ENV_CODEX_HOME:"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "app server stop_session terminates local codex descendant processes" do
+    if SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() do
+      do_app_server_descendant_cleanup_test()
+    else
+      assert SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() == false
+    end
+  end
+
+  defp do_app_server_descendant_cleanup_test do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -383,21 +448,21 @@ defmodule SymphonyElixir.AppServerTest do
       File.mkdir_p!(workspace)
 
       File.write!(codex_binary, """
-       #!/bin/sh
-       child_pid=""
-       cleanup() {
-         if [ -n "$child_pid" ]; then
-           kill "$child_pid" 2>/dev/null || true
-           wait "$child_pid" 2>/dev/null || true
-         fi
-       }
-       trap 'cleanup; exit 143' TERM INT
-       trap 'cleanup' EXIT
-       sleep 60 &
-       child_pid="$!"
-       printf '%s\\n' "$child_pid" > "#{child_pid_file}"
+      #!/bin/sh
+      child_pid=""
+      cleanup() {
+        if [ -n "$child_pid" ]; then
+          kill "$child_pid" 2>/dev/null || true
+          wait "$child_pid" 2>/dev/null || true
+        fi
+      }
+      trap 'cleanup; exit 143' TERM INT
+      trap 'cleanup' EXIT
+      sleep 60 &
+      child_pid="$!"
+      printf '%s\\n' "$child_pid" > "#{child_pid_file}"
 
-       count=0
+      count=0
       while IFS= read -r _line; do
         count=$((count + 1))
 
@@ -405,12 +470,12 @@ defmodule SymphonyElixir.AppServerTest do
           1)
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
-           2)
-             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-descendant-cleanup"}}}'
-             wait "$child_pid"
-             ;;
-           *)
-             sleep 1
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-descendant-cleanup"}}}'
+            wait "$child_pid"
+            ;;
+          *)
+            sleep 1
             ;;
         esac
       done

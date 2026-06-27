@@ -4,7 +4,16 @@ defmodule SymphonyElixir.Codex.AppServer do
   """
 
   require Logger
-  alias SymphonyElixir.{Codex.DynamicTool, Codex.ExecutionProfile, Codex.Launch, Config, PathSafety, Workflow}
+
+  alias SymphonyElixir.{
+    Codex.DynamicTool,
+    Codex.ExecutionProfile,
+    Codex.Launch,
+    Config,
+    PathSafety,
+    ProcessSupervisor,
+    Workflow
+  }
 
   @initialize_id 1
   @thread_start_id 2
@@ -17,6 +26,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   @type session :: %{
           port: port(),
+          process: ProcessSupervisor.t(),
           metadata: map(),
           approval_policy: String.t() | map(),
           auto_approve_requests: boolean(),
@@ -46,9 +56,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     settings = Config.settings!()
     execution_profile = ExecutionProfile.resolve(settings, Keyword.get(opts, :execution_profile, "implementation"))
     codex_command = ExecutionProfile.command(settings.codex.command, execution_profile, settings.codex.model)
+    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, settings.codex.read_timeout_ms)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
+      process = launch.process
       port = launch.port
 
       metadata =
@@ -59,10 +71,12 @@ defmodule SymphonyElixir.Codex.AppServer do
       Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command}")
 
       with {:ok, session_policies} <- session_policies(expanded_workspace, worker_host, opts),
-           {:ok, thread_id} <- do_start_session(port, expanded_workspace, session_policies) do
+           {:ok, thread_id} <-
+             await_session_startup(process, port, expanded_workspace, session_policies, startup_timeout_ms) do
         {:ok,
          %{
            port: port,
+           process: process,
            metadata: metadata,
            approval_policy: session_policies.approval_policy,
            auto_approve_requests: session_policies.approval_policy == "never",
@@ -75,10 +89,16 @@ defmodule SymphonyElixir.Codex.AppServer do
          }}
       else
         {:error, reason} ->
-          stop_port(port)
+          ProcessSupervisor.stop(process)
           {:error, reason}
       end
     end
+  end
+
+  defp await_session_startup(process, port, workspace, session_policies, startup_timeout_ms) do
+    ProcessSupervisor.await_startup(process, startup_timeout_ms, fn _process, timeout ->
+      do_start_session(port, workspace, session_policies, timeout)
+    end)
   end
 
   @spec run_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -162,8 +182,14 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   @spec stop_session(session()) :: :ok
+  def stop_session(%{process: %ProcessSupervisor{} = process}) do
+    ProcessSupervisor.stop(process)
+  end
+
   def stop_session(%{port: port}) when is_port(port) do
-    stop_port(port)
+    port
+    |> ProcessSupervisor.from_port()
+    |> ProcessSupervisor.stop()
   end
 
   defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
@@ -210,8 +236,8 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp port_metadata(port, worker_host) when is_port(port) do
     base_metadata =
-      case :erlang.port_info(port, :os_pid) do
-        {:os_pid, os_pid} ->
+      case ProcessSupervisor.identity(port) do
+        %{os_pid: os_pid} when is_integer(os_pid) ->
           %{codex_app_server_pid: to_string(os_pid)}
 
         _ ->
@@ -224,7 +250,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp send_initialize(port) do
+  defp send_initialize(port, timeout) when is_function(timeout, 0) do
     payload = %{
       "method" => "initialize",
       "id" => @initialize_id,
@@ -242,7 +268,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
     send_message(port, payload)
 
-    with {:ok, _} <- await_response(port, @initialize_id) do
+    with {:ok, _} <- await_response(port, @initialize_id, timeout.()) do
       send_message(port, %{"method" => "initialized", "params" => %{}})
       :ok
     end
@@ -256,14 +282,15 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config.codex_runtime_settings(workspace, Keyword.put(opts, :remote, true))
   end
 
-  defp do_start_session(port, workspace, session_policies) do
-    case send_initialize(port) do
-      :ok -> start_thread(port, workspace, session_policies)
+  defp do_start_session(port, workspace, session_policies, timeout) when is_function(timeout, 0) do
+    case send_initialize(port, timeout) do
+      :ok -> start_thread(port, workspace, session_policies, timeout)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
+  defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}, timeout)
+       when is_function(timeout, 0) do
     send_message(port, %{
       "method" => "thread/start",
       "id" => @thread_start_id,
@@ -275,7 +302,7 @@ defmodule SymphonyElixir.Codex.AppServer do
       }
     })
 
-    case await_response(port, @thread_start_id) do
+    case await_response(port, @thread_start_id, timeout.()) do
       {:ok, %{"thread" => thread_payload}} ->
         case thread_payload do
           %{"id" => thread_id} -> {:ok, thread_id}
@@ -1103,6 +1130,10 @@ defmodule SymphonyElixir.Codex.AppServer do
     with_timeout_response(port, request_id, Config.settings!().codex.read_timeout_ms, "")
   end
 
+  defp await_response(port, request_id, timeout_ms) do
+    with_timeout_response(port, request_id, timeout_ms, "")
+  end
+
   defp with_timeout_response(port, request_id, timeout_ms, pending_line) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
@@ -1168,94 +1199,6 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp issue_context(%{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
-  end
-
-  defp stop_port(port) when is_port(port) do
-    os_pid = port_os_pid(port)
-    descendants = os_pid_descendants(os_pid)
-
-    signal_os_pids([os_pid | descendants], "TERM")
-    Process.sleep(100)
-
-    case :erlang.port_info(port) do
-      :undefined ->
-        :ok
-
-      _ ->
-        try do
-          Port.close(port)
-          :ok
-        rescue
-          ArgumentError ->
-            :ok
-        end
-    end
-
-    signal_os_pids([os_pid | descendants], "TERM")
-    Process.sleep(100)
-    signal_os_pids([os_pid | descendants], "KILL")
-    :ok
-  end
-
-  defp port_os_pid(port) when is_port(port) do
-    case :erlang.port_info(port, :os_pid) do
-      {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
-      _ -> nil
-    end
-  end
-
-  defp os_pid_descendants(nil), do: []
-
-  defp os_pid_descendants(pid) when is_integer(pid) do
-    case System.cmd("ps", ["-axo", "pid=,ppid="], stderr_to_stdout: true) do
-      {output, 0} ->
-        output
-        |> os_parent_pid_map()
-        |> collect_descendant_pids(pid)
-
-      _ ->
-        []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp os_parent_pid_map(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reduce(%{}, &put_parent_pid_entry/2)
-  end
-
-  defp put_parent_pid_entry(line, by_parent) do
-    case line |> String.trim() |> String.split(~r/\s+/, trim: true) do
-      [child, parent] -> put_parent_pid_entry(by_parent, child, parent)
-      _ -> by_parent
-    end
-  end
-
-  defp put_parent_pid_entry(by_parent, child, parent) do
-    child_pid = String.to_integer(child)
-    parent_pid = String.to_integer(parent)
-
-    Map.update(by_parent, parent_pid, [child_pid], &[child_pid | &1])
-  end
-
-  defp collect_descendant_pids(by_parent, pid) do
-    children = Map.get(by_parent, pid, [])
-    Enum.flat_map(children, &collect_descendant_pids(by_parent, &1)) ++ children
-  end
-
-  defp signal_os_pids(pids, signal) do
-    pids
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-    |> Enum.each(fn pid ->
-      System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
-    end)
-
-    :ok
-  rescue
-    _ -> :ok
   end
 
   defp emit_message(on_message, event, details, metadata) when is_function(on_message, 1) do
