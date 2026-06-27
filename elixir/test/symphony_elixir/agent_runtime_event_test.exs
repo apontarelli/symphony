@@ -6,7 +6,7 @@ defmodule SymphonyElixir.AgentRuntimeEventTest do
 
   test "AgentRuntime declares the adapter callbacks expected by orchestration" do
     assert {:start, 3} in AgentRuntime.behaviour_info(:callbacks)
-    assert {:send_turn, 3} in AgentRuntime.behaviour_info(:callbacks)
+    assert {:send_turn, 4} in AgentRuntime.behaviour_info(:callbacks)
     assert {:stop, 1} in AgentRuntime.behaviour_info(:callbacks)
     assert {:capabilities, 1} in AgentRuntime.behaviour_info(:callbacks)
   end

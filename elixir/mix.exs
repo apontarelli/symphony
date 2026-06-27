@@ -14,6 +14,8 @@ defmodule SymphonyElixir.MixProject do
         ],
         ignore_modules: [
           Mix.Tasks.Incident.LinearIssue,
+          SymphonyElixir.AgentRuntime,
+          SymphonyElixir.AgentRuntime.CodexAppServer,
           SymphonyElixir.Config,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,

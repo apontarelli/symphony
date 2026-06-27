@@ -4,8 +4,8 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.AgentRuntime.Event
 
   @type worker_host :: String.t() | nil
 
@@ -55,11 +55,26 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
-    fn message ->
-      send_codex_update(recipient, issue, message)
+  defp runtime_event_handler(recipient, issue) do
+    fn %Event{} = event ->
+      send_codex_update(recipient, issue, runtime_event_update(event))
     end
   end
+
+  defp runtime_event_update(%Event{} = event) do
+    payload = event.payload || %{}
+
+    payload
+    |> Map.put(:event, event.event)
+    |> Map.put(:timestamp, event.timestamp)
+    |> maybe_put_runtime_field(:session_id, event.session_id)
+    |> maybe_put_runtime_field(:usage, event.usage)
+    |> maybe_put_runtime_field(:native, event.native)
+    |> maybe_put_runtime_field(:reason, event.reason)
+  end
+
+  defp maybe_put_runtime_field(update, _key, nil), do: update
+  defp maybe_put_runtime_field(update, key, value), do: Map.put(update, key, value)
 
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
@@ -143,12 +158,12 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, policy} <- policy_for_issue(issue, opts),
-         {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host, policy: policy) do
+         {:ok, session} <- AgentRuntime.start_session(workspace, issue, worker_host: worker_host, policy: policy) do
       try do
         opts = Keyword.put(opts, :policy, policy)
         do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
-        AppServer.stop_session(session)
+        AgentRuntime.stop_session(session)
       end
     end
   end
@@ -173,11 +188,11 @@ defmodule SymphonyElixir.AgentRunner do
     send_workflow_module_resolution(codex_update_recipient, issue, prompt_bundle.workflow_module_resolution)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           AgentRuntime.send_turn(
              app_session,
              prompt_bundle.prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue),
+             on_event: runtime_event_handler(codex_update_recipient, issue),
              workflow_module_resolution: prompt_bundle.workflow_module_resolution
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
