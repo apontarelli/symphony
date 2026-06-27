@@ -976,13 +976,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "codex app-server"
     assert config.codex.model == "gpt-5.5"
 
-    assert config.codex.approval_policy == %{
-             "reject" => %{
-               "sandbox_approval" => true,
-               "rules" => true,
-               "mcp_elicitations" => true
-             }
-           }
+    assert config.codex.approval_policy == "on-request"
 
     assert config.codex.thread_sandbox == "workspace-write"
 
@@ -1306,7 +1300,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{
                tracker: %{api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
-               codex: %{approval_policy: %{reject: %{sandbox_approval: true}}},
+               codex: %{approval_policy: %{custom_policy: %{sandbox_approval: true}}},
                profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
@@ -1314,7 +1308,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
     assert settings.codex.approval_policy == %{
-             "reject" => %{"sandbox_approval" => true}
+             "custom_policy" => %{"sandbox_approval" => true}
            }
 
     assert {:ok, settings} =

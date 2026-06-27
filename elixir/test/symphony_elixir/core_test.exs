@@ -795,7 +795,7 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert Map.get(tracker, "project_slug") == "symphony-self-contained-workflow-modules-72083cd8c253"
+    assert Map.get(tracker, "project_slug") == "make-symphony-runner-agnostic-09b8dc46fe82"
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
@@ -1498,6 +1498,73 @@ defmodule SymphonyElixir.CoreTest do
     assert route_comment =~ "blocked"
     assert route_comment =~ "Stripe and Cloudflare staging access are required."
     assert route_comment =~ "Provide Stripe test credentials and Cloudflare Access authorization."
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+  end
+
+  test "failed worker exit with blocked completion records blocker without retrying" do
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-blocked-failed-exit"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :BlockedFailedExitOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-724",
+      issue: %Issue{id: issue_id, identifier: "MT-724", state: "In Progress"},
+      session_id: nil,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :agent_blocked,
+         timestamp: DateTime.utc_now(),
+         completion: %{
+           outcome: :blocked,
+           blocker: %{
+             reason: "Codex app-server rejected Symphony's request as invalid: unknown variant `reject`.",
+             required_action: "Update Codex configuration for the installed app-server schema."
+           }
+         }
+       }}
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), {%RuntimeError{message: "Agent run failed"}, []}})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+
+    assert %{
+             route: "blocked",
+             target_state: "Human Review",
+             recommendation: "Update Codex configuration for the installed app-server schema."
+           } = state.handoff_routes[issue_id]
+
+    assert_receive {:memory_tracker_comment, ^issue_id, route_comment}
+    assert route_comment =~ "unknown variant `reject`"
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
@@ -2430,6 +2497,81 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "agent runner reports codex invalid request schema errors as blocked completion" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-invalid-codex-schema-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+
+      File.mkdir_p!(workspace_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"error":{"code":-32600,"message":"Invalid request: unknown variant `reject`, expected one of `untrusted`, `on-failure`, `on-request`, `granular`, `never`"}}'
+            ;;
+          *)
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: %{"reject" => %{"sandbox_approval" => true}}
+      )
+
+      issue = %Issue{
+        id: "issue-invalid-codex-schema",
+        identifier: "MT-32600",
+        title: "Invalid Codex schema",
+        description: "Codex rejects a deterministic app-server request schema.",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-32600",
+        project_slug: "project",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/unknown variant `reject`/, fn ->
+        AgentRunner.run(issue, self())
+      end
+
+      assert_received {:codex_worker_update, "issue-invalid-codex-schema",
+                       %{
+                         event: :agent_blocked,
+                         timestamp: %DateTime{},
+                         completion: %{
+                           outcome: :blocked,
+                           blocker: %{
+                             reason: reason,
+                             required_action: required_action
+                           }
+                         }
+                       }}
+
+      assert reason =~ "Codex app-server rejected Symphony's request as invalid"
+      assert reason =~ "unknown variant `reject`"
+      assert required_action =~ "installed Codex app-server schema"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "agent runner completes with empty CODEX_HOME and bundled workflow modules" do
     test_root =
       Path.join(
@@ -2936,16 +3078,8 @@ defmodule SymphonyElixir.CoreTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> then(fn payload ->
-                   expected_approval_policy = %{
-                     "reject" => %{
-                       "sandbox_approval" => true,
-                       "rules" => true,
-                       "mcp_elicitations" => true
-                     }
-                   }
-
                    payload["method"] == "thread/start" &&
-                     get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
                      get_in(payload, ["params", "sandbox"]) == "workspace-write" &&
                      get_in(payload, ["params", "cwd"]) == canonical_workspace
                  end)
@@ -2969,17 +3103,9 @@ defmodule SymphonyElixir.CoreTest do
                  |> String.trim_leading("JSON:")
                  |> Jason.decode!()
                  |> then(fn payload ->
-                   expected_approval_policy = %{
-                     "reject" => %{
-                       "sandbox_approval" => true,
-                       "rules" => true,
-                       "mcp_elicitations" => true
-                     }
-                   }
-
                    payload["method"] == "turn/start" &&
                      get_in(payload, ["params", "cwd"]) == canonical_workspace &&
-                     get_in(payload, ["params", "approvalPolicy"]) == expected_approval_policy &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
                      get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy
                  end)
                else

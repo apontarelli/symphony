@@ -349,7 +349,7 @@ runtime:
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.
 - Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
+  - `codex.approval_policy` defaults to `on-request`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
@@ -361,7 +361,9 @@ runtime:
   - Worker machines still provide the Codex executable and authentication material. When
     `~/.codex/auth.json` exists for the worker user, Symphony links it into the harness home; it does
     not copy Symphony skills into `~/.agents` or `~/.codex`.
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
+- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the
+  current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`,
+  `granular`, and `never`; legacy object-form `reject` is not accepted by Codex CLI 0.128.0.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local

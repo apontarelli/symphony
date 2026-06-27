@@ -189,15 +189,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:command, :string, default: "codex app-server")
       field(:model, :string, default: "gpt-5.5")
 
-      field(:approval_policy, StringOrMap,
-        default: %{
-          "reject" => %{
-            "sandbox_approval" => true,
-            "rules" => true,
-            "mcp_elicitations" => true
-          }
-        }
-      )
+      field(:approval_policy, StringOrMap, default: "on-request")
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)

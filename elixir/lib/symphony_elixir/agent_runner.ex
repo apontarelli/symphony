@@ -29,6 +29,7 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
+        maybe_send_non_retryable_agent_blocker(codex_update_recipient, issue, reason)
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
     end
@@ -67,6 +68,57 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp send_codex_update(_recipient, _issue, _message), do: :ok
+
+  defp maybe_send_non_retryable_agent_blocker(recipient, issue, reason) do
+    case non_retryable_agent_blocker(reason) do
+      nil ->
+        :ok
+
+      blocker ->
+        send_codex_update(recipient, issue, %{
+          event: :agent_blocked,
+          timestamp: DateTime.utc_now(),
+          completion: %{
+            outcome: :blocked,
+            blocker: blocker
+          }
+        })
+    end
+  end
+
+  defp non_retryable_agent_blocker({:response_error, %{} = error}) do
+    if codex_invalid_request_error?(error) do
+      %{
+        reason: codex_invalid_request_reason(error),
+        required_action: "Update the workflow Codex configuration or Symphony Codex adapter to match the installed Codex app-server schema."
+      }
+    end
+  end
+
+  defp non_retryable_agent_blocker(_reason), do: nil
+
+  defp codex_invalid_request_error?(error) do
+    (Map.get(error, "code") || Map.get(error, :code)) in [-32600, "-32600"]
+  end
+
+  defp codex_invalid_request_reason(error) do
+    message =
+      error
+      |> Map.get("message", Map.get(error, :message))
+      |> non_empty_string()
+
+    case message do
+      nil -> "Codex app-server rejected Symphony's request as invalid."
+      message -> "Codex app-server rejected Symphony's request as invalid: #{message}"
+    end
+  end
+
+  defp non_empty_string(value) when is_binary(value) do
+    value = String.trim(value)
+    if value == "", do: nil, else: value
+  end
+
+  defp non_empty_string(_value), do: nil
 
   defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
        when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
