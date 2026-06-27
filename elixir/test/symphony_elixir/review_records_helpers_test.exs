@@ -6,9 +6,9 @@ defmodule SymphonyElixir.ReviewRecords.HelpersTest do
 
   alias SymphonyElixir.ReviewRecords.{
     Command,
-    ParallelReviewAdapter,
     PathSanitizer,
-    Redaction
+    Redaction,
+    RetrospectiveAdapter
   }
 
   test "review-records command handles usage, empty lists, json exports, and read errors" do
@@ -38,6 +38,14 @@ defmodule SymphonyElixir.ReviewRecords.HelpersTest do
              Command.evaluate(["export", "--logs-root", logs_root, "--format", "json", "--since", "last"])
 
     assert Jason.decode!(export_output)["record_count"] == 1
+
+    assert {:ok, backfill_output} = Command.evaluate(["backfill-review", "--logs-root", logs_root])
+    assert backfill_output =~ "backfilled=0 skipped=0 errors=0"
+    assert {:error, backfill_usage} = Command.evaluate(["backfill-review", "extra"])
+    assert backfill_usage =~ "Usage: symphony review-records"
+    assert backfill_usage =~ "backfill-review [--logs-root <path>]"
+    refute backfill_usage =~ "backfill-review [--logs-root <path>] [--format"
+    assert {:error, ^backfill_usage} = Command.evaluate(["backfill-review", "--unknown"])
 
     write_metadata_only!(logs_root, "SID-901", "run-same", ~s({"schema":"metadata"}))
     write_metadata_only!(logs_root, "SID-902", "run-same", ~s({"schema":"metadata"}))
@@ -109,7 +117,7 @@ defmodule SymphonyElixir.ReviewRecords.HelpersTest do
     assert [%{"files" => ["test/source_test.exs"]}] = payload["nested"]
   end
 
-  test "parallel-review adapter maps non-string statuses and reports read errors" do
+  test "retrospective adapter maps non-string statuses and reports read errors" do
     logs_root = tmp_root!("review-records-adapter")
     source_dir = tmp_root!("review-records-adapter-source")
 
@@ -127,25 +135,54 @@ defmodule SymphonyElixir.ReviewRecords.HelpersTest do
     }
 
     write_json!(files.findings, %{"findings" => [%{"category" => nil, "evidence" => nil}]})
-    write_json!(files.disposition, %{"dispositions" => [%{"finding_id" => "F1", "status" => 123, "rationale" => ""}]})
+
+    write_json!(files.disposition, %{
+      "dispositions" => [
+        %{"finding_id" => "F1", "status" => 123, "rationale" => ""},
+        %{"finding_id" => "F2", "status" => "no_change", "rationale" => "No code change."}
+      ]
+    })
+
     write_json!(files.metadata, %{"run" => %{}, "issue" => %{}})
 
     normalized = %{logs_root: logs_root, project: %{slug: "symphony"}, run: %{id: "run-adapter"}}
 
-    assert :ok = ParallelReviewAdapter.write(normalized, files)
+    assert :ok = RetrospectiveAdapter.write(normalized, files)
 
     disposition =
-      [logs_root, "review-records", "parallel-review", "symphony", "run-adapter", "disposition.json"]
+      [logs_root, "review-records", "review", "symphony", "run-adapter", "disposition.json"]
       |> Path.join()
       |> read_json!()
 
-    assert [%{"native_status" => 123, "status" => "untriaged"}] = disposition["dispositions"]
+    assert [
+             %{"native_status" => 123, "status" => "untriaged"},
+             %{"native_status" => "no_change", "status" => "out_of_scope"}
+           ] = disposition["dispositions"]
+
+    refute disposition["instruction"] =~ "no_change"
 
     assert {:error, %File.Error{}} =
-             ParallelReviewAdapter.write(normalized, %{
+             RetrospectiveAdapter.write(normalized, %{
                files
                | findings: Path.join(source_dir, "missing.json")
              })
+  end
+
+  test "retrospective backfill reports malformed legacy records" do
+    logs_root = tmp_root!("review-records-backfill-errors")
+    legacy_dir = Path.join([logs_root, "review-records", "parallel-review", "symphony", "run-bad"])
+
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    File.mkdir_p!(legacy_dir)
+    write_json!(Path.join(legacy_dir, "metadata.json"), %{"schema" => "parallel-review.metadata.v1"})
+
+    assert {:ok, output} = Command.evaluate(["backfill-review", "--logs-root", logs_root])
+    assert output =~ "backfilled=0 skipped=0 errors=1"
+    assert output =~ "parallel-review/symphony/run-bad"
+    assert output =~ "no such file"
+
+    assert {:error, %FunctionClauseError{}} = RetrospectiveAdapter.backfill_legacy_parallel_review(:invalid_logs_root)
   end
 
   defp command_record(logs_root, issue_identifier, run_id) do

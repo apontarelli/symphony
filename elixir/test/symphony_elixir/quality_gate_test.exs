@@ -623,7 +623,15 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:quality_gate_review, :source_correctness}
     assert_receive {:quality_gate_review, :test_quality}
 
-    assert {:ok, record} = SymphonyElixir.ReviewRecords.show(logs_root, "session-320")
+    record =
+      eventually(fn ->
+        case SymphonyElixir.ReviewRecords.show(logs_root, "session-320") do
+          {:ok, record} -> record
+          {:error, _reason} -> nil
+        end
+      end)
+
+    assert record
     assert record.metadata["issue"]["identifier"] == "SID-320"
     assert record.metadata["workflow"]["policy_ref"] == "640c639998cf"
     assert record.quality_gate["status"] == "passed"
@@ -2152,4 +2160,23 @@ defmodule SymphonyElixir.QualityGateTest do
       )
     )
   end
+
+  defp eventually(fun, attempts \\ 20)
+
+  defp eventually(fun, attempts) when attempts > 0 do
+    case fun.() do
+      nil ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      false ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      value ->
+        value
+    end
+  end
+
+  defp eventually(_fun, 0), do: false
 end

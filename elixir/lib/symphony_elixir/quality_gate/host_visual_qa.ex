@@ -158,7 +158,7 @@ defmodule SymphonyElixir.QualityGate.HostVisualQa do
   end
 
   defp clean_shell_args(env, command) do
-    ["-i"] ++ environment_assignments(env) ++ ["/bin/sh", "-lc", command]
+    ["-i"] ++ environment_assignments(env) ++ ["/bin/sh", "-c", command]
   end
 
   defp clean_remote_shell_command(env, command) do

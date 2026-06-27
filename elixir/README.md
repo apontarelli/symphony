@@ -239,9 +239,12 @@ Each record directory contains stable `metadata.json`, `quality_gate.json`, `fin
 after creation; update `disposition.json` when a finding is accepted, fixed, rejected as a false
 positive, deferred, or left for operator decision. The export command groups findings by category,
 disposition, file/surface, false-positive pattern, and follow-up candidate. It also writes
-parallel-review-compatible sidecars under `review-records/parallel-review/<project-slug>/<run-id>/`
+review-retrospective-compatible sidecars under `review-records/review/<project-slug>/<run-id>/`
 so the shared `review-retrospective` workflow can mine Symphony quality-gate records by pointing
-`AGENT_RECORDS_HOME` at the `review-records` root.
+`AGENT_RECORDS_HOME` at the `review-records` root. Historical
+`review-records/parallel-review/<project-slug>/<run-id>/` sidecars are legacy input only; run
+`./bin/symphony review-records backfill-review --logs-root /path/to/logs-root` once to copy them
+into canonical `review/` records while preserving the original legacy path in metadata provenance.
 
 The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
 modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.

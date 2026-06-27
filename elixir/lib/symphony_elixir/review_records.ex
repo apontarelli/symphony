@@ -9,7 +9,7 @@ defmodule SymphonyElixir.ReviewRecords do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.LogFile
   alias SymphonyElixir.QualityGate.Synthesis
-  alias SymphonyElixir.ReviewRecords.{ParallelReviewAdapter, PathSanitizer, Redaction}
+  alias SymphonyElixir.ReviewRecords.{PathSanitizer, Redaction, RetrospectiveAdapter}
 
   @metadata_schema "symphony.quality_gate_review_record.metadata.v1"
   @quality_gate_schema "symphony.quality_gate_review_record.quality_gate.v1"
@@ -52,7 +52,7 @@ defmodule SymphonyElixir.ReviewRecords do
            :ok <- write_json_once(files.findings, findings),
            :ok <- write_json_once(files.disposition, disposition),
            :ok <- write_json(files.handoff_route, handoff_route),
-           :ok <- write_parallel_review_compatibility(normalized, files) do
+           :ok <- write_review_retrospective_compatibility(normalized, files) do
         {:ok, %{record_dir: normalized.record_dir, files: files}}
       end
     end
@@ -126,6 +126,12 @@ defmodule SymphonyElixir.ReviewRecords do
     error -> {:error, error}
   end
 
+  @spec backfill_legacy_parallel_review(Path.t() | nil) ::
+          {:ok, RetrospectiveAdapter.backfill_summary()} | {:error, term()}
+  def backfill_legacy_parallel_review(logs_root) do
+    RetrospectiveAdapter.backfill_legacy_parallel_review(logs_root)
+  end
+
   defp default_logs_root do
     LogFile.default_log_file()
     |> Config.log_file()
@@ -170,8 +176,14 @@ defmodule SymphonyElixir.ReviewRecords do
     %{
       slug:
         (field(project, :slug, nil) ||
+           get_in_any(policy, [
+             ["manifest", "project", "slug"],
+             [:manifest, :project, :slug],
+             ["project", "slug"],
+             [:project, :slug]
+           ]) ||
            field(policy, :project_slug, nil) ||
-           get_in_any(policy, [["policy_metadata", "project_slug"], [:policy_metadata, :project_slug], ["project", "slug"], [:project, :slug]]))
+           get_in_any(policy, [["policy_metadata", "project_slug"], [:policy_metadata, :project_slug]]))
         |> fallback("unknown-project")
         |> sanitize_segment(),
       name: field(project, :name, get_in_any(policy, [["project", "name"], [:project, :name]])),
@@ -548,8 +560,8 @@ defmodule SymphonyElixir.ReviewRecords do
     |> redact_runtime_payload()
   end
 
-  defp write_parallel_review_compatibility(normalized, files) do
-    ParallelReviewAdapter.write(normalized, files)
+  defp write_review_retrospective_compatibility(normalized, files) do
+    RetrospectiveAdapter.write(normalized, files)
   end
 
   defp metadata_paths(records_root) do
@@ -681,8 +693,10 @@ defmodule SymphonyElixir.ReviewRecords do
       },
       "review_retrospective_compatibility" => %{
         "artifact_root" => "review-records",
-        "parallel_review_path" => "parallel-review/<project-slug>/<run-id>",
-        "note" => "Set AGENT_RECORDS_HOME to the review-records root to let review-retrospective discover compatible exported records."
+        "review_path" => "review/<project-slug>/<run-id>",
+        "legacy_repair_source_path" => "parallel-review/<project-slug>/<run-id>",
+        "legacy_backfill_command" => "symphony review-records backfill-review --logs-root <logs-root>",
+        "note" => "Set AGENT_RECORDS_HOME to the review-records root. review/ is canonical; parallel-review/ is legacy backfill input only."
       }
     }
   end
