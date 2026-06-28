@@ -168,7 +168,7 @@ defmodule SymphonyElixir.ProductVisualReviewTest do
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(Workflow.workflow_file_path())
 
-    assert %{path: "runtime.workflow_modules.product_visual_review", message: "route_policy is invalid"} in diagnostics
+    assert %{path: "workflow.config.product_visual_review", message: "route_policy is invalid"} in diagnostics
   end
 
   test "workflow module config normalizes values from selected manifest module config" do

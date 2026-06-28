@@ -45,7 +45,7 @@ defmodule SymphonyElixir.TestSupport do
           )
 
         File.mkdir_p!(workflow_root)
-        workflow_file = Path.join(workflow_root, "symphony.yml")
+        workflow_file = Path.join(workflow_root, "symphony.runtime.yml")
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         previous_log_file = Application.get_env(:symphony_elixir, :log_file)
@@ -339,8 +339,7 @@ defmodule SymphonyElixir.TestSupport do
         "profiles: #{yaml_value(profiles)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
-        server_yaml(server_port, server_host),
-        workflow_modules_yaml(workflow_modules_product_visual_review)
+        server_yaml(server_port, server_host)
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
 
@@ -352,7 +351,7 @@ defmodule SymphonyElixir.TestSupport do
         "  repository: #{yaml_value(project_repository)}",
         "delivery:",
         "  pr_target: #{yaml_value(delivery_pr_target)}",
-        workflow_yaml(workflow_module_ids),
+        workflow_yaml(workflow_module_ids, workflow_modules_product_visual_review),
         "harness:",
         "  codex_home: #{yaml_value(harness_codex_home)}",
         "runtime:",
@@ -398,18 +397,24 @@ defmodule SymphonyElixir.TestSupport do
 
   defp command_argv(command), do: command
 
-  defp workflow_yaml(module_ids) when module_ids in [nil, []] do
+  defp workflow_yaml(module_ids, nil) when module_ids in [nil, []] do
     "workflow:\n  preset: \"default\""
   end
 
-  defp workflow_yaml(module_ids) when is_list(module_ids) do
+  defp workflow_yaml(module_ids, product_visual_review) when module_ids in [nil, []] and is_map(product_visual_review) do
+    workflow_yaml([], product_visual_review)
+  end
+
+  defp workflow_yaml(module_ids, product_visual_review) when is_list(module_ids) do
     [
       "workflow:",
       "  preset: \"default\"",
-      "  modules:",
-      Enum.map(module_ids, &"    - #{yaml_value(&1)}")
+      module_ids != [] && "  modules:",
+      Enum.map(module_ids, &"    - #{yaml_value(&1)}"),
+      workflow_module_config_yaml(product_visual_review)
     ]
     |> List.flatten()
+    |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")
   end
 
@@ -470,12 +475,12 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp workflow_modules_yaml(nil), do: nil
+  defp workflow_module_config_yaml(nil), do: nil
 
-  defp workflow_modules_yaml(product_visual_review) when is_map(product_visual_review) do
+  defp workflow_module_config_yaml(product_visual_review) when is_map(product_visual_review) do
     [
-      "workflow_modules:",
-      "  product_visual_review: #{yaml_value(product_visual_review)}"
+      "  config:",
+      "    product_visual_review: #{yaml_value(product_visual_review)}"
     ]
     |> Enum.join("\n")
   end

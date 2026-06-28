@@ -1,8 +1,8 @@
 version: 1
 # This committed manifest is this fork's dogfood configuration for running Symphony on itself.
 # For another repository, generate a fresh manifest with `symphony workflow init` and replace the
-# repository, tracker, workspace, validation, delivery, and Codex settings with project-local
-# values.
+# repository, validation, delivery, capability, and issue marker values with project-local values.
+# Keep tracker scope, workspace roots, runner commands, and host runtime settings in local setup.
 project:
   slug: symphony
   name: Symphony
@@ -13,6 +13,11 @@ workflow:
   preset: default
   modules:
     - product_visual_review
+  config:
+    product_visual_review:
+      enabled: true
+      project_kind: web
+      route_policy: auto
 docs:
   entrypoints:
     - README.md
@@ -35,104 +40,13 @@ automation:
   profile: default
   completion_requirements:
     - Run the strongest feasible validation gate before handoff.
+capabilities:
+  required:
+    - linear
+    - github_pr
+    - browser
+issue_markers:
+  labels:
+    - symphony
 harness:
   codex_home: null
-runtime:
-  tracker:
-    # Dogfood Linear project scope for this repository's unattended runs.
-    project_slug: make-symphony-runner-agnostic-09b8dc46fe82
-  polling:
-    interval_ms: 5000
-  workspace:
-    # Dogfood workspace root used by this repository's local Symphony runner.
-    root: ~/code/symphony-workspaces
-  hooks:
-    after_create: |
-      if ! command -v jj >/dev/null 2>&1; then
-        echo 'jj is required for this Symphony workflow' >&2
-        exit 127
-      fi
-      jj git clone https://github.com/apontarelli/symphony .
-      if command -v mise >/dev/null 2>&1; then
-        cd elixir && mise trust && mise exec -- mix deps.get
-      fi
-    before_run: |
-      jj status || true
-    before_remove: |
-      cd elixir && mise exec -- mix workspace.before_remove
-    timeout_ms: 60000
-  agent:
-    default_runner: codex
-    max_concurrent_agents: 10
-    max_concurrent_startups: 2
-    max_turns: 20
-  runners:
-    # Dogfood Codex launch policy for this repository's unattended automation.
-    codex:
-      kind: codex_app_server
-      command:
-        - codex
-        - --config
-        - shell_environment_policy.inherit=all
-        - --config
-        - model_reasoning_effort=xhigh
-        - app-server
-      model: gpt-5.5
-      approval_policy: never
-      thread_sandbox: workspace-write
-      turn_sandbox_policy:
-        type: workspaceWrite
-        networkAccess: true
-      max_concurrent_startups: 2
-      execution_profiles:
-        planner:
-          reasoning_effort: high
-          budget: standard
-        source_reviewer:
-          reasoning_effort: medium
-          budget: standard
-        test_reviewer:
-          reasoning_effort: medium
-          budget: standard
-        runtime_qa:
-          reasoning_effort: medium
-          budget: standard
-        product_visual_review:
-          reasoning_effort: high
-          budget: standard
-        docs_reviewer:
-          reasoning_effort: medium
-          budget: standard
-        security_reviewer:
-          reasoning_effort: high
-          budget: standard
-        synthesis:
-          reasoning_effort: high
-          budget: standard
-  quality_gate:
-    enabled: true
-    source_max_concurrency: 3
-    max_repair_passes: 1
-    runtime_isolation: serialized
-    reviewer_timeout_ms: 1200000
-    reviewer_max_retries: 0
-  workflow_modules:
-    product_visual_review:
-      enabled: true
-      project_kind: web
-      route_policy: auto
-  profiles:
-    skill_authoring:
-      delivery:
-        pr_target: main
-      runners:
-        codex:
-          approval_policy: never
-          thread_sandbox: danger-full-access
-          turn_sandbox_policy:
-            type: dangerFullAccess
-      prompt:
-        rules:
-          - This profile is for explicit, interactive repo skill-authoring work that must edit repo-owned `.codex/skills/` or another ticket-specified repo-local skills directory.
-          - It does not make globally installed `symphony-*` skills part of unattended runtime execution; default core workflow modules are self-contained.
-          - Keep global Codex defaults sandboxed; use this profile only for explicit skill-authoring work.

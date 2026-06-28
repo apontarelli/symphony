@@ -60,7 +60,7 @@ defmodule SymphonyElixir.Workflow do
 
   @spec load(Path.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def load(path) when is_binary(path) do
-    Manifest.load(Path.expand(path))
+    Manifest.load(Path.expand(path), repo_setup?: false)
   end
 
   defp maybe_reload_store do

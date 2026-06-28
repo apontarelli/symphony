@@ -96,7 +96,7 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp workflow_from_manifest_prompt!(load_reason) do
-    case Manifest.read(Workflow.selected_workflow_file_path()) do
+    case Manifest.read(Workflow.selected_workflow_file_path(), repo_setup?: false) do
       {:ok, %{"prompt_template" => prompt} = manifest} when is_binary(prompt) ->
         {:ok, resolution} = ModuleRegistry.prompt_module_resolution(manifest)
         %{prompt_template: prompt, workflow_module_resolution: resolution}

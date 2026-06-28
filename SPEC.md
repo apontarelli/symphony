@@ -178,7 +178,8 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `runtime.tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git or Jujutsu CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
+- Coding-agent executable for the configured `AgentRuntime`; the initial reference adapter targets
+  Codex app-server.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -401,18 +402,22 @@ Loader behavior:
 - If the selected manifest file cannot be read, return `missing_manifest_file`.
 - If no explicit path is configured, `symphony.yml` in the current process working directory is the
   only default.
-- Every selected file is parsed as a `symphony.yml` manifest.
+- The default `symphony.yml` file is parsed with the repo setup schema. Explicit local runtime setup
+  sources MAY add daemon/runtime fields outside the checked-in repo setup file.
 
-`symphony.yml` is a YAML manifest. It declares repository facts and selected Symphony-owned workflow
-modules, then compiles to the runtime workflow object used by the daemon.
+`symphony.yml` is a YAML repo setup manifest. It declares durable repository facts, required
+capability names, issue markers, and selected Symphony-owned workflow modules, then compiles to the
+runtime workflow object used by the daemon. It MUST NOT contain active run targets, workspace or log
+roots, polling settings, agent capacity, concrete runners, saved run setups, or host/deployment
+runtime settings. Those fields belong to local config or run setup sources.
 
 Manifest fields for the default preset:
 
 - `version` (integer, default `1` when omitted)
   - Currently only version `1` is supported.
 - `project.slug` (string)
-  - Used by the default `tracker.linear` module as `runtime.tracker.project_slug` when present,
-    except when `runtime.tracker.team_key` is configured without an explicit tracker project.
+  - Identifies the repository in prompts, policy metadata, and durable evidence. It is not a Linear
+    polling target.
 - `project.name` (string, defaults to `project.slug`)
 - `project.repository` (string)
   - Used by the default `workspace` module to populate new issue workspaces with
@@ -436,6 +441,19 @@ Manifest fields for the default preset:
 - `automation.review` (object)
 - `workflow.preset` (string, default `default`)
 - `workflow.modules` (list of strings, appended to preset modules)
+- `workflow.config` (object, default `{}`)
+  - Durable configuration for selected workflow modules, such as
+    `workflow.config.product_visual_review`.
+- `capabilities.required` (list of strings, default `[]`)
+  - Runner capability names required by the repository. This declares requirements only; it does not
+    select a concrete runner, model, sandbox, or command.
+- `issue_markers.labels` (list of strings, default `[]`)
+- `issue_markers.allowed_projects` (list of strings, default `[]`)
+  - Durable issue marker declarations for policy and preview validation. They do not select the
+    active Linear polling target.
+- `harness.codex_home` (string or null, default `null`)
+  - Durable harness isolation override for repositories that commit a Symphony-owned harness
+    directory. `null` means the managed harness default is used.
 - `project.criticality` (string, default `internal`)
 - `project.deployment_coupling` (string, default `local`)
 - `auto_land.posture` (string, default derived from project criticality and deployment coupling)
@@ -457,7 +475,8 @@ Manifest resolution rules:
 - The default `workspace` module compiles `project.repository` into an `after_create` hook when the
   repository field is present.
 - The resolved runtime `config` includes daemon config plus manifest metadata, `checks`,
-  `completion_requirements`, `delivery`, `profiles`, and `policy_metadata`.
+  `completion_requirements`, `capabilities`, `issue_markers`, `delivery`, `profiles`, and
+  `policy_metadata`.
 - The resolved `prompt_template` is generated from registry-owned prompt sections and manifest
   facts; target repositories do not commit full prompt prose in the manifest.
 
@@ -489,6 +508,13 @@ automation:
   profile: default
   completion_requirements:
     - Run the strongest feasible validation gate before handoff.
+capabilities:
+  required: []
+issue_markers:
+  labels: []
+  allowed_projects: []
+harness:
+  codex_home: null
 workflow:
   preset: default
   modules:
@@ -508,8 +534,8 @@ review_routing:
 - `slug` (string)
   - OPTIONAL.
   - Stable Symphony-facing project key.
-  - Used by the default `tracker.linear` module as the tracker project slug when present, except
-    when `runtime.tracker.team_key` is configured without explicit tracker project scope.
+  - Used in prompts, policy metadata, and durable evidence. It does not select tracker polling
+    scope.
 - `repository` (string)
   - OPTIONAL.
   - Repository URL used to populate new issue workspaces when present.
@@ -537,8 +563,8 @@ review_routing:
   - `production` and `production_web` require strict auto-land evidence even when other project
     metadata is lower criticality.
 
-The manifest MAY identify tracker routing by project slug, but it MUST NOT contain tracker API
-tokens.
+Tracker polling scope is runtime setup. The repo manifest MUST NOT select tracker routing or contain
+tracker API tokens.
 
 `project.app_kind` is an input to preset/module defaults; target repository docs remain the authority for
 exact setup commands and architectural style.
@@ -828,6 +854,8 @@ Required top-level fields:
 - `prompt_template` (string)
 - `checks` (list)
 - `completion_requirements` (list)
+- `capabilities` (object)
+- `issue_markers` (object)
 - `delivery` (object)
 - `publish_target` (object, OPTIONAL)
 - `transitions` (object)
@@ -852,6 +880,8 @@ Minimal shape:
   "prompt_template": "You are working on a Linear ticket `{{ issue.identifier }}`...",
   "checks": [],
   "completion_requirements": [],
+  "capabilities": {"required": ["linear", "github_pr"]},
+  "issue_markers": {"labels": ["symphony"], "allowed_projects": []},
   "delivery": {"pr_target": "main"},
   "publish_target": {
     "repository": "https://github.com/example/project",
@@ -1222,25 +1252,34 @@ it.
 `symphony.yml` v1 fields:
 
 - `version` (integer): OPTIONAL, defaults to `1` when omitted; currently only `1` is supported.
-- `project` (object): `name`, `kind`, and `app_kind`.
-- `workflow` (object): `preset` plus optional extra `modules`.
+- `project` (object): durable repository facts such as `slug`, `name`, `repository`, `kind`, and
+  `app_kind`.
+- `workflow` (object): `preset`, optional extra `modules`, and durable module config under
+  `workflow.config`.
 - `docs` (object): repo-relative `entrypoints` that agents should read for repo instructions and
   durable product/architecture context.
 - `validation` (object): named validation `commands` that the workflow expects before handoff.
 - `vcs` (object): `mode`, currently `jj`, `git`, or `none`.
 - `delivery` (object): delivery defaults such as `pr_target`.
-- `automation` (object): automation posture, currently `unattended` or `manual`.
+- `automation` (object): automation posture, selected policy profile, completion requirements, and
+  review policy.
+- `capabilities` (object): required runner capability names only; it does not select a concrete
+  runner.
+- `issue_markers` (object): durable issue labels and allowed project markers for policy/preview
+  validation; it does not select the active Linear polling target.
 - `harness` (object): optional implementation-owned harness root; `null` means the implementation
   derives a managed harness root.
-- `recovery` and `deployment` (objects): optional implementation metadata.
+- `auto_land` and `review_routing` (objects): durable repository policy inputs.
+
+Runtime tracker scope, workspace/log roots, polling, agent capacity, concrete runners, saved run
+setups, and host/deployment settings MUST live in local runtime setup, not in `symphony.yml`.
 
 CLI commands:
 
 - `symphony workflow init` creates `symphony.yml` from repo inspection. It MUST NOT overwrite an
   existing manifest unless the operator passes an explicit replacement flag.
 - `symphony workflow check` validates manifest schema, selected preset/modules, repo doc
-  entrypoints, validation command shape, VCS/delivery defaults, configured harness readiness, and
-  tracker project scope.
+  entrypoints, validation command shape, VCS/delivery defaults, and configured harness readiness.
 - The runner-agnostic cutover does not require a durable migration CLI. Operators may update
   manifests through an explicit one-time edit during upgrade; shipped config validation should teach
   the new `runtime.runners` shape rather than preserving legacy fields.
@@ -1395,7 +1434,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
+- `Runtime Update Event`
   - Update live session fields, token counters, and rate limits.
 
 - `Retry Timer Fired`
@@ -2582,32 +2621,33 @@ API design notes:
 
 Implementations MAY support prompt-level workflow modules that add specialized handoff or
 validation routing without changing the core orchestration state machine. These modules are selected
-through `workflow.modules` and configured through `runtime.workflow_modules`.
+through `workflow.modules` and configured through durable repo setup under `workflow.config`.
 
 Extension config:
 
-- `runtime.workflow_modules.product_visual_review.enabled` (boolean, default `false`)
-  - When true and `product_visual_review` is selected in `workflow.modules`, the first-turn agent
-    prompt includes the `product_visual_review` module and completed runs record structured
-    product visual review evidence in the handoff route.
-- `runtime.workflow_modules.product_visual_review.project_kind` (`web`, `mobile`, or `desktop`, default
+- `workflow.config.product_visual_review.enabled` (boolean, default `true` when
+  `product_visual_review` is selected in `workflow.modules`; set `false` to disable the selected
+  module)
+  - When enabled, the first-turn agent prompt includes the `product_visual_review` module and
+    completed runs record structured product visual review evidence in the handoff route.
+- `workflow.config.product_visual_review.project_kind` (`web`, `mobile`, or `desktop`, default
   `web`)
   - Selects the app family used to phrase visual QA evidence instructions.
-- `runtime.workflow_modules.product_visual_review.route_policy` (`auto`, `required`, `recommended`, or
+- `workflow.config.product_visual_review.route_policy` (`auto`, `required`, `recommended`, or
   `off`, default `auto`)
   - `auto` routes when changed files or issue labels indicate product-facing work.
   - `required` always requires the visual QA checks before handoff.
   - `recommended` asks the agent to consider the module but allows explicit skip evidence.
   - `off` disables the module.
-- `runtime.workflow_modules.product_visual_review.changed_file_triggers` (list of glob-like strings,
+- `workflow.config.product_visual_review.changed_file_triggers` (list of glob-like strings,
   OPTIONAL)
   - Matching final-diff paths require product visual review in `auto`.
-- `runtime.workflow_modules.product_visual_review.issue_label_triggers` (list of strings, OPTIONAL)
+- `workflow.config.product_visual_review.issue_label_triggers` (list of strings, OPTIONAL)
   - Matching issue labels recommend product visual review in `auto`.
-- `runtime.workflow_modules.product_visual_review.checks` (list of check ids, OPTIONAL)
+- `workflow.config.product_visual_review.checks` (list of check ids, OPTIONAL)
   - Check ids SHOULD be stable across app kinds, for example `viewport_screenshots`,
     `responsive_states`, `interaction_smoke`, and `product_design_notes`.
-- `runtime.workflow_modules.product_visual_review.artifacts` (list of artifact ids, OPTIONAL)
+- `workflow.config.product_visual_review.artifacts` (list of artifact ids, OPTIONAL)
   - Artifact ids describe handoff evidence such as screenshot/media references, interaction notes,
     and product/design review notes.
 

@@ -96,6 +96,66 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
   end
 
+  test "config schema parses runtime setup fields outside repo manifests" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{
+                 "kind" => "linear",
+                 "api_key" => "token",
+                 "project_slug" => "runtime-project",
+                 "required_labels" => [" Symphony ", "repo-setup"]
+               },
+               "workspace" => %{"root" => "/tmp/symphony-workspaces"},
+               "polling" => %{"interval_ms" => 5_000},
+               "agent" => %{"default_runner" => "codex", "max_concurrent_agents" => 3, "max_concurrent_startups" => 1},
+               "runners" => %{
+                 "codex" => %{
+                   "kind" => "codex_app_server",
+                   "command" => ["codex", "app-server"],
+                   "model" => "gpt-5.4",
+                   "approval_policy" => "never",
+                   "thread_sandbox" => "workspace-write",
+                   "turn_sandbox_policy" => %{"type" => "workspaceWrite", "networkAccess" => true}
+                 }
+               },
+               "hooks" => %{"before_run" => "jj status"},
+               "quality_gate" => %{"enabled" => true},
+               "profiles" => %{"default" => %{"delivery" => %{"pr_target" => "main"}}}
+             })
+
+    assert settings.tracker.project_slug == "runtime-project"
+    assert settings.tracker.required_labels == ["symphony", "repo-setup"]
+    assert settings.workspace.root == "/tmp/symphony-workspaces"
+    assert settings.polling.interval_ms == 5_000
+    assert settings.agent.max_concurrent_agents == 3
+    assert Schema.default_runner_config!(settings)["model"] == "gpt-5.4"
+    assert Schema.default_runner_config!(settings)["turn_sandbox_policy"] == %{"type" => "workspaceWrite", "networkAccess" => true}
+    assert settings.hooks.before_run == "jj status"
+    assert settings.quality_gate.enabled == true
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "profiles" => %{"default" => %{"delivery" => %{"pr_target" => "main"}}},
+               "runners" => %{"codex" => %{"kind" => " "}}
+             })
+
+    assert message =~ "runtime.runners.codex.kind is required"
+  end
+
+  test "explicit runtime setup can be named symphony.yml" do
+    root = Path.join(System.tmp_dir!(), "symphony-runtime-#{System.unique_integer([:positive])}")
+    path = Path.join(root, "symphony.yml")
+
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    write_workflow_file!(path, tracker_project_slug: "runtime-project")
+
+    assert {:ok, %{config: config}} = Workflow.load(path)
+    assert config["tracker"]["project_slug"] == "runtime-project"
+    refute Map.has_key?(config["manifest"], "runtime")
+  end
+
   test "workflow profiles require default profile and delivery target" do
     assert {:error, {:invalid_workflow_config, message}} = Schema.parse(%{"profiles" => %{}})
     assert message =~ "profiles default profile is required"
@@ -802,18 +862,19 @@ defmodule SymphonyElixir.CoreTest do
     tracker = Map.get(config, "tracker", %{})
     assert is_map(tracker)
     assert Map.get(tracker, "kind") == "linear"
-    assert Map.get(tracker, "project_slug") == "make-symphony-runner-agnostic-09b8dc46fe82"
+    assert Map.get(tracker, "project_slug") == nil
     assert is_list(Map.get(tracker, "active_states"))
     assert is_list(Map.get(tracker, "terminal_states"))
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "jj is required for this Symphony workflow"
-    assert Map.get(hooks, "after_create") =~ "jj git clone https://github.com/apontarelli/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_run") =~ "jj status || true"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    assert Map.get(hooks, "after_create") == "git clone --depth 1 'https://github.com/apontarelli/symphony' ."
+    assert Map.get(hooks, "before_run") == nil
+    assert Map.get(hooks, "before_remove") == nil
+
+    assert get_in(config, ["capabilities", "required"]) == ["linear", "github_pr", "browser"]
+    assert get_in(config, ["issue_markers", "labels"]) == ["symphony"]
+    assert get_in(config, ["workflow_modules", "product_visual_review", "route_policy"]) == "auto"
 
     profiles = Map.get(config, "profiles", %{})
     assert get_in(profiles, ["default", "delivery", "pr_target"]) == "main"
@@ -922,14 +983,18 @@ defmodule SymphonyElixir.CoreTest do
     Application.delete_env(:symphony_elixir, :default_workflow_file_path)
 
     try do
-      write_manifest_file!(Path.join(workflow_root, "symphony.yml"),
-        tracker_project_slug: "manifest-repo",
-        project_repository: "github.com/example/manifest-repo"
-      )
+      File.write!(Path.join(workflow_root, "symphony.yml"), """
+      version: 1
+      project:
+        slug: manifest-repo
+        repository: github.com/example/manifest-repo
+      delivery:
+        pr_target: main
+      """)
 
       File.cd!(workflow_root, fn ->
         assert {:ok, %{config: config}} = Workflow.load()
-        assert config["tracker"]["project_slug"] == "manifest-repo"
+        assert config["tracker"]["project_slug"] == nil
         assert config["manifest"]["project"]["slug"] == "manifest-repo"
       end)
     after

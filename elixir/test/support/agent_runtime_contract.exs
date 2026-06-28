@@ -1,11 +1,14 @@
 defmodule SymphonyElixir.AgentRuntimeContract do
   @moduledoc false
+  # credo:disable-for-this-file Credo.Check.Refactor.LongQuoteBlocks
+  # credo:disable-for-this-file Credo.Check.Refactor.Nesting
 
   defmacro __using__(opts) do
     adapter = Keyword.fetch!(opts, :adapter)
     fake = Keyword.fetch!(opts, :fake)
     expected_runtime = Keyword.fetch!(opts, :expected_runtime)
 
+    # credo:disable-for-next-line Credo.Check.Refactor.LongQuoteBlocks
     quote bind_quoted: [adapter: adapter, fake: fake, expected_runtime: expected_runtime] do
       use SymphonyElixir.TestSupport
 
@@ -221,10 +224,14 @@ defmodule SymphonyElixir.AgentRuntimeContract do
           child_pid = eventually(fn -> @agent_runtime_fake.child_pid(runtime_context) end)
           assert os_pid_alive?(child_pid)
           assert :ok = @agent_runtime_adapter.stop(session)
-          assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+          assert eventually(fn -> stopped_when_not_alive(child_pid) end) == :stopped
         else
           assert SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() == false
         end
+      end
+
+      defp stopped_when_not_alive(os_pid) do
+        if os_pid_alive?(os_pid), do: nil, else: :stopped
       end
 
       defp runtime_issue(runtime_context) do

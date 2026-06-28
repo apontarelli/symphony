@@ -1050,7 +1050,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp module_manifest_diagnostics("product_visual_review", manifest) do
     case product_visual_review_config(manifest) do
       {:ok, _config} -> []
-      {:error, message} -> [%{path: "runtime.workflow_modules.product_visual_review", message: message}]
+      {:error, message} -> [%{path: "workflow.config.product_visual_review", message: message}]
     end
   end
 
@@ -1058,18 +1058,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   defp module_manifest_diagnostics(_name, _manifest), do: []
 
-  defp module_manifest_config("tracker.linear", manifest) do
-    project = Map.get(manifest, "project", %{})
-    project_slug = if team_scoped_tracker?(manifest), do: nil, else: Map.get(project, "slug")
-
-    %{}
-    |> maybe_put_tracker_value("project_id", Map.get(project, "id"))
-    |> maybe_put_tracker_value("project_slug", project_slug)
-    |> case do
-      tracker when map_size(tracker) > 0 -> %{"tracker" => tracker}
-      _tracker -> %{}
-    end
-  end
+  defp module_manifest_config("tracker.linear", _manifest), do: %{}
 
   defp module_manifest_config("workspace", manifest) do
     case get_in(manifest, ["project", "repository"]) do
@@ -1087,21 +1076,25 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   defp module_manifest_config(_name, _manifest), do: %{}
 
-  defp maybe_put_tracker_value(config, key, value) when is_binary(value) and value != "", do: Map.put(config, key, value)
-  defp maybe_put_tracker_value(config, _key, _value), do: config
+  defp product_visual_review_config(manifest) do
+    module_config = get_in(manifest, ["workflow", "config", "product_visual_review"])
 
-  defp team_scoped_tracker?(manifest) when is_map(manifest) do
-    tracker = get_in(manifest, ["runtime", "tracker"]) || %{}
+    cond do
+      is_nil(module_config) ->
+        product_visual_review_config_from_attrs(%{})
 
-    is_binary(Map.get(tracker, "team_key")) and
-      not is_binary(Map.get(tracker, "project_id")) and
-      not is_binary(Map.get(tracker, "project_slug"))
+      is_map(module_config) ->
+        product_visual_review_config_from_attrs(module_config)
+
+      true ->
+        {:error, "must be a map"}
+    end
   end
 
-  defp product_visual_review_config(manifest) do
+  defp product_visual_review_config_from_attrs(module_config) do
     attrs =
       %{"enabled" => true}
-      |> deep_merge(get_in(manifest, ["runtime", "workflow_modules", "product_visual_review"]) || %{})
+      |> deep_merge(module_config)
 
     %ProductVisualReviewConfig{}
     |> ProductVisualReviewConfig.changeset(attrs)
