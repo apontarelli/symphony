@@ -154,7 +154,7 @@ defmodule SymphonyElixir.PublishPreflight do
     task =
       Task.async(fn ->
         {output, status} =
-          System.cmd("/bin/sh", ["-lc", command],
+          System.cmd("/bin/sh", ["-c", command],
             cd: workspace,
             env: env,
             stderr_to_stdout: true
