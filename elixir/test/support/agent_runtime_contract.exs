@@ -1,5 +1,7 @@
 defmodule SymphonyElixir.AgentRuntimeContract do
   @moduledoc false
+  # credo:disable-for-this-file Credo.Check.Refactor.LongQuoteBlocks
+  # credo:disable-for-this-file Credo.Check.Refactor.Nesting
 
   defmacro __using__(opts) do
     adapter = Keyword.fetch!(opts, :adapter)

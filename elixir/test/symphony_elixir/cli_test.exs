@@ -376,7 +376,8 @@ defmodule SymphonyElixir.CLITest do
     assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
     assert output =~ "Workflow check failed"
     assert output =~ "runtime.codex"
-    assert output =~ "runtime.runners.codex"
+    assert output =~ "is runtime setup, not repo setup"
+    assert output =~ "Move this field to local config or run setup"
   end
 
   test "workflow check rejects invalid runtime runner schema" do
@@ -398,7 +399,9 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
     assert output =~ "Workflow check failed"
-    assert output =~ "runtime.runners.codex.command must be a list"
+    assert output =~ "runtime.runners"
+    assert output =~ "is runtime setup, not repo setup"
+    assert output =~ "Move this field to local config or run setup"
   end
 
   test "workflow check rejects missing publish repository and explicit PR target" do
@@ -504,14 +507,7 @@ defmodule SymphonyElixir.CLITest do
     assert config["agent"]["max_concurrent_startups"] == 2
     assert get_in(config, ["runners", "codex", "kind"]) == "codex_app_server"
 
-    assert get_in(config, ["runners", "codex", "command"]) == [
-             "codex",
-             "--config",
-             "shell_environment_policy.inherit=all",
-             "--config",
-             "model_reasoning_effort=xhigh",
-             "app-server"
-           ]
+    assert get_in(config, ["runners", "codex", "command"]) == ["codex", "app-server"]
 
     refute Map.has_key?(config, "codex")
     assert config["policy_metadata"]["source"] == "symphony_manifest"

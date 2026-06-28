@@ -50,7 +50,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert {:ok, %{config: config, prompt: prompt, prompt_template: prompt}} = Manifest.load(path)
 
     assert config["tracker"]["kind"] == "linear"
-    assert config["tracker"]["project_slug"] == "target-repo"
+    assert config["tracker"]["project_slug"] == nil
     assert config["tracker"]["active_states"] == ["Todo", "In Progress", "Merging", "Rework"]
     assert config["hooks"]["after_create"] == "git clone --depth 1 'github.com/example/target-repo' ."
     assert config["manifest"]["project"]["name"] == "Target Repo"
@@ -73,6 +73,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
            ]
 
     refute Map.has_key?(config["manifest"]["workflow"], "_module_requests")
+    assert config["manifest"]["workflow"]["config"] == %{}
     assert config["observability"]["dashboard_enabled"] == true
     assert config["observability"]["refresh_ms"] == 1_000
     assert config["checks"] == [%{"name" => "unit", "command" => "mix test"}]
@@ -141,8 +142,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         preset: default
         modules:
           - product_visual_review
-      runtime:
-        workflow_modules:
+        config:
           product_visual_review:
             enabled: true
             project_kind: web
@@ -174,8 +174,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         preset: default
         modules:
           - product_visual_review
-      runtime:
-        workflow_modules:
+        config:
           product_visual_review:
             enabled: false
       """)
@@ -190,7 +189,30 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Product visual review is disabled by workflow module configuration."
   end
 
-  test "runtime runners codex config validates and compiles into daemon settings" do
+  test "product visual review module rejects non-map workflow config" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      workflow:
+        preset: default
+        modules:
+          - product_visual_review
+        config:
+          product_visual_review: true
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+
+    assert %{path: "workflow.config.product_visual_review", message: "must be a map"} in diagnostics
+  end
+
+  test "repo setup manifest rejects runtime and deployment fields with setup remediation" do
     path =
       write_manifest!("""
       version: 1
@@ -201,6 +223,12 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       delivery:
         pr_target: main
       runtime:
+        tracker:
+          project_slug: today
+        workspace:
+          root: /tmp/symphony-workspaces
+        polling:
+          interval_ms: 1000
         agent:
           default_runner: codex
           max_concurrent_startups: 2
@@ -214,25 +242,123 @@ defmodule SymphonyElixir.WorkflowManifestTest do
               - app-server
             model: gpt-5.4
             max_concurrent_startups: 1
+        hooks:
+          before_run: jj status
+        quality_gate:
+          enabled: true
+        profiles:
+          setup:
+            delivery:
+              pr_target: main
+      host:
+        deployment_target: prod
+      deployment:
+        region: us-east-1
+      saved_run_setups:
+        default:
+          path: /tmp/local.yml
+      server:
+        port: 4000
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.tracker")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.workspace")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.polling")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.agent")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.runners")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.hooks")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.quality_gate")
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.profiles")
+    assert_runtime_setup_diagnostic!(diagnostics, "server")
+    assert_runtime_setup_diagnostic!(diagnostics, "host")
+    assert_runtime_setup_diagnostic!(diagnostics, "deployment")
+    assert_runtime_setup_diagnostic!(diagnostics, "saved_run_setups")
+  end
+
+  test "repo setup manifest rejects the runtime key even when empty or null" do
+    for runtime_value <- ["{}", "null"] do
+      path =
+        write_manifest!("""
+        version: 1
+        project:
+          slug: target-repo
+          repository: github.com/example/target-repo
+        delivery:
+          pr_target: main
+        runtime: #{runtime_value}
+        """)
+
+      assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+      assert_runtime_setup_diagnostic!(diagnostics, "runtime")
+    end
+  end
+
+  test "repo setup manifest accepts durable capabilities and issue markers" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      capabilities:
+        required:
+          - linear
+          - github_pr
+          - browser
+      issue_markers:
+        labels:
+          - symphony
+          - repo-setup
+        allowed_projects:
+          - make-symphony-runner-agnostic-09b8dc46fe82
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
-    assert get_in(config, ["agent", "default_runner"]) == "codex"
-    assert get_in(config, ["agent", "max_concurrent_startups"]) == 2
-    assert get_in(config, ["runners", "codex", "kind"]) == "codex_app_server"
-    assert get_in(config, ["runners", "codex", "command"]) == ["codex", "--config", "model_reasoning_effort=high", "app-server"]
 
-    workflow_path = Workflow.workflow_file_path()
-    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
-    Workflow.set_workflow_file_path(path)
-    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+    assert config["capabilities"] == %{"required" => ["linear", "github_pr", "browser"]}
 
-    assert Config.default_runner!()["command"] == ["codex", "--config", "model_reasoning_effort=high", "app-server"]
-    assert Config.default_runner!()["model"] == "gpt-5.4"
-    assert Config.max_concurrent_startups() == 1
+    assert config["issue_markers"] == %{
+             "labels" => ["symphony", "repo-setup"],
+             "allowed_projects" => ["make-symphony-runner-agnostic-09b8dc46fe82"]
+           }
+
+    assert get_in(config, ["manifest", "capabilities", "required"]) == ["linear", "github_pr", "browser"]
+    assert get_in(config, ["profiles", "default", "capabilities", "required"]) == ["linear", "github_pr", "browser"]
+    assert get_in(config, ["profiles", "default", "issue_markers", "labels"]) == ["symphony", "repo-setup"]
+
+    assert get_in(config, ["profiles", "default", "issue_markers", "allowed_projects"]) == [
+             "make-symphony-runner-agnostic-09b8dc46fe82"
+           ]
   end
 
-  test "runtime codex config is rejected with runner remediation" do
+  test "repo setup manifest rejects unsupported issue marker fields" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      issue_markers:
+        labels:
+          - symphony
+        project_slug: today
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+
+    assert %{
+             path: "issue_markers.project_slug",
+             message: "is not supported; issue markers declare labels and allowed_projects only"
+           } in diagnostics
+  end
+
+  test "repo setup manifest rejects legacy runtime codex config with migration guidance" do
     path =
       write_manifest!("""
       version: 1
@@ -248,36 +374,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
 
     assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
 
-    assert %{
-             path: "runtime.codex",
-             message: "is not supported; use runtime.runners.<name> (for Codex use runtime.runners.codex)"
-           } in diagnostics
-  end
-
-  test "runtime runner kind rejects blank values" do
-    path =
-      write_manifest!("""
-      version: 1
-      project:
-        slug: target-repo
-        repository: github.com/example/target-repo
-      delivery:
-        pr_target: main
-      runtime:
-        agent:
-          default_runner: codex
-        runners:
-          codex:
-            kind: "   "
-            command:
-              - codex
-              - app-server
-      """)
-
-    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
-
-    assert [%{path: "runtime", message: message}] = diagnostics
-    assert message =~ "runtime.runners.codex.kind is required"
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime.codex")
   end
 
   test "review routing compiles into resolved policy and prompt context" do
@@ -554,7 +651,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert %{path: "validation", message: "must be a map"} in diagnostics
     assert %{path: "automation", message: "must be a map"} in diagnostics
     assert %{path: "workflow", message: "must be a map"} in diagnostics
-    assert %{path: "runtime", message: "must be a map"} in diagnostics
+    assert_runtime_setup_diagnostic!(diagnostics, "runtime")
     assert %{path: "harness", message: "must be a map"} in diagnostics
   end
 
@@ -749,14 +846,14 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     refute Map.has_key?(config["hooks"], "after_create")
 
     invalid_product_visual_review_manifest = %{
-      "runtime" => %{
-        "workflow_modules" => %{
+      "workflow" => %{
+        "config" => %{
           "product_visual_review" => %{"route_policy" => "invalid"}
         }
       }
     }
 
-    assert {:error, %{path: "runtime.workflow_modules.product_visual_review", message: "route_policy is invalid"}} =
+    assert {:error, %{path: "workflow.config.product_visual_review", message: "route_policy is invalid"}} =
              ModuleRegistry.module_config("product_visual_review", 0, invalid_product_visual_review_manifest)
   end
 
@@ -895,7 +992,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     refute Enum.any?(report.errors, &(&1.path == "delivery.pr_target"))
   end
 
-  test "manifest defaults validate through typed daemon config and render retry context" do
+  test "manifest defaults compile without a committed Linear target and render retry context" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
     System.put_env("LINEAR_API_KEY", "manifest-token")
@@ -920,12 +1017,12 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     Workflow.set_workflow_file_path(path)
     if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
-    assert :ok = Config.validate!()
+    assert {:error, :missing_linear_project_scope} = Config.validate!()
 
     settings = Config.settings!()
     assert settings.tracker.kind == "linear"
     assert settings.tracker.api_key == "manifest-token"
-    assert settings.tracker.project_slug == "target-repo"
+    assert settings.tracker.project_slug == nil
     assert settings.tracker.active_states == ["Todo", "In Progress", "Merging", "Rework"]
     assert settings.workspace.root == "~/code/symphony-workspaces"
     assert settings.hooks.after_create == "git clone --depth 1 'github.com/example/target-repo' ."
@@ -962,7 +1059,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Route ticket states before acting"
   end
 
-  test "manifest team scope does not inherit repository slug as Linear project scope" do
+  test "manifest does not inherit repository slug as Linear project scope" do
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
     System.put_env("LINEAR_API_KEY", "manifest-token")
@@ -976,26 +1073,22 @@ defmodule SymphonyElixir.WorkflowManifestTest do
         repository: github.com/example/hard-sets-solid
       delivery:
         pr_target: main
-      runtime:
-        tracker:
-          team_key: HAR
-          workspace_slug: antonio-pontarelli
       """)
 
     assert {:ok, %{config: config}} = Manifest.load(path)
     assert config["tracker"]["project_slug"] == nil
-    assert config["tracker"]["team_key"] == "HAR"
+    assert config["tracker"]["team_key"] == nil
 
     Workflow.set_workflow_file_path(path)
     if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
-    assert :ok = Config.validate!()
+    assert {:error, :missing_linear_project_scope} = Config.validate!()
 
     settings = Config.settings!()
     assert settings.tracker.project_id == nil
     assert settings.tracker.project_slug == nil
-    assert settings.tracker.team_key == "HAR"
-    assert settings.tracker.workspace_slug == "antonio-pontarelli"
+    assert settings.tracker.team_key == nil
+    assert settings.tracker.workspace_slug == nil
   end
 
   test "config error formatter reports manifest diagnostics with paths" do
@@ -1021,5 +1114,13 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     path = Path.join(dir, "symphony.yml")
     File.write!(path, content)
     path
+  end
+
+  defp assert_runtime_setup_diagnostic!(diagnostics, path) do
+    assert Enum.any?(diagnostics, fn diagnostic ->
+             diagnostic.path == path and
+               diagnostic.message =~ "is runtime setup, not repo setup" and
+               diagnostic.remediation =~ "Move this field to local config or run setup"
+           end)
   end
 end

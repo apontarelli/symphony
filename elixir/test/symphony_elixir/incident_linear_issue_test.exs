@@ -569,10 +569,12 @@ defmodule SymphonyElixir.IncidentLinearIssueTest do
   end
 
   @tag :tmp_dir
-  test "mix task create mode defaults to the local symphony.yml manifest", %{tmp_dir: tmp_dir} do
+  test "mix task create mode uses the configured local runtime setup", %{tmp_dir: tmp_dir} do
     payload_path = Path.join(tmp_dir, "incident.json")
     File.write!(payload_path, Jason.encode!(@payload))
-    write_workflow_file!(Path.join(tmp_dir, "symphony.yml"), tracker_project_slug: "checkout-web")
+    runtime_setup_path = Path.join(tmp_dir, "symphony.runtime.yml")
+    write_workflow_file!(runtime_setup_path, tracker_project_slug: "checkout-web")
+    Workflow.set_workflow_file_path(runtime_setup_path)
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 
     responses = [
@@ -594,6 +596,8 @@ defmodule SymphonyElixir.IncidentLinearIssueTest do
             IncidentLinearIssueTask.run([
               "--payload",
               payload_path,
+              "--workflow",
+              runtime_setup_path,
               "--create",
               "--acknowledge-project-opt-in"
             ])
@@ -602,7 +606,7 @@ defmodule SymphonyElixir.IncidentLinearIssueTest do
       end)
 
     assert output =~ "Created Linear issue: SID-301 https://linear.app/example/issue/SID-301"
-    assert Workflow.workflow_file_path() == Path.join(tmp_dir, "symphony.yml")
+    assert Workflow.workflow_file_path() == runtime_setup_path
   end
 
   defp create_with_responses(responses, opts \\ []) do

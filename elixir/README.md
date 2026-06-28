@@ -80,23 +80,23 @@ moving the issue as ready for merge.
    set it as the `LINEAR_API_KEY` environment variable.
 3. Build the Elixir escript and run `./bin/symphony workflow init --repo /path/to/repo` to create
    `symphony.yml`.
-4. Run `./bin/symphony workflow check --repo /path/to/repo` to validate the manifest, repo docs,
-   runner config, and any configured harness CODEX_HOME.
+4. Run `./bin/symphony workflow check --repo /path/to/repo` to validate the setup-only manifest,
+   repo docs, validation command shape, publish target defaults, and any configured harness CODEX_HOME.
 5. Run `./bin/symphony workflow print --repo /path/to/repo --compiled` to inspect the resolved
    workflow config and prompt.
 6. Customize the generated `symphony.yml` for your project.
-   - Prefer the Linear project ID in committed `runtime.tracker.project_id`; add
-     `runtime.tracker.project_slug` when the dashboard should render a project URL.
+   - Keep committed `symphony.yml` to durable repo setup fields. Put Linear project scope, workspace
+     roots, polling, agent capacity, runner commands, and host deployment settings in local config
+     or run setup.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
 7. Follow the instructions below to install the required runtime dependencies and start the service.
 
-The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood manifest. It
-intentionally contains this fork's public repository URL, local workspace defaults, Linear project
-scope, and Codex runner launch policy for running Symphony on itself. For another repository,
-create a fresh manifest with `workflow init` and replace tracker, workspace, repository,
-validation, delivery, and runner fields with that project's values.
+The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood repo setup manifest. It
+contains this fork's public repository URL, docs, validation, delivery policy, required
+capabilities, issue markers, and selected workflow module configuration. Local tracker scope,
+workspace, polling, runner, and host settings are intentionally not committed there.
 
 ## Prerequisites
 
@@ -117,19 +117,19 @@ mise install
 mise exec -- mix setup
 mise exec -- mix build
 export LINEAR_API_KEY=...
-mise exec -- ./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/project/symphony.yml
+mise exec -- ./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/local-symphony-runtime.yml
 ```
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
-It keeps local shell glue in this repo instead of dotfiles, resolves project workflows, optionally
-loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching, and passes
-the raw escript's local-run acknowledgement flag.
+It keeps local shell glue in this repo instead of dotfiles, resolves local runtime setup files,
+optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
+and passes the raw escript's local-run acknowledgement flag.
 
 Use the current shell environment when secrets are already exported:
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony --no-env-file --workflow /path/to/project/symphony.yml
+../bin/symphony --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
 Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references:
@@ -138,7 +138,7 @@ Use the launcher env file when you want the 1Password CLI to resolve `op://` sec
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony my-project
-../bin/symphony --workflow /path/to/project/symphony.yml
+../bin/symphony --workflow /path/to/local-symphony-runtime.yml
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
@@ -155,10 +155,11 @@ Target repos can use a committed `symphony.yml` manifest for setup and audit:
 ```
 
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
-left unchanged unless `--force` is passed. `check` validates the manifest schema, selected modules,
-repo doc entrypoints, validation command shape, runner config, and a configured harness
-`CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
-workflow config and prompt without writing generated prompt files into the target repo.
+left unchanged unless `--force` is passed. `check` validates the setup-only manifest schema, selected
+modules, repo doc entrypoints, validation command shape, required capability declarations, publish
+target defaults, and configured harness `CODEX_HOME`. `print` shows the resolved
+preset/modules/defaults and can include the compiled workflow config and prompt without writing
+generated prompt files into the target repo.
 
 `symphony.yml` v1 contains:
 
@@ -188,35 +189,29 @@ delivery:
   pr_target: main
 automation:
   posture: unattended
+capabilities:
+  required: []
+issue_markers:
+  labels: []
+  allowed_projects: []
 harness:
   codex_home: null
-runtime:
-  agent:
-    default_runner: codex
-    max_concurrent_startups: 2
-  runners:
-    codex:
-      kind: codex_app_server
-      command:
-        - codex
-        - app-server
 ```
 
-`runtime.agent.default_runner` selects the runner config under `runtime.runners`. For the Codex
-app-server adapter, `harness.codex_home: null` means Symphony derives a managed harness
-`CODEX_HOME`; if a path is set, `workflow check` requires that directory and its `AGENTS.md` to
-exist.
+For the Codex app-server adapter, `harness.codex_home: null` means Symphony derives a managed
+harness `CODEX_HOME`; if a path is set, `workflow check` requires that directory and its
+`AGENTS.md` to exist. Runner selection and runner commands belong in the local runtime setup file,
+not in the checked-in repo manifest.
 
-Pass a manifest path to `./bin/symphony` when starting the service directly:
+Pass a local runtime setup path to `./bin/symphony` when starting the service directly:
 
 ```bash
-./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails ../symphony.yml
+./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/local-symphony-runtime.yml
 ```
 
-The raw escript requires the local-run acknowledgement flag. If no path is passed, it uses
-`./symphony.yml` from the current directory. From this repository, prefer the higher-level
-`../bin/symphony` launcher so local runs use the single root manifest and the launcher passes the
-acknowledgement flag for you.
+The raw escript requires the local-run acknowledgement flag. A checked-in repo `symphony.yml`
+contains setup and audit data only; direct daemon runs still need local runtime setup for tracker
+scope, workspace roots, runner commands, and host settings.
 
 `project.criticality` and `project.deployment_coupling` describe how risky the project is to land
 automatically. Local, prototype, and internal work default to permissive auto-land policy; production
@@ -268,8 +263,9 @@ so the shared `review-retrospective` workflow can mine Symphony quality-gate rec
 `./bin/symphony review-records backfill-review --logs-root /path/to/logs-root` once to copy them
 into canonical `review/` records while preserving the original legacy path in metadata provenance.
 
-The preferred `symphony.yml` file is a thin YAML manifest that selects Symphony-owned workflow
-modules. The manifest compiles into the same runtime config/prompt shape used by the daemon.
+The preferred `symphony.yml` file is a thin YAML repo setup manifest that selects Symphony-owned
+workflow modules. The manifest compiles into the policy/config fragment and prompt shape consumed by
+the daemon, while local runtime setup supplies active targets and host settings.
 `version` defaults to `1` when omitted, but examples include it explicitly for clarity.
 
 Minimal manifest example:
@@ -306,19 +302,6 @@ workspaces with `git clone --depth 1 <repository> .`. For the default GitHub PR 
 `delivery.pr_target` is explicitly set; `workflow print` shows the resolved publish target as
 `owner/repo:branch`.
 
-Repository-owned profile overrides can live under `runtime.profiles` in committed `symphony.yml`.
-They describe policy available to every run of the repo and should not contain Linear project IDs:
-
-```yaml
-runtime:
-  profiles:
-    project_integration:
-      delivery:
-        pr_target: project/integration
-      checks:
-        - make all
-```
-
 The `default` profile is compiled from manifest delivery, validation, and automation fields.
 `delivery.pr_target` is the only v1 delivery selector: use `main` for normal mainline PRs, or a
 non-main branch such as `project/integration` when work should open PRs against a project integration
@@ -329,18 +312,21 @@ Notes:
 
 - If a value is missing, defaults are used unless a selected workflow module documents a stricter
   validation requirement, such as the default GitHub PR publish target checks.
-- `tracker.required_labels` is optional. When set, an issue must have every configured label to
-  dispatch or continue running. Label matching ignores case and surrounding whitespace. A blank
-  configured label matches no issue.
+- `capabilities.required` declares runner capability names the repo needs without selecting a
+  concrete runner, model, sandbox, or command.
+- `issue_markers.labels` and `issue_markers.allowed_projects` declare durable issue markers for
+  preview and policy checks. They do not select the active Linear polling target.
+- Runtime `tracker.required_labels` remains available in local config or run setup. When set, an
+  issue must have every configured label to dispatch or continue running. Label matching ignores
+  case and surrounding whitespace.
 - `delivery.pr_target` names the Git PR target/base branch. Additional profiles may override the
   compiled `default` profile during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
-- Linear polling scope lives in committed `symphony.yml` under `runtime.tracker`. Prefer
-  `project_id`; include `project_slug` when a human-readable Linear project URL/display fallback is
-  useful. The project scope is repository automation policy, not a local operator preference:
+- Linear polling scope is runtime setup, not repo setup. Prefer `runtime.tracker.project_id`; include
+  `runtime.tracker.project_slug` when the dashboard should render a project URL/display fallback:
 
 ```yaml
 runtime:
@@ -444,48 +430,51 @@ runtime:
   self-contained in bundled modules selected through `workflow.modules`; runtime behavior comes from
   the registry, manifest, and recorded module policy hash.
 - `product_visual_review` can be selected in `workflow.modules` and configured under
-  `runtime.workflow_modules.product_visual_review` to enable product/design QA prompts and durable
-  handoff-route evidence. Set `enabled: true`, choose `project_kind: web | mobile | desktop`, and
-  use `route_policy: auto | required | recommended | off`. In `auto`, Symphony classifies the final
+  `workflow.config.product_visual_review` to adjust product/design QA prompts and durable handoff
+  route evidence. When selected without explicit config, it defaults to `enabled: true`. Set
+  `enabled: false` to disable it, choose `project_kind: web | mobile | desktop`, and use
+  `route_policy: auto | required | recommended | off`. In `auto`, Symphony classifies the final
   validated changed-file manifest against configured `changed_file_triggers` and issue labels,
   records whether visual QA was required, recommended, skipped, or blocked, and keeps durable
   screenshot/media links plus interaction, responsive-state, and product/design notes in the
   handoff route. Local temp/file paths are rejected instead of being exposed as dashboard/API
   artifact links.
-- Use `hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so Codex
-  turns run in jj-native workspaces and do not need to write Git metadata directly. Use
+- Use `runtime.hooks.after_create` to bootstrap a fresh workspace. Prefer `jj git clone ... .` so
+  Codex turns run in jj-native workspaces and do not need to write Git metadata directly. Use
   `git clone ... .` only for repos that cannot run under jj compatibility.
-- If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch
-  the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
-- `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
+- If a hook needs `mise exec` inside a freshly cloned workspace, trust the repo config and fetch the
+  project dependencies in `runtime.hooks.after_create` before invoking `mise` later from other hooks.
+- `runtime.tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is
+  `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
-- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling.
-  `runtime.runners.<name>.command` is an argv list, so use explicit argv elements rather than shell
-  expansion in the command field.
+- For env-backed path values, use `$VAR`. `runtime.workspace.root` resolves `$VAR` before path
+  handling. `runtime.runners.<name>.command` is an argv list, so use explicit argv elements rather
+  than shell expansion in the command field.
 
 ```yaml
-tracker:
-  api_key: $LINEAR_API_KEY
-workspace:
-  root: $SYMPHONY_WORKSPACE_ROOT
-hooks:
-  after_create: |
-    if ! command -v jj >/dev/null 2>&1; then
-      echo 'jj is required for this Symphony workflow' >&2
-      exit 127
-    fi
-    jj git clone "$SOURCE_REPO_URL" .
-  before_run: |
-    jj status || true
-agent:
-  default_runner: codex
-  max_concurrent_startups: 2
-runners:
-  codex:
-    kind: codex_app_server
-    command:
-      - codex
-      - app-server
+runtime:
+  tracker:
+    api_key: $LINEAR_API_KEY
+  workspace:
+    root: $SYMPHONY_WORKSPACE_ROOT
+  hooks:
+    after_create: |
+      if ! command -v jj >/dev/null 2>&1; then
+        echo 'jj is required for this Symphony workflow' >&2
+        exit 127
+      fi
+      jj git clone "$SOURCE_REPO_URL" .
+    before_run: |
+      jj status || true
+  agent:
+    default_runner: codex
+    max_concurrent_startups: 2
+  runners:
+    codex:
+      kind: codex_app_server
+      command:
+        - codex
+        - app-server
 ```
 
 - If the selected manifest is missing or invalid at startup, Symphony does not boot.
@@ -538,7 +527,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `../symphony.yml`: root dogfood manifest used by local runs and CLI `workflow check`/`print`
+- `../symphony.yml`: root dogfood repo setup manifest used by CLI `workflow check`/`print`
 - `../.codex/`: repo-local Codex/Symphony helpers used by this fork's own automation runs; target
   repos do not need to install these globally for bundled workflow modules to run
 

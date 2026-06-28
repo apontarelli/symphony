@@ -8,6 +8,29 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   @manifest_file "symphony.yml"
   @default_force_human_review_labels ~w(force-human-review human-review manual-review no-auto-land)
+  @runtime_setup_top_level_fields ~w(
+    agent
+    codex
+    deployment
+    hooks
+    host
+    logs
+    logs_root
+    observability
+    polling
+    profiles
+    quality_gate
+    run_setup
+    run_setups
+    runners
+    saved_run_setup
+    saved_run_setups
+    server
+    tracker
+    worker
+    workflow_modules
+    workspace
+  )
 
   @type diagnostic :: %{
           required(:path) => String.t(),
@@ -29,9 +52,9 @@ defmodule SymphonyElixir.Workflow.Manifest do
           preset: String.t()
         }
 
-  @spec load(Path.t()) :: {:ok, Workflow.loaded_workflow()} | {:error, manifest_error()}
-  def load(path) when is_binary(path) do
-    with {:ok, manifest} <- read(path) do
+  @spec load(Path.t(), keyword()) :: {:ok, Workflow.loaded_workflow()} | {:error, manifest_error()}
+  def load(path, opts \\ []) when is_binary(path) do
+    with {:ok, manifest} <- read(path, opts) do
       case compile_diagnostics(manifest) do
         [] -> {:ok, compile(manifest)}
         diagnostics -> {:error, {:invalid_manifest, diagnostics}}
@@ -39,13 +62,14 @@ defmodule SymphonyElixir.Workflow.Manifest do
     end
   end
 
-  @spec read(Path.t()) :: {:ok, map()} | {:error, manifest_error()}
-  def read(path_or_repo_root) when is_binary(path_or_repo_root) do
+  @spec read(Path.t(), keyword()) :: {:ok, map()} | {:error, manifest_error()}
+  def read(path_or_repo_root, opts \\ []) when is_binary(path_or_repo_root) do
     path = manifest_source_path(path_or_repo_root)
+    repo_setup? = Keyword.get(opts, :repo_setup?, repo_setup_manifest_path?(path))
 
     with {:ok, content} <- read_manifest(path),
          {:ok, decoded} <- decode_manifest(content) do
-      normalize_manifest(decoded)
+      normalize_manifest(decoded, repo_setup?: repo_setup?)
     end
   end
 
@@ -88,7 +112,9 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "vcs" => %{"mode" => cli_detect_vcs_mode(repo_root), "default_branch" => "main"},
       "delivery" => %{"pr_target" => "main"},
       "automation" => %{"posture" => "unattended", "profile" => "default", "completion_requirements" => []},
-      "harness" => %{"codex_home" => nil}
+      "harness" => %{"codex_home" => nil},
+      "capabilities" => %{"required" => []},
+      "issue_markers" => %{"labels" => [], "allowed_projects" => []}
     }
   end
 
@@ -161,7 +187,10 @@ defmodule SymphonyElixir.Workflow.Manifest do
     end
   end
 
-  defp normalize_manifest(raw) do
+  defp repo_setup_manifest_path?(path), do: Path.basename(path) == @manifest_file
+
+  defp normalize_manifest(raw, opts) do
+    repo_setup? = Keyword.get(opts, :repo_setup?, true)
     {version, version_errors} = integer_field(raw, "version", "version", default: 1)
     {project, project_errors} = normalize_project(Map.get(raw, "project"))
     {docs, docs_errors} = normalize_docs(Map.get(raw, "docs"))
@@ -173,11 +202,14 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {auto_land, auto_land_errors} = normalize_auto_land(Map.get(raw, "auto_land"))
     {review_routing, review_routing_errors} = normalize_review_routing(Map.get(raw, "review_routing"))
     {harness, harness_errors} = normalize_harness(Map.get(raw, "harness"))
-    {runtime, runtime_errors} = normalize_runtime(Map.get(raw, "runtime"))
+    {capabilities, capabilities_errors} = normalize_capabilities(Map.get(raw, "capabilities"))
+    {issue_markers, issue_marker_errors} = normalize_issue_markers(Map.get(raw, "issue_markers"))
+    {runtime, runtime_errors} = normalize_runtime(Map.fetch(raw, "runtime"), repo_setup?)
     {prompt_template, prompt_errors} = string_field(raw, "prompt_template", "prompt_template", default: nil)
 
     errors =
       legacy_schema_errors(raw) ++
+        repo_setup_runtime_field_errors(raw, repo_setup?) ++
         version_errors ++
         project_errors ++
         docs_errors ++
@@ -189,6 +221,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
         auto_land_errors ++
         review_routing_errors ++
         harness_errors ++
+        capabilities_errors ++
+        issue_marker_errors ++
         runtime_errors ++
         prompt_errors
 
@@ -206,8 +240,11 @@ defmodule SymphonyElixir.Workflow.Manifest do
           "auto_land" => auto_land,
           "review_routing" => review_routing,
           "harness" => harness,
+          "capabilities" => capabilities,
+          "issue_markers" => issue_markers,
           "runtime" => runtime,
-          "_field_sources" => field_sources
+          "_field_sources" => field_sources,
+          "_runtime_allowed?" => not repo_setup?
         }
         |> maybe_put("prompt_template", prompt_template)
 
@@ -239,6 +276,14 @@ defmodule SymphonyElixir.Workflow.Manifest do
       _value ->
         errors
     end
+  end
+
+  defp repo_setup_runtime_field_errors(_raw, false), do: []
+
+  defp repo_setup_runtime_field_errors(raw, true) do
+    @runtime_setup_top_level_fields
+    |> Enum.filter(&Map.has_key?(raw, &1))
+    |> Enum.map(&runtime_setup_field_error/1)
   end
 
   defp normalize_project(nil) do
@@ -396,25 +441,33 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_workflow(nil) do
     with {:ok, modules} <- ModuleRegistry.default_modules("default") do
-      {%{"preset" => "default", "modules" => modules}, []}
+      {%{"preset" => "default", "modules" => modules, "config" => %{}, "_module_requests" => []}, []}
     end
   end
 
   defp normalize_workflow(raw) when is_map(raw) do
     {preset, preset_errors} = string_field(raw, "preset", "workflow.preset", default: "default")
+    {config, config_errors} = map_field(raw, "config", "workflow.config", default: %{})
     {explicit_modules, module_requests, module_errors} = workflow_modules(raw)
 
     case ModuleRegistry.default_modules(preset) do
       {:ok, default_modules} ->
         modules = Enum.uniq(default_modules ++ explicit_modules)
-        {%{"preset" => preset, "modules" => modules, "_module_requests" => module_requests}, preset_errors ++ module_errors}
+
+        {
+          %{"preset" => preset, "modules" => modules, "config" => config, "_module_requests" => module_requests},
+          preset_errors ++ config_errors ++ module_errors
+        }
 
       {:error, diagnostic} ->
-        {%{"preset" => preset, "modules" => explicit_modules, "_module_requests" => module_requests}, preset_errors ++ module_errors ++ [diagnostic]}
+        {
+          %{"preset" => preset, "modules" => explicit_modules, "config" => config, "_module_requests" => module_requests},
+          preset_errors ++ config_errors ++ module_errors ++ [diagnostic]
+        }
     end
   end
 
-  defp normalize_workflow(_raw), do: {%{"preset" => "default", "modules" => []}, [type_error("workflow", "must be a map")]}
+  defp normalize_workflow(_raw), do: {%{"preset" => "default", "modules" => [], "config" => %{}, "_module_requests" => []}, [type_error("workflow", "must be a map")]}
 
   defp normalize_review_routing(nil), do: {nil, []}
   defp normalize_review_routing(raw) when is_map(raw), do: {normalize_keys(raw), []}
@@ -470,9 +523,69 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_harness(_raw), do: {%{"codex_home" => nil}, [type_error("harness", "must be a map")]}
 
-  defp normalize_runtime(nil), do: {%{}, []}
+  defp normalize_capabilities(nil), do: {%{"required" => []}, []}
 
-  defp normalize_runtime(raw) when is_map(raw) do
+  defp normalize_capabilities(raw) when is_map(raw) do
+    {required, required_errors} = string_list_field(raw, "required", "capabilities.required", default: [])
+
+    unsupported_errors =
+      raw
+      |> Map.keys()
+      |> Enum.reject(&(&1 == "required"))
+      |> Enum.sort()
+      |> Enum.map(fn field ->
+        %{
+          path: "capabilities.#{field}",
+          message: "is not supported; repo capabilities declare required capability names only"
+        }
+      end)
+
+    {%{"required" => required}, required_errors ++ unsupported_errors}
+  end
+
+  defp normalize_capabilities(_raw), do: {%{"required" => []}, [type_error("capabilities", "must be a map")]}
+
+  defp normalize_issue_markers(nil), do: {%{"labels" => [], "allowed_projects" => []}, []}
+
+  defp normalize_issue_markers(raw) when is_map(raw) do
+    {labels, label_errors} = string_list_field(raw, "labels", "issue_markers.labels", default: [])
+    {allowed_projects, project_errors} = string_list_field(raw, "allowed_projects", "issue_markers.allowed_projects", default: [])
+    supported_fields = ["labels", "allowed_projects"]
+
+    unsupported_errors =
+      raw
+      |> Map.keys()
+      |> Enum.reject(&(&1 in supported_fields))
+      |> Enum.sort()
+      |> Enum.map(fn field ->
+        %{
+          path: "issue_markers.#{field}",
+          message: "is not supported; issue markers declare labels and allowed_projects only"
+        }
+      end)
+
+    {%{"labels" => labels, "allowed_projects" => allowed_projects}, label_errors ++ project_errors ++ unsupported_errors}
+  end
+
+  defp normalize_issue_markers(_raw), do: {%{"labels" => [], "allowed_projects" => []}, [type_error("issue_markers", "must be a map")]}
+
+  defp normalize_runtime(:error, _repo_setup?), do: {%{}, []}
+
+  defp normalize_runtime({:ok, raw}, true) when is_map(raw) do
+    errors =
+      raw
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.map(&runtime_setup_field_error("runtime.#{&1}"))
+
+    {%{}, [runtime_setup_field_error("runtime") | errors]}
+  end
+
+  defp normalize_runtime({:ok, _raw}, true), do: {%{}, [runtime_setup_field_error("runtime")]}
+
+  defp normalize_runtime({:ok, nil}, false), do: {%{}, []}
+
+  defp normalize_runtime({:ok, raw}, false) when is_map(raw) do
     errors =
       if Map.has_key?(raw, "codex") do
         [
@@ -488,7 +601,15 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {raw, errors}
   end
 
-  defp normalize_runtime(_raw), do: {%{}, [type_error("runtime", "must be a map")]}
+  defp normalize_runtime({:ok, _raw}, _repo_setup?), do: {%{}, [type_error("runtime", "must be a map")]}
+
+  defp runtime_setup_field_error(path) do
+    %{
+      path: path,
+      message: "is runtime setup, not repo setup",
+      remediation: "Move this field to local config or run setup, or migrate durable values to workflow.config, capabilities, or issue_markers."
+    }
+  end
 
   defp compile_diagnostics(manifest) do
     module_diagnostics = workflow_module_diagnostics(manifest)
@@ -527,8 +648,11 @@ defmodule SymphonyElixir.Workflow.Manifest do
     manifest
     |> registry_config()
     |> deep_merge(manifest_config(manifest))
-    |> deep_merge(manifest["runtime"])
+    |> deep_merge(runtime_config(manifest))
   end
+
+  defp runtime_config(%{"_runtime_allowed?" => true, "runtime" => runtime}) when is_map(runtime), do: runtime
+  defp runtime_config(_manifest), do: %{}
 
   defp registry_config(%{"workflow" => %{"preset" => preset_name, "modules" => modules}} = manifest) do
     {:ok, preset} = ModuleRegistry.preset(preset_name)
@@ -556,6 +680,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "project" => landing_project_policy(project),
       "checks" => validation["commands"],
       "completion_requirements" => automation["completion_requirements"],
+      "capabilities" => manifest["capabilities"],
+      "issue_markers" => manifest["issue_markers"],
       "delivery" => delivery,
       "profiles" => manifest_profiles(manifest),
       "policy_metadata" => %{
@@ -580,7 +706,9 @@ defmodule SymphonyElixir.Workflow.Manifest do
     %{
       "checks" => manifest["validation"]["commands"],
       "completion_requirements" => manifest["automation"]["completion_requirements"],
+      "capabilities" => manifest["capabilities"],
       "delivery" => manifest["delivery"],
+      "issue_markers" => manifest["issue_markers"],
       "manifest" => manifest_policy_inputs(manifest)
     }
     |> Map.put("project", landing_project_policy(manifest["project"]))
@@ -592,7 +720,20 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp manifest_policy_inputs(manifest) do
     manifest
     |> public_manifest()
-    |> Map.take(["project", "docs", "vcs", "delivery", "validation", "automation", "workflow", "auto_land", "review_routing", "harness"])
+    |> Map.take([
+      "project",
+      "docs",
+      "vcs",
+      "delivery",
+      "validation",
+      "automation",
+      "workflow",
+      "auto_land",
+      "review_routing",
+      "harness",
+      "capabilities",
+      "issue_markers"
+    ])
   end
 
   defp landing_project_policy(project) do
@@ -602,6 +743,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
   defp public_manifest(manifest) do
     manifest
     |> Map.delete("_field_sources")
+    |> Map.delete("_runtime_allowed?")
+    |> Map.delete("runtime")
     |> update_in(["workflow"], fn workflow ->
       Map.delete(workflow, "_module_requests")
     end)

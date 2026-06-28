@@ -65,7 +65,7 @@ defmodule SymphonyElixir.Config do
 
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
-    case Manifest.read(Workflow.selected_workflow_file_path()) do
+    case Manifest.read(Workflow.selected_workflow_file_path(), repo_setup?: false) do
       {:ok, %{"prompt_template" => prompt}} when is_binary(prompt) ->
         if String.trim(prompt) == "", do: default_prompt_template(), else: prompt
 

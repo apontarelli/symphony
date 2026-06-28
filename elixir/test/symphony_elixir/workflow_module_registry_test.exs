@@ -65,15 +65,24 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
 
   test "manifest prompt metadata reports selected prompt module config errors" do
     manifest = %{
-      "workflow" => %{"preset" => "default", "modules" => ["product_visual_review"]},
-      "runtime" => %{
-        "workflow_modules" => %{
+      "workflow" => %{
+        "preset" => "default",
+        "modules" => ["product_visual_review"],
+        "config" => %{
           "product_visual_review" => %{"route_policy" => "invalid"}
         }
       }
     }
 
     assert {:error, "route_policy is invalid"} = ModuleRegistry.prompt_module_resolution(manifest)
+  end
+
+  test "product visual review module config defaults when selected without explicit config" do
+    manifest = %{"workflow" => %{"preset" => "default", "modules" => ["product_visual_review"]}}
+
+    assert {:ok, config} = ModuleRegistry.module_config("product_visual_review", 0, manifest)
+    assert get_in(config, ["workflow_modules", "product_visual_review", "enabled"]) == true
+    assert get_in(config, ["workflow_modules", "product_visual_review", "route_policy"]) == "auto"
   end
 
   test "loaded workflows carry registry-backed prompt metadata" do

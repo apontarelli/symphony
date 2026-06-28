@@ -143,13 +143,15 @@ defmodule SymphonyElixir.ExtensionsTest do
     Workflow.set_workflow_file_path(manifest_path)
 
     assert {:ok, %{config: config}} = Workflow.current()
-    assert config["tracker"]["project_slug"] == "manifest-repo"
+    assert config["tracker"]["project_slug"] == nil
+    assert config["manifest"]["project"]["slug"] == "manifest-repo"
 
     File.write!(manifest_path, "project: [\n")
 
     assert {:error, _reason} = WorkflowStore.force_reload()
     assert {:ok, %{config: last_good_config}} = Workflow.current()
-    assert last_good_config["tracker"]["project_slug"] == "manifest-repo"
+    assert last_good_config["tracker"]["project_slug"] == nil
+    assert last_good_config["manifest"]["project"]["slug"] == "manifest-repo"
   end
 
   test "workflow store keeps last good default manifest when the manifest disappears" do
@@ -181,13 +183,15 @@ defmodule SymphonyElixir.ExtensionsTest do
 
         assert {:ok, state} = WorkflowStore.init([])
         assert state.path == expected_manifest_path
-        assert state.workflow.config["tracker"]["project_slug"] == "manifest-repo"
+        assert state.workflow.config["tracker"]["project_slug"] == nil
+        assert state.workflow.config["manifest"]["project"]["slug"] == "manifest-repo"
 
         File.rm!(manifest_path)
 
         assert {:noreply, reloaded_state} = WorkflowStore.handle_info(:poll, state)
         assert reloaded_state.path == expected_manifest_path
-        assert reloaded_state.workflow.config["tracker"]["project_slug"] == "manifest-repo"
+        assert reloaded_state.workflow.config["tracker"]["project_slug"] == nil
+        assert reloaded_state.workflow.config["manifest"]["project"]["slug"] == "manifest-repo"
       end)
     after
       File.rm_rf(workflow_root)
