@@ -58,9 +58,9 @@ defmodule SymphonyElixir.Codex.Launch do
 
   defp start_port(workspace, worker_host, codex_home, codex_command, line_bytes)
        when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, codex_home, command_string(codex_command))
-
-    with {:ok, port} <- SSH.start_port(worker_host, remote_command, line: line_bytes) do
+    with {:ok, codex_command_string} <- command_string(codex_command),
+         remote_command = remote_launch_command(workspace, codex_home, codex_command_string),
+         {:ok, port} <- SSH.start_port(worker_host, remote_command, line: line_bytes) do
       {:ok, ProcessSupervisor.from_port(port, cleanup: :port_only), nil}
     end
   end
@@ -84,9 +84,13 @@ defmodule SymphonyElixir.Codex.Launch do
 
   defp command_argv(_command), do: {:error, :invalid_argv}
 
-  defp command_string(command) when is_binary(command), do: command
+  defp command_string(command) when is_binary(command), do: {:ok, command}
 
   defp command_string(argv) when is_list(argv) do
-    Enum.map_join(argv, " ", &Shell.escape/1)
+    with {:ok, argv} <- command_argv(argv) do
+      {:ok, Enum.map_join(argv, " ", &Shell.escape/1)}
+    end
   end
+
+  defp command_string(_command), do: {:error, :invalid_argv}
 end

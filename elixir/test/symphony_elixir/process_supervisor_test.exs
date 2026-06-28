@@ -2,6 +2,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ProcessSupervisor
+  import SymphonyElixir.TestSupport, only: [eventually: 1, os_pid_alive?: 1, read_pid: 1]
 
   test "spawns argv without shell and applies cwd env and line buffering" do
     test_root = Path.join(System.tmp_dir!(), "symphony-process-supervisor-argv-#{System.unique_integer([:positive])}")
@@ -52,6 +53,50 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       ProcessSupervisor.stop(process)
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  test "rejects invalid cleanup before spawning a process" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-process-supervisor-invalid-cleanup-#{System.unique_integer([:positive])}")
+
+    try do
+      fake_binary = Path.join(test_root, "fake-runner")
+      started_file = Path.join(test_root, "started")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(fake_binary, """
+      #!/bin/sh
+      touch "#{started_file}"
+      while :; do
+        sleep 1
+      done
+      """)
+
+      File.chmod!(fake_binary, 0o755)
+
+      assert {:error, {:invalid_cleanup, :invalid}} = ProcessSupervisor.start([fake_binary], cleanup: :invalid)
+      refute File.exists?(started_file)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "from_port rejects invalid cleanup mode" do
+    port =
+      Port.open({:spawn_executable, ~c"/bin/sh"}, [
+        :binary,
+        :exit_status,
+        args: [~c"-c", ~c"while :; do sleep 1; done"]
+      ])
+
+    try do
+      assert_raise ArgumentError, "invalid cleanup mode: :invalid", fn ->
+        ProcessSupervisor.from_port(port, cleanup: :invalid)
+      end
+    after
+      Port.close(port)
     end
   end
 
@@ -227,45 +272,4 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       File.rm_rf(test_root)
     end
   end
-
-  defp read_pid(path) do
-    case File.read(path) do
-      {:ok, pid_text} ->
-        case Integer.parse(String.trim(pid_text)) do
-          {pid, ""} -> pid
-          _ -> nil
-        end
-
-      _ ->
-        nil
-    end
-  end
-
-  defp os_pid_alive?(nil), do: false
-
-  defp os_pid_alive?(pid) when is_integer(pid) do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_, 0} -> true
-      _ -> false
-    end
-  end
-
-  defp eventually(fun, attempts \\ 20)
-
-  defp eventually(fun, attempts) when attempts > 0 do
-    case fun.() do
-      nil ->
-        Process.sleep(50)
-        eventually(fun, attempts - 1)
-
-      false ->
-        Process.sleep(50)
-        eventually(fun, attempts - 1)
-
-      value ->
-        value
-    end
-  end
-
-  defp eventually(_fun, 0), do: false
 end

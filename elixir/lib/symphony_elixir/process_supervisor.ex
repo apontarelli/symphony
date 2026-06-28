@@ -29,10 +29,11 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   @spec start(argv(), keyword()) :: {:ok, t()} | {:error, term()}
   def start(argv, opts \\ []) when is_list(argv) do
-    with {:ok, {executable, args}} <- resolve_argv(argv, Keyword.get(opts, :cd)),
+    with {:ok, cleanup} <- normalize_cleanup(Keyword.get(opts, :cleanup, :descendants)),
+         {:ok, {executable, args}} <- resolve_argv(argv, Keyword.get(opts, :cd)),
          {:ok, port_opts} <- port_options(args, opts) do
       port = Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)
-      {:ok, from_port(port, cleanup: Keyword.get(opts, :cleanup, :descendants))}
+      {:ok, from_port(port, cleanup: cleanup)}
     end
   rescue
     error -> {:error, {:process_start_failed, Exception.message(error)}}
@@ -45,7 +46,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
     %__MODULE__{
       port: port,
       os_pid: port_os_pid(port),
-      cleanup: Keyword.get(opts, :cleanup, :descendants)
+      cleanup: normalize_cleanup!(Keyword.get(opts, :cleanup, :descendants))
     }
   end
 
@@ -261,6 +262,17 @@ defmodule SymphonyElixir.ProcessSupervisor do
   defp normalize_startup_error(:timeout, timeout_ms), do: {:timeout, timeout_ms}
   defp normalize_startup_error({:timeout, _timeout_ms} = reason, _default_timeout_ms), do: reason
   defp normalize_startup_error(reason, _timeout_ms), do: reason
+
+  defp normalize_cleanup(cleanup) when cleanup in [:descendants, :port_only], do: {:ok, cleanup}
+
+  defp normalize_cleanup(cleanup), do: {:error, {:invalid_cleanup, cleanup}}
+
+  defp normalize_cleanup!(cleanup) do
+    case normalize_cleanup(cleanup) do
+      {:ok, normalized} -> normalized
+      {:error, {:invalid_cleanup, invalid}} -> raise ArgumentError, "invalid cleanup mode: #{inspect(invalid)}"
+    end
+  end
 
   defp termination_targets(%__MODULE__{} = process) do
     os_pid = current_os_pid(process)
