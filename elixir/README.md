@@ -125,6 +125,9 @@ It keeps local shell glue in this repo instead of dotfiles, resolves local runti
 optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
 and passes the raw escript's local-run acknowledgement flag.
 
+When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; it does not use the
+checked-in setup-only `symphony.yml` to start the daemon.
+
 Use the current shell environment when secrets are already exported:
 
 ```bash
@@ -132,13 +135,15 @@ export LINEAR_API_KEY=...
 ../bin/symphony --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references:
+Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references.
+Set `SYMPHONY_WORKFLOW` there to run the default local runtime setup, or use project-name shorthand
+for `$SYMPHONY_DEV_ROOT/<project-name>/symphony.runtime.yml`:
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
+../bin/symphony
 ../bin/symphony my-project
-../bin/symphony --workflow /path/to/local-symphony-runtime.yml
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or

@@ -4,14 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  symphony [project-name] [--workflow /path/to/symphony.yml] [options]
-  symphony --workflow /path/to/symphony.yml [options]
+  symphony [project-name] [--workflow /path/to/symphony.runtime.yml] [options]
+  symphony --workflow /path/to/symphony.runtime.yml [options]
   symphony workflow <init|check|print> [options]
 
 Project resolution:
-  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.yml.
-  --workflow <path>           Uses the explicit manifest path.
-  no project or workflow      Uses ./symphony.yml when present, otherwise the repo manifest.
+  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.runtime.yml.
+  --workflow <path>           Uses the explicit runtime setup path.
+  no project or workflow      Uses SYMPHONY_WORKFLOW from the env file, then ./symphony.runtime.yml.
 
 Options:
   --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
@@ -27,6 +27,7 @@ Options:
 Environment:
   SYMPHONY_HOME               Symphony Elixir dir. Default: <repo>/elixir.
   SYMPHONY_DEV_ROOT           Project root directory. Default: ~/dev.
+  SYMPHONY_WORKFLOW           Local runtime setup file. May be set in the env file.
   SYMPHONY_ENV_FILE           Default env file path.
   SYMPHONY_SKIP_BUILD=1       Same as --skip-build.
 
@@ -62,6 +63,30 @@ require_value() {
   [[ -n "$value" ]] || die "$flag requires a value"
 }
 
+env_file_value() {
+  local file="$1"
+  local key="$2"
+  local line value
+
+  [[ -f "$file" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" == "$key="* ]] || continue
+
+    value="${line#*=}"
+    value="${value%$'\r'}"
+    value="${value#\"}"
+    value="${value%\"}"
+    value="${value#\'}"
+    value="${value%\'}"
+    printf '%s\n' "$value"
+    return 0
+  done <"$file"
+
+  return 1
+}
+
 resolve_repo_root() {
   local source="${BASH_SOURCE[0]}"
   local dir
@@ -95,7 +120,7 @@ run_elixir() {
   local args
 
   [[ -n "$workflow" ]] || die "SYMPHONY_WORKFLOW is required"
-  [[ -f "$workflow" ]] || die "manifest file not found: $workflow"
+  [[ -f "$workflow" ]] || die "runtime setup file not found: $workflow"
   [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
 
   export PATH="/opt/homebrew/bin:/usr/local/bin:${HOME}/.nix-profile/bin:${HOME}/.local/bin:${HOME}/.bun/bin:/nix/var/nix/profiles/default/bin:${PATH}"
@@ -265,8 +290,13 @@ main() {
   symphony_home="$(expand_path "$symphony_home")"
   dev_root="$(expand_path "$dev_root")"
   env_file="$(expand_path "$env_file")"
-  workflow="$(expand_path "$workflow")"
   logs_root="$(expand_path "$logs_root")"
+
+  if [[ "$use_env_file" == "1" && -z "$workflow" && -f "$env_file" ]]; then
+    workflow="$(env_file_value "$env_file" SYMPHONY_WORKFLOW || true)"
+  fi
+
+  workflow="$(expand_path "$workflow")"
 
   symphony_home="$(absolute_path "$symphony_home")"
   dev_root="$(absolute_path "$dev_root")"
@@ -288,22 +318,21 @@ main() {
     if [[ -f "$expanded_project" ]]; then
       workflow="$(cd "$(dirname "$expanded_project")" >/dev/null 2>&1 && pwd)/$(basename "$expanded_project")"
       project_name="$(basename "$(dirname "$workflow")")"
-	    elif [[ -d "$expanded_project" ]]; then
-	      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/symphony.yml"
-	      project_name="$(basename "$expanded_project")"
-	    else
-	      workflow="$dev_root/$project/symphony.yml"
-	      project_name="$project"
-	    fi
-	  elif [[ -f symphony.yml ]]; then
-	    workflow="$PWD/symphony.yml"
-	    project_name="$(basename "$PWD")"
-	  else
-	    workflow="$repo_root/symphony.yml"
-	    project_name="symphony"
-	  fi
+    elif [[ -d "$expanded_project" ]]; then
+      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/symphony.runtime.yml"
+      project_name="$(basename "$expanded_project")"
+    else
+      workflow="$dev_root/$project/symphony.runtime.yml"
+      project_name="$project"
+    fi
+  elif [[ -f symphony.runtime.yml ]]; then
+    workflow="$PWD/symphony.runtime.yml"
+    project_name="$(basename "$PWD")"
+  else
+    die "local runtime setup not found; pass --workflow /path/to/symphony.runtime.yml. The checked-in symphony.yml is repo setup only and cannot start the daemon."
+  fi
 
-	  [[ -f "$workflow" ]] || die "manifest not found: $workflow"
+  [[ -f "$workflow" ]] || die "runtime setup not found: $workflow; create it from your local run setup or pass --workflow /path/to/symphony.runtime.yml"
 
   if [[ -z "$logs_root" ]]; then
     logs_root="$symphony_home/log"

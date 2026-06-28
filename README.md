@@ -91,13 +91,14 @@ export LINEAR_API_KEY=...
 ../bin/symphony --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env` and use the
-default launcher behavior, which resolves that env file through the 1Password CLI:
+or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env`, set
+`SYMPHONY_WORKFLOW` to a local `symphony.runtime.yml`, and use the default launcher behavior, which
+resolves that env file through the 1Password CLI:
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
-../bin/symphony --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony
 ```
 
 The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. A
