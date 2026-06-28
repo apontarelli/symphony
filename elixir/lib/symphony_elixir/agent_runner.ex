@@ -95,6 +95,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
+  defp non_retryable_agent_blocker({:startup_failed, reason}), do: non_retryable_agent_blocker(reason)
+
   defp non_retryable_agent_blocker(_reason), do: nil
 
   defp codex_invalid_request_error?(error) do

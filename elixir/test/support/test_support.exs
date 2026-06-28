@@ -28,7 +28,11 @@ defmodule SymphonyElixir.TestSupport do
           write_manifest_file!: 1,
           write_manifest_file!: 2,
           restore_env: 2,
-          stop_default_http_server: 0
+          stop_default_http_server: 0,
+          read_pid: 1,
+          os_pid_alive?: 1,
+          eventually: 1,
+          eventually: 2
         ]
 
       setup do
@@ -93,6 +97,47 @@ defmodule SymphonyElixir.TestSupport do
 
   def restore_env(key, nil), do: System.delete_env(key)
   def restore_env(key, value), do: System.put_env(key, value)
+
+  def read_pid(path) do
+    case File.read(path) do
+      {:ok, pid_text} ->
+        case Integer.parse(String.trim(pid_text)) do
+          {pid, ""} -> pid
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  def os_pid_alive?(nil), do: false
+
+  def os_pid_alive?(pid) when is_integer(pid) do
+    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
+      {_, 0} -> true
+      _ -> false
+    end
+  end
+
+  def eventually(fun, attempts \\ 20)
+
+  def eventually(fun, attempts) when attempts > 0 do
+    case fun.() do
+      nil ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      false ->
+        Process.sleep(50)
+        eventually(fun, attempts - 1)
+
+      value ->
+        value
+    end
+  end
+
+  def eventually(_fun, 0), do: false
 
   def ensure_application_started! do
     case Application.ensure_all_started(:symphony_elixir) do

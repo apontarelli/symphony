@@ -2624,7 +2624,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           ;;
         4)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-#{thread_suffix}"}}}'
-          sleep 30
+          sleep 120
           ;;
       esac
     done

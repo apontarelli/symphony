@@ -3,21 +3,24 @@ defmodule SymphonyElixir.Codex.Launch do
   Prepares the Codex harness home and starts the app-server process.
   """
 
-  alias SymphonyElixir.{Codex.HarnessHome, Shell, SSH}
+  alias SymphonyElixir.{Codex.HarnessHome, ProcessSupervisor, Shell, SSH}
 
+  @type command :: String.t() | [String.t()]
   @type result :: %{
           port: port(),
+          process: ProcessSupervisor.t(),
+          argv: [String.t()] | nil,
           codex_home: Path.t()
         }
 
-  @spec start(Path.t(), String.t() | nil, String.t(), keyword()) :: {:ok, result()} | {:error, term()}
+  @spec start(Path.t(), String.t() | nil, command(), keyword()) :: {:ok, result()} | {:error, term()}
   def start(workspace, worker_host, codex_command, opts \\ [])
-      when is_binary(workspace) and is_binary(codex_command) do
+      when is_binary(workspace) and (is_binary(codex_command) or is_list(codex_command)) do
     line_bytes = Keyword.get(opts, :line)
 
     with {:ok, codex_home} <- prepare_harness_home(workspace, worker_host),
-         {:ok, port} <- start_port(workspace, worker_host, codex_home, codex_command, line_bytes) do
-      {:ok, %{port: port, codex_home: codex_home}}
+         {:ok, process, argv} <- start_port(workspace, worker_host, codex_home, codex_command, line_bytes) do
+      {:ok, %{port: ProcessSupervisor.port(process), process: process, argv: argv, codex_home: codex_home}}
     end
   end
 
@@ -30,34 +33,36 @@ defmodule SymphonyElixir.Codex.Launch do
     {:ok, HarnessHome.path(workspace, remote: true)}
   end
 
-  defp start_port(workspace, nil, codex_home, codex_command, line_bytes) do
-    executable = System.find_executable("bash")
+  defp start_port(workspace, nil, codex_home, codex_command, line_bytes) when is_list(codex_command) do
+    with {:ok, argv} <- command_argv(codex_command),
+         {:ok, process} <-
+           ProcessSupervisor.start(argv,
+             cd: workspace,
+             env: HarnessHome.local_port_env(codex_home),
+             line: line_bytes
+           ) do
+      {:ok, process, argv}
+    end
+  end
 
-    if is_nil(executable) do
-      {:error, :bash_not_found}
-    else
-      port =
-        Port.open(
-          {:spawn_executable, String.to_charlist(executable)},
-          [
-            :binary,
-            :exit_status,
-            :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist("exec #{codex_command}")],
-            cd: String.to_charlist(workspace),
-            env: HarnessHome.local_port_env(codex_home),
-            line: line_bytes
-          ]
-        )
-
-      {:ok, port}
+  defp start_port(workspace, nil, codex_home, codex_command, line_bytes) when is_binary(codex_command) do
+    with {:ok, process} <-
+           ProcessSupervisor.start(["/bin/sh", "-lc", "exec #{codex_command}"],
+             cd: workspace,
+             env: HarnessHome.local_port_env(codex_home),
+             line: line_bytes
+           ) do
+      {:ok, process, nil}
     end
   end
 
   defp start_port(workspace, worker_host, codex_home, codex_command, line_bytes)
        when is_binary(worker_host) do
-    remote_command = remote_launch_command(workspace, codex_home, codex_command)
-    SSH.start_port(worker_host, remote_command, line: line_bytes)
+    with {:ok, codex_command_string} <- command_string(codex_command),
+         remote_command = remote_launch_command(workspace, codex_home, codex_command_string),
+         {:ok, port} <- SSH.start_port(worker_host, remote_command, line: line_bytes) do
+      {:ok, ProcessSupervisor.from_port(port, cleanup: :port_only), nil}
+    end
   end
 
   defp remote_launch_command(workspace, codex_home, codex_command) do
@@ -68,4 +73,24 @@ defmodule SymphonyElixir.Codex.Launch do
     ]
     |> Enum.join(" && ")
   end
+
+  defp command_argv(argv) when is_list(argv) do
+    if Enum.all?(argv, &is_binary/1) and argv != [] do
+      {:ok, argv}
+    else
+      {:error, :invalid_argv}
+    end
+  end
+
+  defp command_argv(_command), do: {:error, :invalid_argv}
+
+  defp command_string(command) when is_binary(command), do: {:ok, command}
+
+  defp command_string(argv) when is_list(argv) do
+    with {:ok, argv} <- command_argv(argv) do
+      {:ok, Enum.map_join(argv, " ", &Shell.escape/1)}
+    end
+  end
+
+  defp command_string(_command), do: {:error, :invalid_argv}
 end

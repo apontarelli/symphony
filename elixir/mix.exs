@@ -31,6 +31,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Codex.HarnessHome,
           SymphonyElixir.Codex.Launch,
           SymphonyElixir.HttpServer,
+          SymphonyElixir.ProcessSupervisor,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
           SymphonyElixir.Manifest,

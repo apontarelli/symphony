@@ -623,15 +623,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:quality_gate_review, :source_correctness}
     assert_receive {:quality_gate_review, :test_quality}
 
-    record =
-      eventually(fn ->
-        case SymphonyElixir.ReviewRecords.show(logs_root, "session-320") do
-          {:ok, record} -> record
-          {:error, _reason} -> nil
-        end
-      end)
-
-    assert record
+    record = wait_for_review_record(logs_root, "session-320")
     assert record.metadata["issue"]["identifier"] == "SID-320"
     assert record.metadata["workflow"]["policy_ref"] == "640c639998cf"
     assert record.quality_gate["status"] == "passed"
@@ -2007,24 +1999,31 @@ defmodule SymphonyElixir.QualityGateTest do
     while IFS= read -r line; do
       printf 'JSON:%s\\n' "$line" >> "$trace_file"
 
-      if printf '%s' "$line" | grep -q '"method":"initialize"'; then
-        printf '%s\\n' '{"id":1,"result":{}}'
-      elif printf '%s' "$line" | grep -q '"method":"thread/start"'; then
-        printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality-remote"}}}'
-      elif printf '%s' "$line" | grep -q '"method":"turn/start"'; then
-        count=$(cat "$count_file" 2>/dev/null || echo 0)
-        count=$((count + 1))
-        printf '%s' "$count" > "$count_file"
-        printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality-remote"}}}'
+      case "$line" in
+        *initialize*)
+          printf '%s\\n' '{"id":1,"result":{}}'
+          ;;
+        *thread/start*)
+          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality-remote"}}}'
+          ;;
+        *turn/start*)
+          count=0
+          if [ -f "$count_file" ]; then
+            IFS= read -r count < "$count_file" || count=0
+          fi
+          count=$((count + 1))
+          printf '%s\\n' "$count" > "$count_file"
+          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality-remote"}}}'
 
-        if [ "$count" -eq 1 ]; then
-          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"fix_required","findings":[{"category":"source_correctness","evidence":"Needs repair","recommended_disposition":"fix_required"}]}}}}'
-        else
-          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
-        fi
+          if [ "$count" -eq 1 ]; then
+            printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"fix_required","findings":[{"category":"source_correctness","evidence":"Needs repair","recommended_disposition":"fix_required"}]}}}}'
+          else
+            printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
+          fi
 
-        exit 0
-      fi
+          exit 0
+          ;;
+      esac
     done
     """)
 
@@ -2047,7 +2046,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert result.status == :passed
     assert [%{repair_result: %{status: :passed}}] = result.repair_passes
-    assert count_file |> File.read!() |> String.to_integer() >= 3
+    assert count_file |> File.read!() |> String.trim() |> String.to_integer() >= 3
 
     argv_lines =
       trace_file
@@ -2161,22 +2160,20 @@ defmodule SymphonyElixir.QualityGateTest do
     )
   end
 
-  defp eventually(fun, attempts \\ 20)
+  defp wait_for_review_record(logs_root, run_id, attempts \\ 20)
 
-  defp eventually(fun, attempts) when attempts > 0 do
-    case fun.() do
-      nil ->
+  defp wait_for_review_record(logs_root, run_id, attempts) when attempts > 0 do
+    case SymphonyElixir.ReviewRecords.show(logs_root, run_id) do
+      {:ok, record} ->
+        record
+
+      {:error, _reason} ->
         Process.sleep(50)
-        eventually(fun, attempts - 1)
-
-      false ->
-        Process.sleep(50)
-        eventually(fun, attempts - 1)
-
-      value ->
-        value
+        wait_for_review_record(logs_root, run_id, attempts - 1)
     end
   end
 
-  defp eventually(_fun, 0), do: false
+  defp wait_for_review_record(logs_root, run_id, 0) do
+    flunk("timed out waiting for review record #{run_id} under #{logs_root}")
+  end
 end
