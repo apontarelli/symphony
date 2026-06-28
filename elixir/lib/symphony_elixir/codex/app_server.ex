@@ -1174,7 +1174,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     os_pid = port_os_pid(port)
     descendants = os_pid_descendants(os_pid)
 
-    signal_os_pids(descendants, "TERM")
+    signal_os_pids([os_pid | descendants], "TERM")
+    Process.sleep(100)
 
     case :erlang.port_info(port) do
       :undefined ->
@@ -1209,18 +1210,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     case System.cmd("ps", ["-axo", "pid=,ppid="], stderr_to_stdout: true) do
       {output, 0} ->
         output
-        |> String.split("\n", trim: true)
-        |> Enum.reduce(%{}, fn line, by_parent ->
-          case line |> String.trim() |> String.split(~r/\s+/, trim: true) do
-            [child, parent] ->
-              Map.update(by_parent, String.to_integer(parent), [String.to_integer(child)], &[
-                String.to_integer(child) | &1
-              ])
-
-            _ ->
-              by_parent
-          end
-        end)
+        |> os_parent_pid_map()
         |> collect_descendant_pids(pid)
 
       _ ->
@@ -1228,6 +1218,26 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   rescue
     _ -> []
+  end
+
+  defp os_parent_pid_map(output) do
+    output
+    |> String.split("\n", trim: true)
+    |> Enum.reduce(%{}, &put_parent_pid_entry/2)
+  end
+
+  defp put_parent_pid_entry(line, by_parent) do
+    case line |> String.trim() |> String.split(~r/\s+/, trim: true) do
+      [child, parent] -> put_parent_pid_entry(by_parent, child, parent)
+      _ -> by_parent
+    end
+  end
+
+  defp put_parent_pid_entry(by_parent, child, parent) do
+    child_pid = String.to_integer(child)
+    parent_pid = String.to_integer(parent)
+
+    Map.update(by_parent, parent_pid, [child_pid], &[child_pid | &1])
   end
 
   defp collect_descendant_pids(by_parent, pid) do

@@ -98,7 +98,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp non_retryable_agent_blocker(_reason), do: nil
 
   defp codex_invalid_request_error?(error) do
-    (Map.get(error, "code") || Map.get(error, :code)) in [-32600, "-32600"]
+    (Map.get(error, "code") || Map.get(error, :code)) in [-32_600, "-32600"]
   end
 
   defp codex_invalid_request_reason(error) do

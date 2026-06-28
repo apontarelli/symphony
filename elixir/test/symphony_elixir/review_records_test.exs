@@ -134,14 +134,41 @@ defmodule SymphonyElixir.ReviewRecordsTest do
     assert {:ok, %{files: files}} =
              ReviewRecords.write_quality_gate_run(minimal_record(logs_root, "SID-320", "run-1"))
 
+    compatibility_findings = Path.join([logs_root, "review-records", "review", "symphony", "run-1", "findings.json"])
+    compatibility_disposition = Path.join([logs_root, "review-records", "review", "symphony", "run-1", "disposition.json"])
+
     File.write!(files.findings, ~s({"schema":"custom.findings","findings":[]}))
     File.write!(files.disposition, ~s({"schema":"custom.disposition","dispositions":[]}))
+    File.write!(compatibility_findings, ~s({"schema":"custom.review.findings","findings":[]}))
+    File.write!(compatibility_disposition, ~s({"schema":"custom.review.disposition","dispositions":[{"finding_id":"QG-1","status":"fixed","rationale":"operator decision"}]}))
 
     assert {:ok, %{files: ^files}} =
              ReviewRecords.write_quality_gate_run(minimal_record(logs_root, "SID-320", "run-1"))
 
     assert read_json!(files.findings)["schema"] == "custom.findings"
     assert read_json!(files.disposition)["schema"] == "custom.disposition"
+    assert read_json!(compatibility_findings)["schema"] == "custom.review.findings"
+    assert [%{"status" => "fixed", "rationale" => "operator decision"}] = read_json!(compatibility_disposition)["dispositions"]
+  end
+
+  test "uses manifest repo slug before tracker project slug for review compatibility records" do
+    logs_root = tmp_root!("review-records-repo-key")
+
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    params =
+      logs_root
+      |> minimal_record("SID-320", "run-repo-key")
+      |> Map.delete(:project)
+      |> Map.put(:policy, %{
+        "manifest" => %{"project" => %{"slug" => "symphony"}},
+        "policy_metadata" => %{"project_slug" => "make-symphony-runner-agnostic-09b8dc46fe82"}
+      })
+
+    assert {:ok, _record} = ReviewRecords.write_quality_gate_run(params)
+
+    assert File.regular?(Path.join([logs_root, "review-records", "review", "symphony", "run-repo-key", "metadata.json"]))
+    refute File.exists?(Path.join([logs_root, "review-records", "review", "make-symphony-runner-agnostic-09b8dc46fe82", "run-repo-key"]))
   end
 
   test "ignores malformed repair rerun categories without crashing record writes" do
@@ -246,6 +273,9 @@ defmodule SymphonyElixir.ReviewRecordsTest do
     assert export["schema"] == "symphony.review_retrospective_input.v1"
     assert export["record_count"] == 2
     assert export["review_retrospective_compatibility"]["artifact_root"] == "review-records"
+    assert export["review_retrospective_compatibility"]["review_path"] == "review/<project-slug>/<run-id>"
+    assert export["review_retrospective_compatibility"]["legacy_repair_source_path"] == "parallel-review/<project-slug>/<run-id>"
+    refute Map.has_key?(export["review_retrospective_compatibility"], "parallel_review_path")
     assert hd(export["records"])["record_path"] == "quality-gates/symphony/SID-321/run-2"
     assert Map.has_key?(export["groups"]["by_category"], "test_quality")
     assert Map.has_key?(export["groups"]["by_disposition"], "fixed")
@@ -261,12 +291,18 @@ defmodule SymphonyElixir.ReviewRecordsTest do
     assert since_last["record_count"] == 1
     assert hd(since_last["records"])["run_id"] == "run-2"
 
-    assert File.regular?(Path.join([logs_root, "review-records", "parallel-review", "symphony", "run-1", "findings.json"]))
-    assert File.regular?(Path.join([logs_root, "review-records", "parallel-review", "symphony", "run-2", "disposition.json"]))
+    assert File.regular?(Path.join([logs_root, "review-records", "review", "symphony", "run-1", "findings.json"]))
+    assert File.regular?(Path.join([logs_root, "review-records", "review", "symphony", "run-2", "disposition.json"]))
+    refute File.exists?(Path.join([logs_root, "review-records", "parallel-review", "symphony", "run-1"]))
+
+    retrospective_metadata = read_json!(Path.join([logs_root, "review-records", "review", "symphony", "run-1", "metadata.json"]))
+    assert retrospective_metadata["schema"] == "review.metadata.v1"
+    assert retrospective_metadata["original_repo_key"] == "symphony"
+    assert retrospective_metadata["provenance"]["source_record_path"] == "quality-gates/symphony/SID-320/run-1"
     assert File.dir?(Path.dirname(second.files.metadata))
   end
 
-  test "parallel-review compatibility sidecar maps native no-action dispositions" do
+  test "review compatibility sidecar maps native no-action dispositions" do
     logs_root = tmp_root!("review-records-compatibility-disposition")
     workspace = tmp_root!("review-records-compatibility-workspace")
 
@@ -289,7 +325,7 @@ defmodule SymphonyElixir.ReviewRecordsTest do
     assert Enum.any?(read_json!(files.disposition)["dispositions"], &(&1["status"] == "no_action"))
 
     compatibility_disposition =
-      [logs_root, "review-records", "parallel-review", "symphony", "run-compatibility", "disposition.json"]
+      [logs_root, "review-records", "review", "symphony", "run-compatibility", "disposition.json"]
       |> Path.join()
       |> read_json!()
 
@@ -303,6 +339,79 @@ defmodule SymphonyElixir.ReviewRecordsTest do
 
     assert no_action_entry["status"] == "out_of_scope"
     assert no_action_entry["rationale"] =~ "Native Symphony disposition no_action"
+  end
+
+  test "backfills legacy parallel-review records into canonical review records once with provenance" do
+    logs_root = tmp_root!("review-records-backfill")
+    legacy_dir = Path.join([logs_root, "review-records", "parallel-review", "symphony-old-alias", "run-legacy"])
+    canonical_dir = Path.join([logs_root, "review-records", "review", "symphony-old-alias", "run-legacy"])
+    no_report_legacy_dir = Path.join([logs_root, "review-records", "parallel-review", "symphony-old-alias", "run-no-report"])
+    no_report_canonical_dir = Path.join([logs_root, "review-records", "review", "symphony-old-alias", "run-no-report"])
+
+    on_exit(fn -> File.rm_rf(logs_root) end)
+
+    File.mkdir_p!(legacy_dir)
+    File.mkdir_p!(no_report_legacy_dir)
+    write_json!(Path.join(legacy_dir, "findings.json"), %{"schema" => "parallel-review.findings.v1", "findings" => [%{"id" => "F1", "category" => "docs", "evidence" => "Legacy finding."}]})
+
+    write_json!(Path.join(legacy_dir, "disposition.json"), %{
+      "schema" => "parallel-review.disposition.v1",
+      "dispositions" => [%{"finding_id" => "F1", "status" => "no_action", "rationale" => "Already covered."}]
+    })
+
+    write_json!(Path.join(legacy_dir, "metadata.json"), %{
+      "schema" => "parallel-review.metadata.v1",
+      "review_id" => "run-legacy",
+      "provenance" => %{"kept" => "yes"}
+    })
+
+    File.write!(Path.join(legacy_dir, "report.html"), "<html>leaked /private/tmp/symphony TOKEN=secret-value</html>")
+
+    write_json!(Path.join(no_report_legacy_dir, "findings.json"), %{
+      "schema" => "parallel-review.findings.v1",
+      "findings" => [%{"id" => "F2", "category" => "docs", "evidence" => "Legacy finding without report."}]
+    })
+
+    write_json!(Path.join(no_report_legacy_dir, "disposition.json"), %{
+      "schema" => "parallel-review.disposition.v1",
+      "dispositions" => [%{"finding_id" => "F2", "status" => "accepted", "rationale" => "Accepted."}]
+    })
+
+    write_json!(Path.join(no_report_legacy_dir, "metadata.json"), %{
+      "schema" => "parallel-review.metadata.v1",
+      "review_id" => "run-no-report",
+      "issue" => %{"identifier" => "SID-legacy"}
+    })
+
+    assert {:ok, %{backfilled: backfilled, skipped: [], errors: []}} =
+             ReviewRecords.backfill_legacy_parallel_review(logs_root)
+
+    backfilled = Enum.find(backfilled, &(&1.source == "parallel-review/symphony-old-alias/run-legacy"))
+    assert backfilled.source == "parallel-review/symphony-old-alias/run-legacy"
+    assert backfilled.target == "review/symphony-old-alias/run-legacy"
+
+    metadata = read_json!(Path.join(canonical_dir, "metadata.json"))
+    assert metadata["schema"] == "review.metadata.v1"
+    assert metadata["original_repo_key"] == "symphony-old-alias"
+    assert metadata["provenance"]["kept"] == "yes"
+    assert metadata["provenance"]["source"] == "legacy_parallel_review"
+    assert metadata["provenance"]["legacy_source_path"] == "parallel-review/symphony-old-alias/run-legacy"
+    assert metadata["provenance"]["source_metadata_schema"] == "parallel-review.metadata.v1"
+    canonical_report = File.read!(Path.join(canonical_dir, "report.html"))
+    assert canonical_report =~ "Legacy finding."
+    refute canonical_report =~ "/private/tmp/symphony"
+    refute canonical_report =~ "secret-value"
+    assert File.read!(Path.join(no_report_canonical_dir, "report.html")) =~ "Legacy finding without report."
+
+    disposition = read_json!(Path.join(canonical_dir, "disposition.json"))
+    assert [%{"native_status" => "no_action", "status" => "out_of_scope"}] = disposition["dispositions"]
+
+    assert {:ok, %{backfilled: [], skipped: skipped, errors: []}} =
+             ReviewRecords.backfill_legacy_parallel_review(logs_root)
+
+    skipped = Enum.find(skipped, &(&1.source == "parallel-review/symphony-old-alias/run-legacy"))
+    assert skipped.source == "parallel-review/symphony-old-alias/run-legacy"
+    assert skipped.target == "review/symphony-old-alias/run-legacy"
   end
 
   test "redacts absolute paths and secret-shaped payloads from persisted records and read output" do
@@ -559,6 +668,8 @@ defmodule SymphonyElixir.ReviewRecordsTest do
   end
 
   defp read_json!(path), do: path |> File.read!() |> Jason.decode!()
+
+  defp write_json!(path, payload), do: File.write!(path, Jason.encode!(payload, pretty: true) <> "\n")
 
   defp tmp_root!(name) do
     Path.join(System.tmp_dir!(), "#{name}-#{System.unique_integer([:positive])}")

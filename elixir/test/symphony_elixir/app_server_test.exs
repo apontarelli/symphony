@@ -372,6 +372,7 @@ defmodule SymphonyElixir.AppServerTest do
         System.tmp_dir!(),
         "symphony-elixir-app-server-descendant-cleanup-#{System.unique_integer([:positive])}"
       )
+
     child_pid_file = Path.join(test_root, "child.pid")
 
     try do
@@ -382,11 +383,21 @@ defmodule SymphonyElixir.AppServerTest do
       File.mkdir_p!(workspace)
 
       File.write!(codex_binary, """
-      #!/bin/sh
-      sleep 60 &
-      printf '%s\\n' "$!" > "#{child_pid_file}"
+       #!/bin/sh
+       child_pid=""
+       cleanup() {
+         if [ -n "$child_pid" ]; then
+           kill "$child_pid" 2>/dev/null || true
+           wait "$child_pid" 2>/dev/null || true
+         fi
+       }
+       trap 'cleanup; exit 143' TERM INT
+       trap 'cleanup' EXIT
+       sleep 60 &
+       child_pid="$!"
+       printf '%s\\n' "$child_pid" > "#{child_pid_file}"
 
-      count=0
+       count=0
       while IFS= read -r _line; do
         count=$((count + 1))
 
@@ -394,11 +405,12 @@ defmodule SymphonyElixir.AppServerTest do
           1)
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
-          2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-descendant-cleanup"}}}'
-            ;;
-          *)
-            sleep 1
+           2)
+             printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-descendant-cleanup"}}}'
+             wait "$child_pid"
+             ;;
+           *)
+             sleep 1
             ;;
         esac
       done

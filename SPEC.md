@@ -1071,8 +1071,11 @@ outcomes MUST remain distinguishable instead of being flattened into pass/fail s
 Operator read surfaces SHOULD support listing records, showing a single run, and exporting
 retrospective input grouped by finding category, disposition, affected files/surfaces,
 false-positive patterns, and follow-up candidates. Exports MAY include a compatibility adapter for a
-shared retrospective workflow, but MUST stop at evidence and proposals; they MUST NOT automatically
-edit workflow modules, instructions, skills, repo docs, or tracker issues.
+shared retrospective workflow under a canonical `review/` artifact root. Historical
+`parallel-review/` compatibility records MAY be backfilled once into the canonical root, but legacy
+paths MUST be recorded as provenance rather than treated as a separate source of truth. These
+surfaces MUST stop at evidence and proposals; they MUST NOT automatically edit workflow modules,
+instructions, skills, repo docs, or tracker issues.
 
 Review-record payloads and read surfaces MUST redact or omit raw credentials, secret-shaped fields,
 local temp paths, unsafe absolute workspace paths, caches, logs, and operator-local configuration

@@ -43,10 +43,27 @@ defmodule SymphonyElixir.ReviewRecords.Command do
     end
   end
 
+  def evaluate(["backfill-review" | args]) do
+    with {:ok, opts, []} <- parse_opts(args),
+         {:ok, summary} <- ReviewRecords.backfill_legacy_parallel_review(Keyword.get(opts, :logs_root)) do
+      {:ok, format_backfill(summary)}
+    else
+      {:ok, _opts, _argv} -> {:error, usage_message()}
+      {:error, reason} -> {:error, format_error(reason)}
+    end
+  end
+
   def evaluate(_args), do: {:error, usage_message()}
 
   defp usage_message do
-    "Usage: symphony review-records list|show <run-id>|export [--logs-root <path>] [--limit <n>] [--since <date|last>] [--format markdown|json]"
+    [
+      "Usage: symphony review-records",
+      "  symphony review-records list [--logs-root <path>] [--limit <n>]",
+      "  symphony review-records show <run-id> [--logs-root <path>]",
+      "  symphony review-records export [--logs-root <path>] [--since <date|last>] [--format markdown|json]",
+      "  symphony review-records backfill-review [--logs-root <path>]"
+    ]
+    |> Enum.join("\n")
   end
 
   defp parse_opts(args, extra_switches \\ []) do
@@ -105,6 +122,25 @@ defmodule SymphonyElixir.ReviewRecords.Command do
 
   defp format_export(export) when is_binary(export), do: export
   defp format_export(export), do: Jason.encode!(export, pretty: true)
+
+  defp format_backfill(summary) do
+    errors = Map.get(summary, :errors, [])
+
+    [
+      "Backfill complete: backfilled=#{length(Map.get(summary, :backfilled, []))} skipped=#{length(Map.get(summary, :skipped, []))} errors=#{length(errors)}",
+      backfill_errors(errors)
+    ]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp backfill_errors([]), do: ""
+
+  defp backfill_errors(errors) do
+    Enum.map_join(errors, "\n", fn error ->
+      "- #{error.source}: #{error.reason}"
+    end)
+  end
 
   defp format("json"), do: :json
   defp format(_format), do: :markdown
