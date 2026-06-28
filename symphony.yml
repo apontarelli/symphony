@@ -40,7 +40,7 @@ harness:
 runtime:
   tracker:
     # Dogfood Linear project scope for this repository's unattended runs.
-    project_slug: make-symphony-runner-agnostic-09b8dc46fe82
+    project_slug: symphony-repo-setup-and-run-setup-ux-eeddf6c567ce
   polling:
     interval_ms: 5000
   workspace:
