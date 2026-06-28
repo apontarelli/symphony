@@ -190,6 +190,70 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Product visual review is disabled by workflow module configuration."
   end
 
+  test "runtime runners codex config validates and compiles into daemon settings" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        name: Target Repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      runtime:
+        agent:
+          default_runner: codex
+          max_concurrent_startups: 2
+        runners:
+          codex:
+            kind: codex_app_server
+            command:
+              - codex
+              - --config
+              - model_reasoning_effort=high
+              - app-server
+            model: gpt-5.4
+            max_concurrent_startups: 1
+      """)
+
+    assert {:ok, %{config: config}} = Manifest.load(path)
+    assert get_in(config, ["agent", "default_runner"]) == "codex"
+    assert get_in(config, ["agent", "max_concurrent_startups"]) == 2
+    assert get_in(config, ["runners", "codex", "kind"]) == "codex_app_server"
+    assert get_in(config, ["runners", "codex", "command"]) == ["codex", "--config", "model_reasoning_effort=high", "app-server"]
+
+    workflow_path = Workflow.workflow_file_path()
+    on_exit(fn -> Workflow.set_workflow_file_path(workflow_path) end)
+    Workflow.set_workflow_file_path(path)
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    assert Config.default_runner!()["command"] == ["codex", "--config", "model_reasoning_effort=high", "app-server"]
+    assert Config.default_runner!()["model"] == "gpt-5.4"
+    assert Config.max_concurrent_startups() == 1
+  end
+
+  test "runtime codex config is rejected with runner remediation" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      runtime:
+        codex:
+          command: codex app-server
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+
+    assert %{
+             path: "runtime.codex",
+             message: "is not supported; use runtime.runners.<name> (for Codex use runtime.runners.codex)"
+           } in diagnostics
+  end
+
   test "review routing compiles into resolved policy and prompt context" do
     path =
       write_manifest!("""
@@ -839,9 +903,12 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.tracker.active_states == ["Todo", "In Progress", "Merging", "Rework"]
     assert settings.workspace.root == "~/code/symphony-workspaces"
     assert settings.hooks.after_create == "git clone --depth 1 'github.com/example/target-repo' ."
+    assert settings.agent.default_runner == "codex"
     assert settings.agent.max_concurrent_agents == 10
-    assert settings.codex.command == "codex app-server"
-    assert settings.codex.model == "gpt-5.5"
+    assert settings.agent.max_concurrent_startups == 2
+    assert Config.default_runner!(settings)["kind"] == "codex_app_server"
+    assert Config.default_runner!(settings)["command"] == ["codex", "app-server"]
+    assert Config.default_runner!(settings)["model"] == "gpt-5.5"
     assert settings.polling.interval_ms == 30_000
 
     prompt =

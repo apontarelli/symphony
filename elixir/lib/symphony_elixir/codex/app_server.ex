@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     Config,
     PathSafety,
     ProcessSupervisor,
+    Shell,
     Workflow
   }
 
@@ -54,9 +55,11 @@ defmodule SymphonyElixir.Codex.AppServer do
     worker_host = Keyword.get(opts, :worker_host)
 
     settings = Config.settings!()
+    runner = Config.default_runner!(settings)
     execution_profile = ExecutionProfile.resolve(settings, Keyword.get(opts, :execution_profile, "implementation"))
-    codex_command = ExecutionProfile.command(settings.codex.command, execution_profile, settings.codex.model)
-    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, settings.codex.read_timeout_ms)
+    codex_command = ExecutionProfile.command(runner["command"], execution_profile, runner["model"])
+    codex_command_display = Shell.argv_to_command(codex_command)
+    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, Config.runner_read_timeout_ms())
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
@@ -66,9 +69,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       metadata =
         port
         |> port_metadata(worker_host)
-        |> Map.merge(launch_provenance(expanded_workspace, launch.codex_home, codex_command, execution_profile))
+        |> Map.merge(launch_provenance(expanded_workspace, launch.codex_home, codex_command_display, execution_profile))
 
-      Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command}")
+      Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command_display}")
 
       case session_policies(expanded_workspace, worker_host, opts) do
         {:ok, session_policies} ->
@@ -137,7 +140,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.settings!().codex.turn_timeout_ms)
+    timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.runner_turn_timeout_ms())
 
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
@@ -1140,7 +1143,7 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp await_response(port, request_id) do
-    await_response(port, request_id, Config.settings!().codex.read_timeout_ms)
+    await_response(port, request_id, Config.runner_read_timeout_ms())
   end
 
   defp await_response(port, request_id, timeout) when is_function(timeout, 0) do

@@ -190,10 +190,13 @@ defmodule SymphonyElixir.TestSupport do
           workspace_root: Path.join(System.tmp_dir!(), "symphony_workspaces"),
           worker_ssh_hosts: [],
           worker_max_concurrent_agents_per_host: nil,
+          default_runner: "codex",
           max_concurrent_agents: 10,
+          max_concurrent_startups: 2,
           max_turns: 20,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
+          runner_kind: "codex_app_server",
           codex_command: "codex app-server",
           codex_model: "gpt-5.5",
           codex_approval_policy: "on-request",
@@ -202,6 +205,7 @@ defmodule SymphonyElixir.TestSupport do
           codex_turn_timeout_ms: 3_600_000,
           codex_read_timeout_ms: 30_000,
           codex_stall_timeout_ms: 300_000,
+          runner_max_concurrent_startups: nil,
           quality_gate_enabled: false,
           quality_gate_source_max_concurrency: 3,
           quality_gate_max_repair_passes: 1,
@@ -244,11 +248,15 @@ defmodule SymphonyElixir.TestSupport do
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
     worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+    default_runner = Keyword.get(config, :default_runner)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
+    max_concurrent_startups = Keyword.get(config, :max_concurrent_startups)
     max_turns = Keyword.get(config, :max_turns)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
+    runner_kind = Keyword.get(config, :runner_kind)
     codex_command = Keyword.get(config, :codex_command)
+    runner_command = Keyword.get(config, :runner_command) || command_argv(codex_command)
     codex_model = Keyword.get(config, :codex_model)
     codex_approval_policy = Keyword.get(config, :codex_approval_policy)
     codex_thread_sandbox = Keyword.get(config, :codex_thread_sandbox)
@@ -256,6 +264,7 @@ defmodule SymphonyElixir.TestSupport do
     codex_turn_timeout_ms = Keyword.get(config, :codex_turn_timeout_ms)
     codex_read_timeout_ms = Keyword.get(config, :codex_read_timeout_ms)
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
+    runner_max_concurrent_startups = Keyword.get(config, :runner_max_concurrent_startups)
     quality_gate_enabled = Keyword.get(config, :quality_gate_enabled)
     quality_gate_source_max_concurrency = Keyword.get(config, :quality_gate_source_max_concurrency)
     quality_gate_max_repair_passes = Keyword.get(config, :quality_gate_max_repair_passes)
@@ -300,19 +309,24 @@ defmodule SymphonyElixir.TestSupport do
         "  root: #{yaml_value(workspace_root)}",
         worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host),
         "agent:",
+        "  default_runner: #{yaml_value(default_runner)}",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
+        "  max_concurrent_startups: #{yaml_value(max_concurrent_startups)}",
         "  max_turns: #{yaml_value(max_turns)}",
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
-        "codex:",
-        "  command: #{yaml_value(codex_command)}",
-        "  model: #{yaml_value(codex_model)}",
-        "  approval_policy: #{yaml_value(codex_approval_policy)}",
-        "  thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
-        "  turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
-        "  turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
-        "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
-        "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "runners:",
+        "  codex:",
+        "    kind: #{yaml_value(runner_kind)}",
+        "    command: #{yaml_value(runner_command)}",
+        "    model: #{yaml_value(codex_model)}",
+        "    approval_policy: #{yaml_value(codex_approval_policy)}",
+        "    thread_sandbox: #{yaml_value(codex_thread_sandbox)}",
+        "    turn_sandbox_policy: #{yaml_value(codex_turn_sandbox_policy)}",
+        "    turn_timeout_ms: #{yaml_value(codex_turn_timeout_ms)}",
+        "    read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
+        "    stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
+        "    max_concurrent_startups: #{yaml_value(runner_max_concurrent_startups)}",
         "quality_gate:",
         "  enabled: #{yaml_value(quality_gate_enabled)}",
         "  source_max_concurrency: #{yaml_value(quality_gate_source_max_concurrency)}",
@@ -369,6 +383,18 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   defp yaml_value(value), do: yaml_value(to_string(value))
+
+  defp command_argv(nil), do: nil
+  defp command_argv(command) when is_list(command), do: command
+
+  defp command_argv(command) when is_binary(command) do
+    case SymphonyElixir.Shell.split(command) do
+      {:ok, argv} -> argv
+      {:error, _reason} -> command
+    end
+  end
+
+  defp command_argv(command), do: command
 
   defp workflow_yaml(module_ids) when module_ids in [nil, []] do
     "workflow:\n  preset: \"default\""

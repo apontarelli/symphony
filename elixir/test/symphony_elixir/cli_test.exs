@@ -358,6 +358,49 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "must stay inside the repo"
   end
 
+  test "workflow check rejects legacy runtime codex config" do
+    repo = tmp_repo!("symphony-elixir-check-runtime-codex")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      name: legacy-runtime
+      repository: https://github.com/example/legacy-runtime
+    delivery:
+      pr_target: main
+    runtime:
+      codex:
+        command: codex app-server
+    """)
+
+    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert output =~ "Workflow check failed"
+    assert output =~ "runtime.codex"
+    assert output =~ "runtime.runners.codex"
+  end
+
+  test "workflow check rejects invalid runtime runner schema" do
+    repo = tmp_repo!("symphony-elixir-check-runtime-runners")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      name: invalid-runtime-runner
+      repository: https://github.com/example/invalid-runtime-runner
+    delivery:
+      pr_target: main
+    runtime:
+      runners:
+        codex:
+          kind: codex_app_server
+          command: "codex app-server"
+    """)
+
+    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert output =~ "Workflow check failed"
+    assert output =~ "runtime.runners.codex.command must be a list"
+  end
+
   test "workflow check rejects missing publish repository and explicit PR target" do
     repo = tmp_repo!("symphony-elixir-check-missing-publish-target")
 
@@ -457,6 +500,20 @@ defmodule SymphonyElixir.CLITest do
     assert config["publish_target"]["display"] == "apontarelli/symphony:main"
     refute config["publish_target"]["display"] == "openai/symphony:main"
     assert config["checks"] == [%{"name" => "all", "command" => "cd elixir && mise exec -- make all"}]
+    assert config["agent"]["default_runner"] == "codex"
+    assert config["agent"]["max_concurrent_startups"] == 2
+    assert get_in(config, ["runners", "codex", "kind"]) == "codex_app_server"
+
+    assert get_in(config, ["runners", "codex", "command"]) == [
+             "codex",
+             "--config",
+             "shell_environment_policy.inherit=all",
+             "--config",
+             "model_reasoning_effort=xhigh",
+             "app-server"
+           ]
+
+    refute Map.has_key?(config, "codex")
     assert config["policy_metadata"]["source"] == "symphony_manifest"
     assert prompt =~ "You are working on a Linear ticket"
     assert prompt =~ "## Core Workflow Modules"
@@ -482,6 +539,10 @@ defmodule SymphonyElixir.CLITest do
     assert compiled_output =~ "publish_target:"
     assert compiled_output =~ "display: \"example/print-repo:main\""
     assert compiled_output =~ "tracker:"
+    assert compiled_output =~ "default_runner: \"codex\""
+    assert compiled_output =~ "runners:"
+    assert compiled_output =~ "kind: \"codex_app_server\""
+    assert compiled_output =~ "command:"
     assert compiled_output =~ "You are working on a Linear ticket"
     assert compiled_output =~ "## Core Workflow Modules"
     assert compiled_output =~ "Docs entrypoints:"

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.PromptBuilder do
   """
 
   alias SymphonyElixir.{Config, Workflow}
-  alias SymphonyElixir.Workflow.ModuleRegistry
+  alias SymphonyElixir.Workflow.{Manifest, ModuleRegistry}
 
   @render_opts [strict_variables: true, strict_filters: true]
 
@@ -83,9 +83,26 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp workflow! do
-    case Workflow.current() do
-      {:ok, workflow} when is_map(workflow) -> workflow
-      {:error, reason} -> raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
+    case Workflow.load(Workflow.selected_workflow_file_path()) do
+      {:ok, workflow} when is_map(workflow) ->
+        workflow
+
+      {:error, {:invalid_manifest, _diagnostics} = reason} ->
+        workflow_from_manifest_prompt!(reason)
+
+      {:error, reason} ->
+        raise RuntimeError, "workflow_unavailable: #{inspect(reason)}"
+    end
+  end
+
+  defp workflow_from_manifest_prompt!(load_reason) do
+    case Manifest.read(Workflow.selected_workflow_file_path()) do
+      {:ok, %{"prompt_template" => prompt} = manifest} when is_binary(prompt) ->
+        {:ok, resolution} = ModuleRegistry.prompt_module_resolution(manifest)
+        %{prompt_template: prompt, workflow_module_resolution: resolution}
+
+      _ ->
+        raise RuntimeError, "workflow_unavailable: #{inspect(load_reason)}"
     end
   end
 

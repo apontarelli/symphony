@@ -2,7 +2,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   use SymphonyElixir.TestSupport
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.Config.Schema.{AutoLand, Codex, StringOrMap}
+  alias SymphonyElixir.Config.Schema.{AutoLand, StringOrMap}
   alias SymphonyElixir.Linear.Client
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -972,13 +972,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.tracker.required_labels == []
     assert config.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
     assert config.worker.max_concurrent_agents_per_host == nil
+    assert config.agent.default_runner == "codex"
     assert config.agent.max_concurrent_agents == 10
-    assert config.codex.command == "codex app-server"
-    assert config.codex.model == "gpt-5.5"
+    assert config.agent.max_concurrent_startups == 2
+    assert Config.max_concurrent_startups() == 2
 
-    assert config.codex.approval_policy == "on-request"
+    runner = Config.default_runner!()
+    assert runner["kind"] == "codex_app_server"
+    assert runner["command"] == ["codex", "app-server"]
+    assert runner["model"] == "gpt-5.5"
+    assert runner["approval_policy"] == "on-request"
 
-    assert config.codex.thread_sandbox == "workspace-write"
+    assert runner["thread_sandbox"] == "workspace-write"
 
     assert {:ok, canonical_default_workspace_root} =
              SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
@@ -992,9 +997,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "excludeSlashTmp" => false
            }
 
-    assert config.codex.turn_timeout_ms == 3_600_000
-    assert config.codex.read_timeout_ms == 30_000
-    assert config.codex.stall_timeout_ms == 300_000
+    assert runner["turn_timeout_ms"] == 3_600_000
+    assert runner["read_timeout_ms"] == 30_000
+    assert runner["stall_timeout_ms"] == 300_000
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_required_labels: [" Symphony ", "SYMPHONY", "JavaScript"]
@@ -1009,11 +1014,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
     )
 
-    assert Config.settings!().codex.command ==
-             "codex --config 'model=\"gpt-5.5\"' app-server"
+    assert Config.default_runner!()["command"] == ["codex", "--config", "model=\"gpt-5.5\"", "app-server"]
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_model: "gpt-5.4")
-    assert Config.settings!().codex.model == "gpt-5.4"
+    assert Config.default_runner!()["model"] == "gpt-5.4"
 
     explicit_root =
       Path.join(
@@ -1038,17 +1042,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     config = Config.settings!()
-    assert config.codex.approval_policy == "on-request"
-    assert config.codex.thread_sandbox == "workspace-write"
+    runner = Config.default_runner!(config)
+    assert runner["approval_policy"] == "on-request"
+    assert runner["thread_sandbox"] == "workspace-write"
 
     assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
              "type" => "workspaceWrite",
              "writableRoots" => [explicit_workspace, explicit_cache]
            }
 
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: ",")
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: %{bad: "shape"})
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "tracker.active_states"
+    assert message =~ "tracker.kind"
 
     write_workflow_file!(Workflow.workflow_file_path(), max_concurrent_agents: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -1060,15 +1065,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_timeout_ms"
+    assert message =~ "runtime.runners.codex.turn_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_read_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.read_timeout_ms"
+    assert message =~ "runtime.runners.codex.read_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_stall_timeout_ms: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.stall_timeout_ms"
+    assert message =~ "runtime.runners.codex.stall_timeout_ms"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_active_states: %{todo: true},
@@ -1089,15 +1094,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "")
     assert :ok = Config.validate!()
-    assert Config.settings!().codex.approval_policy == ""
+    assert Config.default_runner!()["approval_policy"] == ""
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "")
     assert :ok = Config.validate!()
-    assert Config.settings!().codex.thread_sandbox == ""
+    assert Config.default_runner!()["thread_sandbox"] == ""
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_turn_sandbox_policy: "bad")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.turn_sandbox_policy"
+    assert message =~ "runtime.runners.codex.turn_sandbox_policy"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_approval_policy: "future-policy",
@@ -1109,8 +1114,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     )
 
     config = Config.settings!()
-    assert config.codex.approval_policy == "future-policy"
-    assert config.codex.thread_sandbox == "future-sandbox"
+    runner = Config.default_runner!(config)
+    assert runner["approval_policy"] == "future-policy"
+    assert runner["thread_sandbox"] == "future-sandbox"
 
     assert :ok = Config.validate!()
 
@@ -1120,7 +1126,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server")
-    assert Config.settings!().codex.command == "codex app-server"
+    assert Config.default_runner!()["command"] == ["codex", "app-server"]
   end
 
   test "config accepts Linear team scope when project scope is absent" do
@@ -1188,7 +1194,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     config = Config.settings!()
     assert config.tracker.api_key == api_key
     assert config.workspace.root == Path.expand(workspace_root)
-    assert config.codex.command == "#{codex_bin} app-server"
+    assert Config.default_runner!(config)["command"] == [codex_bin, "app-server"]
   end
 
   test "config no longer resolves legacy env: references" do
@@ -1300,14 +1306,14 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Schema.parse(%{
                tracker: %{api_key: "$#{empty_secret_env}"},
                workspace: %{root: "$#{missing_workspace_env}"},
-               codex: %{approval_policy: %{custom_policy: %{sandbox_approval: true}}},
+               runners: %{codex: %{approval_policy: %{custom_policy: %{sandbox_approval: true}}}},
                profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
     assert settings.tracker.api_key == nil
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
 
-    assert settings.codex.approval_policy == %{
+    assert Schema.default_runner_config!(settings)["approval_policy"] == %{
              "custom_policy" => %{"sandbox_approval" => true}
            }
 
@@ -1322,16 +1328,86 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
+  test "schema rejects legacy top-level codex config" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               codex: %{command: "codex app-server"},
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert message =~ "runtime.codex is not supported"
+    assert message =~ "runtime.runners.codex"
+  end
+
+  test "shell splitting covers escaped arguments and malformed quotes" do
+    assert SymphonyElixir.Shell.split("codex\\ app-server --flag") == {:ok, ["codex app-server", "--flag"]}
+    assert SymphonyElixir.Shell.split("'unterminated") == {:error, {:unterminated_quote, "'"}}
+  end
+
+  test "schema validates runner defaults, references, and malformed runner fields" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               agent: %{default_runner: " custom "},
+               runners: %{custom: %{kind: "codex_app_server", command: ["custom-runner"]}},
+               profiles: %{default: %{delivery: %{pr_target: "main"}, runners: %{custom: %{}}}}
+             })
+
+    assert settings.agent.default_runner == "custom"
+    assert Schema.default_runner_name(settings) == "custom"
+    assert Schema.default_runner_config!(settings)["kind"] == "codex_app_server"
+    assert Schema.default_runner_config!(settings)["command"] == ["custom-runner"]
+
+    assert {:ok, defaulted_settings} =
+             Schema.parse(%{
+               runners: %{},
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert Schema.default_runner_config!(defaulted_settings)["command"] == ["codex", "app-server"]
+    assert Schema.default_runner_name(%Schema{agent: nil}) == "codex"
+    assert {:error, {:unknown_default_runner, "codex"}} = Schema.default_runner_config(%Schema{runners: %{}})
+
+    assert_raise ArgumentError, ~r/Invalid default runner config/, fn ->
+      Schema.default_runner_config!(%Schema{runners: %{}})
+    end
+
+    invalid_configs = [
+      {%{runners: "bad"}, "runners is invalid"},
+      {%{runners: %{" " => %{command: ["runner"]}}}, "runtime.runners runner names must not be blank"},
+      {%{agent: %{default_runner: " "}}, "runtime.agent.default_runner is required"},
+      {%{agent: %{default_runner: "missing"}}, "runtime.agent.default_runner \"missing\" must reference runtime.runners.missing"},
+      {%{runners: %{codex: "bad"}}, "runtime.runners.codex must be a map"},
+      {%{runners: %{codex: %{kind: 123}}}, "runtime.runners.codex.kind must be a string"},
+      {%{runners: %{codex: %{kind: "typo_runner"}}}, "runtime.runners.codex.kind \"typo_runner\" is not supported"},
+      {%{runners: %{codex: %{command: ["codex", " "]}}}, "runtime.runners.codex.command[1] must be a non-empty string"},
+      {%{runners: %{codex: %{command: ["codex", 123]}}}, "runtime.runners.codex.command[1] must be a non-empty string"},
+      {%{runners: %{codex: %{command: []}}}, "runtime.runners.codex.command is required"},
+      {%{runners: %{codex: %{command: "codex app-server"}}}, "runtime.runners.codex.command must be a list"},
+      {%{runners: %{codex: %{model: 123}}}, "runtime.runners.codex.model must be a string"},
+      {%{runners: %{codex: %{approval_policy: 123}}}, "runtime.runners.codex.approval_policy must be a string or map"},
+      {%{runners: %{codex: %{execution_profiles: "bad"}}}, "runtime.runners.codex.execution_profiles must be a map"},
+      {%{runners: %{codex: %{stall_timeout_ms: -1}}}, "runtime.runners.codex.stall_timeout_ms must be a non-negative integer"},
+      {%{runners: %{codex: %{unexpected: true}}}, "runtime.runners.codex.unexpected is not supported in v1"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, runners: %{codex: "bad"}}}}, "default.runners.codex must be a map"}
+    ]
+
+    for {config, expected_message} <- invalid_configs do
+      config = Map.put_new(config, :profiles, %{default: %{delivery: %{pr_target: "main"}}})
+      assert {:error, {:invalid_workflow_config, message}} = Schema.parse(config)
+      assert message =~ expected_message
+    end
+  end
+
   test "schema resolves sandbox policies from explicit and default workspaces" do
     explicit_policy = %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/explicit"]}
 
     assert Schema.resolve_turn_sandbox_policy(%Schema{
-             codex: %Codex{turn_sandbox_policy: explicit_policy},
+             runners: %{"codex" => %{"turn_sandbox_policy" => explicit_policy}},
              workspace: %Schema.Workspace{root: "/tmp/ignored"}
            }) == explicit_policy
 
     assert Schema.resolve_turn_sandbox_policy(%Schema{
-             codex: %Codex{turn_sandbox_policy: nil},
+             runners: Schema.default_runners(),
              workspace: %Schema.Workspace{root: ""}
            }) == %{
              "type" => "workspaceWrite",
@@ -1344,7 +1420,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Schema.resolve_turn_sandbox_policy(
              %Schema{
-               codex: %Codex{turn_sandbox_policy: nil},
+               runners: Schema.default_runners(),
                workspace: %Schema.Workspace{root: "/tmp/ignored"}
              },
              "/tmp/workspace"
@@ -1364,10 +1440,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
         default: %{delivery: %{pr_target: "main"}},
         skill_authoring: %{
           delivery: %{pr_target: "main"},
-          codex: %{
-            approval_policy: "never",
-            thread_sandbox: "danger-full-access",
-            turn_sandbox_policy: %{type: "dangerFullAccess"}
+          runners: %{
+            codex: %{
+              approval_policy: "never",
+              thread_sandbox: "danger-full-access",
+              turn_sandbox_policy: %{type: "dangerFullAccess"}
+            }
           }
         }
       }
@@ -1389,7 +1467,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, settings} =
              Schema.parse(%{
                workspace: %{root: "~/.symphony-workspaces"},
-               codex: %{},
+               runners: %{codex: %{kind: "codex_app_server", command: ["codex", "app-server"]}},
                profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
@@ -1505,7 +1583,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       read_only_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "readOnly", "networkAccess" => true}}
+        | runners: put_in(settings.runners, ["codex", "turn_sandbox_policy"], %{"type" => "readOnly", "networkAccess" => true})
       }
 
       assert {:ok, %{"type" => "readOnly", "networkAccess" => true}} =
@@ -1513,7 +1591,11 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       future_settings = %{
         settings
-        | codex: %{settings.codex | turn_sandbox_policy: %{"type" => "futureSandbox", "nested" => %{"flag" => true}}}
+        | runners:
+            put_in(settings.runners, ["codex", "turn_sandbox_policy"], %{
+              "type" => "futureSandbox",
+              "nested" => %{"flag" => true}
+            })
       }
 
       assert {:ok, %{"type" => "futureSandbox", "nested" => %{"flag" => true}}} =

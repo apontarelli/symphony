@@ -59,15 +59,17 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.command"
-    assert message =~ "can't be blank"
+    assert message =~ "runtime.runners.codex.command"
+    assert message =~ "is required"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "   ")
-    assert :ok = Config.validate!()
-    assert Config.settings!().codex.command == "   "
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "runtime.runners.codex.command"
+    assert message =~ "is required"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_command: "/bin/sh app-server")
     assert :ok = Config.validate!()
+    assert Config.default_runner!()["command"] == ["/bin/sh", "app-server"]
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "definitely-not-valid")
     assert :ok = Config.validate!()
@@ -83,11 +85,11 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: 123)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.approval_policy"
+    assert message =~ "runtime.runners.codex.approval_policy"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: 123)
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
-    assert message =~ "codex.thread_sandbox"
+    assert message =~ "runtime.runners.codex.thread_sandbox"
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
@@ -140,20 +142,23 @@ defmodule SymphonyElixir.CoreTest do
                  "not_a_map" => "bad",
                  "non_string_pr_target" => %{"delivery" => %{"pr_target" => 123}},
                  "non_map_delivery" => %{"delivery" => "main"},
-                 "unsupported_codex" => %{
+                 "legacy_codex" => %{
                    "delivery" => %{"pr_target" => "main"},
                    "codex" => %{"command" => "codex app-server"}
                  },
-                 "non_map_codex" => %{
+                 "non_map_runners" => %{
                    "delivery" => %{"pr_target" => "main"},
-                   "codex" => "danger"
+                   "runners" => "danger"
                  },
-                 "malformed_codex_fields" => %{
+                 "malformed_runner_fields" => %{
                    "delivery" => %{"pr_target" => "main"},
-                   "codex" => %{
-                     "approval_policy" => 123,
-                     "thread_sandbox" => 123,
-                     "turn_sandbox_policy" => "dangerFullAccess"
+                   "runners" => %{
+                     "codex" => %{
+                       "approval_policy" => 123,
+                       "thread_sandbox" => 123,
+                       "turn_sandbox_policy" => "dangerFullAccess",
+                       "command" => "codex app-server"
+                     }
                    }
                  }
                }
@@ -163,11 +168,12 @@ defmodule SymphonyElixir.CoreTest do
     assert message =~ "not_a_map profile must be a map"
     assert message =~ "non_string_pr_target.delivery.pr_target must be a string"
     assert message =~ "non_map_delivery.delivery must be a map"
-    assert message =~ "unsupported_codex.codex.command is not supported in v1"
-    assert message =~ "non_map_codex.codex must be a map"
-    assert message =~ "malformed_codex_fields.codex.approval_policy must be a string or map"
-    assert message =~ "malformed_codex_fields.codex.thread_sandbox must be a string"
-    assert message =~ "malformed_codex_fields.codex.turn_sandbox_policy must be a map"
+    assert message =~ "legacy_codex.codex is not supported in v1"
+    assert message =~ "non_map_runners.runners must be a map"
+    assert message =~ "malformed_runner_fields.runners.codex.command is not supported in v1"
+    assert message =~ "malformed_runner_fields.runners.codex.approval_policy must be a string or map"
+    assert message =~ "malformed_runner_fields.runners.codex.thread_sandbox must be a string"
+    assert message =~ "malformed_runner_fields.runners.codex.turn_sandbox_policy must be a map"
   end
 
   test "workflow profile resolution replaces lists and maps by default while preserving untouched defaults" do

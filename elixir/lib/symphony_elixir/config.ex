@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Config do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.ModuleRegistry
 
   @profile_override_env_key :workflow_profile_override
@@ -18,8 +19,8 @@ defmodule SymphonyElixir.Config do
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
   def settings do
-    case Workflow.current() do
-      {:ok, %{config: config}} when is_map(config) ->
+    case selected_workflow_config() do
+      {:ok, config} when is_map(config) ->
         Schema.parse(config)
 
       {:error, reason} ->
@@ -64,8 +65,8 @@ defmodule SymphonyElixir.Config do
 
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
-    case Workflow.current() do
-      {:ok, %{prompt_template: prompt}} ->
+    case Manifest.read(Workflow.selected_workflow_file_path()) do
+      {:ok, %{"prompt_template" => prompt}} when is_binary(prompt) ->
         if String.trim(prompt) == "", do: default_prompt_template(), else: prompt
 
       _ ->
@@ -88,10 +89,10 @@ defmodule SymphonyElixir.Config do
 
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
-    with {:ok, settings} <- settings() do
-      with :ok <- validate_semantics(settings) do
-        validate_profile_override(settings)
-      end
+    with {:ok, config} <- selected_workflow_config(),
+         {:ok, settings} <- Schema.parse(config),
+         :ok <- validate_semantics(settings) do
+      validate_profile_override(settings)
     end
   end
 
@@ -142,11 +143,14 @@ defmodule SymphonyElixir.Config do
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
     with {:ok, settings} <- settings() do
-      with {:ok, codex_policy_overrides} <- policy_codex_overrides(Keyword.get(opts, :policy)),
+      runner_name = Schema.default_runner_name(settings)
+      runner = Schema.default_runner_config!(settings)
+
+      with {:ok, runner_policy_overrides} <- policy_runner_overrides(Keyword.get(opts, :policy), runner_name),
            {:ok, turn_sandbox_policy} <-
-             runtime_turn_sandbox_policy(settings, workspace, opts, codex_policy_overrides),
-           {:ok, approval_policy} <- runtime_approval_policy(settings.codex.approval_policy, codex_policy_overrides),
-           {:ok, thread_sandbox} <- runtime_thread_sandbox(settings.codex.thread_sandbox, codex_policy_overrides) do
+             runtime_turn_sandbox_policy(settings, workspace, opts, runner_policy_overrides),
+           {:ok, approval_policy} <- runtime_approval_policy(runner["approval_policy"], runner_policy_overrides),
+           {:ok, thread_sandbox} <- runtime_thread_sandbox(runner["thread_sandbox"], runner_policy_overrides) do
         {:ok,
          %{
            approval_policy: approval_policy,
@@ -157,40 +161,98 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  defp policy_codex_overrides(nil), do: {:ok, %{}}
+  @spec default_runner!() :: map()
+  def default_runner!, do: settings!() |> Schema.default_runner_config!()
 
-  defp policy_codex_overrides(%{"codex" => codex}) when is_map(codex), do: {:ok, normalize_map_keys(codex)}
-  defp policy_codex_overrides(%{codex: codex}) when is_map(codex), do: {:ok, normalize_map_keys(codex)}
+  @spec default_runner!(Schema.t()) :: map()
+  def default_runner!(%Schema{} = settings), do: Schema.default_runner_config!(settings)
 
-  defp policy_codex_overrides(%{"codex" => nil}), do: {:ok, %{}}
-  defp policy_codex_overrides(%{codex: nil}), do: {:ok, %{}}
+  @spec default_runner_name() :: String.t()
+  def default_runner_name, do: settings!() |> Schema.default_runner_name()
 
-  defp policy_codex_overrides(%{"codex" => codex}), do: {:error, {:invalid_policy_codex, codex}}
-  defp policy_codex_overrides(%{codex: codex}), do: {:error, {:invalid_policy_codex, codex}}
-  defp policy_codex_overrides(policy) when is_map(policy), do: {:ok, %{}}
-  defp policy_codex_overrides(_policy), do: {:ok, %{}}
+  @spec runner_turn_timeout_ms() :: pos_integer()
+  def runner_turn_timeout_ms do
+    case default_runner!()["turn_timeout_ms"] do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _timeout -> 3_600_000
+    end
+  end
 
-  defp runtime_turn_sandbox_policy(settings, workspace, opts, codex_policy_overrides) do
-    case Map.fetch(codex_policy_overrides, "turn_sandbox_policy") do
+  @spec runner_read_timeout_ms() :: pos_integer()
+  def runner_read_timeout_ms do
+    case default_runner!()["read_timeout_ms"] do
+      timeout when is_integer(timeout) and timeout > 0 -> timeout
+      _timeout -> 30_000
+    end
+  end
+
+  @spec runner_stall_timeout_ms() :: non_neg_integer()
+  def runner_stall_timeout_ms do
+    case default_runner!()["stall_timeout_ms"] do
+      timeout when is_integer(timeout) and timeout >= 0 -> timeout
+      _timeout -> 300_000
+    end
+  end
+
+  @spec max_concurrent_startups() :: pos_integer()
+  def max_concurrent_startups do
+    settings = settings!()
+    runner = Schema.default_runner_config!(settings)
+
+    [
+      settings.agent.max_concurrent_startups,
+      runner["max_concurrent_startups"]
+    ]
+    |> Enum.filter(&(is_integer(&1) and &1 > 0))
+    |> case do
+      [] -> settings.agent.max_concurrent_agents
+      limits -> Enum.min(limits)
+    end
+  end
+
+  defp policy_runner_overrides(nil, _runner_name), do: {:ok, %{}}
+
+  defp policy_runner_overrides(%{"codex" => codex}, _runner_name), do: {:error, {:invalid_policy_legacy_codex, codex}}
+  defp policy_runner_overrides(%{codex: codex}, _runner_name), do: {:error, {:invalid_policy_legacy_codex, codex}}
+
+  defp policy_runner_overrides(%{"runners" => runners}, runner_name) when is_map(runners) do
+    case Map.get(runners, runner_name) do
+      runner when is_map(runner) -> {:ok, normalize_map_keys(runner)}
+      nil -> {:ok, %{}}
+      runner -> {:error, {:invalid_policy_runner, runner_name, runner}}
+    end
+  end
+
+  defp policy_runner_overrides(%{runners: runners}, runner_name) when is_map(runners) do
+    policy_runner_overrides(%{"runners" => normalize_map_keys(runners)}, runner_name)
+  end
+
+  defp policy_runner_overrides(%{"runners" => runners}, _runner_name), do: {:error, {:invalid_policy_runners, runners}}
+  defp policy_runner_overrides(%{runners: runners}, _runner_name), do: {:error, {:invalid_policy_runners, runners}}
+  defp policy_runner_overrides(policy, _runner_name) when is_map(policy), do: {:ok, %{}}
+  defp policy_runner_overrides(_policy, _runner_name), do: {:ok, %{}}
+
+  defp runtime_turn_sandbox_policy(settings, workspace, opts, runner_policy_overrides) do
+    case Map.fetch(runner_policy_overrides, "turn_sandbox_policy") do
       {:ok, %{} = policy} -> {:ok, normalize_map_keys(policy)}
       {:ok, nil} -> Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts)
-      {:ok, policy} -> {:error, {:invalid_policy_codex_turn_sandbox_policy, policy}}
+      {:ok, policy} -> {:error, {:invalid_policy_runner_turn_sandbox_policy, policy}}
       :error -> Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts)
     end
   end
 
-  defp runtime_approval_policy(default_approval_policy, codex_policy_overrides) do
-    case Map.fetch(codex_policy_overrides, "approval_policy") do
+  defp runtime_approval_policy(default_approval_policy, runner_policy_overrides) do
+    case Map.fetch(runner_policy_overrides, "approval_policy") do
       {:ok, value} when is_binary(value) or is_map(value) -> {:ok, normalize_map_keys(value)}
-      {:ok, value} -> {:error, {:invalid_policy_codex_approval_policy, value}}
+      {:ok, value} -> {:error, {:invalid_policy_runner_approval_policy, value}}
       :error -> {:ok, default_approval_policy}
     end
   end
 
-  defp runtime_thread_sandbox(default_thread_sandbox, codex_policy_overrides) do
-    case Map.fetch(codex_policy_overrides, "thread_sandbox") do
+  defp runtime_thread_sandbox(default_thread_sandbox, runner_policy_overrides) do
+    case Map.fetch(runner_policy_overrides, "thread_sandbox") do
       {:ok, value} when is_binary(value) -> {:ok, value}
-      {:ok, value} -> {:error, {:invalid_policy_codex_thread_sandbox, value}}
+      {:ok, value} -> {:error, {:invalid_policy_runner_thread_sandbox, value}}
       :error -> {:ok, default_thread_sandbox}
     end
   end
@@ -261,6 +323,19 @@ defmodule SymphonyElixir.Config do
 
   defp linear_scope_configured?(tracker) do
     is_binary(tracker.project_id) or is_binary(tracker.project_slug) or is_binary(tracker.team_key)
+  end
+
+  defp selected_workflow_config do
+    case Workflow.load(Workflow.selected_workflow_file_path()) do
+      {:ok, %{config: config}} ->
+        {:ok, config}
+
+      {:error, {:invalid_manifest, diagnostics}} ->
+        {:error, {:invalid_workflow_config, format_manifest_diagnostics(diagnostics)}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp validate_profile_override(settings) do

@@ -29,12 +29,11 @@ surface is not enough.
 
 The shared `SymphonyElixir.ProcessSupervisor` primitive supports argv launch, workspace cwd,
 CODEX_HOME environment overlay, line buffering, startup timeout normalization, process identity,
-stop/kill, and best-effort descendant cleanup through the host `ps`/`kill` process tree. The
-existing string-valued `codex.command` local launch path remains a compatibility shell command so
-documented shell expansion continues to work; direct argv callers use the primitive without an
-intermediate shell. Remote worker launch remains an explicit SSH shell command; Symphony supervises
-the local ssh port, but remote process-group and descendant cleanup are not guaranteed by this local
-primitive.
+stop/kill, and best-effort descendant cleanup through the host `ps`/`kill` process tree. Local
+Codex runner commands are configured as argv lists under `runtime.runners.<name>.command`; Symphony
+wraps that argv only to preserve app-server stdin and cleanup behavior. Remote worker launch converts
+the argv into an explicit SSH shell command; Symphony supervises the local ssh port, but remote
+process-group and descendant cleanup are not guaranteed by this local primitive.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
@@ -360,10 +359,12 @@ runtime:
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.
-- Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `on-request`
-  - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- Safer Codex defaults are used when runner policy fields are omitted:
+  - `runtime.agent.default_runner` defaults to `codex`
+  - `runtime.agent.max_concurrent_startups` defaults to `2`
+  - `runtime.runners.codex.approval_policy` defaults to `on-request`
+  - `runtime.runners.codex.thread_sandbox` defaults to `workspace-write`
+  - `runtime.runners.codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.
@@ -373,27 +374,25 @@ runtime:
   - Worker machines still provide the Codex executable and authentication material. When
     `~/.codex/auth.json` exists for the worker user, Symphony links it into the harness home; it does
     not copy Symphony skills into `~/.agents` or `~/.codex`.
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the
-  current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`,
-  `granular`, and `never`; legacy object-form `reject` is not accepted by Codex CLI 0.128.0.
-- Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
+- Supported `runtime.runners.codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, `granular`, and `never`; legacy object-form `reject` is not accepted by Codex CLI 0.128.0.
+- Supported `runtime.runners.codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
+- When `runtime.runners.codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
 - Workflows that run package managers or other commands that resolve external hosts should set
-  `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
+  `networkAccess: true` in `runtime.runners.codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
-- `codex.execution_profiles` lets the host run implementation, planner, reviewer, runtime QA,
-  product visual review, security review, and synthesis jobs with typed reasoning, timeout, retry,
-  budget, model, or command settings. `codex.model` is the default launch model. Profile `model`
-  values override it for that launch, and explicit model flags already present in `codex.command`
-  control the command unchanged. Operators do not need to rewrite the raw command string for normal
-  profile tuning.
-- Profiles may include a `codex` object with `approval_policy`, `thread_sandbox`, and
+- `runtime.runners.codex.execution_profiles` lets the host run implementation, planner, reviewer,
+  runtime QA, product visual review, security review, and synthesis jobs with typed reasoning,
+  timeout, retry, budget, model, or command settings. `runtime.runners.codex.model` is the default
+  launch model. Profile `model` values override it for that launch, and explicit model flags already
+  present in `runtime.runners.codex.command` control the command unchanged. Operators do not need to
+  rewrite the argv list for normal profile tuning.
+- Workflow profiles may include `runners.codex` with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
   authoring that needs to edit protected repo-local skill or tooling paths. Profile overrides do
   not make globally installed `symphony-*` skills part of unattended runtime execution; keep the
-  global `codex` defaults sandboxed.
+  default Codex runner sandboxed.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - `quality_gate.enabled` controls the host-owned post-implementation review fanout. When enabled,
@@ -446,9 +445,9 @@ runtime:
   the project dependencies in `hooks.after_create` before invoking `mise` later from other hooks.
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For path values, `~` is expanded to the home directory.
-- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
-  while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
-  launched shell.
+- For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling.
+  `runtime.runners.<name>.command` is an argv list, so use explicit argv elements rather than shell
+  expansion in the command field.
 
 ```yaml
 tracker:
@@ -464,8 +463,15 @@ hooks:
     jj git clone "$SOURCE_REPO_URL" .
   before_run: |
     jj status || true
-codex:
-  command: "$CODEX_BIN app-server"
+agent:
+  default_runner: codex
+  max_concurrent_startups: 2
+runners:
+  codex:
+    kind: codex_app_server
+    command:
+      - codex
+      - app-server
 ```
 
 - If the selected manifest is missing or invalid at startup, Symphony does not boot.

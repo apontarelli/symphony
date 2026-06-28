@@ -15,7 +15,34 @@ defmodule SymphonyElixir.Config.Schema do
   @reserved_profile_policy_keys MapSet.new([@profile_policy_ref_key, @profile_policy_metadata_key])
   @delivery_pr_target_key "pr_target"
   @delivery_v1_fields MapSet.new([@delivery_pr_target_key])
-  @profile_codex_v1_fields MapSet.new(["approval_policy", "thread_sandbox", "turn_sandbox_policy"])
+  @profile_runner_v1_fields MapSet.new(["approval_policy", "thread_sandbox", "turn_sandbox_policy"])
+  @runner_v1_fields MapSet.new([
+                      "kind",
+                      "command",
+                      "model",
+                      "approval_policy",
+                      "thread_sandbox",
+                      "turn_sandbox_policy",
+                      "turn_timeout_ms",
+                      "read_timeout_ms",
+                      "stall_timeout_ms",
+                      "execution_profiles",
+                      "max_concurrent_startups"
+                    ])
+  @default_runner_name "codex"
+  @supported_runner_kinds MapSet.new(["codex_app_server"])
+  @default_runner_config %{
+    "kind" => "codex_app_server",
+    "command" => ["codex", "app-server"],
+    "model" => "gpt-5.5",
+    "approval_policy" => "on-request",
+    "thread_sandbox" => "workspace-write",
+    "turn_timeout_ms" => 3_600_000,
+    "read_timeout_ms" => 30_000,
+    "stall_timeout_ms" => 300_000,
+    "execution_profiles" => %{}
+  }
+  @default_runners %{@default_runner_name => @default_runner_config}
 
   @type t :: %__MODULE__{}
 
@@ -157,7 +184,9 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:default_runner, :string, default: "codex")
       field(:max_concurrent_agents, :integer, default: 10)
+      field(:max_concurrent_startups, :integer, default: 2)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
@@ -168,60 +197,46 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :default_runner,
+          :max_concurrent_agents,
+          :max_concurrent_startups,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
+      |> update_change(:default_runner, &normalize_runner_name/1)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
+      |> validate_number(:max_concurrent_startups, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
+
+    defp normalize_runner_name(value) when is_binary(value) do
+      value
+      |> String.trim()
+      |> case do
+        "" -> nil
+        runner -> runner
+      end
+    end
   end
 
   defmodule Codex do
     @moduledoc false
-    use Ecto.Schema
-    import Ecto.Changeset
-
-    @primary_key false
-    embedded_schema do
-      field(:command, :string, default: "codex app-server")
-      field(:model, :string, default: "gpt-5.5")
-
-      field(:approval_policy, StringOrMap, default: "on-request")
-
-      field(:thread_sandbox, :string, default: "workspace-write")
-      field(:turn_sandbox_policy, :map)
-      field(:turn_timeout_ms, :integer, default: 3_600_000)
-      field(:read_timeout_ms, :integer, default: 30_000)
-      field(:stall_timeout_ms, :integer, default: 300_000)
-      field(:execution_profiles, :map, default: %{})
-    end
-
-    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-    def changeset(schema, attrs) do
-      schema
-      |> cast(
-        attrs,
-        [
-          :command,
-          :model,
-          :approval_policy,
-          :thread_sandbox,
-          :turn_sandbox_policy,
-          :turn_timeout_ms,
-          :read_timeout_ms,
-          :stall_timeout_ms,
-          :execution_profiles
-        ],
-        empty_values: []
-      )
-      |> validate_required([:command])
-      |> validate_number(:turn_timeout_ms, greater_than: 0)
-      |> validate_number(:read_timeout_ms, greater_than: 0)
-      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
-    end
+    defstruct command: "codex app-server",
+              model: "gpt-5.5",
+              approval_policy: "on-request",
+              thread_sandbox: "workspace-write",
+              turn_sandbox_policy: nil,
+              turn_timeout_ms: 3_600_000,
+              read_timeout_ms: 30_000,
+              stall_timeout_ms: 300_000,
+              execution_profiles: %{}
   end
 
   defmodule QualityGate do
@@ -518,13 +533,13 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:workspace, Workspace, on_replace: :update, defaults_to_struct: true)
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
-    embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:project, Project, on_replace: :update, defaults_to_struct: true)
     embeds_one(:auto_land, AutoLand, on_replace: :update, defaults_to_struct: true)
     embeds_one(:quality_gate, QualityGate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    field(:runners, :map, default: @default_runners)
     field(:profiles, :map, default: %{})
     field(:policy_metadata, :map, default: %{})
     embeds_one(:workflow_modules, WorkflowModules, on_replace: :update, defaults_to_struct: true)
@@ -535,6 +550,15 @@ defmodule SymphonyElixir.Config.Schema do
     config
     |> normalize_keys()
     |> drop_nil_values()
+    |> reject_legacy_codex_config()
+    |> case do
+      {:ok, config} -> validate_config(config)
+      {:error, message} -> {:error, {:invalid_workflow_config, message}}
+    end
+  end
+
+  defp validate_config(config) do
+    config
     |> changeset()
     |> apply_action(:validate)
     |> case do
@@ -575,7 +599,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
-    case settings.codex.turn_sandbox_policy do
+    case default_runner_config!(settings)["turn_sandbox_policy"] do
       %{} = policy ->
         policy
 
@@ -590,7 +614,7 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case settings.codex.turn_sandbox_policy do
+    case default_runner_config!(settings)["turn_sandbox_policy"] do
       %{} = policy ->
         {:ok, policy}
 
@@ -637,13 +661,12 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:profiles, :policy_metadata])
+    |> cast(attrs, [:runners, :profiles, :policy_metadata])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
-    |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:project, with: &Project.changeset/2)
     |> cast_embed(:auto_land, with: &AutoLand.changeset/2)
@@ -651,6 +674,9 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> cast_embed(:workflow_modules, with: &WorkflowModules.changeset/2)
+    |> update_change(:runners, &normalize_runner_map/1)
+    |> validate_runners()
+    |> validate_default_runner()
     |> validate_profiles()
   end
 
@@ -666,14 +692,196 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
-    codex = %{
-      settings.codex
-      | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
-    }
-
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    %{settings | tracker: tracker, workspace: workspace, runners: normalize_runner_map(settings.runners)}
   end
+
+  @spec default_runner_config(%__MODULE__{}) :: {:ok, map()} | {:error, term()}
+  def default_runner_config(%__MODULE__{} = settings) do
+    runner_name = default_runner_name(settings)
+
+    case Map.fetch(settings.runners || %{}, runner_name) do
+      {:ok, runner} when is_map(runner) -> {:ok, runner}
+      _ -> {:error, {:unknown_default_runner, runner_name}}
+    end
+  end
+
+  @spec default_runner_config!(%__MODULE__{}) :: map()
+  def default_runner_config!(%__MODULE__{} = settings) do
+    case default_runner_config(settings) do
+      {:ok, runner} -> runner
+      {:error, reason} -> raise ArgumentError, message: "Invalid default runner config: #{inspect(reason)}"
+    end
+  end
+
+  @spec default_runner_name(%__MODULE__{}) :: String.t()
+  def default_runner_name(%__MODULE__{agent: %{default_runner: runner_name}})
+      when is_binary(runner_name) and runner_name != "",
+      do: runner_name
+
+  def default_runner_name(%__MODULE__{}), do: @default_runner_name
+
+  @spec default_runners() :: map()
+  def default_runners, do: @default_runners
+
+  defp reject_legacy_codex_config(%{"codex" => _config}) do
+    {:error, "runtime.codex is not supported; use runtime.runners.<name> (for Codex use runtime.runners.codex)"}
+  end
+
+  defp reject_legacy_codex_config(config), do: {:ok, config}
+
+  defp normalize_runner_map(runners) when runners == %{}, do: @default_runners
+
+  defp normalize_runner_map(runners) when is_map(runners) do
+    Map.new(runners, fn {name, runner} ->
+      runner_name = normalize_runner_map_key(name)
+      {runner_name, normalize_runner_config(runner_name, runner)}
+    end)
+  end
+
+  defp normalize_runner_map_key(name) do
+    name
+    |> to_string()
+    |> String.trim()
+  end
+
+  defp normalize_runner_config(name, runner) when is_map(runner) do
+    @default_runner_config
+    |> Map.put("kind", default_kind_for_runner(name))
+    |> Map.merge(normalize_keys(runner))
+    |> update_runner_optional_map("approval_policy")
+    |> update_runner_optional_map("turn_sandbox_policy")
+  end
+
+  defp normalize_runner_config(_name, runner), do: runner
+
+  defp default_kind_for_runner(@default_runner_name), do: "codex_app_server"
+  defp default_kind_for_runner(_runner_name), do: nil
+
+  defp update_runner_optional_map(runner, key) do
+    case Map.get(runner, key) do
+      %{} = value -> Map.put(runner, key, normalize_keys(value))
+      _value -> runner
+    end
+  end
+
+  defp validate_runners(%{valid?: false} = changeset), do: changeset
+
+  defp validate_runners(changeset) do
+    changeset
+    |> get_field(:runners)
+    |> runner_validation_errors()
+    |> Enum.reduce(changeset, fn message, acc -> add_error(acc, :runners, message) end)
+  end
+
+  defp validate_default_runner(%{valid?: false} = changeset), do: changeset
+
+  defp validate_default_runner(changeset) do
+    runner_name = get_field(changeset, :agent).default_runner
+    runners = get_field(changeset, :runners) || %{}
+
+    cond do
+      not is_binary(runner_name) or runner_name == "" ->
+        add_error(changeset, :agent, "runtime.agent.default_runner is required")
+
+      Map.has_key?(runners, runner_name) ->
+        changeset
+
+      true ->
+        add_error(changeset, :agent, "runtime.agent.default_runner #{inspect(runner_name)} must reference runtime.runners.#{runner_name}")
+    end
+  end
+
+  defp runner_validation_errors(runners) when is_map(runners) do
+    runners
+    |> Enum.flat_map(fn {name, runner} -> runner_validation_errors(to_string(name), runner) end)
+  end
+
+  defp runner_validation_errors("", _runner), do: ["runtime.runners runner names must not be blank"]
+
+  defp runner_validation_errors(name, runner) when is_map(runner) do
+    unsupported =
+      runner
+      |> Map.keys()
+      |> Enum.reject(&MapSet.member?(@runner_v1_fields, &1))
+      |> Enum.sort()
+      |> Enum.map(fn field -> "runtime.runners.#{name}.#{field} is not supported in v1" end)
+
+    [
+      validate_runner_kind(name, Map.get(runner, "kind")),
+      validate_runner_command(name, Map.get(runner, "command")),
+      validate_runner_string(name, "model", Map.get(runner, "model")),
+      validate_runner_string_or_map(name, "approval_policy", Map.get(runner, "approval_policy")),
+      validate_runner_string(name, "thread_sandbox", Map.get(runner, "thread_sandbox")),
+      validate_runner_map(name, "turn_sandbox_policy", Map.get(runner, "turn_sandbox_policy")),
+      validate_runner_positive_integer(name, "turn_timeout_ms", Map.get(runner, "turn_timeout_ms")),
+      validate_runner_positive_integer(name, "read_timeout_ms", Map.get(runner, "read_timeout_ms")),
+      validate_runner_non_negative_integer(name, "stall_timeout_ms", Map.get(runner, "stall_timeout_ms")),
+      validate_runner_map(name, "execution_profiles", Map.get(runner, "execution_profiles")),
+      validate_runner_positive_integer(name, "max_concurrent_startups", Map.get(runner, "max_concurrent_startups"))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Kernel.++(unsupported)
+  end
+
+  defp runner_validation_errors(name, _runner), do: ["runtime.runners.#{name} must be a map"]
+
+  defp validate_runner_kind(name, value) when is_binary(value) do
+    kind = String.trim(value)
+
+    cond do
+      kind == "" ->
+        "runtime.runners.#{name}.kind is required"
+
+      MapSet.member?(@supported_runner_kinds, kind) ->
+        nil
+
+      true ->
+        "runtime.runners.#{name}.kind #{inspect(kind)} is not supported; supported kinds: codex_app_server"
+    end
+  end
+
+  defp validate_runner_kind(name, _value), do: "runtime.runners.#{name}.kind must be a string"
+
+  defp validate_runner_command(name, values) when is_list(values) do
+    values
+    |> Enum.with_index()
+    |> Enum.find_value(fn
+      {value, index} when is_binary(value) ->
+        if String.trim(value) == "", do: "runtime.runners.#{name}.command[#{index}] must be a non-empty string"
+
+      {_value, index} ->
+        "runtime.runners.#{name}.command[#{index}] must be a non-empty string"
+    end)
+    |> case do
+      nil -> if values == [], do: "runtime.runners.#{name}.command is required"
+      message -> message
+    end
+  end
+
+  defp validate_runner_command(name, _value), do: "runtime.runners.#{name}.command must be a list"
+
+  defp validate_runner_string(_name, _field, value) when is_binary(value), do: nil
+  defp validate_runner_string(name, field, _value), do: "runtime.runners.#{name}.#{field} must be a string"
+
+  defp validate_runner_string_or_map(_name, _field, value) when is_binary(value) or is_map(value), do: nil
+
+  defp validate_runner_string_or_map(name, field, _value),
+    do: "runtime.runners.#{name}.#{field} must be a string or map"
+
+  defp validate_runner_map(_name, _field, nil), do: nil
+  defp validate_runner_map(_name, _field, value) when is_map(value), do: nil
+  defp validate_runner_map(name, field, _value), do: "runtime.runners.#{name}.#{field} must be a map"
+
+  defp validate_runner_positive_integer(_name, _field, nil), do: nil
+  defp validate_runner_positive_integer(_name, _field, value) when is_integer(value) and value > 0, do: nil
+
+  defp validate_runner_positive_integer(name, field, _value),
+    do: "runtime.runners.#{name}.#{field} must be a positive integer"
+
+  defp validate_runner_non_negative_integer(_name, _field, value) when is_integer(value) and value >= 0, do: nil
+
+  defp validate_runner_non_negative_integer(name, field, _value),
+    do: "runtime.runners.#{name}.#{field} must be a non-negative integer"
 
   defp validate_profiles(%{valid?: false} = changeset), do: changeset
 
@@ -701,7 +909,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_profile_shape(name, policy) when is_map(policy) do
     reserved_profile_field_errors(name, policy) ++
       validate_profile_delivery_shape(name, Map.get(policy, "delivery")) ++
-      validate_profile_codex_shape(name, Map.get(policy, "codex"))
+      validate_profile_legacy_codex_shape(name, Map.get(policy, "codex")) ++
+      validate_profile_runners_shape(name, Map.get(policy, "runners"))
   end
 
   defp validate_profile_shape(name, _policy), do: ["#{name} profile must be a map"]
@@ -759,47 +968,66 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_profile_delivery_shape(name, _delivery), do: ["#{name}.delivery must be a map"]
 
-  defp validate_profile_codex_shape(_name, nil), do: []
+  defp validate_profile_legacy_codex_shape(_name, nil), do: []
 
-  defp validate_profile_codex_shape(name, codex) when is_map(codex) do
+  defp validate_profile_legacy_codex_shape(name, _codex) do
+    ["#{name}.codex is not supported in v1; use #{name}.runners.<runner_name>"]
+  end
+
+  defp validate_profile_runners_shape(_name, nil), do: []
+
+  defp validate_profile_runners_shape(name, runners) when is_map(runners) do
+    runners
+    |> Enum.flat_map(fn {runner_name, runner_policy} ->
+      validate_profile_runner_shape(name, to_string(runner_name), runner_policy)
+    end)
+  end
+
+  defp validate_profile_runners_shape(name, _runners), do: ["#{name}.runners must be a map"]
+
+  defp validate_profile_runner_shape(name, runner_name, runner_policy) when is_map(runner_policy) do
     unsupported_errors =
-      codex
+      runner_policy
       |> Map.keys()
-      |> Enum.reject(&MapSet.member?(@profile_codex_v1_fields, &1))
+      |> Enum.reject(&MapSet.member?(@profile_runner_v1_fields, &1))
       |> Enum.sort()
-      |> Enum.map(fn field -> "#{name}.codex.#{field} is not supported in v1" end)
+      |> Enum.map(fn field -> "#{name}.runners.#{runner_name}.#{field} is not supported in v1" end)
 
     field_errors =
       [
-        validate_profile_codex_approval_policy(name, Map.get(codex, "approval_policy")),
-        validate_profile_codex_thread_sandbox(name, Map.get(codex, "thread_sandbox")),
-        validate_profile_codex_turn_sandbox_policy(name, Map.get(codex, "turn_sandbox_policy"))
+        validate_profile_runner_approval_policy(name, runner_name, Map.get(runner_policy, "approval_policy")),
+        validate_profile_runner_thread_sandbox(name, runner_name, Map.get(runner_policy, "thread_sandbox")),
+        validate_profile_runner_turn_sandbox_policy(name, runner_name, Map.get(runner_policy, "turn_sandbox_policy"))
       ]
       |> Enum.reject(&is_nil/1)
 
     unsupported_errors ++ field_errors
   end
 
-  defp validate_profile_codex_shape(name, _codex), do: ["#{name}.codex must be a map"]
+  defp validate_profile_runner_shape(name, runner_name, _runner_policy),
+    do: ["#{name}.runners.#{runner_name} must be a map"]
 
-  defp validate_profile_codex_approval_policy(_name, nil), do: nil
+  defp validate_profile_runner_approval_policy(_name, _runner_name, nil), do: nil
 
-  defp validate_profile_codex_approval_policy(_name, value) when is_binary(value) or is_map(value), do: nil
+  defp validate_profile_runner_approval_policy(_name, _runner_name, value) when is_binary(value) or is_map(value),
+    do: nil
 
-  defp validate_profile_codex_approval_policy(name, _value), do: "#{name}.codex.approval_policy must be a string or map"
+  defp validate_profile_runner_approval_policy(name, runner_name, _value),
+    do: "#{name}.runners.#{runner_name}.approval_policy must be a string or map"
 
-  defp validate_profile_codex_thread_sandbox(_name, nil), do: nil
+  defp validate_profile_runner_thread_sandbox(_name, _runner_name, nil), do: nil
 
-  defp validate_profile_codex_thread_sandbox(_name, value) when is_binary(value), do: nil
+  defp validate_profile_runner_thread_sandbox(_name, _runner_name, value) when is_binary(value), do: nil
 
-  defp validate_profile_codex_thread_sandbox(name, _value), do: "#{name}.codex.thread_sandbox must be a string"
+  defp validate_profile_runner_thread_sandbox(name, runner_name, _value),
+    do: "#{name}.runners.#{runner_name}.thread_sandbox must be a string"
 
-  defp validate_profile_codex_turn_sandbox_policy(_name, nil), do: nil
+  defp validate_profile_runner_turn_sandbox_policy(_name, _runner_name, nil), do: nil
 
-  defp validate_profile_codex_turn_sandbox_policy(_name, value) when is_map(value), do: nil
+  defp validate_profile_runner_turn_sandbox_policy(_name, _runner_name, value) when is_map(value), do: nil
 
-  defp validate_profile_codex_turn_sandbox_policy(name, _value),
-    do: "#{name}.codex.turn_sandbox_policy must be a map"
+  defp validate_profile_runner_turn_sandbox_policy(name, runner_name, _value),
+    do: "#{name}.runners.#{runner_name}.turn_sandbox_policy must be a map"
 
   defp validate_resolvable_profiles(profiles, shape_errors) do
     if Map.has_key?(profiles, "default") and shape_errors == [] do
@@ -1152,9 +1380,6 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
-
-  defp normalize_optional_map(nil), do: nil
-  defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)
 
   defp normalize_key(value) when is_atom(value), do: Atom.to_string(value)
   defp normalize_key(value), do: to_string(value)
