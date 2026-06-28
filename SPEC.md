@@ -1833,7 +1833,7 @@ Core normalized events:
 - `blocked`
 
 `blocked` means the runtime/session observed that the agent cannot continue without external input,
-an unavailable capability, or another recoverable or unrecoverable blocker. It SHOULD include a
+an unavailable capability, or another recoverable or unrecoverable blocker. It MUST include a
 machine-readable `reason`, such as `operator_input_requested`. A runtime `blocked` event feeds
 workflow route classification; it MUST NOT directly mutate tracker state or labels without workflow
 policy.
