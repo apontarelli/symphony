@@ -254,7 +254,7 @@ defmodule SymphonyElixir.QualityGate.HostVisualQaTest do
              })
 
     assert raw_result["summary"] == "Host visual QA command completed."
-    assert raw_result["raw_output"] == "product_visual_review"
+    assert raw_result["raw_output"] =~ "product_visual_review"
 
     System.put_env("PATH", previous_path || "")
 

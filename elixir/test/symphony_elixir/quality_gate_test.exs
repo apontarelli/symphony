@@ -503,7 +503,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
@@ -608,7 +608,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.from_naive!(~N[2026-06-11 16:05:00], "Etc/UTC"),
@@ -627,7 +627,14 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:quality_gate_review, :test_quality}
     :sys.get_state(pid)
 
-    record = wait_for_review_record(logs_root, "session-320")
+    assert {:ok, record} =
+             eventually(fn ->
+               case SymphonyElixir.ReviewRecords.show(logs_root, "session-320") do
+                 {:ok, record} -> {:ok, record}
+                 {:error, :not_found} -> nil
+               end
+             end)
+
     assert record.metadata["issue"]["identifier"] == "SID-320"
     assert record.metadata["workflow"]["policy_ref"] == "640c639998cf"
     assert record.quality_gate["status"] == "passed"
@@ -742,7 +749,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
@@ -2054,12 +2061,19 @@ defmodule SymphonyElixir.QualityGateTest do
           printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality-remote"}}}'
           ;;
         *turn/start*)
+          lock_dir="${count_file}.lock"
+          while ! mkdir "$lock_dir" 2>/dev/null; do
+            sleep 0.01
+          done
+
           count=0
           if [ -f "$count_file" ]; then
             IFS= read -r count < "$count_file" || count=0
           fi
           count=$((count + 1))
           printf '%s\\n' "$count" > "$count_file"
+          rmdir "$lock_dir"
+
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality-remote"}}}'
 
           if [ "$count" -eq 1 ]; then
@@ -2205,22 +2219,5 @@ defmodule SymphonyElixir.QualityGateTest do
         opts
       )
     )
-  end
-
-  defp wait_for_review_record(logs_root, run_id, attempts \\ 20)
-
-  defp wait_for_review_record(logs_root, run_id, attempts) when attempts > 0 do
-    case SymphonyElixir.ReviewRecords.show(logs_root, run_id) do
-      {:ok, record} ->
-        record
-
-      {:error, _reason} ->
-        Process.sleep(50)
-        wait_for_review_record(logs_root, run_id, attempts - 1)
-    end
-  end
-
-  defp wait_for_review_record(logs_root, run_id, 0) do
-    flunk("timed out waiting for review record #{run_id} under #{logs_root}")
   end
 end

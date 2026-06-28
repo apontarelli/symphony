@@ -3287,6 +3287,8 @@ Extension config:
   - When omitted, work runs locally.
 - `worker.max_concurrent_agents_per_host` (positive integer, OPTIONAL)
   - Shared per-host cap applied across configured SSH hosts.
+- `worker.max_concurrent_startups_per_host` (positive integer, OPTIONAL)
+  - Shared per-host startup cap applied across configured SSH hosts.
 
 ### A.1 Execution Model
 
@@ -3310,6 +3312,8 @@ Extension config:
   available.
 - `worker.max_concurrent_agents_per_host` is an OPTIONAL shared per-host cap across configured SSH
   hosts.
+- `worker.max_concurrent_startups_per_host`, when set, additionally caps startup concurrency per
+  configured SSH host. It does not override `runtime.agent.max_concurrent_startups`.
 - When all SSH hosts are at capacity, dispatch SHOULD wait rather than silently falling back to a
   different execution mode.
 - Implementations MAY fail over to another host when the original host is unavailable before work

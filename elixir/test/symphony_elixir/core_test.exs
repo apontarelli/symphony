@@ -17,6 +17,7 @@ defmodule SymphonyElixir.CoreTest do
     assert config.tracker.active_states == ["Todo", "In Progress", "Merging", "Rework"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
     assert config.tracker.assignee == nil
+    assert config.agent.max_concurrent_startups == 2
     assert config.agent.max_turns == 20
 
     assert {:ok, policy} = Config.effective_policy()
@@ -1015,7 +1016,7 @@ defmodule SymphonyElixir.CoreTest do
           }
         },
         claimed: MapSet.new([issue_id]),
-        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
         retry_attempts: %{}
       }
 
@@ -1078,7 +1079,7 @@ defmodule SymphonyElixir.CoreTest do
           }
         },
         claimed: MapSet.new([issue_id]),
-        codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+        runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
         retry_attempts: %{}
       }
 
@@ -1198,7 +1199,7 @@ defmodule SymphonyElixir.CoreTest do
         }
       },
       claimed: MapSet.new([issue_id]),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -1245,7 +1246,7 @@ defmodule SymphonyElixir.CoreTest do
         }
       },
       claimed: MapSet.new([issue_id]),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -1294,7 +1295,7 @@ defmodule SymphonyElixir.CoreTest do
         }
       },
       claimed: MapSet.new([issue_id]),
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       retry_attempts: %{}
     }
 
@@ -1473,7 +1474,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
@@ -1542,7 +1543,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :agent_blocked,
          timestamp: DateTime.utc_now(),
@@ -1616,7 +1617,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
@@ -1706,7 +1707,7 @@ defmodule SymphonyElixir.CoreTest do
 
     send(
       pid,
-      {:codex_worker_update, issue_id,
+      {:runtime_event, issue_id,
        %{
          event: :turn_completed,
          timestamp: DateTime.utc_now(),
@@ -1868,8 +1869,8 @@ defmodule SymphonyElixir.CoreTest do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: stale_tick_token,
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-      codex_rate_limits: nil
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_rate_limits: nil
     }
 
     assert {:reply, %{queued: true, coalesced: false}, refreshed_state} =
@@ -1932,6 +1933,24 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
+  end
+
+  test "select_worker_host_for_test observes per-host startup caps" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a", "worker-b"],
+      worker_max_concurrent_agents_per_host: 2,
+      worker_max_concurrent_startups_per_host: 1
+    )
+
+    state = %Orchestrator.State{
+      running: %{
+        "issue-1" => %{worker_host: "worker-a", startup_slot?: true},
+        "issue-2" => %{worker_host: "worker-b", startup_slot?: false}
+      }
+    }
+
+    assert Orchestrator.select_worker_host_for_test(state, nil) == "worker-b"
+    assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-b"
   end
 
   defp assert_due_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_remaining_ms) do
@@ -2530,7 +2549,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{name: "linear-operation", version: "v1"} in workflow_module_refs
       assert Enum.any?(workflow_modules_with_config, &(&1.id == "linear-operation" and is_map(&1.config)))
 
-      assert_receive {:codex_worker_update, "issue-live-updates",
+      assert_receive {:runtime_event, "issue-live-updates",
                       %{
                         event: :session_started,
                         timestamp: %DateTime{},
@@ -2602,7 +2621,7 @@ defmodule SymphonyElixir.CoreTest do
         AgentRunner.run(issue, self())
       end
 
-      assert_received {:codex_worker_update, "issue-invalid-codex-schema",
+      assert_received {:runtime_event, "issue-invalid-codex-schema",
                        %{
                          event: :agent_blocked,
                          timestamp: %DateTime{},
@@ -3019,7 +3038,7 @@ defmodule SymphonyElixir.CoreTest do
       assert length(String.split(trace, "RUN", trim: true)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
 
-      assert_received {:codex_worker_update, "issue-max-turns",
+      assert_received {:runtime_event, "issue-max-turns",
                        %{
                          event: :agent_max_turns_exhausted,
                          completion: %{

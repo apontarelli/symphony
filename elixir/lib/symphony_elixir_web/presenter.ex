@@ -54,7 +54,7 @@ defmodule SymphonyElixirWeb.Presenter do
           blocked: blocked,
           token_hotspot: token_hotspot_payload(running),
           handoff_routes: Enum.map(Map.get(snapshot, :handoff_routes, []), &handoff_route_payload/1),
-          codex_totals: snapshot.codex_totals,
+          runtime_totals: snapshot.runtime_totals,
           rate_limits: snapshot.rate_limits,
           rate_limits_available: meaningful_rate_limits?(snapshot.rate_limits)
         }
@@ -129,7 +129,7 @@ defmodule SymphonyElixirWeb.Presenter do
       retry: retry && retry_issue_payload(retry),
       blocked: blocked && blocked_issue_payload(blocked),
       logs: %{
-        codex_session_logs: []
+        runtime_session_logs: []
       },
       recent_events: recent_events_payload(running || blocked),
       last_error: (blocked && blocked.error) || (retry && retry.error),
@@ -177,21 +177,23 @@ defmodule SymphonyElixirWeb.Presenter do
       policy_ref: Map.get(entry, :policy_ref),
       policy: Map.get(entry, :policy),
       session_id: entry.session_id,
+      startup: Map.get(entry, :startup, false),
+      adapter: Map.get(entry, :adapter),
       profile: entry_project_profile(entry, project),
       pr_target: entry_project_pr_target(entry, project),
       turn_count: Map.get(entry, :turn_count, 0),
-      last_event: entry.last_codex_event,
-      last_message: summarize_message(entry.last_codex_message),
+      last_event: entry.last_runtime_event,
+      last_message: summarize_message(entry.last_runtime_message),
       started_at: iso8601(entry.started_at),
-      last_event_at: iso8601(entry.last_codex_timestamp),
+      last_event_at: iso8601(entry.last_runtime_timestamp),
       tokens: %{
-        input_tokens: entry.codex_input_tokens,
-        output_tokens: entry.codex_output_tokens,
-        total_tokens: entry.codex_total_tokens
+        input_tokens: entry.runtime_input_tokens,
+        output_tokens: entry.runtime_output_tokens,
+        total_tokens: entry.runtime_total_tokens
       }
     }
-    |> put_if_present(:last_progress_at, iso8601(Map.get(entry, :last_codex_progress_timestamp)))
-    |> put_if_present(:last_error_signature, Map.get(entry, :last_codex_error_signature))
+    |> put_if_present(:last_progress_at, iso8601(Map.get(entry, :last_runtime_progress_timestamp)))
+    |> put_if_present(:last_error_signature, Map.get(entry, :last_runtime_error_signature))
   end
 
   defp retry_entry_payload(entry, projects_by_slug, default_project_slug) do
@@ -240,9 +242,9 @@ defmodule SymphonyElixirWeb.Presenter do
       profile: entry_project_profile(entry, project),
       pr_target: entry_project_pr_target(entry, project),
       blocked_at: iso8601(entry.blocked_at),
-      last_event: entry.last_codex_event,
-      last_message: summarize_message(entry.last_codex_message),
-      last_event_at: iso8601(entry.last_codex_timestamp)
+      last_event: entry.last_runtime_event,
+      last_message: summarize_message(entry.last_runtime_message),
+      last_event_at: iso8601(entry.last_runtime_timestamp)
     }
   end
 
@@ -256,23 +258,25 @@ defmodule SymphonyElixirWeb.Presenter do
       policy_ref: Map.get(running, :policy_ref),
       policy: Map.get(running, :policy),
       session_id: running.session_id,
+      startup: Map.get(running, :startup, false),
+      adapter: Map.get(running, :adapter),
       project_slug: Map.get(running, :project_slug),
       profile: Map.get(running, :profile, @default_profile),
       pr_target: Map.get(running, :pr_target, @default_pr_target),
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
-      last_event: running.last_codex_event,
-      last_message: summarize_message(running.last_codex_message),
-      last_event_at: iso8601(running.last_codex_timestamp),
+      last_event: running.last_runtime_event,
+      last_message: summarize_message(running.last_runtime_message),
+      last_event_at: iso8601(running.last_runtime_timestamp),
       tokens: %{
-        input_tokens: running.codex_input_tokens,
-        output_tokens: running.codex_output_tokens,
-        total_tokens: running.codex_total_tokens
+        input_tokens: running.runtime_input_tokens,
+        output_tokens: running.runtime_output_tokens,
+        total_tokens: running.runtime_total_tokens
       }
     }
-    |> put_if_present(:last_progress_at, iso8601(Map.get(running, :last_codex_progress_timestamp)))
-    |> put_if_present(:last_error_signature, Map.get(running, :last_codex_error_signature))
+    |> put_if_present(:last_progress_at, iso8601(Map.get(running, :last_runtime_progress_timestamp)))
+    |> put_if_present(:last_error_signature, Map.get(running, :last_runtime_error_signature))
   end
 
   defp retry_issue_payload(retry) do
@@ -307,9 +311,9 @@ defmodule SymphonyElixirWeb.Presenter do
       state: blocked.state,
       error: blocked.error,
       blocked_at: iso8601(blocked.blocked_at),
-      last_event: blocked.last_codex_event,
-      last_message: summarize_message(blocked.last_codex_message),
-      last_event_at: iso8601(blocked.last_codex_timestamp)
+      last_event: blocked.last_runtime_event,
+      last_message: summarize_message(blocked.last_runtime_message),
+      last_event_at: iso8601(blocked.last_runtime_timestamp)
     }
   end
 
@@ -753,16 +757,16 @@ defmodule SymphonyElixirWeb.Presenter do
   defp recent_events_payload(entry) do
     [
       %{
-        at: iso8601(entry.last_codex_timestamp),
-        event: entry.last_codex_event,
-        message: summarize_message(entry.last_codex_message)
+        at: iso8601(entry.last_runtime_timestamp),
+        event: entry.last_runtime_event,
+        message: summarize_message(entry.last_runtime_message)
       }
     ]
     |> Enum.reject(&is_nil(&1.at))
   end
 
   defp summarize_message(nil), do: nil
-  defp summarize_message(message), do: StatusDashboard.humanize_codex_message(message)
+  defp summarize_message(message), do: StatusDashboard.humanize_runtime_message(message)
 
   defp put_if_present(payload, _key, nil), do: payload
   defp put_if_present(payload, key, value), do: Map.put(payload, key, value)

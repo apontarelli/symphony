@@ -308,15 +308,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp snapshot_with_samples(token_samples, now_ms) do
     case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        total_tokens = Map.get(codex_totals, :total_tokens, 0)
+      {:ok, %{running: running, retrying: retrying, runtime_totals: runtime_totals} = snapshot} ->
+        total_tokens = Map.get(runtime_totals, :total_tokens, 0)
 
         {
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             runtime_totals: runtime_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }},
@@ -333,14 +333,14 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+      {:ok, %{running: running, retrying: retrying, runtime_totals: runtime_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
-        codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
-        codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
-        codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
-        codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        runtime_input_tokens = Map.get(runtime_totals, :input_tokens, 0)
+        runtime_output_tokens = Map.get(runtime_totals, :output_tokens, 0)
+        runtime_total_tokens = Map.get(runtime_totals, :total_tokens, 0)
+        runtime_seconds_running = Map.get(runtime_totals, :seconds_running, 0)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -356,13 +356,13 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("#{max_agents}", @ansi_gray),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
-             colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+             colorize(format_runtime_seconds(runtime_seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
-             colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
+             colorize("in #{format_count(runtime_input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
+             colorize("out #{format_count(runtime_output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+             colorize("total #{format_count(runtime_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
@@ -567,14 +567,14 @@ defmodule SymphonyElixir.StatusDashboard do
         %{
           running: running,
           retrying: retrying,
-          codex_totals: codex_totals
+          runtime_totals: runtime_totals
         } = snapshot
         when is_list(running) and is_list(retrying) ->
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             runtime_totals: runtime_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
@@ -607,13 +607,13 @@ defmodule SymphonyElixir.StatusDashboard do
     state_display = format_cell(to_string(state), @running_stage_width)
     policy = running_entry |> policy_label() |> format_cell(@running_policy_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
-    pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
-    total_tokens = running_entry.codex_total_tokens || 0
+    pid = format_cell(adapter_diagnostic(running_entry, :app_server_pid) || "n/a", @running_pid_width)
+    total_tokens = running_entry.runtime_total_tokens || 0
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
-    event = running_entry.last_codex_event || "none"
-    event_label = format_cell(summarize_message(running_entry.last_codex_message), running_event_width)
+    event = running_entry.last_runtime_event || "none"
+    event_label = format_cell(summarize_message(running_entry.last_runtime_message), running_event_width)
 
     tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
 
@@ -1112,11 +1112,15 @@ defmodule SymphonyElixir.StatusDashboard do
     colorize("●", color_code)
   end
 
-  defp snapshot_total_tokens({:ok, %{codex_totals: codex_totals}}) when is_map(codex_totals) do
-    Map.get(codex_totals, :total_tokens, 0)
+  defp snapshot_total_tokens({:ok, %{runtime_totals: runtime_totals}}) when is_map(runtime_totals) do
+    Map.get(runtime_totals, :total_tokens, 0)
   end
 
   defp snapshot_total_tokens(_snapshot_data), do: 0
+
+  defp adapter_diagnostic(entry, key) when is_map(entry) do
+    get_in(entry, [:adapter, :diagnostics, key])
+  end
 
   defp format_timestamp(datetime) do
     datetime
@@ -1135,33 +1139,33 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   @doc false
-  @spec humanize_codex_message(term()) :: String.t()
-  def humanize_codex_message(nil), do: "no codex message yet"
+  @spec humanize_runtime_message(term()) :: String.t()
+  def humanize_runtime_message(nil), do: "no runtime message yet"
 
-  def humanize_codex_message(%{event: event, message: message}) do
-    payload = unwrap_codex_message_payload(message)
+  def humanize_runtime_message(%{event: event, message: message}) do
+    payload = unwrap_runtime_message_payload(message)
 
-    (humanize_codex_event(event, message, payload) || humanize_codex_payload(payload))
+    (humanize_runtime_event(event, message, payload) || humanize_runtime_payload(payload))
     |> truncate(140)
   end
 
-  def humanize_codex_message(%{message: message}) do
+  def humanize_runtime_message(%{message: message}) do
     message
-    |> unwrap_codex_message_payload()
-    |> humanize_codex_payload()
+    |> unwrap_runtime_message_payload()
+    |> humanize_runtime_payload()
     |> truncate(140)
   end
 
-  def humanize_codex_message(message) do
+  def humanize_runtime_message(message) do
     message
-    |> unwrap_codex_message_payload()
-    |> humanize_codex_payload()
+    |> unwrap_runtime_message_payload()
+    |> humanize_runtime_payload()
     |> truncate(140)
   end
 
-  defp summarize_message(message), do: humanize_codex_message(message)
+  defp summarize_message(message), do: humanize_runtime_message(message)
 
-  defp humanize_codex_event(:session_started, _message, payload) do
+  defp humanize_runtime_event(:session_started, _message, payload) do
     session_id = map_value(payload, ["session_id", :session_id])
     command = map_value(payload, ["codex_command", :codex_command])
 
@@ -1175,9 +1179,9 @@ defmodule SymphonyElixir.StatusDashboard do
     if is_binary(command), do: "#{base} command=#{command}", else: base
   end
 
-  defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
+  defp humanize_runtime_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
 
-  defp humanize_codex_event(:approval_auto_approved, message, payload) do
+  defp humanize_runtime_event(:approval_auto_approved, message, payload) do
     method =
       map_value(payload, ["method", :method]) ||
         map_path(message, ["payload", "method"]) ||
@@ -1187,7 +1191,7 @@ defmodule SymphonyElixir.StatusDashboard do
 
     base =
       if is_binary(method) do
-        "#{humanize_codex_method(method, payload)} (auto-approved)"
+        "#{humanize_runtime_method(method, payload)} (auto-approved)"
       else
         "approval request auto-approved"
       end
@@ -1195,11 +1199,11 @@ defmodule SymphonyElixir.StatusDashboard do
     if is_binary(decision), do: "#{base}: #{decision}", else: base
   end
 
-  defp humanize_codex_event(:tool_input_auto_answered, message, payload) do
+  defp humanize_runtime_event(:tool_input_auto_answered, message, payload) do
     answer = map_value(message, ["answer", :answer])
 
     base =
-      case humanize_codex_method("item/tool/requestUserInput", payload) do
+      case humanize_runtime_method("item/tool/requestUserInput", payload) do
         nil -> "tool input auto-answered"
         text -> "#{text} (auto-answered)"
       end
@@ -1207,30 +1211,30 @@ defmodule SymphonyElixir.StatusDashboard do
     if is_binary(answer), do: "#{base}: #{inline_text(answer)}", else: base
   end
 
-  defp humanize_codex_event(:tool_call_completed, _message, payload),
+  defp humanize_runtime_event(:tool_call_completed, _message, payload),
     do: humanize_dynamic_tool_event("dynamic tool call completed", payload)
 
-  defp humanize_codex_event(:tool_call_failed, _message, payload),
+  defp humanize_runtime_event(:tool_call_failed, _message, payload),
     do: humanize_dynamic_tool_event("dynamic tool call failed", payload)
 
-  defp humanize_codex_event(:unsupported_tool_call, _message, payload),
+  defp humanize_runtime_event(:unsupported_tool_call, _message, payload),
     do: humanize_dynamic_tool_event("unsupported dynamic tool call rejected", payload)
 
-  defp humanize_codex_event(:codex_error_loop, message, _payload) do
+  defp humanize_runtime_event(:codex_error_loop, message, _payload) do
     case map_value(message, ["signature", :signature]) do
-      signature when is_binary(signature) -> "codex error loop: #{signature}"
-      _ -> "codex error loop"
+      signature when is_binary(signature) -> "runtime error loop: #{signature}"
+      _ -> "runtime error loop"
     end
   end
 
-  defp humanize_codex_event(:turn_ended_with_error, message, _payload), do: "turn ended with error: #{format_reason(message)}"
-  defp humanize_codex_event(:startup_failed, message, _payload), do: "startup failed: #{format_reason(message)}"
-  defp humanize_codex_event(:turn_failed, _message, payload), do: humanize_codex_method("turn/failed", payload)
-  defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
-  defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
-  defp humanize_codex_event(_event, _message, _payload), do: nil
+  defp humanize_runtime_event(:turn_ended_with_error, message, _payload), do: "turn ended with error: #{format_reason(message)}"
+  defp humanize_runtime_event(:startup_failed, message, _payload), do: "startup failed: #{format_reason(message)}"
+  defp humanize_runtime_event(:turn_failed, _message, payload), do: humanize_runtime_method("turn/failed", payload)
+  defp humanize_runtime_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
+  defp humanize_runtime_event(:malformed, _message, _payload), do: "malformed JSON event from runtime"
+  defp humanize_runtime_event(_event, _message, _payload), do: nil
 
-  defp unwrap_codex_message_payload(%{} = message) do
+  defp unwrap_runtime_message_payload(%{} = message) do
     cond do
       is_binary(map_value(message, ["method", :method])) -> message
       is_binary(map_value(message, ["session_id", :session_id])) -> message
@@ -1239,12 +1243,12 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp unwrap_codex_message_payload(message), do: message
+  defp unwrap_runtime_message_payload(message), do: message
 
-  defp humanize_codex_payload(%{} = payload) do
+  defp humanize_runtime_payload(%{} = payload) do
     case map_value(payload, ["method", :method]) do
       method when is_binary(method) ->
-        humanize_codex_method(method, payload)
+        humanize_runtime_method(method, payload)
 
       _ ->
         cond do
@@ -1264,14 +1268,14 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_payload(payload) when is_binary(payload) do
+  defp humanize_runtime_payload(payload) when is_binary(payload) do
     payload
     |> String.replace("\n", " ")
     |> sanitize_ansi_and_control_bytes()
     |> String.trim()
   end
 
-  defp humanize_codex_payload(payload) do
+  defp humanize_runtime_payload(payload) do
     payload
     |> inspect(pretty: true, limit: 20)
     |> String.replace("\n", " ")
@@ -1286,7 +1290,7 @@ defmodule SymphonyElixir.StatusDashboard do
     |> String.replace(~r/[\x00-\x1F\x7F]/, "")
   end
 
-  defp humanize_codex_method("thread/started", payload) do
+  defp humanize_runtime_method("thread/started", payload) do
     thread_id = map_path(payload, ["params", "thread", "id"]) || map_path(payload, [:params, :thread, :id])
 
     if is_binary(thread_id) do
@@ -1296,7 +1300,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("turn/started", payload) do
+  defp humanize_runtime_method("turn/started", payload) do
     turn_id = map_path(payload, ["params", "turn", "id"]) || map_path(payload, [:params, :turn, :id])
 
     if is_binary(turn_id) do
@@ -1306,7 +1310,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("turn/completed", payload) do
+  defp humanize_runtime_method("turn/completed", payload) do
     status =
       map_path(payload, ["params", "turn", "status"]) ||
         map_path(payload, [:params, :turn, :status]) ||
@@ -1328,7 +1332,7 @@ defmodule SymphonyElixir.StatusDashboard do
     "turn completed (#{status})#{usage_suffix}"
   end
 
-  defp humanize_codex_method("turn/failed", payload) do
+  defp humanize_runtime_method("turn/failed", payload) do
     error_message =
       map_path(payload, ["params", "error", "message"]) ||
         map_path(payload, [:params, :error, :message])
@@ -1336,9 +1340,9 @@ defmodule SymphonyElixir.StatusDashboard do
     if is_binary(error_message), do: "turn failed: #{error_message}", else: "turn failed"
   end
 
-  defp humanize_codex_method("turn/cancelled", _payload), do: "turn cancelled"
+  defp humanize_runtime_method("turn/cancelled", _payload), do: "turn cancelled"
 
-  defp humanize_codex_method("turn/diff/updated", payload) do
+  defp humanize_runtime_method("turn/diff/updated", payload) do
     diff =
       map_path(payload, ["params", "diff"]) ||
         map_path(payload, [:params, :diff]) ||
@@ -1352,7 +1356,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("turn/plan/updated", payload) do
+  defp humanize_runtime_method("turn/plan/updated", payload) do
     plan_entries =
       map_path(payload, ["params", "plan"]) ||
         map_path(payload, [:params, :plan]) ||
@@ -1369,7 +1373,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("thread/tokenUsage/updated", payload) do
+  defp humanize_runtime_method("thread/tokenUsage/updated", payload) do
     usage =
       map_path(payload, ["params", "tokenUsage", "total"]) ||
         map_path(payload, [:params, :tokenUsage, :total]) ||
@@ -1381,31 +1385,31 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("item/started", payload), do: humanize_item_lifecycle("started", payload)
-  defp humanize_codex_method("item/completed", payload), do: humanize_item_lifecycle("completed", payload)
+  defp humanize_runtime_method("item/started", payload), do: humanize_item_lifecycle("started", payload)
+  defp humanize_runtime_method("item/completed", payload), do: humanize_item_lifecycle("completed", payload)
 
-  defp humanize_codex_method("item/agentMessage/delta", payload),
+  defp humanize_runtime_method("item/agentMessage/delta", payload),
     do: humanize_streaming_event("agent message streaming", payload)
 
-  defp humanize_codex_method("item/plan/delta", payload),
+  defp humanize_runtime_method("item/plan/delta", payload),
     do: humanize_streaming_event("plan streaming", payload)
 
-  defp humanize_codex_method("item/reasoning/summaryTextDelta", payload),
+  defp humanize_runtime_method("item/reasoning/summaryTextDelta", payload),
     do: humanize_streaming_event("reasoning summary streaming", payload)
 
-  defp humanize_codex_method("item/reasoning/summaryPartAdded", payload),
+  defp humanize_runtime_method("item/reasoning/summaryPartAdded", payload),
     do: humanize_streaming_event("reasoning summary section added", payload)
 
-  defp humanize_codex_method("item/reasoning/textDelta", payload),
+  defp humanize_runtime_method("item/reasoning/textDelta", payload),
     do: humanize_streaming_event("reasoning text streaming", payload)
 
-  defp humanize_codex_method("item/commandExecution/outputDelta", payload),
+  defp humanize_runtime_method("item/commandExecution/outputDelta", payload),
     do: humanize_streaming_event("command output streaming", payload)
 
-  defp humanize_codex_method("item/fileChange/outputDelta", payload),
+  defp humanize_runtime_method("item/fileChange/outputDelta", payload),
     do: humanize_streaming_event("file change output streaming", payload)
 
-  defp humanize_codex_method("item/commandExecution/requestApproval", payload) do
+  defp humanize_runtime_method("item/commandExecution/requestApproval", payload) do
     command = extract_command(payload)
 
     if is_binary(command) do
@@ -1415,7 +1419,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("item/fileChange/requestApproval", payload) do
+  defp humanize_runtime_method("item/fileChange/requestApproval", payload) do
     change_count = map_path(payload, ["params", "fileChangeCount"]) || map_path(payload, ["params", "changeCount"])
 
     if is_integer(change_count) and change_count > 0 do
@@ -1425,7 +1429,7 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("item/tool/requestUserInput", payload) do
+  defp humanize_runtime_method("item/tool/requestUserInput", payload) do
     question =
       map_path(payload, ["params", "question"]) ||
         map_path(payload, ["params", "prompt"]) ||
@@ -1439,10 +1443,10 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method("tool/requestUserInput", payload),
-    do: humanize_codex_method("item/tool/requestUserInput", payload)
+  defp humanize_runtime_method("tool/requestUserInput", payload),
+    do: humanize_runtime_method("item/tool/requestUserInput", payload)
 
-  defp humanize_codex_method("account/updated", payload) do
+  defp humanize_runtime_method("account/updated", payload) do
     auth_mode =
       map_path(payload, ["params", "authMode"]) ||
         map_path(payload, [:params, :authMode]) ||
@@ -1451,7 +1455,7 @@ defmodule SymphonyElixir.StatusDashboard do
     "account updated (auth #{auth_mode})"
   end
 
-  defp humanize_codex_method("account/rateLimits/updated", payload) do
+  defp humanize_runtime_method("account/rateLimits/updated", payload) do
     rate_limits =
       map_path(payload, ["params", "rateLimits"]) ||
         map_path(payload, [:params, :rateLimits])
@@ -1459,9 +1463,9 @@ defmodule SymphonyElixir.StatusDashboard do
     "rate limits updated: #{format_rate_limits_summary(rate_limits)}"
   end
 
-  defp humanize_codex_method("account/chatgptAuthTokens/refresh", _payload), do: "account auth token refresh requested"
+  defp humanize_runtime_method("account/chatgptAuthTokens/refresh", _payload), do: "account auth token refresh requested"
 
-  defp humanize_codex_method("item/tool/call", payload) do
+  defp humanize_runtime_method("item/tool/call", payload) do
     tool = dynamic_tool_name(payload)
 
     if is_binary(tool) and String.trim(tool) != "" do
@@ -1471,11 +1475,11 @@ defmodule SymphonyElixir.StatusDashboard do
     end
   end
 
-  defp humanize_codex_method(<<"codex/event/", suffix::binary>>, payload) do
+  defp humanize_runtime_method(<<"codex/event/", suffix::binary>>, payload) do
     humanize_codex_wrapper_event(suffix, payload)
   end
 
-  defp humanize_codex_method(method, payload) do
+  defp humanize_runtime_method(method, payload) do
     msg_type =
       map_path(payload, ["params", "msg", "type"]) ||
         map_path(payload, [:params, :msg, :type])

@@ -469,6 +469,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "policy_ref" => "policy-http"
                  },
                  "session_id" => "thread-http",
+                 "startup" => false,
+                 "adapter" => nil,
                  "pr_target" => "main",
                  "turn_count" => 7,
                  "last_event" => "notification",
@@ -509,7 +511,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "project_id" => nil,
                  "project_slug" => "project",
                  "state" => "In Progress",
-                 "error" => "codex turn requires operator input",
+                 "error" => "runtime turn requires operator input",
                  "worker_host" => "dm-dev2",
                  "workspace_path" => "/workspaces/MT-BLOCKED",
                  "profile" => "strict",
@@ -540,7 +542,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "metadata" => %{}
                }
              ],
-             "codex_totals" => %{
+             "runtime_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
                "total_tokens" => 12,
@@ -580,6 +582,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "policy_ref" => "policy-http"
                },
                "session_id" => "thread-http",
+               "startup" => false,
+               "adapter" => nil,
                "project_slug" => "project",
                "pr_target" => "main",
                "turn_count" => 7,
@@ -592,7 +596,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              },
              "retry" => nil,
              "blocked" => nil,
-             "logs" => %{"codex_session_logs" => []},
+             "logs" => %{"runtime_session_logs" => []},
              "recent_events" => [],
              "last_error" => nil,
              "tracked" => %{}
@@ -621,14 +625,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{
              "status" => "blocked",
-             "last_error" => "codex turn requires operator input",
+             "last_error" => "runtime turn requires operator input",
              "blocked" => %{
                "session_id" => "thread-blocked",
                "state" => "In Progress",
                "profile" => "strict",
                "target" => "Human Review",
                "policy_ref" => "policy-blocked",
-               "error" => "codex turn requires operator input"
+               "error" => "runtime turn requires operator input"
              }
            } = json_response(conn, 200)
 
@@ -801,8 +805,8 @@ defmodule SymphonyElixir.ExtensionsTest do
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 8,
-          last_codex_event: :notification,
-          last_codex_message: %{
+          last_runtime_event: :notification,
+          last_runtime_message: %{
             event: :notification,
             message: %{
               payload: %{
@@ -815,10 +819,10 @@ defmodule SymphonyElixir.ExtensionsTest do
               }
             }
           },
-          last_codex_timestamp: DateTime.utc_now(),
-          codex_input_tokens: 10,
-          codex_output_tokens: 12,
-          codex_total_tokens: 22,
+          last_runtime_timestamp: DateTime.utc_now(),
+          runtime_input_tokens: 10,
+          runtime_output_tokens: 12,
+          runtime_total_tokens: 22,
           started_at: DateTime.utc_now()
         }
       ])
@@ -912,17 +916,17 @@ defmodule SymphonyElixir.ExtensionsTest do
           session_id: "thread-active",
           turn_count: 1,
           codex_app_server_pid: nil,
-          last_codex_message: "working",
-          last_codex_timestamp: DateTime.utc_now(),
-          last_codex_event: :notification,
-          codex_input_tokens: 1,
-          codex_output_tokens: 2,
-          codex_total_tokens: 3,
+          last_runtime_message: "working",
+          last_runtime_timestamp: DateTime.utc_now(),
+          last_runtime_event: :notification,
+          runtime_input_tokens: 1,
+          runtime_output_tokens: 2,
+          runtime_total_tokens: 3,
           started_at: DateTime.utc_now()
         }
       ],
       retrying: [],
-      codex_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 0},
+      runtime_totals: %{input_tokens: 1, output_tokens: 2, total_tokens: 3, seconds_running: 0},
       rate_limits: nil
     }
 
@@ -958,7 +962,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     snapshot = %{
       running: [],
       retrying: [],
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: nil
     }
 
@@ -991,7 +995,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     snapshot = %{
       running: [],
       retrying: [],
-      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
       rate_limits: "n/a"
     }
 
@@ -1028,17 +1032,17 @@ defmodule SymphonyElixir.ExtensionsTest do
           session_id: "thread-stale",
           turn_count: 3,
           codex_app_server_pid: nil,
-          last_codex_message: "still working",
-          last_codex_timestamp: stale_at,
-          last_codex_event: :notification,
-          codex_input_tokens: 5,
-          codex_output_tokens: 8,
-          codex_total_tokens: 13,
+          last_runtime_message: "still working",
+          last_runtime_timestamp: stale_at,
+          last_runtime_event: :notification,
+          runtime_input_tokens: 5,
+          runtime_output_tokens: 8,
+          runtime_total_tokens: 13,
           started_at: started_at
         }
       ],
       retrying: [],
-      codex_totals: %{input_tokens: 5, output_tokens: 8, total_tokens: 13, seconds_running: 0},
+      runtime_totals: %{input_tokens: 5, output_tokens: 8, total_tokens: 13, seconds_running: 0},
       rate_limits: %{"limit_id" => "codex", "primary" => %{}, "secondary" => nil}
     }
 
@@ -1187,12 +1191,12 @@ defmodule SymphonyElixir.ExtensionsTest do
             "policy_ref" => "policy-http"
           },
           codex_app_server_pid: nil,
-          last_codex_message: "rendered",
-          last_codex_timestamp: nil,
-          last_codex_event: :notification,
-          codex_input_tokens: 4,
-          codex_output_tokens: 8,
-          codex_total_tokens: 12,
+          last_runtime_message: "rendered",
+          last_runtime_timestamp: nil,
+          last_runtime_event: :notification,
+          runtime_input_tokens: 4,
+          runtime_output_tokens: 8,
+          runtime_total_tokens: 12,
           started_at: DateTime.utc_now()
         }
       ],
@@ -1220,7 +1224,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           identifier: "MT-BLOCKED",
           issue_url: "https://example.org/issues/MT-BLOCKED",
           state: "In Progress",
-          error: "codex turn requires operator input",
+          error: "runtime turn requires operator input",
           worker_host: "dm-dev2",
           workspace_path: "/workspaces/MT-BLOCKED",
           profile: "strict",
@@ -1232,13 +1236,13 @@ defmodule SymphonyElixir.ExtensionsTest do
           },
           session_id: "thread-blocked",
           blocked_at: DateTime.utc_now(),
-          last_codex_event: :turn_input_required,
-          last_codex_message: %{
+          last_runtime_event: :turn_input_required,
+          last_runtime_message: %{
             event: :turn_input_required,
             message: %{"method" => "turn/input_required"},
             timestamp: DateTime.utc_now()
           },
-          last_codex_timestamp: DateTime.utc_now()
+          last_runtime_timestamp: DateTime.utc_now()
         }
       ],
       handoff_routes: [
@@ -1254,7 +1258,7 @@ defmodule SymphonyElixir.ExtensionsTest do
           metadata: %{}
         }
       ],
-      codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
+      runtime_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
     }
   end
