@@ -254,6 +254,32 @@ defmodule SymphonyElixir.WorkflowManifestTest do
            } in diagnostics
   end
 
+  test "runtime runner kind rejects blank values" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: target-repo
+        repository: github.com/example/target-repo
+      delivery:
+        pr_target: main
+      runtime:
+        agent:
+          default_runner: codex
+        runners:
+          codex:
+            kind: "   "
+            command:
+              - codex
+              - app-server
+      """)
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load(path)
+
+    assert [%{path: "runtime", message: message}] = diagnostics
+    assert message =~ "runtime.runners.codex.kind is required"
+  end
+
   test "review routing compiles into resolved policy and prompt context" do
     path =
       write_manifest!("""

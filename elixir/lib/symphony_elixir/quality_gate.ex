@@ -3,8 +3,9 @@ defmodule SymphonyElixir.QualityGate do
   Runs host-owned quality-gate reviewer fanout and synthesis.
   """
 
-  alias SymphonyElixir.Codex.{AppServer, ExecutionProfile}
-  alias SymphonyElixir.{Config, Linear.Issue, SSH}
+  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, SSH}
+  alias SymphonyElixir.AgentRuntime.Event
+  alias SymphonyElixir.Codex.ExecutionProfile
   alias SymphonyElixir.QualityGate.{HostVisualQa, Planner, Synthesis}
   alias SymphonyElixir.ReviewRecords.Redaction
 
@@ -690,14 +691,14 @@ defmodule SymphonyElixir.QualityGate do
     caller = self()
     ref = make_ref()
 
-    on_message = fn message ->
-      send(caller, {ref, message})
+    on_event = fn event ->
+      send(caller, {ref, event})
       :ok
     end
 
-    opts = Keyword.put(opts_base, :on_message, on_message)
+    opts = Keyword.put(opts_base, :on_event, on_event)
 
-    case AppServer.run(workspace, prompt, issue, opts) do
+    case AgentRuntime.run(workspace, prompt, issue, opts) do
       {:ok, session} ->
         completion = quality_gate_completion(drain_messages(ref))
 
@@ -760,8 +761,8 @@ defmodule SymphonyElixir.QualityGate do
     end)
   end
 
-  defp completion_from_message(%{payload: payload}) when is_map(payload), do: completion_from_payload(payload)
-  defp completion_from_message(_message), do: nil
+  defp completion_from_message(%Event{payload: %{payload: payload}}) when is_map(payload), do: completion_from_payload(payload)
+  defp completion_from_message(%Event{payload: payload}) when is_map(payload), do: completion_from_payload(payload)
 
   defp completion_from_payload(payload) when is_map(payload) do
     map_at_path(payload, ["params", "completion"]) ||

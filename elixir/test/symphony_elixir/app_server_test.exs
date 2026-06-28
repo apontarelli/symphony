@@ -597,23 +597,25 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      on_event = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Validate launch provenance", issue, on_message: on_message)
+               AppServer.run(workspace, "Validate launch provenance", issue, on_event: on_event)
 
       assert_receive {:app_server_message,
-                      %{
+                      %SymphonyElixir.AgentRuntime.Event{
                         event: :session_started,
-                        codex_command: codex_command,
-                        codex_home: ^expected_codex_home,
-                        codex_workspace: ^canonical_workspace,
-                        codex_execution_profile: "implementation",
-                        codex_execution_profile_model: nil,
-                        codex_execution_profile_reasoning_effort: nil,
-                        codex_execution_profile_budget: "standard",
-                        workflow_file_path: workflow_file_path,
-                        workflow_config_sha256: ^expected_workflow_hash
+                        payload: %{
+                          codex_command: codex_command,
+                          codex_home: ^expected_codex_home,
+                          codex_workspace: ^canonical_workspace,
+                          codex_execution_profile: "implementation",
+                          codex_execution_profile_model: nil,
+                          codex_execution_profile_reasoning_effort: nil,
+                          codex_execution_profile_budget: "standard",
+                          workflow_file_path: workflow_file_path,
+                          workflow_config_sha256: ^expected_workflow_hash
+                        }
                       }}
 
       assert codex_command == "#{codex_binary} --config 'model=\"gpt-5.5\"' app-server"
@@ -1337,15 +1339,15 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      on_message = fn message -> send(self(), {:app_server_message, message}) end
+      on_event = fn message -> send(self(), {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Handle generic tool input", issue, on_message: on_message)
+               AppServer.run(workspace, "Handle generic tool input", issue, on_event: on_event)
 
       assert_received {:app_server_message,
-                       %{
-                         event: :tool_input_auto_answered,
-                         answer: "This is a non-interactive session. Operator input is unavailable."
+                       %SymphonyElixir.AgentRuntime.Event{
+                         event: :tool_result,
+                         payload: %{answer: "This is a non-interactive session. Operator input is unavailable."}
                        }}
     after
       File.rm_rf(test_root)
@@ -1765,17 +1767,27 @@ defmodule SymphonyElixir.AppServerTest do
         }
       end
 
-      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      on_event = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
                AppServer.run(workspace, "Handle failed tool calls", issue,
-                 on_message: on_message,
+                 on_event: on_event,
                  tool_executor: tool_executor
                )
 
       assert_received {:tool_called, "linear_graphql", %{"query" => "query Viewer { viewer { id } }"}}
 
-      assert_received {:app_server_message, %{event: :tool_call_failed, payload: %{"params" => %{"tool" => "linear_graphql"}}}}
+      assert_received {:app_server_message,
+                       %SymphonyElixir.AgentRuntime.Event{
+                         event: :tool_call,
+                         payload: %{payload: %{"params" => %{"tool" => "linear_graphql"}}}
+                       }}
+
+      assert_received {:app_server_message,
+                       %SymphonyElixir.AgentRuntime.Event{
+                         event: :tool_result,
+                         payload: %{payload: %{"params" => %{"tool" => "linear_graphql"}}}
+                       }}
     after
       File.rm_rf(test_root)
     end
@@ -1904,16 +1916,16 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       test_pid = self()
-      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      on_event = fn message -> send(test_pid, {:app_server_message, message}) end
 
       log =
         capture_log(fn ->
           assert {:ok, _result} =
-                   AppServer.run(workspace, "Capture stderr log", issue, on_message: on_message)
+                   AppServer.run(workspace, "Capture stderr log", issue, on_event: on_event)
         end)
 
       assert_received {:app_server_message, %{event: :turn_completed}}
-      refute_received {:app_server_message, %{event: :malformed}}
+      refute_received {:app_server_message, %SymphonyElixir.AgentRuntime.Event{event: :message_delta}}
       assert log =~ "Codex turn stream output: warning: this is stderr noise"
     after
       File.rm_rf(test_root)
@@ -1984,10 +1996,10 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       test_pid = self()
-      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      on_event = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:error, {:codex_error_loop, context}} =
-               AppServer.run(workspace, "Reproduce SID-92 loop", issue, on_message: on_message)
+               AppServer.run(workspace, "Reproduce SID-92 loop", issue, on_event: on_event)
 
       assert context.issue_id == "issue-compaction-loop"
       assert context.issue_identifier == "SID-92"
@@ -1999,10 +2011,10 @@ defmodule SymphonyElixir.AppServerTest do
       assert context.last_message =~ "Invalid property name"
 
       assert_received {:app_server_message,
-                       %{
-                         event: :codex_error_loop,
+                       %SymphonyElixir.AgentRuntime.Event{
+                         event: :turn_failed,
                          session_id: "thread-92-turn-92",
-                         signature: "remote_compaction_failed:property_name_above_max_length"
+                         payload: %{signature: "remote_compaction_failed:property_name_above_max_length"}
                        }}
     after
       File.rm_rf(test_root)
@@ -2137,13 +2149,18 @@ defmodule SymphonyElixir.AppServerTest do
       }
 
       test_pid = self()
-      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+      on_event = fn message -> send(test_pid, {:app_server_message, message}) end
 
       assert {:ok, _result} =
-               AppServer.run(workspace, "Capture malformed protocol line", issue, on_message: on_message)
+               AppServer.run(workspace, "Capture malformed protocol line", issue, on_event: on_event)
 
-      assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
-      assert_received {:app_server_message, %{event: :turn_completed}}
+      assert_received {:app_server_message,
+                       %SymphonyElixir.AgentRuntime.Event{
+                         event: :message_delta,
+                         payload: %{payload: "{\"method\":\"turn/completed\""}
+                       }}
+
+      assert_received {:app_server_message, %SymphonyElixir.AgentRuntime.Event{event: :turn_completed}}
     after
       File.rm_rf(test_root)
     end

@@ -91,16 +91,35 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp normalize_linear_graphql_arguments(_arguments), do: {:error, :invalid_arguments}
 
   defp normalize_query(arguments) do
-    case Map.get(arguments, "query") || Map.get(arguments, :query) do
-      query when is_binary(query) ->
-        case String.trim(query) do
-          "" -> {:error, :missing_query}
-          trimmed -> {:ok, trimmed}
-        end
-
-      _ ->
-        {:error, :missing_query}
+    with query when is_binary(query) <- Map.get(arguments, "query") || Map.get(arguments, :query),
+         trimmed when trimmed != "" <- String.trim(query),
+         :ok <- validate_single_graphql_operation(trimmed) do
+      {:ok, trimmed}
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :missing_query}
     end
+  end
+
+  defp validate_single_graphql_operation(query) do
+    operation_count =
+      query
+      |> strip_graphql_comments_and_strings()
+      |> then(&Regex.scan(~r/\b(query|mutation|subscription)\b/, &1))
+      |> length()
+
+    if operation_count <= 1 do
+      :ok
+    else
+      {:error, :multiple_operations}
+    end
+  end
+
+  defp strip_graphql_comments_and_strings(query) do
+    query
+    |> String.replace(~r/\"\"\"(?:.|\n)*?\"\"\"/, "\"\"")
+    |> String.replace(~r/\"(?:\\.|[^\"\\])*\"/, "\"\"")
+    |> String.replace(~r/#.*$/m, "", global: true)
   end
 
   defp normalize_variables(arguments) do
@@ -164,6 +183,14 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     %{
       "error" => %{
         "message" => "`linear_graphql.variables` must be a JSON object when provided."
+      }
+    }
+  end
+
+  defp tool_error_payload(:multiple_operations) do
+    %{
+      "error" => %{
+        "message" => "`linear_graphql.query` must contain exactly one GraphQL operation."
       }
     }
   end

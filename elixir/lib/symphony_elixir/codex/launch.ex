@@ -131,13 +131,9 @@ defmodule SymphonyElixir.Codex.Launch do
 
   defp command_argv(_command), do: {:error, :invalid_argv}
 
-  defp command_string(command) when is_binary(command), do: {:ok, command}
-
   defp command_string(argv) when is_list(argv) do
     with {:ok, argv} <- command_argv(argv) do
       {:ok, Shell.argv_to_command(argv)}
     end
   end
-
-  defp command_string(_command), do: {:error, :invalid_argv}
 end
