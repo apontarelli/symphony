@@ -125,6 +125,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
+    assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
     assert {:ok, %{prompt: "Third prompt"}} = WorkflowStore.current()
     assert :ok = WorkflowStore.force_reload()
     assert {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)

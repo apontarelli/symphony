@@ -2201,6 +2201,51 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "prompt builder reports invalid manifests without recoverable prompt templates" do
+    original_workflow_path = Workflow.workflow_file_path()
+    workflow_store_pid = Process.whereis(SymphonyElixir.WorkflowStore)
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+
+      if is_pid(workflow_store_pid) and is_nil(Process.whereis(SymphonyElixir.WorkflowStore)) do
+        Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+      end
+    end)
+
+    assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.WorkflowStore)
+
+    invalid_manifest =
+      Path.join(System.tmp_dir!(), "invalid-workflow-#{System.unique_integer([:positive])}.yml")
+
+    File.write!(invalid_manifest, """
+    version: 1
+    project:
+      slug: target-repo
+      repository: github.com/example/target-repo
+    delivery:
+      pr_target: main
+    runtime:
+      codex:
+        command: codex app-server
+    """)
+
+    Workflow.set_workflow_file_path(invalid_manifest)
+
+    issue = %Issue{
+      identifier: "MT-782",
+      title: "Invalid workflow",
+      description: "Manifest cannot provide fallback prompt",
+      state: "Todo",
+      url: "https://example.org/issues/MT-782",
+      labels: []
+    }
+
+    assert_raise RuntimeError, ~r/workflow_unavailable: \{:invalid_manifest,/, fn ->
+      PromptBuilder.build_prompt(issue)
+    end
+  end
+
   test "in-repo symphony.yml renders generated prompt correctly" do
     workflow_path = Workflow.workflow_file_path()
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")

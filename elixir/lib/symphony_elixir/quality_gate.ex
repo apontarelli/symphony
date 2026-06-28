@@ -763,8 +763,6 @@ defmodule SymphonyElixir.QualityGate do
 
   defp completion_from_message(%Event{payload: %{payload: payload}}) when is_map(payload), do: completion_from_payload(payload)
   defp completion_from_message(%Event{payload: payload}) when is_map(payload), do: completion_from_payload(payload)
-  defp completion_from_message(%{payload: payload}) when is_map(payload), do: completion_from_payload(payload)
-  defp completion_from_message(_message), do: nil
 
   defp completion_from_payload(payload) when is_map(payload) do
     map_at_path(payload, ["params", "completion"]) ||
