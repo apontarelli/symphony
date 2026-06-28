@@ -178,7 +178,8 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `runtime.tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git or Jujutsu CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
+- Coding-agent executable for the configured `AgentRuntime`; the initial reference adapter targets
+  Codex app-server.
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -499,6 +500,16 @@ review_routing:
   auto_land:
     enabled: true
     max_risk_class: low
+runtime:
+  agent:
+    default_runner: codex
+    max_concurrent_startups: 2
+  runners:
+    codex:
+      kind: codex_app_server
+      command:
+        - codex
+        - app-server
 ```
 
 ### 5.3 Manifest Field Semantics
@@ -1395,7 +1406,7 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
+- `Runtime Update Event`
   - Update live session fields, token counters, and rate limits.
 
 - `Retry Timer Fired`

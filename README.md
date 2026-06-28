@@ -1,8 +1,9 @@
 # Symphony
 
 Symphony is an experimental service for turning issue-tracker work into isolated,
-autonomous coding-agent runs. It polls Linear, creates a per-issue workspace, launches Codex in
-app-server mode, and records validation, review, publish, and handoff evidence back to the tracker.
+autonomous coding-agent runs. It polls Linear, creates a per-issue workspace, launches the
+configured `AgentRuntime` runner, and records validation, review, publish, and handoff evidence
+back to the tracker. The current production adapter targets Codex app-server.
 
 This is my personal, independent public fork of the
 [OpenAI Symphony](https://github.com/openai/symphony) prototype. It is not an official OpenAI
@@ -35,8 +36,9 @@ OpenAI project include:
   landing, rework, requirement validation, project closeout, and run recovery.
 - No copied runtime prompt requirement: public runtime behavior no longer depends on target repos
   copying `WORKFLOW.md` files or globally installing private `symphony-*` skills.
-- Isolated Codex harness behavior: unattended runs use a Symphony-owned `CODEX_HOME` and then layer
-  target-repo `AGENTS.md` and docs after the harness instructions.
+- Runner-agnostic runtime seam: unattended runs dispatch through an `AgentRuntime` adapter. The
+  current production adapter uses a Symphony-owned Codex `CODEX_HOME` and then layers target-repo
+  `AGENTS.md` and docs after the harness instructions.
 - Workflow inspection commands: the Elixir CLI can initialize, validate, and print compiled
   workflow policy with `workflow init`, `workflow check`, and `workflow print --compiled`.
 - Host-owned quality gates: completed implementation turns can fan out deterministic reviewer jobs
@@ -58,8 +60,9 @@ contract lives in [`SPEC.md`](SPEC.md). The current implementation is the Elixir
 
 The root [`symphony.yml`](symphony.yml) is this fork's dogfood manifest for running Symphony on
 itself. It intentionally contains this fork's public repository URL, local workspace defaults, a
-Linear project scope, and Codex launch policy used by this repository's unattended automation. Use
-it as an example of the manifest shape, not as a file to copy unchanged into another project.
+Linear project scope, and Codex runner launch policy used by this repository's unattended
+automation. Use it as an example of the manifest shape, not as a file to copy unchanged into
+another project.
 
 ## Run the Elixir implementation
 

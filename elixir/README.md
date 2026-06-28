@@ -18,10 +18,11 @@ file is the implementation setup and operation guide.
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+3. Launches the configured `AgentRuntime` runner inside the workspace
+4. Sends a workflow prompt to the runner
+5. Keeps the runner working on the issue until the work is done
+
+The current production runner is the Codex app-server adapter.
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that
 bundled workflow modules and agents can make raw Linear GraphQL calls when the direct tracker tool
@@ -38,8 +39,9 @@ process-group and descendant cleanup are not guaranteed by this local primitive.
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
-If Codex reports that operator input, approval, or MCP elicitation is required, Symphony keeps the
-issue claimed and exposes it as blocked in the runtime state, JSON API, and dashboard. Blocked
+If the selected runtime reports that operator input, approval, or MCP elicitation is required,
+Symphony keeps the issue claimed and exposes it as blocked in the runtime state, JSON API, and
+dashboard. Blocked
 entries are in memory only; restarting the orchestrator clears that blocked map, so any still-active
 Linear issue can become a dispatch candidate again after restart.
 
@@ -79,7 +81,7 @@ moving the issue as ready for merge.
 3. Build the Elixir escript and run `./bin/symphony workflow init --repo /path/to/repo` to create
    `symphony.yml`.
 4. Run `./bin/symphony workflow check --repo /path/to/repo` to validate the manifest, repo docs,
-   and any configured harness CODEX_HOME.
+   runner config, and any configured harness CODEX_HOME.
 5. Run `./bin/symphony workflow print --repo /path/to/repo --compiled` to inspect the resolved
    workflow config and prompt.
 6. Customize the generated `symphony.yml` for your project.
@@ -92,9 +94,9 @@ moving the issue as ready for merge.
 
 The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood manifest. It
 intentionally contains this fork's public repository URL, local workspace defaults, Linear project
-scope, and Codex launch policy for running Symphony on itself. For another repository, create a
-fresh manifest with `workflow init` and replace tracker, workspace, repository, validation, and
-delivery fields with that project's values.
+scope, and Codex runner launch policy for running Symphony on itself. For another repository,
+create a fresh manifest with `workflow init` and replace tracker, workspace, repository,
+validation, delivery, and runner fields with that project's values.
 
 ## Prerequisites
 
@@ -154,9 +156,9 @@ Target repos can use a committed `symphony.yml` manifest for setup and audit:
 
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
 left unchanged unless `--force` is passed. `check` validates the manifest schema, selected modules,
-repo doc entrypoints, validation command shape, and a configured harness `CODEX_HOME`. `print`
-shows the resolved preset/modules/defaults and can include the compiled workflow config and prompt
-without writing generated prompt files into the target repo.
+repo doc entrypoints, validation command shape, runner config, and a configured harness
+`CODEX_HOME`. `print` shows the resolved preset/modules/defaults and can include the compiled
+workflow config and prompt without writing generated prompt files into the target repo.
 
 `symphony.yml` v1 contains:
 
@@ -188,10 +190,22 @@ automation:
   posture: unattended
 harness:
   codex_home: null
+runtime:
+  agent:
+    default_runner: codex
+    max_concurrent_startups: 2
+  runners:
+    codex:
+      kind: codex_app_server
+      command:
+        - codex
+        - app-server
 ```
 
-`harness.codex_home: null` means Symphony derives a managed harness CODEX_HOME. If a path is set,
-`workflow check` requires that directory and its `AGENTS.md` to exist.
+`runtime.agent.default_runner` selects the runner config under `runtime.runners`. For the Codex
+app-server adapter, `harness.codex_home: null` means Symphony derives a managed harness
+`CODEX_HOME`; if a path is set, `workflow check` requires that directory and its `AGENTS.md` to
+exist.
 
 Pass a manifest path to `./bin/symphony` when starting the service directly:
 

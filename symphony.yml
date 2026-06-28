@@ -1,7 +1,7 @@
 version: 1
 # This committed manifest is this fork's dogfood configuration for running Symphony on itself.
 # For another repository, generate a fresh manifest with `symphony workflow init` and replace the
-# repository, tracker, workspace, validation, delivery, and Codex settings with project-local
+# repository, tracker, workspace, validation, delivery, and runner settings with project-local
 # values.
 project:
   slug: symphony
