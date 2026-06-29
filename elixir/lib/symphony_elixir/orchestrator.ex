@@ -16,6 +16,7 @@ defmodule SymphonyElixir.Orchestrator do
     PublishPreflight,
     QualityGate,
     ReviewRecords,
+    RunSetup,
     StatusDashboard,
     Tracker,
     Workspace
@@ -49,6 +50,9 @@ defmodule SymphonyElixir.Orchestrator do
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
+      :run_mode,
+      :issue_batch_limit,
+      dispatched_issue_count: 0,
       running: %{},
       completed: MapSet.new(),
       handoff_routes: %{},
@@ -74,15 +78,18 @@ defmodule SymphonyElixir.Orchestrator do
       :ok ->
         now_ms = System.monotonic_time(:millisecond)
         config = Config.settings!()
+        capacity = RunSetup.capacity(config)
 
         state = %State{
           poll_interval_ms: config.polling.interval_ms,
-          max_concurrent_agents: config.agent.max_concurrent_agents,
-          max_concurrent_startups: config.agent.max_concurrent_startups,
+          max_concurrent_agents: capacity.max_concurrent_agents,
+          max_concurrent_startups: capacity.max_concurrent_startups,
           next_poll_due_at_ms: now_ms,
           poll_check_in_progress: false,
           tick_timer_ref: nil,
           tick_token: nil,
+          run_mode: RunSetup.mode(),
+          issue_batch_limit: RunSetup.issue_batch_limit(),
           runtime_totals: @empty_runtime_totals,
           runtime_rate_limits: nil
         }
@@ -140,8 +147,8 @@ defmodule SymphonyElixir.Orchestrator do
   def handle_info(:run_poll_cycle, state) do
     state = refresh_runtime_config(state)
     state = maybe_dispatch(state)
-    state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
+    state = maybe_schedule_next_poll(state)
 
     notify_dashboard()
     {:noreply, state}
@@ -307,6 +314,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
+         true <- dispatch_budget_available?(state),
          {:ok, issues} <- Tracker.fetch_candidate_issues(),
          true <- available_slots(state) > 0 do
       choose_issues(issues, state)
@@ -956,13 +964,23 @@ defmodule SymphonyElixir.Orchestrator do
 
     issues
     |> sort_issues_for_dispatch()
-    |> Enum.reduce(state, fn issue, state_acc ->
-      if should_dispatch_issue?(issue, state_acc, active_states, terminal_states) do
-        dispatch_issue(state_acc, issue)
-      else
-        state_acc
-      end
+    |> Enum.reduce_while(state, fn issue, state_acc ->
+      maybe_choose_issue(issue, state_acc, active_states, terminal_states)
     end)
+  end
+
+  defp maybe_choose_issue(issue, state, active_states, terminal_states) do
+    if should_dispatch_issue?(issue, state, active_states, terminal_states) do
+      state
+      |> dispatch_issue(issue)
+      |> continue_or_halt_dispatch()
+    else
+      {:cont, state}
+    end
+  end
+
+  defp continue_or_halt_dispatch(state) do
+    if dispatch_budget_available?(state), do: {:cont, state}, else: {:halt, state}
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
@@ -1155,7 +1173,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp policy_for_dispatch(_issue, policy) when is_map(policy), do: {:ok, policy}
-  defp policy_for_dispatch(issue, _policy), do: Config.issue_policy(issue)
+
+  defp policy_for_dispatch(issue, _policy) do
+    with {:ok, policy} <- Config.issue_policy(issue) do
+      {:ok, RunSetup.apply_restrictive_policy(policy)}
+    end
+  end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, policy) do
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
@@ -1211,6 +1234,7 @@ defmodule SymphonyElixir.Orchestrator do
         %{
           state
           | running: running,
+            dispatched_issue_count: increment_dispatched_issue_count(state, attempt),
             claimed: MapSet.put(state.claimed, issue.id),
             handoff_routes: Map.delete(state.handoff_routes, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id)
@@ -1871,6 +1895,15 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  defp increment_dispatched_issue_count(%State{dispatched_issue_count: count}, nil) when is_integer(count),
+    do: count + 1
+
+  defp increment_dispatched_issue_count(%State{dispatched_issue_count: count}, _attempt) when is_integer(count),
+    do: count
+
+  defp increment_dispatched_issue_count(_state, nil), do: 1
+  defp increment_dispatched_issue_count(_state, _attempt), do: 0
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -2382,6 +2415,30 @@ defmodule SymphonyElixir.Orchestrator do
     :ok
   end
 
+  defp maybe_schedule_next_poll(%State{} = state) do
+    if continue_polling?(state) do
+      schedule_tick(state, state.poll_interval_ms)
+    else
+      %{state | tick_timer_ref: nil, tick_token: nil, next_poll_due_at_ms: nil}
+    end
+  end
+
+  defp continue_polling?(%State{run_mode: :watch}), do: true
+
+  defp continue_polling?(%State{run_mode: :drain} = state) do
+    runtime_active?(state)
+  end
+
+  defp continue_polling?(%State{run_mode: :issue_batch} = state) do
+    runtime_active?(state) or dispatch_budget_available?(state)
+  end
+
+  defp continue_polling?(_state), do: true
+
+  defp runtime_active?(%State{} = state) do
+    map_size(state.running) > 0 or map_size(state.retry_attempts) > 0
+  end
+
   defp next_poll_in_ms(nil, _now_ms), do: nil
 
   defp next_poll_in_ms(next_poll_due_at_ms, now_ms) when is_integer(next_poll_due_at_ms) do
@@ -2413,12 +2470,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp refresh_runtime_config(%State{} = state) do
     config = Config.settings!()
+    capacity = RunSetup.capacity(config)
 
     %{
       state
       | poll_interval_ms: config.polling.interval_ms,
-        max_concurrent_agents: config.agent.max_concurrent_agents,
-        max_concurrent_startups: config.agent.max_concurrent_startups
+        max_concurrent_agents: capacity.max_concurrent_agents,
+        max_concurrent_startups: capacity.max_concurrent_startups,
+        run_mode: RunSetup.mode(),
+        issue_batch_limit: RunSetup.issue_batch_limit()
     }
   end
 
@@ -2430,6 +2490,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and startup_slots_available?(state) and state_slots_available?(issue, state.running)
   end
+
+  defp dispatch_budget_available?(%State{run_mode: :issue_batch, issue_batch_limit: limit, dispatched_issue_count: count})
+       when is_integer(limit) and limit > 0 and is_integer(count) do
+    count < limit
+  end
+
+  defp dispatch_budget_available?(%State{run_mode: :issue_batch, issue_batch_limit: nil}), do: false
+  defp dispatch_budget_available?(_state), do: true
 
   defp apply_runtime_token_delta(
          %{runtime_totals: runtime_totals} = state,

@@ -1099,7 +1099,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              "Linear API token missing in selected workflow config"
 
     assert Config.format_error(:missing_linear_project_scope) ==
-             "Linear project_id, project_slug, or team_key missing in selected workflow config"
+             "Linear project_id, project_slug, team_key, issue_ids, query, or query_file missing in selected workflow config"
 
     assert Config.format_error(:missing_tracker_kind) ==
              "Tracker kind missing in selected workflow config"

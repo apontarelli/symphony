@@ -39,8 +39,9 @@ OpenAI project include:
 - Runner-agnostic runtime seam: unattended runs dispatch through an `AgentRuntime` adapter. The
   current production adapter uses a Symphony-owned Codex `CODEX_HOME` and then layers target-repo
   `AGENTS.md` and docs after the harness instructions.
-- Workflow inspection commands: the Elixir CLI can initialize, validate, and print compiled
-  workflow policy with `workflow init`, `workflow check`, and `workflow print --compiled`.
+- Repo setup inspection commands: the Elixir CLI can initialize, validate, and preview compiled
+  setup policy with `setup init`, `setup check`, and `setup preview --compiled`. The legacy
+  `workflow` command remains as a one-release compatibility alias with deprecation guidance.
 - Host-owned quality gates: completed implementation turns can fan out deterministic reviewer jobs
   for source correctness, tests, scenario QA, product visual review, docs alignment, and risky
   security/data/migration seams, then synthesize findings before handoff.
@@ -77,9 +78,9 @@ mise exec -- mix build
 Create a manifest for a target repository, then inspect it before starting unattended runs:
 
 ```bash
-mise exec -- ./bin/symphony workflow init --repo /path/to/target-repo
-mise exec -- ./bin/symphony workflow check --repo /path/to/target-repo
-mise exec -- ./bin/symphony workflow print --repo /path/to/target-repo --compiled
+mise exec -- ./bin/symphony setup init --repo /path/to/target-repo
+mise exec -- ./bin/symphony setup check --repo /path/to/target-repo
+mise exec -- ./bin/symphony setup preview --repo /path/to/target-repo --compiled
 ```
 
 For local solo runs, use `symphony run` to build or load a saved local run setup instead of
@@ -109,7 +110,8 @@ current environment and skip the launcher env file:
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony --no-env-file --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony run --preview --no-env-file --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
 or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env`, set
