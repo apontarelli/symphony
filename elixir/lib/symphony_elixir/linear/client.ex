@@ -175,8 +175,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
-    issues(filter: {id: {in: $ids}}, first: $first) {
+  query SymphonyLinearIssuesById($ids: [ID!]!, $identifiers: [String!]!, $first: Int!, $relationFirst: Int!) {
+    issues(filter: {or: [{id: {in: $ids}}, {identifier: {in: $identifiers}}]}, first: $first) {
       nodes {
         id
         identifier
@@ -241,7 +241,7 @@ defmodule SymphonyElixir.Linear.Client do
       {:error, :missing_linear_api_token}
     else
       with {:ok, assignee_filter} <- routing_assignee_filter() do
-        fetch_by_configured_scope(tracker, tracker.active_states, assignee_filter)
+        fetch_candidates_for_tracker(tracker, assignee_filter)
       end
     end
   end
@@ -366,6 +366,17 @@ defmodule SymphonyElixir.Linear.Client do
     do_fetch_by_project_selector(selector, state_names, nil, graphql_fun)
   end
 
+  @spec fetch_by_query_for_test(
+          map(),
+          nil | String.t(),
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_by_query_for_test(tracker, assignee_filter, graphql_fun)
+      when is_map(tracker) and is_function(graphql_fun, 2) do
+    fetch_by_query(tracker, assignee_filter, graphql_fun)
+  end
+
   defp fetch_by_configured_scope(tracker, state_names, assignee_filter) do
     cond do
       is_binary(tracker.project_id) ->
@@ -381,6 +392,65 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, :missing_linear_project_scope}
     end
   end
+
+  defp fetch_candidates_for_tracker(tracker, assignee_filter) do
+    cond do
+      tracker.issue_ids != [] ->
+        do_fetch_issue_states(tracker.issue_ids, assignee_filter)
+
+      query_configured?(tracker) ->
+        fetch_by_query(tracker, assignee_filter)
+
+      true ->
+        fetch_by_configured_scope(tracker, tracker.active_states, assignee_filter)
+    end
+  end
+
+  defp query_configured?(tracker) do
+    non_empty_string?(tracker.query) or non_empty_string?(tracker.query_file)
+  end
+
+  defp fetch_by_query(tracker, assignee_filter) do
+    fetch_by_query(tracker, assignee_filter, &graphql/2)
+  end
+
+  defp fetch_by_query(tracker, assignee_filter, graphql_fun) when is_function(graphql_fun, 2) do
+    with {:ok, query} <- query_source(tracker),
+         {:ok, body} <- graphql_fun.(query, %{stateNames: tracker.active_states}) do
+      decode_linear_response(body, assignee_filter)
+    end
+  end
+
+  defp query_source(%{query: query, query_file: query_file}) when is_binary(query) and is_binary(query_file) do
+    case String.trim(query) do
+      "" -> query_file_source(query_file)
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp query_source(%{query: query}) when is_binary(query) do
+    case String.trim(query) do
+      "" -> {:error, :missing_linear_query}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  defp query_source(%{query_file: query_file}) when is_binary(query_file), do: query_file_source(query_file)
+
+  defp query_source(_tracker), do: {:error, :missing_linear_query}
+
+  defp query_file_source(query_file) when is_binary(query_file) do
+    with path when path != "" <- String.trim(query_file),
+         {:ok, query} <- File.read(Path.expand(path)) do
+      {:ok, query}
+    else
+      "" -> {:error, :missing_linear_query_file}
+      {:error, reason} -> {:error, {:linear_query_file, reason}}
+    end
+  end
+
+  defp non_empty_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp non_empty_string?(_value), do: false
 
   defp do_fetch_by_project_selector(selector, state_names, assignee_filter) do
     do_fetch_by_project_selector(selector, state_names, assignee_filter, &graphql/2)
@@ -505,9 +575,11 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp do_fetch_issue_states_page(ids, assignee_filter, graphql_fun, acc_issues, issue_order_index) do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
+    {linear_ids, identifiers} = split_issue_refs(batch_ids)
 
     case graphql_fun.(@query_by_ids, %{
-           ids: batch_ids,
+           ids: linear_ids,
+           identifiers: identifiers,
            first: length(batch_ids),
            relationFirst: @issue_page_size
          }) do
@@ -522,6 +594,17 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  defp split_issue_refs(issue_refs) when is_list(issue_refs) do
+    Enum.reduce(issue_refs, {[], []}, fn issue_ref, {linear_ids, identifiers} ->
+      if uuid?(issue_ref) do
+        {[issue_ref | linear_ids], identifiers}
+      else
+        {linear_ids, [issue_ref | identifiers]}
+      end
+    end)
+    |> then(fn {linear_ids, identifiers} -> {Enum.reverse(linear_ids), Enum.reverse(identifiers)} end)
+  end
+
   defp issue_order_index(ids) when is_list(ids) do
     ids
     |> Enum.with_index()
@@ -533,9 +616,16 @@ defmodule SymphonyElixir.Linear.Client do
     fallback_index = map_size(issue_order_index)
 
     Enum.sort_by(issues, fn
-      %Issue{id: issue_id} -> Map.get(issue_order_index, issue_id, fallback_index)
-      _ -> fallback_index
+      %Issue{id: issue_id, identifier: identifier} ->
+        Map.get(issue_order_index, issue_id) || Map.get(issue_order_index, identifier, fallback_index)
+
+      _ ->
+        fallback_index
     end)
+  end
+
+  defp uuid?(value) when is_binary(value) do
+    Regex.match?(~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, value)
   end
 
   defp build_graphql_payload(query, variables, operation_name) do

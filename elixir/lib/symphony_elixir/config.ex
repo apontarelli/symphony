@@ -322,8 +322,12 @@ defmodule SymphonyElixir.Config do
   end
 
   defp linear_scope_configured?(tracker) do
-    is_binary(tracker.project_id) or is_binary(tracker.project_slug) or is_binary(tracker.team_key)
+    is_binary(tracker.project_id) or is_binary(tracker.project_slug) or is_binary(tracker.team_key) or
+      tracker.issue_ids != [] or non_empty_string?(tracker.query) or non_empty_string?(tracker.query_file)
   end
+
+  defp non_empty_string?(value) when is_binary(value), do: String.trim(value) != ""
+  defp non_empty_string?(_value), do: false
 
   defp selected_workflow_config do
     case Workflow.load(Workflow.selected_workflow_file_path()) do

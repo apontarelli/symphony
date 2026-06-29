@@ -3,12 +3,13 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with a manifest.
   """
 
-  alias SymphonyElixir.LogFile
+  alias SymphonyElixir.{LocalRun, LogFile}
   alias SymphonyElixir.ReviewRecords.Command, as: ReviewRecordsCommand
   alias SymphonyElixir.RunSetup
   alias SymphonyElixir.SetupMigration
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
+  @acknowledgement_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
   @switches [
     {@acknowledgement_switch, :boolean},
     logs_root: :string,
@@ -115,7 +116,13 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]\n       symphony run <name> [--config-root <path>] [--dry-run] [--i-understand-that-this-will-be-running-without-the-usual-guardrails]\n       symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]"
+    [
+      "Usage: symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]",
+      "       symphony run [target...] [--repo <path>] [--config-root <path>] [--setup <name>] [--save <name>] [--dry-run] [--yes]",
+      "       symphony run <name> [--config-root <path>] [--dry-run] [--i-understand-that-this-will-be-running-without-the-usual-guardrails]",
+      "       symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]"
+    ]
+    |> Enum.join("\n")
   end
 
   defp default_workflow_path(_deps), do: Path.expand("symphony.yml")
@@ -137,6 +144,16 @@ defmodule SymphonyElixir.CLI do
   defp workflow_command?(_args), do: false
 
   defp evaluate_run(args, deps) do
+    case legacy_saved_setup_args(args) do
+      {:legacy, name, opts} ->
+        run_saved_setup(name, opts, deps)
+
+      :not_legacy ->
+        evaluate_local_run(args, deps)
+    end
+  end
+
+  defp legacy_saved_setup_args(args) do
     switches = [
       {@acknowledgement_switch, :boolean},
       config_root: :string,
@@ -148,11 +165,47 @@ defmodule SymphonyElixir.CLI do
 
     case OptionParser.parse(args, strict: switches) do
       {opts, [name], []} ->
-        run_saved_setup(name, opts, deps)
+        if legacy_saved_setup?(name, opts) do
+          {:legacy, name, opts}
+        else
+          :not_legacy
+        end
 
-      _ ->
-        {:error, usage_message()}
+      {_opts, _rest, []} ->
+        :not_legacy
+
+      {_opts, _rest, _invalid} ->
+        :not_legacy
     end
+  end
+
+  defp legacy_saved_setup?(name, opts) do
+    case RunSetup.read(name, config_opts(opts)) do
+      {:ok, setup, _setup_path} -> legacy_saved_setup_shape?(setup)
+      {:error, _reason} -> false
+    end
+  end
+
+  defp legacy_saved_setup_shape?(%{"repo" => repo}) when is_map(repo), do: true
+  defp legacy_saved_setup_shape?(_setup), do: false
+
+  defp evaluate_local_run(args, deps) do
+    local_run_args = Enum.reject(args, &(&1 == @acknowledgement_flag))
+
+    with {:ok, result} <- LocalRun.evaluate(local_run_args, Map.get(deps, :local_run_deps, %{})),
+         :ok <- maybe_acknowledge_local_run_start(result, args) do
+      if result.start?, do: run(result.workflow_path, [], deps), else: {:ok, result.preview}
+    end
+  end
+
+  defp maybe_acknowledge_local_run_start(%{start?: true}, args) do
+    require_guardrails_acknowledgement(local_run_acknowledgement_opts(args))
+  end
+
+  defp maybe_acknowledge_local_run_start(_result, _args), do: :ok
+
+  defp local_run_acknowledgement_opts(args) do
+    if Enum.member?(args, @acknowledgement_flag), do: [{@acknowledgement_switch, true}], else: []
   end
 
   defp run_saved_setup(name, opts, deps) do

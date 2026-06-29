@@ -414,7 +414,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(merged, & &1.identifier) == ["MT-1", "MT-2", "MT-3"]
   end
 
-  test "linear client paginates issue state fetches by id beyond one page" do
+  test "linear client paginates issue state fetches by identifier beyond one page" do
     issue_ids = Enum.map(1..55, &"issue-#{&1}")
     first_batch_ids = Enum.take(issue_ids, 50)
     second_batch_ids = Enum.drop(issue_ids, 50)
@@ -439,7 +439,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       body = %{
         "data" => %{
           "issues" => %{
-            "nodes" => Enum.map(variables.ids, raw_issue)
+            "nodes" => Enum.map(variables.identifiers, raw_issue)
           }
         }
       }
@@ -451,10 +451,73 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query, %{ids: ^first_batch_ids, first: 50, relationFirst: 50}}
+    assert_receive {:fetch_issue_states_page, query,
+                    %{
+                      ids: [],
+                      identifiers: ^first_batch_ids,
+                      first: 50,
+                      relationFirst: 50
+                    }}
+
     assert query =~ "SymphonyLinearIssuesById"
 
-    assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+    assert_receive {:fetch_issue_states_page, ^query,
+                    %{
+                      ids: [],
+                      identifiers: ^second_batch_ids,
+                      first: 5,
+                      relationFirst: 50
+                    }}
+  end
+
+  test "linear client sends UUIDs as ids and issue keys as identifiers" do
+    uuid = "11111111-1111-1111-1111-111111111111"
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_issue_states_page, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => uuid,
+                 "identifier" => "SID-999",
+                 "title" => "Internal ID lookup",
+                 "description" => "Use Linear UUID.",
+                 "state" => %{"name" => "Todo"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-374",
+                 "identifier" => "SID-374",
+                 "title" => "Identifier lookup",
+                 "description" => "Use issue identifier.",
+                 "state" => %{"name" => "Todo"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ]
+           }
+         }
+       }}
+    end
+
+    assert {:ok, issues} = Client.fetch_issue_states_by_ids_for_test([uuid, "SID-374"], graphql_fun)
+
+    assert Enum.map(issues, & &1.id) == [uuid, "issue-374"]
+
+    assert_receive {:fetch_issue_states_page, query,
+                    %{
+                      ids: [^uuid],
+                      identifiers: ["SID-374"],
+                      first: 2,
+                      relationFirst: 50
+                    }}
+
+    assert query =~ "identifier: {in: $identifiers}"
   end
 
   test "linear client fetches URL-style project slugs by Linear slugId suffix" do
@@ -573,6 +636,57 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert query =~ "SymphonyLinearPollByTeamKey"
     assert query =~ "team: {key: {eq: $teamKey}}"
+  end
+
+  test "linear client uses query file when inline query is blank" do
+    query_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-linear-query-#{System.unique_integer([:positive])}"
+      )
+
+    query_path = Path.join(query_root, "linear.graphql")
+    query = "query QueryFileIssues($stateNames: [String!]!) { issues { nodes { id } } }"
+    File.mkdir_p!(query_root)
+    File.write!(query_path, query)
+
+    graphql_fun = fn used_query, variables ->
+      send(self(), {:fetch_query, used_query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-1",
+                 "identifier" => "SID-374",
+                 "title" => "Build interactive local run setup builder",
+                 "description" => "Use query-file scope.",
+                 "priority" => 2,
+                 "state" => %{"name" => "Todo"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ]
+           }
+         }
+       }}
+    end
+
+    try do
+      assert {:ok, [issue]} =
+               Client.fetch_by_query_for_test(
+                 %{query: " ", query_file: query_path, active_states: ["Todo"]},
+                 nil,
+                 graphql_fun
+               )
+
+      assert issue.identifier == "SID-374"
+      assert_receive {:fetch_query, ^query, %{stateNames: ["Todo"]}}
+    after
+      File.rm_rf(query_root)
+    end
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
@@ -1050,6 +1164,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: [" "])
     assert Config.settings!().tracker.required_labels == [""]
+
+    assert {:ok, selector_settings} =
+             Schema.parse(%{
+               tracker: %{
+                 kind: "linear",
+                 api_key: "token",
+                 issue_ids: [" SID-374 ", "", "SID-374", "SID-375"],
+                 query: "query { issues { nodes { id } } }",
+                 query_file: "linear-query.graphql"
+               },
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert selector_settings.tracker.issue_ids == ["SID-374", "SID-375"]
+    assert selector_settings.tracker.query == "query { issues { nodes { id } } }"
+    assert selector_settings.tracker.query_file == "linear-query.graphql"
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"

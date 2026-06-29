@@ -172,6 +172,9 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "project_slug",
       "team_key",
       "workspace_slug",
+      "issue_ids",
+      "query",
+      "query_file",
       "active_states",
       "terminal_states",
       "polling",
@@ -195,7 +198,12 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "read_timeout_ms",
       "stall_timeout_ms",
       "execution_profiles",
+      "run_target",
+      "mode",
+      "capacity",
       "type",
+      "issue_ids",
+      "discovery",
       "networkAccess"
     ]
 

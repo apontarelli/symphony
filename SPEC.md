@@ -409,7 +409,9 @@ Loader behavior:
 capability names, issue markers, and selected Symphony-owned workflow modules, then compiles to the
 runtime workflow object used by the daemon. It MUST NOT contain active run targets, workspace or log
 roots, polling settings, agent capacity, concrete runners, saved run setups, or host/deployment
-runtime settings. Those fields belong to local config or run setup sources.
+runtime settings. Those fields belong to local config or run setup sources. Local runtime tracker
+scope MAY select a Linear project, team, explicit issue ID batch, or implementation-defined Linear
+query source.
 
 Manifest fields for the default preset:
 
@@ -1280,6 +1282,8 @@ it.
 
 Runtime tracker scope, workspace/log roots, polling, agent capacity, concrete runners, saved run
 setups, and host/deployment settings MUST live in local runtime setup, not in `symphony.yml`.
+Runtime tracker scope MAY target a Linear project, team, explicit issue ID batch, or
+implementation-defined Linear query source.
 
 CLI commands:
 
