@@ -252,9 +252,19 @@ defmodule SymphonyElixir.Config do
 
   defp runtime_approval_policy(default_approval_policy, runner_policy_overrides) do
     case Map.fetch(runner_policy_overrides, "approval_policy") do
-      {:ok, value} when is_binary(value) or is_map(value) -> {:ok, normalize_map_keys(value)}
-      {:ok, value} -> {:error, {:invalid_policy_runner_approval_policy, value}}
-      :error -> {:ok, default_approval_policy}
+      {:ok, value} when is_binary(value) or is_map(value) ->
+        normalized = normalize_map_keys(value)
+
+        case Schema.codex_action_approval_policy_error(normalized) do
+          nil -> {:ok, normalized}
+          :on_request -> {:error, {:invalid_policy_runner_approval_policy, :on_request}}
+        end
+
+      {:ok, value} ->
+        {:error, {:invalid_policy_runner_approval_policy, value}}
+
+      :error ->
+        {:ok, default_approval_policy}
     end
   end
 

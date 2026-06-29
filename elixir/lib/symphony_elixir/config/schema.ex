@@ -35,7 +35,7 @@ defmodule SymphonyElixir.Config.Schema do
     "kind" => "codex_app_server",
     "command" => ["codex", "app-server"],
     "model" => "gpt-5.5",
-    "approval_policy" => "on-request",
+    "approval_policy" => "never",
     "thread_sandbox" => "workspace-write",
     "turn_timeout_ms" => 3_600_000,
     "read_timeout_ms" => 30_000,
@@ -244,7 +244,7 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     defstruct command: "codex app-server",
               model: "gpt-5.5",
-              approval_policy: "on-request",
+              approval_policy: "never",
               thread_sandbox: "workspace-write",
               turn_sandbox_policy: nil,
               turn_timeout_ms: 3_600_000,
@@ -767,6 +767,21 @@ defmodule SymphonyElixir.Config.Schema do
   @spec default_runners() :: map()
   def default_runners, do: @default_runners
 
+  @doc false
+  @spec codex_action_approval_policy_error(term()) :: :on_request | :invalid_type | nil
+  def codex_action_approval_policy_error(value) when is_binary(value) do
+    case String.trim(value) do
+      "on-request" -> :on_request
+      _policy -> nil
+    end
+  end
+
+  def codex_action_approval_policy_error(value) when is_map(value) do
+    if Map.has_key?(normalize_keys(value), "on-request"), do: :on_request
+  end
+
+  def codex_action_approval_policy_error(_value), do: :invalid_type
+
   defp reject_legacy_codex_config(%{"codex" => _config}) do
     {:error, "runtime.codex is not supported; use runtime.runners.<name> (for Codex use runtime.runners.codex)"}
   end
@@ -854,7 +869,7 @@ defmodule SymphonyElixir.Config.Schema do
       validate_runner_kind(name, Map.get(runner, "kind")),
       validate_runner_command(name, Map.get(runner, "command")),
       validate_runner_string(name, "model", Map.get(runner, "model")),
-      validate_runner_string_or_map(name, "approval_policy", Map.get(runner, "approval_policy")),
+      validate_runner_approval_policy(name, Map.get(runner, "approval_policy")),
       validate_runner_string(name, "thread_sandbox", Map.get(runner, "thread_sandbox")),
       validate_runner_map(name, "turn_sandbox_policy", Map.get(runner, "turn_sandbox_policy")),
       validate_runner_positive_integer(name, "turn_timeout_ms", Map.get(runner, "turn_timeout_ms")),
@@ -904,13 +919,20 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_runner_command(name, _value), do: "runtime.runners.#{name}.command must be a list"
 
+  defp validate_runner_approval_policy(name, value) do
+    format_codex_action_approval_policy_error("runtime.runners.#{name}.approval_policy", value)
+  end
+
+  defp format_codex_action_approval_policy_error(path, value) do
+    case codex_action_approval_policy_error(value) do
+      :on_request -> "#{path} on-request is not supported; Symphony agents are unattended"
+      :invalid_type -> "#{path} must be a string or map"
+      nil -> nil
+    end
+  end
+
   defp validate_runner_string(_name, _field, value) when is_binary(value), do: nil
   defp validate_runner_string(name, field, _value), do: "runtime.runners.#{name}.#{field} must be a string"
-
-  defp validate_runner_string_or_map(_name, _field, value) when is_binary(value) or is_map(value), do: nil
-
-  defp validate_runner_string_or_map(name, field, _value),
-    do: "runtime.runners.#{name}.#{field} must be a string or map"
 
   defp validate_runner_map(_name, _field, nil), do: nil
   defp validate_runner_map(_name, _field, value) when is_map(value), do: nil
@@ -1053,11 +1075,9 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_profile_runner_approval_policy(_name, _runner_name, nil), do: nil
 
-  defp validate_profile_runner_approval_policy(_name, _runner_name, value) when is_binary(value) or is_map(value),
-    do: nil
-
-  defp validate_profile_runner_approval_policy(name, runner_name, _value),
-    do: "#{name}.runners.#{runner_name}.approval_policy must be a string or map"
+  defp validate_profile_runner_approval_policy(name, runner_name, value) do
+    format_codex_action_approval_policy_error("#{name}.runners.#{runner_name}.approval_policy", value)
+  end
 
   defp validate_profile_runner_thread_sandbox(_name, _runner_name, nil), do: nil
 
@@ -1132,7 +1152,8 @@ defmodule SymphonyElixir.Config.Schema do
          {:ok, default_effective} <- apply_policy_overrides(%{}, default_policy, ["default"]),
          {:ok, policy} <- apply_selected_policy(default_effective, selected_policy, profile_name),
          {:ok, policy} <- apply_delivery_target_override(policy, locked_delivery_target),
-         :ok <- validate_resolved_delivery(policy, profile_name) do
+         :ok <- validate_resolved_delivery(policy, profile_name),
+         :ok <- validate_resolved_runner_policies(policy, profile_name) do
       apply_refinement_policies(profiles, policy, refinement_names, locked_delivery_target)
     end
   end
@@ -1178,7 +1199,8 @@ defmodule SymphonyElixir.Config.Schema do
     with {:ok, selected_policy} <- fetch_profile_policy(profiles, profile_name),
          {:ok, refined_policy} <- apply_policy_overrides(policy, selected_policy, [profile_name]),
          :ok <- validate_refinement_delivery_target(refined_policy, profile_name, locked_delivery_target),
-         :ok <- validate_resolved_delivery(refined_policy, profile_name) do
+         :ok <- validate_resolved_delivery(refined_policy, profile_name),
+         :ok <- validate_resolved_runner_policies(refined_policy, profile_name) do
       apply_refinement_policies(profiles, refined_policy, rest, locked_delivery_target)
     end
   end
@@ -1348,6 +1370,29 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp validate_resolved_runner_policies(policy, profile_name) do
+    case Map.get(policy, "runners") do
+      runners when is_map(runners) ->
+        validate_resolved_runner_policy_map(runners, profile_name)
+
+      _runners ->
+        :ok
+    end
+  end
+
+  defp validate_resolved_runner_policy_map(runners, profile_name) do
+    case Enum.find_value(runners, &resolved_runner_policy_error(&1, profile_name)) do
+      nil -> :ok
+      message -> {:error, {:invalid_resolved_runner_policy, message}}
+    end
+  end
+
+  defp resolved_runner_policy_error({runner_name, runner_policy}, profile_name) do
+    profile_name
+    |> validate_profile_runner_shape(to_string(runner_name), runner_policy)
+    |> List.first()
+  end
+
   defp valid_pr_target?(value), do: is_binary(value) and String.trim(value) != ""
 
   defp validate_refinement_delivery_target(_policy, _profile_name, nil), do: :ok
@@ -1411,6 +1456,8 @@ defmodule SymphonyElixir.Config.Schema do
   defp format_policy_resolution_error({:invalid_policy_add_field, path, expected}) do
     "#{path} cannot be merged with add_* policy field; #{expected}"
   end
+
+  defp format_policy_resolution_error({:invalid_resolved_runner_policy, message}), do: message
 
   defp format_policy_resolution_error({:invalid_policy_append_field, path, expected}) do
     "#{path} cannot be merged with append_* policy field; #{expected}"

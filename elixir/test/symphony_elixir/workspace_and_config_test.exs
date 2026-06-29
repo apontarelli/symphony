@@ -1330,7 +1330,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert runner["kind"] == "codex_app_server"
     assert runner["command"] == ["codex", "app-server"]
     assert runner["model"] == "gpt-5.5"
-    assert runner["approval_policy"] == "on-request"
+    assert runner["approval_policy"] == "never"
 
     assert runner["thread_sandbox"] == "workspace-write"
 
@@ -1398,7 +1398,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: explicit_root,
-      codex_approval_policy: "on-request",
+      codex_approval_policy: "never",
       codex_thread_sandbox: "workspace-write",
       codex_turn_sandbox_policy: %{
         type: "workspaceWrite",
@@ -1408,7 +1408,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     config = Config.settings!()
     runner = Config.default_runner!(config)
-    assert runner["approval_policy"] == "on-request"
+    assert runner["approval_policy"] == "never"
     assert runner["thread_sandbox"] == "workspace-write"
 
     assert Config.codex_turn_sandbox_policy(explicit_workspace) == %{
@@ -1468,6 +1468,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "")
     assert :ok = Config.validate!()
     assert Config.default_runner!()["approval_policy"] == ""
+
+    write_workflow_file!(Workflow.workflow_file_path(), codex_approval_policy: "on-request")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "runtime.runners.codex.approval_policy on-request is not supported"
 
     write_workflow_file!(Workflow.workflow_file_path(), codex_thread_sandbox: "")
     assert :ok = Config.validate!()
@@ -1745,6 +1749,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              })
 
     assert Schema.default_runner_config!(defaulted_settings)["command"] == ["codex", "app-server"]
+    assert Schema.default_runner_config!(defaulted_settings)["approval_policy"] == "never"
     assert Schema.default_runner_name(%Schema{agent: nil}) == "codex"
     assert {:error, {:unknown_default_runner, "codex"}} = Schema.default_runner_config(%Schema{runners: %{}})
 
@@ -1766,16 +1771,43 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       {%{runners: %{codex: %{command: "codex app-server"}}}, "runtime.runners.codex.command must be a list"},
       {%{runners: %{codex: %{model: 123}}}, "runtime.runners.codex.model must be a string"},
       {%{runners: %{codex: %{approval_policy: 123}}}, "runtime.runners.codex.approval_policy must be a string or map"},
+      {%{runners: %{codex: %{approval_policy: "on-request"}}}, "runtime.runners.codex.approval_policy on-request is not supported"},
+      {%{runners: %{codex: %{approval_policy: %{"on-request" => %{}}}}}, "runtime.runners.codex.approval_policy on-request is not supported"},
       {%{runners: %{codex: %{execution_profiles: "bad"}}}, "runtime.runners.codex.execution_profiles must be a map"},
       {%{runners: %{codex: %{stall_timeout_ms: -1}}}, "runtime.runners.codex.stall_timeout_ms must be a non-negative integer"},
       {%{runners: %{codex: %{unexpected: true}}}, "runtime.runners.codex.unexpected is not supported in v1"},
-      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, runners: %{codex: "bad"}}}}, "default.runners.codex must be a map"}
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, runners: %{codex: "bad"}}}}, "default.runners.codex must be a map"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, runners: %{codex: %{approval_policy: "on-request"}}}}}, "default.runners.codex.approval_policy on-request is not supported"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: %{approval_policy: "on-request"}}}}}, "default.runners.codex.approval_policy on-request is not supported"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: %{approval_policy: %{"on-request" => %{}}}}}}},
+       "default.runners.codex.approval_policy on-request is not supported"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: %{thread_sandbox: 123}}}}}, "default.runners.codex.thread_sandbox must be a string"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: %{turn_sandbox_policy: "bad"}}}}}, "default.runners.codex.turn_sandbox_policy must be a map"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: %{unexpected: true}}}}}, "default.runners.codex.unexpected is not supported in v1"},
+      {%{profiles: %{default: %{delivery: %{pr_target: "main"}, add_runners: %{codex: "bad"}}}}, "default.runners.codex must be a map"}
     ]
 
     for {config, expected_message} <- invalid_configs do
       config = Map.put_new(config, :profiles, %{default: %{delivery: %{pr_target: "main"}}})
       assert {:error, {:invalid_workflow_config, message}} = Schema.parse(config)
       assert message =~ expected_message
+    end
+
+    assert {:ok, _settings} =
+             Schema.parse(%{
+               profiles: %{
+                 default: %{
+                   delivery: %{pr_target: "main"},
+                   runners: %{codex: %{approval_policy: "never"}}
+                 }
+               }
+             })
+
+    for approval_policy <- ["on-request", %{"on-request" => %{}}] do
+      assert {:error, {:invalid_policy_runner_approval_policy, :on_request}} =
+               Config.codex_runtime_settings(nil,
+                 policy: %{"runners" => %{"codex" => %{"approval_policy" => approval_policy}}}
+               )
     end
   end
 
@@ -1823,7 +1855,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           delivery: %{pr_target: "main"},
           runners: %{
             codex: %{
-              approval_policy: "never",
+              approval_policy: %{custom_policy: %{sandbox_approval: false}},
               thread_sandbox: "danger-full-access",
               turn_sandbox_policy: %{type: "dangerFullAccess"}
             }
@@ -1838,7 +1870,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              Config.codex_runtime_settings(nil, policy: policy)
 
     assert runtime_settings == %{
-             approval_policy: "never",
+             approval_policy: %{"custom_policy" => %{"sandbox_approval" => false}},
              thread_sandbox: "danger-full-access",
              turn_sandbox_policy: %{"type" => "dangerFullAccess"}
            }

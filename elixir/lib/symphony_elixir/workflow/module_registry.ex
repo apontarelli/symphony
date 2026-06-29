@@ -186,7 +186,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "codex" => %{
             "kind" => "codex_app_server",
             "command" => ["codex", "app-server"],
-            "approval_policy" => "on-request",
+            "approval_policy" => "never",
             "thread_sandbox" => "workspace-write",
             "turn_timeout_ms" => 3_600_000,
             "read_timeout_ms" => 30_000,

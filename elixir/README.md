@@ -429,10 +429,10 @@ runtime:
 - The v1 core delivery policy only supports `delivery.pr_target`; `delivery.mode`,
   `delivery.base_ref`, `delivery.allow_main_merge`, and `delivery.require_feature_flag` are not
   supported core fields.
-- Safer Codex defaults are used when runner policy fields are omitted:
+- Unattended Codex defaults are used when runner policy fields are omitted:
   - `runtime.agent.default_runner` defaults to `codex`
   - `runtime.agent.max_concurrent_startups` defaults to `2`
-  - `runtime.runners.codex.approval_policy` defaults to `on-request`
+  - `runtime.runners.codex.approval_policy` defaults to `never`
   - `runtime.runners.codex.thread_sandbox` defaults to `workspace-write`
   - `runtime.runners.codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
@@ -444,7 +444,13 @@ runtime:
   - Worker machines still provide the Codex executable and authentication material. When
     `~/.codex/auth.json` exists for the worker user, Symphony links it into the harness home; it does
     not copy Symphony skills into `~/.agents` or `~/.codex`.
-- Supported `runtime.runners.codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, `granular`, and `never`; legacy object-form `reject` is not accepted by Codex CLI 0.128.0.
+- `runtime.runners.codex.approval_policy` controls Codex host action approvals for command execution
+  and file changes; it is separate from the model deciding that an issue needs a human/product
+  decision and updating the workpad or issue state. Symphony rejects `on-request` string and
+  object-form approval policies even when the targeted Codex app-server version supports them,
+  because unattended agents cannot service host action approval prompts. Other string or object-form
+  values depend on the targeted Codex app-server version; legacy object-form `reject` is not accepted
+  by Codex CLI 0.128.0.
 - Supported `runtime.runners.codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `runtime.runners.codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local

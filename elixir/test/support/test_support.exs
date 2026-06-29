@@ -200,7 +200,7 @@ defmodule SymphonyElixir.TestSupport do
           runner_kind: "codex_app_server",
           codex_command: "codex app-server",
           codex_model: "gpt-5.5",
-          codex_approval_policy: "on-request",
+          codex_approval_policy: "never",
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,
           codex_turn_timeout_ms: 3_600_000,

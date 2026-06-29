@@ -979,38 +979,58 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server fails when command execution approval is required under safer defaults" do
+  test "app server auto-approves command execution approval requests under unattended defaults" do
     test_root =
       Path.join(
         System.tmp_dir!(),
-        "symphony-elixir-app-server-approval-required-#{System.unique_integer([:positive])}"
+        "symphony-elixir-app-server-default-auto-approve-#{System.unique_integer([:positive])}"
       )
 
     try do
       workspace_root = Path.join(test_root, "workspaces")
       workspace = Path.join(workspace_root, "MT-89")
       codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-default-auto-approve.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_TRACE", trace_file)
       File.mkdir_p!(workspace)
 
       File.write!(codex_binary, """
       #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_TRACE:-/tmp/codex-default-auto-approve.trace}"
       count=0
-      while IFS= read -r _line; do
+      while IFS= read -r line; do
         count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
 
         case "$count" in
           1)
             printf '%s\\n' '{"id":1,"result":{}}'
             ;;
           2)
-            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
             ;;
           3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
+            ;;
+          4)
             printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-89"}}}'
             printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"gh pr view","cwd":"/tmp","reason":"need approval"}}'
             ;;
+          5)
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
           *)
-            sleep 1
+            exit 0
             ;;
         esac
       done
@@ -1024,12 +1044,119 @@ defmodule SymphonyElixir.AppServerTest do
       )
 
       issue = %Issue{
-        id: "issue-approval-required",
+        id: "issue-default-auto-approve",
         identifier: "MT-89",
-        title: "Approval required",
-        description: "Ensure safer defaults do not auto approve requests",
+        title: "Default auto approve request",
+        description: "Ensure unattended defaults handle app-server approval requests automatically",
         state: "In Progress",
         url: "https://example.org/issues/MT-89",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Handle approval request", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["method"] == "thread/start" &&
+                   get_in(payload, ["params", "approvalPolicy"]) == "never"
+               else
+                 false
+               end
+             end)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 99 and payload["result"] == %{"decision" => "acceptForSession"}
+               else
+                 false
+               end
+             end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server surfaces command execution approval requests when approval policy is not never" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-non-never-approval-required-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-90")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-non-never-approval-required.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEX_NON_NEVER_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEX_NON_NEVER_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEX_NON_NEVER_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEX_NON_NEVER_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEX_NON_NEVER_TRACE:-/tmp/codex-non-never-approval-required.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-90"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-90"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"gh pr view","cwd":"/tmp","reason":"need approval"}}'
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "future-policy"
+      )
+
+      issue = %Issue{
+        id: "issue-non-never-approval-required",
+        identifier: "MT-90",
+        title: "Non-never approval request",
+        description: "Ensure non-never policies surface app-server approval requests",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-90",
         labels: ["backend"]
       }
 
@@ -1037,6 +1164,36 @@ defmodule SymphonyElixir.AppServerTest do
                AppServer.run(workspace, "Handle approval request", issue)
 
       assert payload["method"] == "item/commandExecution/requestApproval"
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["method"] == "thread/start" &&
+                   get_in(payload, ["params", "approvalPolicy"]) == "future-policy"
+               else
+                 false
+               end
+             end)
+
+      refute Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 payload =
+                   line
+                   |> String.trim_leading("JSON:")
+                   |> Jason.decode!()
+
+                 payload["id"] == 99 and Map.has_key?(payload, "result")
+               else
+                 false
+               end
+             end)
     after
       File.rm_rf(test_root)
     end

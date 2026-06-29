@@ -3240,7 +3240,7 @@ defmodule SymphonyElixir.CoreTest do
                  |> Jason.decode!()
                  |> then(fn payload ->
                    payload["method"] == "thread/start" &&
-                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "never" &&
                      get_in(payload, ["params", "sandbox"]) == "workspace-write" &&
                      get_in(payload, ["params", "cwd"]) == canonical_workspace
                  end)
@@ -3266,7 +3266,7 @@ defmodule SymphonyElixir.CoreTest do
                  |> then(fn payload ->
                    payload["method"] == "turn/start" &&
                      get_in(payload, ["params", "cwd"]) == canonical_workspace &&
-                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "never" &&
                      get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_sandbox_policy
                  end)
                else
@@ -3426,7 +3426,7 @@ defmodule SymphonyElixir.CoreTest do
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         codex_command: "#{codex_binary} app-server",
-        codex_approval_policy: "on-request",
+        codex_approval_policy: "never",
         codex_thread_sandbox: "workspace-write",
         codex_turn_sandbox_policy: %{
           type: "workspaceWrite",
@@ -3455,7 +3455,7 @@ defmodule SymphonyElixir.CoreTest do
                  |> Jason.decode!()
                  |> then(fn payload ->
                    payload["method"] == "thread/start" &&
-                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "never" &&
                      get_in(payload, ["params", "sandbox"]) == "workspace-write"
                  end)
                else
@@ -3475,7 +3475,7 @@ defmodule SymphonyElixir.CoreTest do
                  |> Jason.decode!()
                  |> then(fn payload ->
                    payload["method"] == "turn/start" &&
-                     get_in(payload, ["params", "approvalPolicy"]) == "on-request" &&
+                     get_in(payload, ["params", "approvalPolicy"]) == "never" &&
                      get_in(payload, ["params", "sandboxPolicy"]) == expected_turn_policy
                  end)
                else
