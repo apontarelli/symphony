@@ -88,6 +88,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:team_key, :string)
       field(:workspace_slug, :string)
       field(:assignee, :string)
+      field(:issue_ids, {:array, :string}, default: [])
+      field(:query, :string)
+      field(:query_file, :string)
       field(:required_labels, {:array, :string}, default: [])
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress", "Merging", "Rework"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
@@ -107,6 +110,9 @@ defmodule SymphonyElixir.Config.Schema do
           :team_key,
           :workspace_slug,
           :assignee,
+          :issue_ids,
+          :query,
+          :query_file,
           :required_labels,
           :active_states,
           :terminal_states
@@ -116,6 +122,12 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:required_labels, fn labels ->
         labels
         |> Enum.map(&(String.trim(&1) |> String.downcase()))
+        |> Enum.uniq()
+      end)
+      |> update_change(:issue_ids, fn ids ->
+        ids
+        |> Enum.map(&String.trim/1)
+        |> Enum.reject(&(&1 == ""))
         |> Enum.uniq()
       end)
     end

@@ -6,7 +6,7 @@ defmodule SymphonyElixir.RunSetup do
   alias SymphonyElixir.Workflow.Renderer
 
   @name_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
-  @tracker_target_keys ~w(project_id project_slug team_key workspace_slug assignee)
+  @tracker_target_keys ~w(project_id project_slug team_key workspace_slug assignee issue_ids query query_file)
 
   @type setup :: map()
 

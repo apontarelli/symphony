@@ -54,6 +54,32 @@ defmodule SymphonyElixir.CoreTest do
 
     assert {:error, :missing_linear_project_scope} = Config.validate!()
 
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    System.put_env("LINEAR_API_KEY", "token")
+
+    try do
+      File.write!(Workflow.workflow_file_path(), """
+      project:
+        repository: https://github.com/apontarelli/symphony
+      delivery:
+        pr_target: main
+      tracker:
+        kind: linear
+        api_key: "$LINEAR_API_KEY"
+        project_slug: null
+        query: " "
+        query_file: null
+      profiles:
+        default:
+          delivery:
+            pr_target: main
+      """)
+
+      assert {:error, :missing_linear_project_scope} = Config.validate!()
+    after
+      restore_env("LINEAR_API_KEY", previous_linear_api_key)
+    end
+
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: "project",
       codex_command: ""

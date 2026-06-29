@@ -128,6 +128,20 @@ It keeps local shell glue in this repo instead of dotfiles, resolves local runti
 optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
 and passes the raw escript's local-run acknowledgement flag.
 
+For first-run local use, prefer the interactive builder:
+
+```bash
+export LINEAR_API_KEY=...
+../bin/symphony run --repo /path/to/repo --no-env-file
+../bin/symphony run SID-123 SID-124 --repo /path/to/repo --no-env-file
+../bin/symphony run my-saved-setup --no-env-file
+```
+
+`symphony run` creates `~/.config/symphony/config.yml` if it is missing, using
+`~/dev/symphony-workspaces` as the default workspace root and `light`, `normal`, and `swarm` capacity
+profiles. The builder previews the resolved run setup before confirmation and can save named setups
+to `~/.config/symphony/runs/<name>.yml`. Explicit issue IDs use issue-batch mode by default.
+
 When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; it does not use the
 checked-in setup-only `symphony.yml` to start the daemon.
 
@@ -363,6 +377,9 @@ Notes:
 - Runtime `tracker.required_labels` remains available in local config or run setup. When set, an
   issue must have every configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace.
+- Runtime `tracker.issue_ids` limits dispatch to explicit Linear issue identifiers or internal IDs.
+  Runtime `tracker.query` and `tracker.query_file` can supply a Linear GraphQL query that returns the
+  standard `issues.nodes` shape.
 - `delivery.pr_target` names the Git PR target/base branch. Additional profiles may override the
   compiled `default` profile during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list

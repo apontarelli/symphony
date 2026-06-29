@@ -82,14 +82,21 @@ mise exec -- ./bin/symphony workflow check --repo /path/to/target-repo
 mise exec -- ./bin/symphony workflow print --repo /path/to/target-repo --compiled
 ```
 
-To start the service from this checkout, select a local run setup that supplies tracker target,
-capacity, and repo reference, while `~/.config/symphony/config.yml` supplies operator defaults such
-as workspace root, eligible states, deployment ceilings, polling, and runner settings. First use
-creates a default config with workspace root `~/dev/symphony-workspaces`. Saved run setups live under
-`~/.config/symphony/runs/<name>.yml`.
+For local solo runs, use `symphony run` to build or load a saved local run setup instead of
+hand-writing runtime YAML. First use creates `~/.config/symphony/config.yml` with operator defaults
+such as workspace root, capacity profiles, deployment ceilings, polling, and runner settings. Saved
+named setups live under `~/.config/symphony/runs/<name>.yml`.
 
-`setup migrate` intentionally requires an explicit `--repo` so the target repository never depends on
-the launcher's working directory.
+```bash
+export LINEAR_API_KEY=...
+../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run
+../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --no-env-file --dry-run
+../bin/symphony run my-saved-setup --no-env-file --dry-run
+```
+
+`setup migrate` can convert an existing checked-in runtime setup into local config plus a saved run
+setup. It intentionally requires an explicit `--repo` so the target repository never depends on the
+launcher's working directory.
 
 ```bash
 mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo --dry-run

@@ -39,6 +39,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.SetupMigration,
           SymphonyElixir.StatusDashboard,
           SymphonyElixir.LogFile,
+          SymphonyElixir.LocalRun,
           SymphonyElixir.Manifest,
           SymphonyElixir.Workspace,
           SymphonyElixirWeb.DashboardLive,

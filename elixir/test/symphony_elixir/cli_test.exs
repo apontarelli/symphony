@@ -192,6 +192,69 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:profile, "strict"}
   end
 
+  test "run command uses the local setup builder without starting the daemon on dry-run" do
+    repo = tmp_repo!("symphony-elixir-run")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      slug: symphony
+      name: Symphony
+      repository: https://github.com/apontarelli/symphony
+    delivery:
+      pr_target: main
+    """)
+
+    config_root = Path.join(repo, ".local-symphony")
+
+    deps = %{
+      file_regular?: fn _path -> flunk("dry-run local setup should not check a runtime manifest") end,
+      set_workflow_file_path: fn _path -> flunk("dry-run local setup should not start the daemon") end,
+      set_logs_root: fn _path -> flunk("dry-run local setup should not set logs") end,
+      set_server_port_override: fn _port -> flunk("dry-run local setup should not set ports") end,
+      set_profile_override: fn _profile -> flunk("dry-run local setup should not set profiles") end,
+      ensure_all_started: fn -> flunk("dry-run local setup should not start applications") end,
+      local_run_deps: %{home: fn -> repo end, cwd: fn -> repo end}
+    }
+
+    assert {:ok, output} =
+             CLI.evaluate(["run", "SID-374", "--repo", repo, "--config-root", config_root, "--dry-run"], deps)
+
+    assert output =~ "Run preview"
+    assert output =~ "Target: Issues SID-374"
+    assert output =~ "Mode: issue-batch"
+  end
+
+  test "local run startup requires the guardrail acknowledgement" do
+    repo = tmp_repo!("symphony-elixir-run-ack")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      slug: symphony
+      name: Symphony
+      repository: https://github.com/apontarelli/symphony
+    delivery:
+      pr_target: main
+    """)
+
+    deps = %{
+      file_regular?: fn _path -> flunk("unacknowledged local run should not check a runtime manifest") end,
+      set_workflow_file_path: fn _path -> flunk("unacknowledged local run should not start the daemon") end,
+      set_logs_root: fn _path -> flunk("unacknowledged local run should not set logs") end,
+      set_server_port_override: fn _port -> flunk("unacknowledged local run should not set ports") end,
+      set_profile_override: fn _profile -> flunk("unacknowledged local run should not set profiles") end,
+      ensure_all_started: fn -> flunk("unacknowledged local run should not start applications") end,
+      local_run_deps: %{home: fn -> repo end, cwd: fn -> repo end}
+    }
+
+    assert {:error, banner} =
+             CLI.evaluate(["run", "SID-374", "--repo", repo, "--config-root", Path.join(repo, ".local-symphony"), "--yes"], deps)
+
+    assert banner =~ "Codex will run without any guardrails."
+    assert banner =~ @ack_flag
+  end
+
   test "review-records commands list, show, and export without starting the daemon" do
     logs_root =
       Path.join(
@@ -304,8 +367,9 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "interval_ms"
   end
 
-  test "usage documents explicit migration repo and saved-run acknowledgement" do
-    assert {:error, usage} = CLI.evaluate(["run"], daemon_forbidden_deps())
+  test "usage documents run forms, explicit migration repo, and saved-run acknowledgement" do
+    assert {:error, usage} = CLI.evaluate(["--unknown"], daemon_forbidden_deps())
+    assert usage =~ "symphony run [target...]"
     assert usage =~ "symphony run <name>"
     assert usage =~ @ack_flag
     assert usage =~ "symphony setup migrate --repo <path>"
