@@ -43,6 +43,8 @@ defmodule SymphonyElixir.Orchestrator do
     Runtime state for the orchestrator polling loop.
     """
 
+    @type t :: %__MODULE__{}
+
     defstruct [
       :poll_interval_ms,
       :max_concurrent_agents,
@@ -61,7 +63,8 @@ defmodule SymphonyElixir.Orchestrator do
       blocked: %{},
       retry_attempts: %{},
       runtime_totals: nil,
-      runtime_rate_limits: nil
+      runtime_rate_limits: nil,
+      tracker_rate_limit: nil
     ]
   end
 
@@ -92,7 +95,8 @@ defmodule SymphonyElixir.Orchestrator do
           run_mode: RunSetup.mode(),
           issue_batch_limit: RunSetup.issue_batch_limit(),
           runtime_totals: @empty_runtime_totals,
-          runtime_rate_limits: nil
+          runtime_rate_limits: nil,
+          tracker_rate_limit: nil
         }
 
         if validate_startup?, do: run_terminal_workspace_cleanup()
@@ -311,80 +315,178 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_dispatch(%State{} = state) do
     state =
       state
-      |> reconcile_running_issues()
-      |> reconcile_blocked_issues()
+      |> reconcile_stalled_running_issues()
+      |> maybe_reconcile_tracker_state()
 
-    with :ok <- Config.validate!(),
+    with false <- tracker_backoff_active?(state),
+         :ok <- Config.validate!(),
          true <- dispatch_budget_available?(state),
          {:ok, resolution} <- Tracker.resolve_candidate_issues(),
          true <- available_slots(state) > 0 do
       resolution
       |> log_target_resolution_warnings()
-      |> choose_issues(state)
+      |> then(&choose_issues(&1, clear_tracker_rate_limit(state)))
     else
       {:error, reason} ->
-        Logger.error(dispatch_error_message(reason))
-        state
+        handle_tracker_fetch_error(state, reason, :candidate_fetch, fn ->
+          Logger.error(dispatch_error_message(reason))
+        end)
 
       false ->
+        state
+
+      true ->
         state
     end
   end
 
-  defp dispatch_error_message(reason) do
-    if Config.config_error?(reason) do
-      Config.format_error(reason)
+  defp maybe_reconcile_tracker_state(%State{} = state) do
+    if tracker_backoff_active?(state) do
+      state
     else
-      "Failed to fetch from Linear: #{inspect(reason)}"
+      state
+      |> clear_tracker_rate_limit()
+      |> reconcile_running_issues()
+      |> maybe_reconcile_blocked_issues()
     end
+  end
+
+  defp maybe_reconcile_blocked_issues(%State{} = state) do
+    if tracker_backoff_active?(state), do: state, else: reconcile_blocked_issues(state)
+  end
+
+  defp dispatch_error_message(reason) do
+    cond do
+      Config.config_error?(reason) ->
+        Config.format_error(reason)
+
+      tracker_rate_limited_error?(reason) ->
+        "Tracker rate limited: #{inspect(reason)}"
+
+      true ->
+        "Failed to fetch from Linear: #{inspect(reason)}"
+    end
+  end
+
+  defp handle_tracker_fetch_error(%State{} = state, reason, source, fallback_log_fun)
+       when is_atom(source) and is_function(fallback_log_fun, 0) do
+    if tracker_rate_limited_error?(reason) do
+      record_tracker_rate_limit(state, reason, source)
+    else
+      fallback_log_fun.()
+      state
+    end
+  end
+
+  defp tracker_rate_limited_error?({:linear_rate_limited, _details}), do: true
+  defp tracker_rate_limited_error?(_reason), do: false
+
+  defp record_tracker_rate_limit(%State{} = state, {:linear_rate_limited, details}, source) when is_map(details) do
+    now_ms = System.monotonic_time(:millisecond)
+    delay_ms = tracker_backoff_delay_ms(details)
+    limited_until_ms = now_ms + delay_ms
+    limited_until = DateTime.utc_now() |> DateTime.add(delay_ms, :millisecond) |> DateTime.truncate(:second)
+
+    tracker_rate_limit =
+      details
+      |> Map.take([:status, :retry_after_ms, :reset_at, :errors])
+      |> Map.merge(%{
+        reason: :tracker_rate_limited,
+        source: source,
+        limited_until_ms: limited_until_ms,
+        limited_until: DateTime.to_iso8601(limited_until),
+        retry_after_ms: delay_ms
+      })
+
+    Logger.warning("Tracker rate limited source=#{source} retry_after_ms=#{delay_ms} limited_until=#{tracker_rate_limit.limited_until}; skipping tracker reads until backoff elapses")
+
+    %{state | tracker_rate_limit: tracker_rate_limit}
+  end
+
+  defp record_tracker_rate_limit(%State{} = state, reason, source) do
+    record_tracker_rate_limit(state, {:linear_rate_limited, %{error: inspect(reason)}}, source)
+  end
+
+  defp tracker_backoff_delay_ms(details) when is_map(details) do
+    positive_integer(Map.get(details, :retry_after_ms)) || reset_delay_ms(details) ||
+      Config.settings!().polling.interval_ms
+  end
+
+  defp reset_delay_ms(%{reset_at: reset_at}) when is_binary(reset_at) do
+    case DateTime.from_iso8601(reset_at) do
+      {:ok, reset_at, _offset} -> max(0, DateTime.diff(reset_at, DateTime.utc_now(), :millisecond))
+      _ -> nil
+    end
+  end
+
+  defp reset_delay_ms(_details), do: nil
+
+  defp positive_integer(value) when is_integer(value) and value > 0, do: value
+  defp positive_integer(_value), do: nil
+
+  defp tracker_backoff_active?(%State{tracker_rate_limit: %{limited_until_ms: limited_until_ms}})
+       when is_integer(limited_until_ms) do
+    limited_until_ms > System.monotonic_time(:millisecond)
+  end
+
+  defp tracker_backoff_active?(_state), do: false
+
+  defp clear_tracker_rate_limit(%State{} = state) do
+    if tracker_backoff_active?(state), do: state, else: %{state | tracker_rate_limit: nil}
   end
 
   defp reconcile_running_issues(%State{} = state) do
     state = reconcile_stalled_running_issues(state)
     running_ids = Map.keys(state.running)
 
-    if running_ids == [] do
-      state
-    else
-      case Tracker.fetch_issue_states_by_ids(running_ids) do
-        {:ok, issues} ->
-          issues
-          |> reconcile_running_issue_states(
-            state,
-            active_state_set(),
-            terminal_state_set()
-          )
-          |> reconcile_missing_running_issue_ids(running_ids, issues)
+    case running_ids do
+      [] -> state
+      _ -> fetch_and_reconcile_running_issues(state, running_ids)
+    end
+  end
 
-        {:error, reason} ->
+  defp fetch_and_reconcile_running_issues(state, running_ids) do
+    case Tracker.fetch_issue_states_by_ids(running_ids) do
+      {:ok, issues} ->
+        issues
+        |> reconcile_running_issue_states(
+          clear_tracker_rate_limit(state),
+          active_state_set(),
+          terminal_state_set()
+        )
+        |> reconcile_missing_running_issue_ids(running_ids, issues)
+
+      {:error, reason} ->
+        handle_tracker_fetch_error(state, reason, :running_refresh, fn ->
           Logger.debug("Failed to refresh running issue states: #{inspect(reason)}; keeping active workers")
-
-          state
-      end
+        end)
     end
   end
 
   defp reconcile_blocked_issues(%State{} = state) do
     blocked_ids = Map.keys(state.blocked)
 
-    if blocked_ids == [] do
-      state
-    else
-      case Tracker.fetch_issue_states_by_ids(blocked_ids) do
-        {:ok, issues} ->
-          issues
-          |> reconcile_blocked_issue_states(
-            state,
-            active_state_set(),
-            terminal_state_set()
-          )
-          |> reconcile_missing_blocked_issue_ids(blocked_ids, issues)
+    case blocked_ids do
+      [] -> state
+      _ -> fetch_and_reconcile_blocked_issues(state, blocked_ids)
+    end
+  end
 
-        {:error, reason} ->
+  defp fetch_and_reconcile_blocked_issues(state, blocked_ids) do
+    case Tracker.fetch_issue_states_by_ids(blocked_ids) do
+      {:ok, issues} ->
+        issues
+        |> reconcile_blocked_issue_states(
+          clear_tracker_rate_limit(state),
+          active_state_set(),
+          terminal_state_set()
+        )
+        |> reconcile_missing_blocked_issue_ids(blocked_ids, issues)
+
+      {:error, reason} ->
+        handle_tracker_fetch_error(state, reason, :blocked_refresh, fn ->
           Logger.debug("Failed to refresh blocked issue states: #{inspect(reason)}; keeping blocked issues")
-
-          state
-      end
+        end)
     end
   end
 
@@ -434,6 +536,12 @@ defmodule SymphonyElixir.Orchestrator do
   def revalidate_issue_for_dispatch_for_test(%Issue{} = issue, issue_fetcher)
       when is_function(issue_fetcher, 1) do
     revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set())
+  end
+
+  @doc false
+  @spec record_tracker_rate_limit_for_test(State.t(), term(), atom()) :: State.t()
+  def record_tracker_rate_limit_for_test(%State{} = state, reason, source) when is_atom(source) do
+    record_tracker_rate_limit(state, reason, source)
   end
 
   @doc false
@@ -989,7 +1097,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp continue_or_halt_dispatch(state) do
-    if dispatch_budget_available?(state), do: {:cont, state}, else: {:halt, state}
+    if tracker_backoff_active?(state) or not dispatch_budget_available?(state) do
+      {:halt, state}
+    else
+      {:cont, state}
+    end
   end
 
   defp order_candidate_issues(%RunTarget.Resolution{ordering: :target, issues: issues}) when is_list(issues), do: issues
@@ -1169,8 +1281,9 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
-        state
+        handle_tracker_fetch_error(state, reason, :dispatch_revalidation, fn ->
+          Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
+        end)
     end
   end
 
@@ -1406,23 +1519,52 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_retry_issue(%State{} = state, issue_id, attempt, metadata) do
+    if tracker_backoff_active?(state) do
+      retry_tracker_backoff_issue(state, issue_id, attempt, metadata)
+    else
+      fetch_and_handle_retry_issue(state, issue_id, attempt, metadata)
+    end
+  end
+
+  defp fetch_and_handle_retry_issue(state, issue_id, attempt, metadata) do
     case Tracker.fetch_candidate_issues() do
       {:ok, issues} ->
+        state = clear_tracker_rate_limit(state)
+
         issues
         |> find_issue_by_id(issue_id)
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
       {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+        updated_state =
+          handle_tracker_fetch_error(state, reason, :retry_poll, fn ->
+            Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+          end)
 
         {:noreply,
          schedule_issue_retry(
-           state,
+           updated_state,
            issue_id,
            attempt + 1,
            Map.merge(metadata, %{error: "retry poll failed: #{inspect(reason)}"})
          )}
     end
+  end
+
+  defp retry_tracker_backoff_issue(%State{} = state, issue_id, attempt, metadata) do
+    remaining_ms = tracker_rate_limit_remaining_ms(state.tracker_rate_limit, System.monotonic_time(:millisecond))
+
+    Logger.warning("Retry poll skipped for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}; tracker_rate_limited retry_after_ms=#{remaining_ms}")
+
+    {:noreply,
+     schedule_issue_retry(
+       state,
+       issue_id,
+       attempt,
+       metadata
+       |> Map.merge(%{error: "tracker rate limited", retry_delay_ms: max(remaining_ms || 0, 1)})
+       |> Map.delete(:delay_type)
+     )}
   end
 
   defp handle_retry_issue_lookup(%Issue{} = issue, state, issue_id, attempt, metadata) do
@@ -1517,10 +1659,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      is_integer(metadata[:retry_delay_ms]) and metadata[:retry_delay_ms] > 0 ->
+        metadata[:retry_delay_ms]
+
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
 
@@ -2050,6 +2197,10 @@ defmodule SymphonyElixir.Orchestrator do
        handoff_routes: handoff_route_entries(state.handoff_routes),
        runtime_totals: state.runtime_totals,
        rate_limits: Map.get(state, :runtime_rate_limits),
+       tracker: %{
+         limited?: tracker_backoff_active?(state),
+         rate_limit: tracker_rate_limit_snapshot(state, now_ms)
+       },
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2072,6 +2223,28 @@ defmodule SymphonyElixir.Orchestrator do
        operations: ["poll", "reconcile"]
      }, state}
   end
+
+  defp tracker_rate_limit_snapshot(%State{tracker_rate_limit: nil}, _now_ms), do: nil
+
+  defp tracker_rate_limit_snapshot(%State{tracker_rate_limit: tracker_rate_limit}, now_ms)
+       when is_map(tracker_rate_limit) do
+    case tracker_rate_limit_remaining_ms(tracker_rate_limit, now_ms) do
+      remaining_ms when is_integer(remaining_ms) and remaining_ms > 0 ->
+        tracker_rate_limit
+        |> Map.drop([:limited_until_ms])
+        |> Map.put(:remaining_ms, remaining_ms)
+
+      _remaining_ms ->
+        nil
+    end
+  end
+
+  defp tracker_rate_limit_remaining_ms(%{limited_until_ms: limited_until_ms}, now_ms)
+       when is_integer(limited_until_ms) and is_integer(now_ms) do
+    max(0, limited_until_ms - now_ms)
+  end
+
+  defp tracker_rate_limit_remaining_ms(_tracker_rate_limit, _now_ms), do: nil
 
   defp blocked_issue_state(%{issue: %Issue{state: state}}), do: state
   defp blocked_issue_state(_metadata), do: nil

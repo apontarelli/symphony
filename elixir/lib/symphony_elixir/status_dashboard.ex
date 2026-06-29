@@ -318,6 +318,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              runtime_totals: runtime_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             tracker: Map.get(snapshot, :tracker),
              polling: Map.get(snapshot, :polling)
            }},
           update_token_samples(token_samples, now_ms, total_tokens)
@@ -335,6 +336,7 @@ defmodule SymphonyElixir.StatusDashboard do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, runtime_totals: runtime_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
+        tracker = Map.get(snapshot, :tracker)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         runtime_input_tokens = Map.get(runtime_totals, :input_tokens, 0)
@@ -364,6 +366,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(runtime_total_tokens)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           colorize("│ Tracker: ", @ansi_bold) <> format_tracker_status(tracker),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -576,6 +579,7 @@ defmodule SymphonyElixir.StatusDashboard do
              retrying: retrying,
              runtime_totals: runtime_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
+             tracker: Map.get(snapshot, :tracker),
              polling: Map.get(snapshot, :polling)
            }}
 
@@ -986,6 +990,31 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp in_bucket?(timestamp, bucket_start, bucket_end, false),
     do: timestamp >= bucket_start and timestamp < bucket_end
+
+  defp format_tracker_status(%{limited?: true, rate_limit: rate_limit}) when is_map(rate_limit) do
+    source = map_value(rate_limit, [:source, "source"]) || "unknown"
+    remaining_ms = map_value(rate_limit, [:remaining_ms, "remaining_ms"])
+
+    colorize("tracker_rate_limited", @ansi_orange) <>
+      colorize(" source=#{source}", @ansi_gray) <>
+      colorize(" retry_in=#{format_duration_ms(remaining_ms)}", @ansi_gray)
+  end
+
+  defp format_tracker_status(%{limited?: true}), do: colorize("tracker_rate_limited", @ansi_orange)
+  defp format_tracker_status(_tracker), do: colorize("ok", @ansi_green)
+
+  defp format_duration_ms(value) when is_integer(value) and value >= 1_000 do
+    seconds = div(value + 999, 1_000)
+
+    if seconds >= 60 do
+      "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
+    else
+      "#{seconds}s"
+    end
+  end
+
+  defp format_duration_ms(value) when is_integer(value) and value >= 0, do: "#{value}ms"
+  defp format_duration_ms(_value), do: "n/a"
 
   defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
 

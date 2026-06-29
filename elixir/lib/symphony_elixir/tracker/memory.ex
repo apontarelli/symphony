@@ -16,6 +16,8 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec resolve_candidate_issues(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_candidate_issues(%RunTarget{type: :issues, issue_ids: issue_ids} = target) do
+    send_event({:memory_tracker_resolve_candidate_issues, target})
+
     wanted_ids = MapSet.new(issue_ids)
 
     issues =
@@ -27,11 +29,15 @@ defmodule SymphonyElixir.Tracker.Memory do
   end
 
   def resolve_candidate_issues(target) do
+    send_event({:memory_tracker_resolve_candidate_issues, target})
+
     {:ok, RunTarget.Resolution.new(target, issue_entries(), [])}
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) do
+    send_event({:memory_tracker_fetch_issues_by_states, state_names})
+
     normalized_states =
       state_names
       |> Enum.map(&normalize_state/1)
@@ -45,12 +51,20 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
-    wanted_ids = MapSet.new(issue_ids)
+    send_event({:memory_tracker_fetch_issue_states_by_ids, issue_ids})
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
-       MapSet.member?(wanted_ids, id)
-     end)}
+    case configured_error(:fetch_issue_states_by_ids) do
+      nil ->
+        wanted_ids = MapSet.new(issue_ids)
+
+        {:ok,
+         Enum.filter(issue_entries(), fn %Issue{id: id} ->
+           MapSet.member?(wanted_ids, id)
+         end)}
+
+      error ->
+        {:error, error}
+    end
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
@@ -81,6 +95,11 @@ defmodule SymphonyElixir.Tracker.Memory do
 
     fallback = map_size(order)
     Enum.sort_by(issues, &Map.get(order, &1.id, fallback))
+  end
+
+  defp configured_error(operation) when is_atom(operation) do
+    errors = Application.get_env(:symphony_elixir, :memory_tracker_errors, %{})
+    Map.get(errors, operation) || Map.get(errors, Atom.to_string(operation))
   end
 
   defp send_event(message) do

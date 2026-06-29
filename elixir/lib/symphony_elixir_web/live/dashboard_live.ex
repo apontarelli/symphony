@@ -128,6 +128,35 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <section :if={@payload.tracker.limited} class="section-card tracker-limit-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Tracker rate limited</h2>
+              <p class="section-copy">
+                Linear reads are paused for <span class="numeric"><%= format_duration_ms(@payload.tracker.rate_limit.remaining_ms) %></span>.
+              </p>
+            </div>
+            <span class="state-badge state-badge-warning">
+              <%= @payload.tracker.rate_limit.source || "tracker" %>
+            </span>
+          </div>
+
+          <div class="tracker-limit-details">
+            <span>
+              Retry after
+              <strong class="numeric"><%= format_duration_ms(@payload.tracker.rate_limit.retry_after_ms) %></strong>
+            </span>
+            <span :if={@payload.tracker.rate_limit.limited_until}>
+              Until
+              <strong class="numeric"><%= format_timestamp(@payload.tracker.rate_limit.limited_until) %></strong>
+            </span>
+            <span :if={@payload.tracker.rate_limit.reset_at}>
+              Reset
+              <strong class="numeric"><%= format_timestamp(@payload.tracker.rate_limit.reset_at) %></strong>
+            </span>
+          </div>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>
@@ -754,6 +783,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp format_int(_value), do: "n/a"
+
+  defp format_duration_ms(value) when is_integer(value) and value >= 1_000 do
+    seconds = div(value, 1_000)
+
+    if seconds >= 60 do
+      "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
+    else
+      "#{seconds}s"
+    end
+  end
+
+  defp format_duration_ms(value) when is_integer(value) and value >= 0, do: "#{value}ms"
+  defp format_duration_ms(_value), do: "n/a"
 
   defp token_hotspot_text(nil), do: "No active token hotspot."
 

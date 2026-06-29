@@ -559,6 +559,11 @@ defmodule SymphonyElixir.ExtensionsTest do
                "output_tokens" => 8,
                "total_tokens" => 12
              },
+             "tracker" => %{
+               "status" => "ok",
+               "limited" => false,
+               "rate_limit" => nil
+             },
              "rate_limits_available" => true,
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
@@ -731,6 +736,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
     assert dashboard_css =~ ":root {"
     assert dashboard_css =~ ".status-badge-live"
+    assert dashboard_css =~ ".tracker-limit-card"
     assert dashboard_css =~ ".project-table"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
@@ -1017,6 +1023,40 @@ defmodule SymphonyElixir.ExtensionsTest do
     {:ok, _view, html} = live(build_conn(), "/")
     refute html =~ "Rate limits"
     refute html =~ "<pre class=\"code-panel\">"
+  end
+
+  test "dashboard renders tracker-limited status" do
+    orchestrator_name = Module.concat(__MODULE__, :TrackerLimitedDashboardOrchestrator)
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:tracker, %{
+        limited?: true,
+        rate_limit: %{
+          reason: :tracker_rate_limited,
+          source: :candidate_fetch,
+          retry_after_ms: 60_000,
+          remaining_ms: 42_000,
+          limited_until: "2030-01-01T00:00:00Z",
+          status: 400,
+          errors: [%{code: "RATELIMITED", message: "Rate limit exhausted"}]
+        }
+      })
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{queued: true, coalesced: false, requested_at: DateTime.utc_now(), operations: ["poll"]}
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Tracker rate limited"
+    assert html =~ "Linear reads are paused"
+    assert html =~ "candidate_fetch"
+    assert html =~ "42s"
   end
 
   test "dashboard treats stale active sessions as warnings and hides identification-only rate limits" do

@@ -355,6 +355,8 @@ Fields:
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `runtime_totals` (aggregate tokens + runtime seconds)
 - `runtime_rate_limits` (latest rate-limit snapshot from agent runtime events, when available)
+- `tracker_rate_limit` (source-of-truth tracker backoff state; `null` when tracker reads are
+  allowed, otherwise used to pause tracker reads while preserving running agent work)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -2431,6 +2433,11 @@ SHOULD return:
   - `total_tokens`
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
 - `rate_limits` (latest coding-agent rate limit payload, if available)
+- `tracker` (current tracker read status derived from `tracker_rate_limit`)
+  - `status` (`ok` or `tracker_rate_limited`)
+  - `limited` (boolean)
+  - `rate_limit` (`null` when not limited; otherwise includes `reason`, `source`,
+    `retry_after_ms`, `remaining_ms`, `limited_until`, `reset_at`, `status`, and `errors`)
 
 RECOMMENDED snapshot error modes:
 
@@ -2576,9 +2583,32 @@ Minimum endpoints:
         "total_tokens": 7400,
         "seconds_running": 1834.2
       },
-      "rate_limits": null
+      "rate_limits": null,
+      "tracker": {
+        "status": "tracker_rate_limited",
+        "limited": true,
+        "rate_limit": {
+          "reason": "tracker_rate_limited",
+          "source": "candidate_fetch",
+          "retry_after_ms": 60000,
+          "remaining_ms": 45231,
+          "limited_until": "2026-02-24T20:16:30Z",
+          "reset_at": "2026-02-24T20:16:30Z",
+          "status": 400,
+          "errors": [
+            {
+              "code": "RATELIMITED",
+              "message": "Rate limit exhausted"
+            }
+          ]
+        }
+      }
     }
     ```
+  - `tracker.status` is `ok` when tracker reads can proceed and `tracker_rate_limited` when the
+    orchestrator is backing off tracker reads.
+  - `tracker.limited` is the boolean form of that state. `tracker.rate_limit` is `null` unless
+    limited; when present, it carries the tracker backoff payload used by orchestrator state.
 
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information
@@ -2888,7 +2918,8 @@ function start_service():
     retry_attempts: {},
     completed: set(),
     runtime_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    runtime_rate_limits: null
+    runtime_rate_limits: null,
+    tracker_rate_limit: null
   }
 
   validation = validate_dispatch_config()

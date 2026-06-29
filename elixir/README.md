@@ -586,14 +586,17 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - LiveView for the dashboard at `/`
 - A compact control panel overview for freshness, running/retrying work, work errors,
-  config warnings, stale sessions, runtime, and token usage
+  config warnings, stale sessions, runtime, token usage, and tracker availability
 - A primary project status table for the configured tracker project plus runtime project rows
 - Running session detail with issue state, profile/target, runtime, last Codex update,
   copyable session ID, and token split
 - Handoff route detail with completion route, target state, product visual review evidence, and
   durable artifact references
+- Tracker-limited status in the dashboard, terminal status, and `/api/v1/state` when Linear
+  rate-limits GraphQL reads; `tracker.status = "tracker_rate_limited"` means Symphony is
+  preserving running work and pausing new tracker reads until the recorded backoff expires
 - Optional Admin details for runtime metadata and rate-limit diagnostics only when upstream
-  rate-limit data is present
+  runtime rate-limit data is present
 - JSON API for operational debugging under `/api/v1/*`
 - Bandit as the HTTP server
 - Phoenix dependency static assets for the LiveView client bootstrap
