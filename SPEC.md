@@ -1287,19 +1287,28 @@ implementation-defined Linear query source.
 
 CLI commands:
 
-- `symphony workflow init` creates `symphony.yml` from repo inspection. It MUST NOT overwrite an
+- `symphony setup init` creates `symphony.yml` from repo inspection. It MUST NOT overwrite an
   existing manifest unless the operator passes an explicit replacement flag.
-- `symphony workflow check` validates manifest schema, selected preset/modules, repo doc
+- `symphony setup check` validates manifest schema, selected preset/modules, repo doc
   entrypoints, validation command shape, VCS/delivery defaults, and configured harness readiness.
-- `symphony workflow print` prints the resolved preset/modules/defaults. It MAY include the
+- `symphony setup preview` prints the resolved preset/modules/defaults. It MAY include the
   compiled workflow config and prompt without writing generated prompt files into the target repo.
 - `symphony setup migrate` MAY migrate existing mixed manifests by extracting runtime/target fields
   into local operator config and a saved run setup. It MUST support a preview/dry-run mode, report
   every moved field, preserve moved values, and leave `symphony.yml` valid under the setup-only
   schema when applied.
+- `symphony workflow ...` MAY remain available as a one-release compatibility alias, but it SHOULD
+  print deprecation guidance that points operators to `symphony setup ...`.
 - `symphony run <name>` MAY resolve a saved run setup from operator storage, compose it with local
   config and the target repo manifest, and start the runtime without storing saved setup files in the
   target app repository.
+- `symphony run --preview` prints the resolved repo setup, local runtime setup, run target, eligible
+  states, run mode, capacity, runner/deployment, workspace root, restrictive flags, marker warnings,
+  and source provenance without starting the daemon.
+- `symphony run` prints the same preview and requires interactive TTY confirmation before side
+  effects. Noninteractive preview mode MUST NOT start the daemon.
+- Bare `symphony` MAY enter the run path only when the current directory contains a valid
+  `symphony.yml`; outside a repo setup directory it prints help.
 
 CLI validation failures MUST exit nonzero and point to the manifest field or missing repo/harness
 evidence with concise remediation.
@@ -3238,17 +3247,19 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 
 ### 17.7 CLI and Host Lifecycle
 
-- CLI or host config accepts an explicit manifest path argument (`path-to-symphony.yml`) or
-  equivalent setting
-- CLI accepts a positional manifest path argument
-- CLI uses `./symphony.yml` when no manifest path argument is provided
-- CLI errors on nonexistent explicit manifest path or missing default manifest
+- CLI or host config accepts an explicit run setup path argument (`--workflow path`) or equivalent
+  setting
+- CLI supports `setup init/check/preview` as the primary repo setup command family
+- CLI keeps `workflow init/check/print` as a deprecated one-release setup alias
+- CLI supports `run --preview` without starting the daemon
+- CLI uses bare `symphony` for interactive run setup only when `./symphony.yml` is a valid repo setup
+- CLI prints help outside a repo setup directory when no run setup is selected
 - CLI or host config accepts or derives the harness root
 - CLI can initialize a target repo `symphony.yml` without overwriting an existing manifest unless
   explicitly forced
 - CLI can check a target repo manifest and fail nonzero with field-level remediation for schema,
   module, doc, tracker scope, or configured harness problems
-- CLI can print the resolved workflow preset/modules/defaults and optionally include the compiled
+- CLI can preview the resolved workflow preset/modules/defaults and optionally include the compiled
   workflow config/prompt
 - CLI surfaces startup failure cleanly
 - CLI exits with success when application starts and shuts down normally

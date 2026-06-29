@@ -886,6 +886,55 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Orchestrator.should_dispatch_issue_for_test(candidate, state_with_released_startup)
   end
 
+  test "drain mode leaves the scheduler idle after an empty poll" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    SymphonyElixir.RunSetup.put_current(%{mode: :drain})
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 3,
+      max_concurrent_startups: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    assert {:noreply, updated} = Orchestrator.handle_info(:run_poll_cycle, state)
+    refute is_reference(updated.tick_timer_ref)
+    assert updated.next_poll_due_at_ms == nil
+    refute updated.poll_check_in_progress
+  after
+    SymphonyElixir.RunSetup.clear_current()
+  end
+
+  test "issue_batch mode stops polling when its dispatch limit is already reached and idle" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    SymphonyElixir.RunSetup.put_current(%{mode: :issue_batch, issue_batch_limit: 1})
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 3,
+      max_concurrent_startups: 1,
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{},
+      dispatched_issue_count: 1
+    }
+
+    assert {:noreply, updated} = Orchestrator.handle_info(:run_poll_cycle, state)
+    refute is_reference(updated.tick_timer_ref)
+    assert updated.next_poll_due_at_ms == nil
+    refute updated.poll_check_in_progress
+  after
+    SymphonyElixir.RunSetup.clear_current()
+  end
+
   test "issue ticket kind is derived from generic Symphony labels" do
     assert Issue.ticket_kind(%Issue{labels: [" Requirement "]}) == :requirement
     assert Issue.requirement?(%Issue{labels: ["requirement"]})

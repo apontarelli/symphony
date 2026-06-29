@@ -268,7 +268,7 @@ defmodule SymphonyElixir.Config do
   def format_error(:missing_linear_api_token), do: "Linear API token missing in selected workflow config"
 
   def format_error(:missing_linear_project_scope),
-    do: "Linear project_id, project_slug, or team_key missing in selected workflow config"
+    do: "Linear project_id, project_slug, team_key, issue_ids, query, or query_file missing in selected workflow config"
 
   def format_error(:missing_tracker_kind), do: "Tracker kind missing in selected workflow config"
 

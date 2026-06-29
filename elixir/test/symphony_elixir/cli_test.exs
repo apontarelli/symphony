@@ -6,6 +6,12 @@ defmodule SymphonyElixir.CLITest do
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
+  setup do
+    SymphonyElixir.RunSetup.clear_current()
+    on_exit(fn -> SymphonyElixir.RunSetup.clear_current() end)
+    :ok
+  end
+
   test "returns the guardrails acknowledgement banner when the flag is missing" do
     parent = self()
 
@@ -417,6 +423,241 @@ defmodule SymphonyElixir.CLITest do
     assert {:ok, _workflow} = Manifest.load(Path.join(repo, "symphony.yml"))
   end
 
+  test "setup commands use repo setup language" do
+    repo = tmp_repo!("symphony-elixir-setup")
+    File.write!(Path.join(repo, "README.md"), "repo docs
+")
+    File.write!(Path.join(repo, "AGENTS.md"), "repo instructions
+")
+
+    assert {:ok, init_output} = CLI.evaluate(["setup", "init", "--repo", repo])
+    assert init_output =~ "Created symphony.yml"
+
+    set_publish_repository!(repo, "https://github.com/example/setup-repo")
+
+    assert {:ok, check_output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert check_output =~ "Repo setup check passed"
+    assert check_output =~ "setup: #{Path.join(repo, "symphony.yml")}"
+    refute check_output =~ "Workflow check passed"
+
+    assert {:ok, preview_output} = CLI.evaluate(["setup", "preview", "--repo", repo])
+    assert preview_output =~ "Resolved repo setup"
+    assert preview_output =~ "publish target:"
+  end
+
+  test "setup preview relabels only the human summary before compiled workflow output" do
+    repo = tmp_repo!("symphony-elixir-setup-compiled")
+    File.write!(Path.join(repo, "README.md"), "repo docs\n")
+    File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
+
+    assert {:ok, _init_output} = CLI.evaluate(["setup", "init", "--repo", repo])
+    set_publish_repository!(repo, "https://github.com/example/setup-compiled-repo")
+
+    assert {:ok, %{config: config}} = Manifest.load(Path.join(repo, "symphony.yml"))
+    assert {:ok, output} = CLI.evaluate(["setup", "preview", "--repo", repo, "--compiled"])
+
+    assert output =~ "Resolved repo setup"
+    assert output =~ "setup: #{Path.join(repo, "symphony.yml")}"
+    assert output =~ "Compiled workflow"
+    assert output =~ Renderer.to_yaml(config)
+  end
+
+  test "setup preview usage keeps the public preview command spelling" do
+    assert {:error, usage} = CLI.evaluate(["setup", "preview", "--unknown"])
+    assert usage =~ "symphony setup preview"
+    refute usage =~ "symphony setup print"
+  end
+
+  test "workflow commands remain available with deprecation guidance" do
+    repo = tmp_repo!("symphony-elixir-workflow-deprecated")
+    File.write!(Path.join(repo, "README.md"), "repo docs
+")
+    File.write!(Path.join(repo, "AGENTS.md"), "repo instructions
+")
+
+    assert {:ok, _init_output} = CLI.evaluate(["setup", "init", "--repo", repo])
+    set_publish_repository!(repo, "https://github.com/example/workflow-repo")
+
+    assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert output =~ "`symphony workflow` is deprecated; use `symphony setup`."
+    assert output =~ "Workflow check passed"
+  end
+
+  test "run preview renders resolved setup without starting the daemon" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-preview", max_concurrent_agents: 4)
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        ensure_all_started: fn ->
+          send(parent, :started)
+          {:ok, [:symphony_elixir]}
+        end
+      })
+
+    assert {:ok, output} =
+             CLI.evaluate(
+               [
+                 "run",
+                 "--preview",
+                 "--workflow",
+                 runtime_path,
+                 "--mode",
+                 "drain",
+                 "--max-agents",
+                 "2",
+                 "--no-land",
+                 "--human-review-only"
+               ],
+               deps
+             )
+
+    assert output =~ "Run preview"
+    assert output =~ "repo setup:"
+    assert output =~ "runtime setup: #{runtime_path}"
+    assert output =~ "run target:"
+    assert output =~ "marker intersection:"
+    assert output =~ "eligible states: Todo, In Progress, Merging, Rework"
+    assert output =~ "mode: drain"
+    assert output =~ "max agents: 2 (ceiling: 4)"
+    assert output =~ "runner: codex (codex_app_server)"
+    assert output =~ "workspace root:"
+    assert output =~ "restrictive flags: human_review_only, no_land"
+    assert output =~ "source provenance:"
+    refute_received :started
+  end
+
+  test "run shared runtime switches dispatch to runtime setup when no local target is provided" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-shared-switch")
+    cwd = Path.dirname(runtime_path)
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        cwd: fn -> cwd end,
+        tty?: fn -> true end,
+        confirm: fn preview ->
+          send(parent, {:previewed, preview})
+          true
+        end,
+        set_server_port_override: fn port ->
+          send(parent, {:port, port})
+          :ok
+        end,
+        ensure_all_started: fn ->
+          send(parent, :started)
+          {:ok, [:symphony_elixir]}
+        end
+      })
+
+    assert :ok = CLI.evaluate(["run", "--port", "4001"], deps)
+    assert_received {:previewed, preview}
+    assert preview =~ "runtime setup: #{runtime_path}"
+    assert_received {:port, 4001}
+    assert_received :started
+  end
+
+  test "interactive run requires a TTY confirmation after preview" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-confirm")
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        tty?: fn -> true end,
+        confirm: fn preview ->
+          send(parent, {:previewed, preview})
+          true
+        end,
+        ensure_all_started: fn ->
+          send(parent, :started)
+          {:ok, [:symphony_elixir]}
+        end
+      })
+
+    assert :ok = CLI.evaluate(["run", "--workflow", runtime_path], deps)
+    assert_received {:previewed, preview}
+    assert preview =~ "Run preview"
+    assert_received :started
+  end
+
+  test "cancelled interactive run does not apply setup side effects" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-cancel")
+
+    deps =
+      cli_deps(%{
+        tty?: fn -> true end,
+        confirm: fn preview ->
+          assert preview =~ "Run preview"
+          false
+        end,
+        set_workflow_file_path: fn _path -> flunk("cancelled run should not set workflow path") end,
+        set_logs_root: fn _path -> flunk("cancelled run should not set logs root") end,
+        set_server_port_override: fn _port -> flunk("cancelled run should not set port") end,
+        set_profile_override: fn _profile -> flunk("cancelled run should not set profile") end,
+        ensure_all_started: fn -> flunk("cancelled run should not start") end
+      })
+
+    assert {:error, output} = CLI.evaluate(["run", "--workflow", runtime_path], deps)
+    assert output =~ "Run cancelled."
+    assert SymphonyElixir.RunSetup.current() == nil
+  after
+    SymphonyElixir.RunSetup.clear_current()
+  end
+
+  test "non-TTY run refuses to start after rendering preview" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-nontty")
+
+    deps =
+      cli_deps(%{
+        tty?: fn -> false end,
+        confirm: fn _preview -> flunk("non-TTY run should not ask for confirmation") end,
+        ensure_all_started: fn -> flunk("non-TTY run should not start") end
+      })
+
+    assert {:error, output} = CLI.evaluate(["run", "--workflow", runtime_path], deps)
+    assert output =~ "Run preview"
+    assert output =~ "Interactive confirmation requires a TTY"
+  end
+
+  test "capacity overrides above deployment ceilings fail before startup" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-capacity", max_concurrent_agents: 2)
+
+    deps =
+      cli_deps(%{
+        ensure_all_started: fn -> flunk("invalid capacity should not start") end
+      })
+
+    assert {:error, output} =
+             CLI.evaluate(["run", "--preview", "--workflow", runtime_path, "--max-agents", "3"], deps)
+
+    assert output =~ "capacity override exceeds deployment ceiling"
+    assert output =~ "max agents 3 > ceiling 2"
+  end
+
+  test "weakening safety flags fail before startup" do
+    runtime_path = tmp_runtime_setup!("symphony-elixir-run-weaken")
+
+    deps =
+      cli_deps(%{
+        ensure_all_started: fn -> flunk("weakening flags should not start") end
+      })
+
+    assert {:error, output} =
+             CLI.evaluate(["run", "--preview", "--workflow", runtime_path, "--skip-validation"], deps)
+
+    assert output =~ "refusing to weaken repo safety policy"
+    assert output =~ "--skip-validation"
+  end
+
+  test "bare invocation outside a repo setup directory prints help" do
+    cwd = tmp_repo!("symphony-elixir-no-setup")
+
+    assert {:ok, output} = CLI.evaluate([], cli_deps(%{cwd: fn -> cwd end}))
+    assert output =~ "Usage:"
+    assert output =~ "symphony setup"
+    assert output =~ "symphony run"
+  end
+
   test "workflow init creates a thin manifest from repo inspection" do
     repo = tmp_repo!("symphony-elixir-init")
     File.write!(Path.join(repo, "README.md"), "repo docs\n")
@@ -813,4 +1054,28 @@ defmodule SymphonyElixir.CLITest do
   end
 
   defp repo_root!, do: Path.expand("../../..", __DIR__)
+
+  defp tmp_runtime_setup!(prefix, overrides \\ []) do
+    root = tmp_repo!(prefix)
+    runtime_path = Path.join(root, "symphony.runtime.yml")
+    SymphonyElixir.TestSupport.write_manifest_file!(runtime_path, overrides)
+    runtime_path
+  end
+
+  defp cli_deps(overrides) do
+    Map.merge(
+      %{
+        file_regular?: &File.regular?/1,
+        set_workflow_file_path: fn _path -> :ok end,
+        set_logs_root: fn _path -> :ok end,
+        set_server_port_override: fn _port -> :ok end,
+        set_profile_override: fn _profile -> :ok end,
+        ensure_all_started: fn -> {:ok, [:symphony_elixir]} end,
+        cwd: fn -> File.cwd!() end,
+        tty?: fn -> false end,
+        confirm: fn _preview -> false end
+      },
+      overrides
+    )
+  end
 end

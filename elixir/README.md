@@ -78,11 +78,11 @@ moving the issue as ready for merge.
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Build the Elixir escript and run `./bin/symphony workflow init --repo /path/to/repo` to create
+3. Build the Elixir escript and run `./bin/symphony setup init --repo /path/to/repo` to create
    `symphony.yml`.
-4. Run `./bin/symphony workflow check --repo /path/to/repo` to validate the setup-only manifest,
+4. Run `./bin/symphony setup check --repo /path/to/repo` to validate the setup-only manifest,
    repo docs, validation command shape, publish target defaults, and any configured harness CODEX_HOME.
-5. Run `./bin/symphony workflow print --repo /path/to/repo --compiled` to inspect the resolved
+5. Run `./bin/symphony setup preview --repo /path/to/repo --compiled` to inspect the resolved
    workflow config and prompt.
 6. Customize the generated `symphony.yml` for your project.
    - Keep committed `symphony.yml` to durable repo setup fields. Put Linear project scope, workspace
@@ -120,13 +120,14 @@ mise install
 mise exec -- mix setup
 mise exec -- mix build
 export LINEAR_API_KEY=...
-mise exec -- ./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/local-symphony-runtime.yml
+mise exec -- ./bin/symphony run --preview --workflow /path/to/local-symphony-runtime.yml
+mise exec -- ./bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
 It keeps local shell glue in this repo instead of dotfiles, resolves local runtime setup files,
 optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
-and passes the raw escript's local-run acknowledgement flag.
+and passes the resolved run setup to the Elixir CLI.
 
 For first-run local use, prefer the interactive builder:
 
@@ -142,8 +143,9 @@ export LINEAR_API_KEY=...
 profiles. The builder previews the resolved run setup before confirmation and can save named setups
 to `~/.config/symphony/runs/<name>.yml`. Explicit issue IDs use issue-batch mode by default.
 
-When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; it does not use the
-checked-in setup-only `symphony.yml` to start the daemon.
+When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; if only a checked-in
+setup-only `symphony.yml` is present, bare `symphony` enters the interactive run path and fails
+before side effects unless required local runtime scope and secrets are available.
 
 The raw escript also supports saved run setups. `./bin/symphony run <name>` reads
 `~/.config/symphony/runs/<name>.yml`, creates `~/.config/symphony/config.yml` with defaults if it is
@@ -160,7 +162,8 @@ Use the current shell environment when secrets are already exported:
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony --no-env-file --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony run --preview --no-env-file --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
 Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references.
@@ -182,9 +185,9 @@ symlink `../bin/symphony` into a directory already on `PATH`.
 Target repos can use a committed `symphony.yml` manifest for setup and audit:
 
 ```bash
-./bin/symphony workflow init --repo /path/to/repo
-./bin/symphony workflow check --repo /path/to/repo
-./bin/symphony workflow print --repo /path/to/repo --compiled
+./bin/symphony setup init --repo /path/to/repo
+./bin/symphony setup check --repo /path/to/repo
+./bin/symphony setup preview --repo /path/to/repo --compiled
 ```
 
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
@@ -232,7 +235,7 @@ harness:
 ```
 
 For the Codex app-server adapter, `harness.codex_home: null` means Symphony derives a managed
-harness `CODEX_HOME`; if a path is set, `workflow check` requires that directory and its
+harness `CODEX_HOME`; if a path is set, `setup check` requires that directory and its
 `AGENTS.md` to exist. Runner selection and runner commands belong in the local runtime setup file,
 not in the checked-in repo manifest.
 
@@ -261,15 +264,17 @@ For migration, `setup migrate` requires an explicit `--repo`, reads that repo's 
 ./bin/symphony setup migrate --repo /path/to/repo --name my-project --apply
 ```
 
-Pass a local runtime setup path to `./bin/symphony` when starting the service directly:
+Preview the resolved run setup before side effects, then pass a local runtime setup path to
+`./bin/symphony run` when starting the service directly:
 
 ```bash
-./bin/symphony --i-understand-that-this-will-be-running-without-the-usual-guardrails /path/to/local-symphony-runtime.yml
+./bin/symphony run --preview --workflow /path/to/local-symphony-runtime.yml
+./bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 
-The raw escript requires the local-run acknowledgement flag. A checked-in repo `symphony.yml`
-contains setup and audit data only; direct daemon runs still need local runtime setup for tracker
-scope, workspace roots, runner commands, and host settings.
+Interactive `run` prints the same preview and requires a TTY confirmation before starting. A
+checked-in repo `symphony.yml` contains setup and audit data only; direct daemon runs still need
+local runtime setup for tracker scope, workspace roots, runner commands, and host settings.
 
 `project.criticality` and `project.deployment_coupling` describe how risky the project is to land
 automatically. Local, prototype, and internal work default to permissive auto-land policy; production
@@ -356,8 +361,8 @@ workflow:
 
 When `project.repository` is present, the default `workspace` module uses it to populate new issue
 workspaces with `git clone --depth 1 <repository> .`. For the default GitHub PR delivery workflow,
-`workflow check` also validates that `project.repository` is a GitHub repository URL and that
-`delivery.pr_target` is explicitly set; `workflow print` shows the resolved publish target as
+`setup check` also validates that `project.repository` is a GitHub repository URL and that
+`delivery.pr_target` is explicitly set; `setup preview` shows the resolved publish target as
 `owner/repo:branch`.
 
 The `default` profile is compiled from manifest delivery, validation, and automation fields.
@@ -588,7 +593,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `../symphony.yml`: root dogfood repo setup manifest used by CLI `workflow check`/`print`
+- `../symphony.yml`: root dogfood repo setup manifest used by CLI `setup check`/`preview`
 - `../.codex/`: repo-local Codex/Symphony helpers used by this fork's own automation runs; target
   repos do not need to install these globally for bundled workflow modules to run
 
