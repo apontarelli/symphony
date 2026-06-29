@@ -227,6 +227,8 @@ defmodule SymphonyElixir.TestSupport do
           server_host: nil,
           project_repository: "https://github.com/example/project.git",
           delivery_pr_target: "main",
+          issue_markers: %{"labels" => [], "allowed_projects" => []},
+          target: nil,
           workflow_module_ids: [],
           workflow_modules_product_visual_review: nil,
           prompt: @workflow_prompt
@@ -287,6 +289,8 @@ defmodule SymphonyElixir.TestSupport do
     server_host = Keyword.get(config, :server_host)
     project_repository = Keyword.get(config, :project_repository)
     delivery_pr_target = Keyword.get(config, :delivery_pr_target)
+    issue_markers = Keyword.get(config, :issue_markers)
+    target = Keyword.get(config, :target)
     workflow_module_ids = Keyword.get(config, :workflow_module_ids)
     workflow_modules_product_visual_review = Keyword.get(config, :workflow_modules_product_visual_review)
     prompt = Keyword.get(config, :prompt)
@@ -305,6 +309,7 @@ defmodule SymphonyElixir.TestSupport do
         "  required_labels: #{yaml_value(tracker_required_labels)}",
         "  active_states: #{yaml_value(tracker_active_states)}",
         "  terminal_states: #{yaml_value(tracker_terminal_states)}",
+        target && "target: #{yaml_value(target)}",
         "polling:",
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
@@ -351,6 +356,7 @@ defmodule SymphonyElixir.TestSupport do
         "  repository: #{yaml_value(project_repository)}",
         "delivery:",
         "  pr_target: #{yaml_value(delivery_pr_target)}",
+        "issue_markers: #{yaml_value(issue_markers)}",
         workflow_yaml(workflow_module_ids, workflow_modules_product_visual_review),
         "harness:",
         "  codex_home: #{yaml_value(harness_codex_home)}",

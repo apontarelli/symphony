@@ -98,7 +98,7 @@ moving the issue as ready for merge.
 
 The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood repo setup manifest. It
 contains this fork's public repository URL, docs, validation, delivery policy, required
-capabilities, issue markers, and selected workflow module configuration. Local tracker scope,
+capabilities, issue markers, and selected workflow module configuration. Local run targets,
 workspace, polling, runner, and host settings are intentionally not committed there.
 
 ## Prerequisites
@@ -382,29 +382,33 @@ Notes:
 - Runtime `tracker.required_labels` remains available in local config or run setup. When set, an
   issue must have every configured label to dispatch or continue running. Label matching ignores
   case and surrounding whitespace.
-- Runtime `tracker.issue_ids` limits dispatch to explicit Linear issue identifiers or internal IDs.
-  Runtime `tracker.query` and `tracker.query_file` can supply a Linear GraphQL query that returns the
-  standard `issues.nodes` shape.
+- Runtime `target.issue_ids` limits dispatch to explicit Linear issue identifiers or internal IDs.
+  Runtime `target.filter` supplies a Linear-native issue filter object for query targets.
 - `delivery.pr_target` names the Git PR target/base branch. Additional profiles may override the
   compiled `default` profile during effective-policy resolution.
 - Profile overrides replace scalar, list, and map fields by default. Use `append_<field>` for list
   additions and `add_<field>` for map additions. The resolved policy includes a stable
   `policy_ref` short hash. Replacement fields are applied before additive directives when both
   appear in the same profile.
-- Linear polling scope is runtime setup, not repo setup. Prefer `runtime.tracker.project_id`; include
-  `runtime.tracker.project_slug` when the dashboard should render a project URL/display fallback:
+- Linear run target is runtime setup, not repo setup. Prefer `runtime.target`; legacy
+  `runtime.tracker.project_id`, `runtime.tracker.project_slug`, `runtime.tracker.team_key`, and
+  `runtime.tracker.issue_ids` remain as compatibility fallbacks only:
 
 ```yaml
 runtime:
-  tracker:
-    project_id: 00000000-0000-0000-0000-000000000000
+  target:
+    tracker: linear
+    type: project
     project_slug: my-linear-project-slug
 ```
 
-- Candidate polling filters by `runtime.tracker.project_id` when present and falls back to
-  `runtime.tracker.project_slug`. Workflow profiles do not choose which Linear project is polled.
-  `--profile` is a process-wide override for policy selection; otherwise the `default` profile is
-  used.
+- Supported Linear target types are `project`, `team`, `query`, and `issues`. Query targets use a
+  Linear-native issue filter object under `runtime.target.filter`; explicit issue targets use
+  `runtime.target.issue_ids`. Team and query targets require repo `issue_markers.labels` or
+  `issue_markers.allowed_projects`, and marker filters are intersected with project, team, and query
+  targets. Explicit issue targets keep mismatched issues but return preview warnings.
+- Workflow profiles do not choose which Linear issues are polled. `--profile` is a process-wide
+  override for policy selection; otherwise the `default` profile is used.
 - Ticket class labels have generic Symphony behavior independent of tracker project scope:
   - `Requirement` issues are validation artifacts. They require at least one blocking
     implementation issue and are dispatched from `Todo` only after all blockers are terminal.

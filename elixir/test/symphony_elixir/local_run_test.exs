@@ -33,7 +33,7 @@ defmodule SymphonyElixir.LocalRunTest do
     assert result.setup["runtime"]["workspace"]["root"] == "~/dev/symphony-workspaces"
     assert result.setup["runtime"]["tracker"]["project_id"] == "project-id"
     assert result.setup["runtime"]["agent"]["max_concurrent_agents"] == 4
-    assert result.setup["runtime"]["run_target"]["mode"] == "continuous"
+    assert result.setup["runtime"]["target"]["mode"] == "continuous"
     assert result.preview =~ "Run preview"
     assert result.preview =~ "Target: Linear project Symphony (project-id)"
     assert result.preview =~ "Capacity: normal (agents=4, startups=1)"
@@ -67,8 +67,12 @@ defmodule SymphonyElixir.LocalRunTest do
   test "interactive query file target defaults to query mode" do
     root = tmp_root!("local-run-query-file")
     repo = tmp_repo!(root)
-    query_path = Path.join(root, "linear.graphql")
-    File.write!(query_path, "query LocalRun { issues { nodes { id } } }")
+    query_path = Path.join(root, "linear-filter.yml")
+
+    File.write!(query_path, """
+    priority:
+      lte: 2
+    """)
 
     assert {:ok, result} =
              LocalRun.evaluate(
@@ -76,10 +80,10 @@ defmodule SymphonyElixir.LocalRunTest do
                deps(root, prompt_answers: ["4", query_path, "1", "", "n"])
              )
 
-    assert result.setup["runtime"]["tracker"]["query_file"] == query_path
-    assert result.setup["runtime"]["run_target"]["type"] == "query_file"
-    assert result.setup["runtime"]["run_target"]["mode"] == "query"
-    assert result.preview =~ "Target: Linear query file #{query_path}"
+    assert result.setup["runtime"]["target"]["type"] == "query"
+    assert result.setup["runtime"]["target"]["filter"] == %{"priority" => %{"lte" => 2}}
+    assert result.setup["runtime"]["target"]["mode"] == "query"
+    assert result.preview =~ "Target: Linear query filter file #{query_path}"
     assert result.preview =~ "Mode: query"
   end
 
@@ -96,7 +100,7 @@ defmodule SymphonyElixir.LocalRunTest do
                save_deps
              )
 
-    assert saved.setup["runtime"]["run_target"]["mode"] == "issue-batch"
+    assert saved.setup["runtime"]["target"]["mode"] == "issue-batch"
     assert {:ok, persisted_setup} = YamlElixir.read_from_file(saved.saved_path)
     assert persisted_setup["repo"]["path"] == repo
     assert persisted_setup["target"]["tracker"]["issue_ids"] == ["SID-374"]
@@ -107,7 +111,7 @@ defmodule SymphonyElixir.LocalRunTest do
 
     assert loaded.source == :saved
     assert loaded.setup["runtime"]["tracker"]["issue_ids"] == ["SID-374"]
-    assert loaded.setup["runtime"]["run_target"] == saved.setup["runtime"]["run_target"]
+    assert loaded.setup["runtime"]["target"] == saved.setup["runtime"]["target"]
     assert loaded.preview == LocalRun.preview(loaded.setup, loaded.workflow_path)
     assert loaded.preview =~ "Target: Issues SID-374"
   end
@@ -131,7 +135,7 @@ defmodule SymphonyElixir.LocalRunTest do
     assert {:ok, loaded} = LocalRun.evaluate(["--setup", "dogfood", "--config-root", config_root, "--dry-run"], deps(root, prompt_answers: []))
 
     assert loaded.setup["runtime"]["tracker"]["issue_ids"] == ["SID-374"]
-    assert loaded.setup["runtime"]["run_target"]["mode"] == "issue-batch"
+    assert loaded.setup["runtime"]["target"]["mode"] == "issue-batch"
     assert loaded.preview =~ "Target: Issues SID-374"
   end
 
@@ -147,7 +151,7 @@ defmodule SymphonyElixir.LocalRunTest do
              )
 
     assert result.setup["runtime"]["tracker"]["issue_ids"] == [issue_id]
-    assert result.setup["runtime"]["run_target"]["mode"] == "issue-batch"
+    assert result.setup["runtime"]["target"]["mode"] == "issue-batch"
   end
 
   test "explicit issue identifiers default to issue-batch mode" do
@@ -161,8 +165,8 @@ defmodule SymphonyElixir.LocalRunTest do
              )
 
     assert result.setup["runtime"]["tracker"]["issue_ids"] == ["SID-374", "SID-375"]
-    assert result.setup["runtime"]["run_target"]["type"] == "issues"
-    assert result.setup["runtime"]["run_target"]["mode"] == "issue-batch"
+    assert result.setup["runtime"]["target"]["type"] == "issues"
+    assert result.setup["runtime"]["target"]["mode"] == "issue-batch"
     assert result.preview =~ "Mode: issue-batch"
   end
 
@@ -177,7 +181,7 @@ defmodule SymphonyElixir.LocalRunTest do
              )
 
     assert result.start? == true
-    assert result.setup["runtime"]["run_target"]["mode"] == "issue-batch"
+    assert result.setup["runtime"]["target"]["mode"] == "issue-batch"
     assert result.preview =~ "Target: Issues SID-374"
   end
 

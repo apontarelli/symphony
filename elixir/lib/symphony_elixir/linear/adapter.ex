@@ -40,6 +40,10 @@ defmodule SymphonyElixir.Linear.Adapter do
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
+  @spec resolve_candidate_issues(SymphonyElixir.RunTarget.t() | nil) ::
+          {:ok, SymphonyElixir.RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_candidate_issues(target), do: client_module().resolve_run_target(target)
+
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
 

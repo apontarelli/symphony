@@ -71,7 +71,7 @@ defmodule SymphonyElixir.LocalRun do
   @spec preview(setup(), Path.t()) :: String.t()
   def preview(setup, workflow_path) when is_map(setup) and is_binary(workflow_path) do
     runtime = Map.get(setup, "runtime", %{})
-    target = Map.get(runtime, "run_target", %{})
+    target = Map.get(runtime, "target") || Map.get(runtime, "run_target", %{})
     tracker = Map.get(runtime, "tracker", %{})
     agent = Map.get(runtime, "agent", %{})
     workspace = Map.get(runtime, "workspace", %{})
@@ -214,7 +214,7 @@ defmodule SymphonyElixir.LocalRun do
   defp put_run_target(runtime_manifest, run_target) do
     update_in(runtime_manifest, ["runtime"], fn runtime ->
       (runtime || %{})
-      |> Map.put("run_target", run_target)
+      |> Map.put("target", run_target)
     end)
   end
 
@@ -316,7 +316,7 @@ defmodule SymphonyElixir.LocalRun do
 
   defp run_setup_from_runtime(setup, opts) do
     runtime = Map.get(setup, "runtime", %{})
-    run_target = Map.get(runtime, "run_target", %{})
+    run_target = Map.get(runtime, "target") || Map.get(runtime, "run_target", %{})
     tracker = runtime |> Map.get("tracker", %{}) |> Map.take(@tracker_target_keys)
 
     target =
@@ -571,26 +571,54 @@ defmodule SymphonyElixir.LocalRun do
   end
 
   defp prompt_query_file(deps) do
-    with {:ok, path} <- prompt(deps, "Linear query file path: ") do
-      path = String.trim(path)
+    with {:ok, path} <- prompt(deps, "Linear query filter file path: ") do
+      query_filter_file_target(path, deps)
+    end
+  end
 
-      if path == "" do
-        {:error, "Linear query file path is required"}
-      else
-        {:ok, %{type: "query_file", query_file: path}}
-      end
+  defp query_filter_file_target(path, deps) do
+    path = path |> String.trim() |> expand_user_path(deps)
+
+    if path == "" do
+      {:error, "Linear query filter file path is required"}
+    else
+      read_query_filter_file(path, deps)
+    end
+  end
+
+  defp read_query_filter_file(path, deps) do
+    with {:ok, content} <- deps.read_file.(path),
+         {:ok, filter} <- decode_query_filter(content, path) do
+      {:ok, %{type: "query", filter: filter, query_file: path}}
+    else
+      {:error, reason} when is_atom(reason) ->
+        {:error, "Failed to read Linear query filter file #{path}: #{inspect(reason)}"}
+
+      {:error, message} when is_binary(message) ->
+        {:error, message}
     end
   end
 
   defp prompt_query_manual(deps) do
-    with {:ok, query} <- prompt(deps, "Linear GraphQL query: ") do
-      query = String.trim(query)
+    with {:ok, filter_source} <- prompt(deps, "Linear query filter YAML/JSON object: ") do
+      query_filter_manual_target(filter_source)
+    end
+  end
 
-      if query == "" do
-        {:error, "Linear GraphQL query is required"}
-      else
-        {:ok, %{type: "query_manual", query: query}}
-      end
+  defp query_filter_manual_target(filter_source) do
+    filter_source = String.trim(filter_source)
+
+    if filter_source == "" do
+      {:error, "Linear query filter is required"}
+    else
+      build_query_filter_target(filter_source)
+    end
+  end
+
+  defp build_query_filter_target(filter_source) do
+    case decode_query_filter(filter_source, "inline Linear query filter") do
+      {:ok, filter} -> {:ok, %{type: "query", filter: filter}}
+      {:error, message} -> {:error, message}
     end
   end
 
@@ -669,6 +697,7 @@ defmodule SymphonyElixir.LocalRun do
   end
 
   defp default_mode(%{type: "issues"}), do: "issue-batch"
+  defp default_mode(%{type: "query"}), do: "query"
   defp default_mode(%{type: "query_file"}), do: "query"
   defp default_mode(%{type: "query_manual"}), do: "query"
   defp default_mode(_target), do: "continuous"
@@ -689,17 +718,11 @@ defmodule SymphonyElixir.LocalRun do
     %{"team_key" => team_key}
   end
 
-  defp tracker_target_config(%{type: "query_file", query_file: query_file}) do
-    %{"query_file" => query_file}
-  end
-
-  defp tracker_target_config(%{type: "query_manual", query: query}) do
-    %{"query" => query}
-  end
+  defp tracker_target_config(%{type: "query"}), do: %{}
 
   defp run_target_config(target, capacity_name, mode) do
     target
-    |> Map.take([:type, :issue_ids, :project_id, :project_slug, :team_key, :query_file, :query, :name, :discovery])
+    |> Map.take([:type, :issue_ids, :project_id, :project_slug, :team_key, :filter, :query_file, :name, :discovery])
     |> stringify_keys()
     |> Map.put("mode", mode)
     |> Map.put("capacity", capacity_name)
@@ -717,6 +740,8 @@ defmodule SymphonyElixir.LocalRun do
   defp target_summary(%{"type" => "project", "project_id" => project_id}, _tracker), do: "Linear project #{project_id}"
   defp target_summary(%{"type" => "project", "project_slug" => slug}, _tracker), do: "Linear project #{slug}"
   defp target_summary(%{"type" => "team", "team_key" => key}, _tracker), do: "Linear team #{key}"
+  defp target_summary(%{"type" => "query", "query_file" => path}, _tracker), do: "Linear query filter file #{path}"
+  defp target_summary(%{"type" => "query"}, _tracker), do: "Linear query filter"
   defp target_summary(%{"type" => "query_file", "query_file" => path}, _tracker), do: "Linear query file #{path}"
   defp target_summary(%{"type" => "query_manual"}, _tracker), do: "Manual Linear query"
   defp target_summary(_target, _tracker), do: "Unknown target"
@@ -788,6 +813,14 @@ defmodule SymphonyElixir.LocalRun do
       path == "~" -> home
       String.starts_with?(path, "~/") -> Path.join(home, String.replace_prefix(path, "~/", ""))
       true -> Path.expand(path)
+    end
+  end
+
+  defp decode_query_filter(content, source) do
+    case YamlElixir.read_from_string(content) do
+      {:ok, decoded} when is_map(decoded) -> {:ok, stringify_keys(decoded)}
+      {:ok, _decoded} -> {:error, "#{source} must contain a YAML map"}
+      {:error, reason} -> {:error, "Failed to parse #{source}: #{inspect(reason)}"}
     end
   end
 

@@ -198,7 +198,7 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "read_timeout_ms",
       "stall_timeout_ms",
       "execution_profiles",
-      "run_target",
+      "target",
       "mode",
       "capacity",
       "type",

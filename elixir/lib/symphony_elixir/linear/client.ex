@@ -4,7 +4,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, RunTarget}
+  alias SymphonyElixir.Linear.{Filter, Issue}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -174,6 +175,61 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
+  @query_by_filter """
+  query SymphonyLinearPollByFilter($filter: IssueFilter, $first: Int!, $relationFirst: Int!, $after: String) {
+    issues(filter: $filter, first: $first, after: $after) {
+      nodes {
+        id
+        identifier
+        title
+        description
+        priority
+        state {
+          name
+        }
+        branchName
+        url
+        assignee {
+          id
+        }
+        team {
+          id
+          key
+          name
+        }
+        project {
+          id
+          slugId
+          name
+        }
+        labels {
+          nodes {
+            name
+          }
+        }
+        inverseRelations(first: $relationFirst) {
+          nodes {
+            type
+            issue {
+              id
+              identifier
+              state {
+                name
+              }
+            }
+          }
+        }
+        createdAt
+        updatedAt
+      }
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+    }
+  }
+  """
+
   @query_by_ids """
   query SymphonyLinearIssuesById($ids: [ID!]!, $identifiers: [String!]!, $first: Int!, $relationFirst: Int!) {
     issues(filter: {or: [{id: {in: $ids}}, {identifier: {in: $identifiers}}]}, first: $first) {
@@ -235,14 +291,8 @@ defmodule SymphonyElixir.Linear.Client do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    tracker = Config.settings!().tracker
-
-    if is_nil(tracker.api_key) do
-      {:error, :missing_linear_api_token}
-    else
-      with {:ok, assignee_filter} <- routing_assignee_filter() do
-        fetch_candidates_for_tracker(tracker, assignee_filter)
-      end
+    with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_run_target(nil) do
+      {:ok, issues}
     end
   end
 
@@ -253,12 +303,34 @@ defmodule SymphonyElixir.Linear.Client do
     if normalized_states == [] do
       {:ok, []}
     else
-      tracker = Config.settings!().tracker
+      with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_run_target(nil, normalized_states) do
+        {:ok, issues}
+      end
+    end
+  end
 
-      if is_nil(tracker.api_key) do
-        {:error, :missing_linear_api_token}
-      else
-        fetch_by_configured_scope(tracker, normalized_states, nil)
+  @spec resolve_run_target(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_run_target(target \\ nil) do
+    settings = Config.settings!()
+    resolve_run_target(target, settings.tracker.active_states)
+  end
+
+  @spec resolve_run_target(RunTarget.t() | nil, [String.t()]) ::
+          {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_run_target(target, state_names) when is_list(state_names) do
+    settings = Config.settings!()
+    tracker = settings.tracker
+    markers = RunTarget.repo_markers(settings)
+
+    if is_nil(tracker.api_key) do
+      {:error, :missing_linear_api_token}
+    else
+      with {:ok, run_target} <- configured_run_target(target, settings),
+           :ok <- validate_linear_target(run_target),
+           :ok <- RunTarget.validate_marker_safety(run_target, markers),
+           {:ok, assignee_filter} <- routing_assignee_filter(),
+           {:ok, issues} <- do_resolve_run_target(run_target, state_names, markers, assignee_filter, &graphql/2) do
+        {:ok, RunTarget.apply_marker_safety(run_target, issues, markers)}
       end
     end
   end
@@ -366,95 +438,53 @@ defmodule SymphonyElixir.Linear.Client do
     do_fetch_by_project_selector(selector, state_names, nil, graphql_fun)
   end
 
-  @spec fetch_by_query_for_test(
-          map(),
-          nil | String.t(),
+  @doc false
+  @spec resolve_run_target_for_test(
+          RunTarget.t(),
+          [String.t()],
+          RunTarget.RepoMarkers.t(),
           (String.t(), map() -> {:ok, map()} | {:error, term()})
-        ) ::
-          {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_by_query_for_test(tracker, assignee_filter, graphql_fun)
-      when is_map(tracker) and is_function(graphql_fun, 2) do
-    fetch_by_query(tracker, assignee_filter, graphql_fun)
-  end
-
-  defp fetch_by_configured_scope(tracker, state_names, assignee_filter) do
-    cond do
-      is_binary(tracker.project_id) ->
-        do_fetch_by_project_selector(%{project_id: tracker.project_id}, state_names, assignee_filter)
-
-      is_binary(tracker.project_slug) ->
-        do_fetch_by_project_selector(%{project_slug: tracker.project_slug}, state_names, assignee_filter)
-
-      is_binary(Map.get(tracker, :team_key)) ->
-        do_fetch_by_project_selector(%{team_key: tracker.team_key}, state_names, assignee_filter)
-
-      true ->
-        {:error, :missing_linear_project_scope}
+        ) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_run_target_for_test(%RunTarget{} = target, state_names, %RunTarget.RepoMarkers{} = markers, graphql_fun)
+      when is_list(state_names) and is_function(graphql_fun, 2) do
+    with :ok <- validate_linear_target(target),
+         :ok <- RunTarget.validate_marker_safety(target, markers),
+         {:ok, issues} <- do_resolve_run_target(target, state_names, markers, nil, graphql_fun) do
+      {:ok, RunTarget.apply_marker_safety(target, issues, markers)}
     end
   end
 
-  defp fetch_candidates_for_tracker(tracker, assignee_filter) do
-    cond do
-      tracker.issue_ids != [] ->
-        do_fetch_issue_states(tracker.issue_ids, assignee_filter)
+  defp configured_run_target(%RunTarget{} = target, _settings), do: {:ok, target}
+  defp configured_run_target(nil, settings), do: RunTarget.from_settings(settings)
 
-      query_configured?(tracker) ->
-        fetch_by_query(tracker, assignee_filter)
+  defp do_resolve_run_target(%RunTarget{type: :project, project_id: project_id}, state_names, _markers, assignee_filter, graphql_fun)
+       when is_binary(project_id) do
+    do_fetch_by_project_selector(%{project_id: project_id}, state_names, assignee_filter, graphql_fun)
+  end
 
-      true ->
-        fetch_by_configured_scope(tracker, tracker.active_states, assignee_filter)
+  defp do_resolve_run_target(%RunTarget{type: :project, project_slug: project_slug}, state_names, _markers, assignee_filter, graphql_fun)
+       when is_binary(project_slug) do
+    do_fetch_by_project_selector(%{project_slug: project_slug}, state_names, assignee_filter, graphql_fun)
+  end
+
+  defp do_resolve_run_target(%RunTarget{type: :team, team_key: team_key}, state_names, _markers, assignee_filter, graphql_fun)
+       when is_binary(team_key) do
+    do_fetch_by_project_selector(%{team_key: team_key}, state_names, assignee_filter, graphql_fun)
+  end
+
+  defp do_resolve_run_target(%RunTarget{type: :query} = target, state_names, markers, assignee_filter, graphql_fun) do
+    target
+    |> Filter.issue_filter(state_names, markers)
+    |> do_fetch_by_filter(assignee_filter, graphql_fun)
+  end
+
+  defp do_resolve_run_target(%RunTarget{type: :issues, issue_ids: issue_ids}, state_names, _markers, assignee_filter, graphql_fun) do
+    with {:ok, issues} <- do_fetch_issue_states(issue_ids, assignee_filter, graphql_fun) do
+      {:ok, filter_issues_by_states(issues, state_names)}
     end
   end
 
-  defp query_configured?(tracker) do
-    non_empty_string?(tracker.query) or non_empty_string?(tracker.query_file)
-  end
-
-  defp fetch_by_query(tracker, assignee_filter) do
-    fetch_by_query(tracker, assignee_filter, &graphql/2)
-  end
-
-  defp fetch_by_query(tracker, assignee_filter, graphql_fun) when is_function(graphql_fun, 2) do
-    with {:ok, query} <- query_source(tracker),
-         {:ok, body} <- graphql_fun.(query, %{stateNames: tracker.active_states}) do
-      decode_linear_response(body, assignee_filter)
-    end
-  end
-
-  defp query_source(%{query: query, query_file: query_file}) when is_binary(query) and is_binary(query_file) do
-    case String.trim(query) do
-      "" -> query_file_source(query_file)
-      trimmed -> {:ok, trimmed}
-    end
-  end
-
-  defp query_source(%{query: query}) when is_binary(query) do
-    case String.trim(query) do
-      "" -> {:error, :missing_linear_query}
-      trimmed -> {:ok, trimmed}
-    end
-  end
-
-  defp query_source(%{query_file: query_file}) when is_binary(query_file), do: query_file_source(query_file)
-
-  defp query_source(_tracker), do: {:error, :missing_linear_query}
-
-  defp query_file_source(query_file) when is_binary(query_file) do
-    with path when path != "" <- String.trim(query_file),
-         {:ok, query} <- File.read(Path.expand(path)) do
-      {:ok, query}
-    else
-      "" -> {:error, :missing_linear_query_file}
-      {:error, reason} -> {:error, {:linear_query_file, reason}}
-    end
-  end
-
-  defp non_empty_string?(value) when is_binary(value), do: String.trim(value) != ""
-  defp non_empty_string?(_value), do: false
-
-  defp do_fetch_by_project_selector(selector, state_names, assignee_filter) do
-    do_fetch_by_project_selector(selector, state_names, assignee_filter, &graphql/2)
-  end
+  defp do_resolve_run_target(_target, _state_names, _markers, _assignee_filter, _graphql_fun), do: {:error, :invalid_run_target}
 
   defp do_fetch_by_project_selector(%{project_id: project_id}, state_names, assignee_filter, graphql_fun)
        when is_binary(project_id) and is_function(graphql_fun, 2) do
@@ -491,26 +521,50 @@ defmodule SymphonyElixir.Linear.Client do
   defp do_fetch_by_project_selector(_selector, _state_names, _assignee_filter, _graphql_fun), do: {:ok, []}
 
   defp do_fetch_by_states(query, variables, state_names, assignee_filter, graphql_fun) when is_function(graphql_fun, 2) do
-    do_fetch_by_states_page(query, variables, state_names, assignee_filter, nil, [], graphql_fun)
+    do_fetch_paginated_issues(
+      query,
+      fn after_cursor ->
+        Map.merge(variables, %{
+          stateNames: state_names,
+          first: @issue_page_size,
+          relationFirst: @issue_page_size,
+          after: after_cursor
+        })
+      end,
+      assignee_filter,
+      graphql_fun
+    )
   end
 
-  defp do_fetch_by_states_page(query, variables, state_names, assignee_filter, after_cursor, acc_issues, graphql_fun) do
-    with {:ok, body} <-
-           graphql_fun.(
-             query,
-             Map.merge(variables, %{
-               stateNames: state_names,
-               first: @issue_page_size,
-               relationFirst: @issue_page_size,
-               after: after_cursor
-             })
-           ),
+  defp do_fetch_by_filter(filter, assignee_filter, graphql_fun) when is_map(filter) and is_function(graphql_fun, 2) do
+    do_fetch_paginated_issues(
+      @query_by_filter,
+      fn after_cursor ->
+        %{
+          filter: filter,
+          first: @issue_page_size,
+          relationFirst: @issue_page_size,
+          after: after_cursor
+        }
+      end,
+      assignee_filter,
+      graphql_fun
+    )
+  end
+
+  defp do_fetch_paginated_issues(query, variables_fun, assignee_filter, graphql_fun)
+       when is_binary(query) and is_function(variables_fun, 1) and is_function(graphql_fun, 2) do
+    do_fetch_paginated_issues_page(query, variables_fun, assignee_filter, nil, [], graphql_fun)
+  end
+
+  defp do_fetch_paginated_issues_page(query, variables_fun, assignee_filter, after_cursor, acc_issues, graphql_fun) do
+    with {:ok, body} <- graphql_fun.(query, variables_fun.(after_cursor)),
          {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
       updated_acc = prepend_page_issues(issues, acc_issues)
 
       case next_page_cursor(page_info) do
         {:ok, next_cursor} ->
-          do_fetch_by_states_page(query, variables, state_names, assignee_filter, next_cursor, updated_acc, graphql_fun)
+          do_fetch_paginated_issues_page(query, variables_fun, assignee_filter, next_cursor, updated_acc, graphql_fun)
 
         :done ->
           {:ok, finalize_paginated_issues(updated_acc)}
@@ -627,6 +681,41 @@ defmodule SymphonyElixir.Linear.Client do
   defp uuid?(value) when is_binary(value) do
     Regex.match?(~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, value)
   end
+
+  defp filter_issues_by_states(issues, state_names) when is_list(issues) and is_list(state_names) do
+    wanted_states =
+      state_names
+      |> Enum.map(&normalize_issue_state/1)
+      |> Enum.reject(&(&1 == ""))
+      |> MapSet.new()
+
+    if MapSet.size(wanted_states) == 0 do
+      issues
+    else
+      Enum.filter(issues, fn
+        %Issue{state: state} -> MapSet.member?(wanted_states, normalize_issue_state(state))
+        _issue -> false
+      end)
+    end
+  end
+
+  defp validate_linear_target(%RunTarget{tracker: tracker}) when is_binary(tracker) do
+    if String.downcase(String.trim(tracker)) == "linear" do
+      :ok
+    else
+      {:error, {:unsupported_run_target_tracker, tracker}}
+    end
+  end
+
+  defp validate_linear_target(_target), do: {:error, :invalid_run_target}
+
+  defp normalize_issue_state(state_name) when is_binary(state_name) do
+    state_name
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_issue_state(_state_name), do: ""
 
   defp build_graphql_payload(query, variables, operation_name) do
     %{

@@ -5,11 +5,29 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{Linear.Issue, RunTarget}
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    {:ok, issue_entries()}
+    with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_candidate_issues(nil) do
+      {:ok, issues}
+    end
+  end
+
+  @spec resolve_candidate_issues(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_candidate_issues(%RunTarget{type: :issues, issue_ids: issue_ids} = target) do
+    wanted_ids = MapSet.new(issue_ids)
+
+    issues =
+      Enum.filter(issue_entries(), fn %Issue{id: id} ->
+        MapSet.member?(wanted_ids, id)
+      end)
+
+    {:ok, RunTarget.Resolution.new(target, sort_by_requested_ids(issues, issue_ids), [])}
+  end
+
+  def resolve_candidate_issues(target) do
+    {:ok, RunTarget.Resolution.new(target, issue_entries(), [])}
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
@@ -53,6 +71,16 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   defp issue_entries do
     Enum.filter(configured_issues(), &match?(%Issue{}, &1))
+  end
+
+  defp sort_by_requested_ids(issues, issue_ids) do
+    order =
+      issue_ids
+      |> Enum.with_index()
+      |> Map.new()
+
+    fallback = map_size(order)
+    Enum.sort_by(issues, &Map.get(order, &1.id, fallback))
   end
 
   defp send_event(message) do

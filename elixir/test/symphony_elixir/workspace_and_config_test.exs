@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{AutoLand, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.RunTarget
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -638,20 +639,122 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert query =~ "team: {key: {eq: $teamKey}}"
   end
 
-  test "linear client uses query file when inline query is blank" do
-    query_root =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-elixir-linear-query-#{System.unique_integer([:positive])}"
-      )
+  test "linear client resolves project run target through existing project selector" do
+    target = %RunTarget{tracker: "linear", type: :project, project_slug: "repo-project"}
 
-    query_path = Path.join(query_root, "linear.graphql")
-    query = "query QueryFileIssues($stateNames: [String!]!) { issues { nodes { id } } }"
-    File.mkdir_p!(query_root)
-    File.write!(query_path, query)
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_project_page, query, variables})
 
-    graphql_fun = fn used_query, variables ->
-      send(self(), {:fetch_query, used_query, variables})
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-project",
+                 "identifier" => "SID-701",
+                 "title" => "Project target",
+                 "description" => "Resolve from run target.",
+                 "priority" => 2,
+                 "state" => %{"name" => "Todo"},
+                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+                 "project" => %{"id" => "project-id", "slugId" => "repo-project", "name" => "Repo Project"},
+                 "labels" => %{"nodes" => []},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, %RunTarget.Resolution{issues: [issue], warnings: []}} =
+             Client.resolve_run_target_for_test(target, ["Todo"], RunTarget.RepoMarkers.empty(), graphql_fun)
+
+    assert issue.identifier == "SID-701"
+
+    assert_receive {:fetch_project_page, query,
+                    %{
+                      projectSlug: "repo-project",
+                      stateNames: ["Todo"],
+                      first: 50,
+                      relationFirst: 50,
+                      after: nil
+                    }}
+
+    assert query =~ "SymphonyLinearPoll"
+  end
+
+  test "linear client resolves query run target with state and repo marker filters" do
+    target = %RunTarget{
+      tracker: "linear",
+      type: :query,
+      filter: %{"priority" => %{"lte" => 2}}
+    }
+
+    markers = %RunTarget.RepoMarkers{
+      labels: ["symphony"],
+      allowed_projects: ["repo-project"]
+    }
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_query_page, query, variables})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [
+               %{
+                 "id" => "issue-query",
+                 "identifier" => "SID-702",
+                 "title" => "Query target",
+                 "description" => "Resolve from Linear-native filter.",
+                 "priority" => 1,
+                 "state" => %{"name" => "Todo"},
+                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+                 "project" => %{"id" => "project-id", "slugId" => "repo-project", "name" => "Repo Project"},
+                 "labels" => %{"nodes" => [%{"name" => "Symphony"}]},
+                 "inverseRelations" => %{"nodes" => []}
+               }
+             ],
+             "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+           }
+         }
+       }}
+    end
+
+    assert {:ok, %RunTarget.Resolution{issues: [issue], warnings: []}} =
+             Client.resolve_run_target_for_test(target, ["Todo", "In Progress"], markers, graphql_fun)
+
+    assert issue.identifier == "SID-702"
+
+    assert_receive {:fetch_query_page, query,
+                    %{
+                      filter: %{"and" => filters},
+                      first: 50,
+                      relationFirst: 50,
+                      after: nil
+                    }}
+
+    assert query =~ "SymphonyLinearPollByFilter"
+    assert %{"priority" => %{"lte" => 2}} in filters
+    assert %{"state" => %{"name" => %{"in" => ["Todo", "In Progress"]}}} in filters
+    assert inspect(filters) =~ "symphony"
+    assert inspect(filters) =~ "repo-project"
+  end
+
+  test "linear client resolves explicit issue target in requested order with marker warnings" do
+    target = %RunTarget{tracker: "linear", type: :issues, issue_ids: ["issue-2", "issue-1"]}
+
+    markers = %RunTarget.RepoMarkers{
+      labels: ["symphony"],
+      allowed_projects: ["repo-project"]
+    }
+
+    graphql_fun = fn query, variables ->
+      send(self(), {:fetch_issues, query, variables})
 
       {:ok,
        %{
@@ -660,12 +763,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "nodes" => [
                %{
                  "id" => "issue-1",
-                 "identifier" => "SID-374",
-                 "title" => "Build interactive local run setup builder",
-                 "description" => "Use query-file scope.",
+                 "identifier" => "SID-701",
+                 "title" => "First issue",
+                 "description" => "Linear returned this first.",
+                 "priority" => 1,
+                 "state" => %{"name" => "Todo"},
+                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+                 "project" => %{"id" => "project-id", "slugId" => "other-project", "name" => "Other"},
+                 "labels" => %{"nodes" => [%{"name" => "other"}]},
+                 "inverseRelations" => %{"nodes" => []}
+               },
+               %{
+                 "id" => "issue-2",
+                 "identifier" => "SID-702",
+                 "title" => "Second issue",
+                 "description" => "Requested first.",
                  "priority" => 2,
                  "state" => %{"name" => "Todo"},
-                 "labels" => %{"nodes" => []},
+                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+                 "project" => %{"id" => "project-id", "slugId" => "repo-project", "name" => "Repo Project"},
+                 "labels" => %{"nodes" => [%{"name" => "Symphony"}]},
                  "inverseRelations" => %{"nodes" => []}
                }
              ]
@@ -674,19 +791,22 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
        }}
     end
 
-    try do
-      assert {:ok, [issue]} =
-               Client.fetch_by_query_for_test(
-                 %{query: " ", query_file: query_path, active_states: ["Todo"]},
-                 nil,
-                 graphql_fun
-               )
+    assert {:ok, %RunTarget.Resolution{issues: issues, warnings: [warning]}} =
+             Client.resolve_run_target_for_test(target, ["Todo"], markers, graphql_fun)
 
-      assert issue.identifier == "SID-374"
-      assert_receive {:fetch_query, ^query, %{stateNames: ["Todo"]}}
-    after
-      File.rm_rf(query_root)
-    end
+    assert Enum.map(issues, & &1.id) == ["issue-2", "issue-1"]
+    assert warning.code == :repo_marker_mismatch
+    assert warning.issue_id == "issue-1"
+
+    assert_receive {:fetch_issues, query,
+                    %{
+                      ids: [],
+                      identifiers: ["issue-2", "issue-1"],
+                      first: 2,
+                      relationFirst: 50
+                    }}
+
+    assert query =~ "SymphonyLinearIssuesById"
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
@@ -754,6 +874,35 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       ])
 
     assert Enum.map(sorted, & &1.identifier) == ["MT-200", "MT-201", "MT-199"]
+  end
+
+  test "orchestrator preserves explicit issue target order for dispatch" do
+    requested_first = %Issue{
+      id: "issue-low-priority",
+      identifier: "MT-250",
+      title: "Requested first",
+      state: "Todo",
+      priority: 4,
+      created_at: ~U[2026-01-03 00:00:00Z]
+    }
+
+    requested_second = %Issue{
+      id: "issue-high-priority",
+      identifier: "MT-251",
+      title: "Requested second",
+      state: "Todo",
+      priority: 1,
+      created_at: ~U[2026-01-01 00:00:00Z]
+    }
+
+    resolution =
+      RunTarget.Resolution.new(
+        %RunTarget{tracker: "linear", type: :issues, issue_ids: ["issue-low-priority", "issue-high-priority"]},
+        [requested_first, requested_second],
+        []
+      )
+
+    assert Orchestrator.order_candidate_issues_for_test(resolution) == [requested_first, requested_second]
   end
 
   test "todo issue with non-terminal blocker is not dispatch-eligible" do
@@ -1362,7 +1511,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       tracker_project_id: nil,
       tracker_project_slug: nil,
       tracker_team_key: "HAR",
-      tracker_workspace_slug: "antonio-pontarelli"
+      tracker_workspace_slug: "antonio-pontarelli",
+      issue_markers: %{"labels" => ["symphony"], "allowed_projects" => []}
     )
 
     assert :ok = Config.validate!()

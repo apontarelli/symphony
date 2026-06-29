@@ -1620,7 +1620,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  })
       end)
 
-    assert log =~ "Linear project_id, project_slug, team_key, issue_ids, query, or query_file missing in selected workflow config"
+    assert log =~ "Linear run target missing in selected workflow config"
     refute log =~ "Failed to fetch from Linear"
   end
 

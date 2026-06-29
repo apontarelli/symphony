@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
     saved_run_setup
     saved_run_setups
     server
+    target
     tracker
     worker
     workflow_modules

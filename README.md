@@ -61,8 +61,8 @@ contract lives in [`SPEC.md`](SPEC.md). The current implementation is the Elixir
 
 The root [`symphony.yml`](symphony.yml) is this fork's dogfood repo setup manifest. It intentionally
 contains durable repository facts, validation, delivery policy, required capabilities, and selected
-workflow module configuration. Local Linear target scope, workspace roots, runner commands, polling,
-and host runtime settings belong in local config or run setup instead of the checked-in manifest.
+workflow module configuration. Local run targets, workspace roots, runner commands, polling, and
+host runtime settings belong in local config or run setup instead of the checked-in manifest.
 
 ## Run the Elixir implementation
 

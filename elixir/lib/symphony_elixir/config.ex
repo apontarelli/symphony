@@ -5,10 +5,19 @@ defmodule SymphonyElixir.Config do
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.RunTarget
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.ModuleRegistry
 
+  @run_target_config_errors [
+    :missing_run_target_type,
+    :invalid_run_target,
+    :missing_project_target,
+    :missing_team_target,
+    :missing_query_filter,
+    :missing_issue_ids
+  ]
   @profile_override_env_key :workflow_profile_override
 
   @type codex_runtime_settings :: %{
@@ -267,8 +276,22 @@ defmodule SymphonyElixir.Config do
   @spec format_error(term()) :: String.t()
   def format_error(:missing_linear_api_token), do: "Linear API token missing in selected workflow config"
 
-  def format_error(:missing_linear_project_scope),
-    do: "Linear project_id, project_slug, team_key, issue_ids, query, or query_file missing in selected workflow config"
+  def format_error(:missing_linear_run_target),
+    do: "Linear run target missing in selected workflow config"
+
+  def format_error(:missing_run_target), do: "Run target missing in selected workflow config"
+
+  def format_error(:run_target_requires_issue_markers),
+    do: "Linear team and query run targets require repo issue markers"
+
+  def format_error({:unsupported_run_target_type, type}),
+    do: "Unsupported run target type in selected workflow config: #{inspect(type)}"
+
+  def format_error({:unsupported_run_target_tracker, tracker}),
+    do: "Unsupported run target tracker in selected workflow config: #{inspect(tracker)}"
+
+  def format_error(reason) when reason in @run_target_config_errors,
+    do: "Invalid run target in selected workflow config: #{inspect(reason)}"
 
   def format_error(:missing_tracker_kind), do: "Tracker kind missing in selected workflow config"
 
@@ -292,7 +315,14 @@ defmodule SymphonyElixir.Config do
 
   @spec config_error?(term()) :: boolean()
   def config_error?(:missing_linear_api_token), do: true
-  def config_error?(:missing_linear_project_scope), do: true
+  def config_error?(:missing_linear_run_target), do: true
+  def config_error?(:missing_run_target), do: true
+  def config_error?(:run_target_requires_issue_markers), do: true
+  def config_error?({:unsupported_run_target_type, _type}), do: true
+  def config_error?({:unsupported_run_target_tracker, _tracker}), do: true
+
+  def config_error?(reason) when reason in @run_target_config_errors, do: true
+
   def config_error?(:missing_tracker_kind), do: true
   def config_error?({:unsupported_tracker_kind, _kind}), do: true
   def config_error?({:invalid_workflow_config, _message}), do: true
@@ -313,21 +343,20 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not linear_scope_configured?(settings.tracker) ->
-        {:error, :missing_linear_project_scope}
+      settings.tracker.kind == "linear" ->
+        validate_linear_run_target(settings)
 
       true ->
         :ok
     end
   end
 
-  defp linear_scope_configured?(tracker) do
-    is_binary(tracker.project_id) or is_binary(tracker.project_slug) or is_binary(tracker.team_key) or
-      tracker.issue_ids != [] or non_empty_string?(tracker.query) or non_empty_string?(tracker.query_file)
+  defp validate_linear_run_target(settings) do
+    case RunTarget.from_settings(settings) do
+      {:ok, target} -> RunTarget.validate_marker_safety(target, RunTarget.repo_markers(settings))
+      {:error, reason} -> {:error, reason}
+    end
   end
-
-  defp non_empty_string?(value) when is_binary(value), do: String.trim(value) != ""
-  defp non_empty_string?(_value), do: false
 
   defp selected_workflow_config do
     case Workflow.load(Workflow.selected_workflow_file_path()) do

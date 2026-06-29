@@ -657,6 +657,7 @@ defmodule SymphonyElixir.RunSetup do
       |> LocalConfig.runtime_config()
       |> LocalConfig.deep_merge(%{"agent" => capacity})
       |> LocalConfig.deep_merge(%{"tracker" => legacy_target_tracker(setup)})
+      |> LocalConfig.deep_merge(%{"target" => runtime_target(setup)})
       |> LocalConfig.deep_merge(%{"tracker" => restrictive_tracker_flags(setup)})
 
     {:ok, runtime}
@@ -672,6 +673,20 @@ defmodule SymphonyElixir.RunSetup do
       _ ->
         Map.take(target, @tracker_target_keys)
     end
+  end
+
+  defp runtime_target(setup) do
+    target = Map.get(setup, "target", %{})
+
+    tracker =
+      case Map.get(target, "tracker") do
+        tracker when is_map(tracker) -> tracker
+        _ -> %{}
+      end
+
+    target
+    |> Map.drop(["tracker"])
+    |> Map.merge(Map.take(tracker, @tracker_target_keys))
   end
 
   defp restrictive_tracker_flags(setup) do

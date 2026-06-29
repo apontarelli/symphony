@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Orchestrator do
     QualityGate,
     ReviewRecords,
     RunSetup,
+    RunTarget,
     StatusDashboard,
     Tracker,
     Workspace
@@ -315,9 +316,11 @@ defmodule SymphonyElixir.Orchestrator do
 
     with :ok <- Config.validate!(),
          true <- dispatch_budget_available?(state),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
+         {:ok, resolution} <- Tracker.resolve_candidate_issues(),
          true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+      resolution
+      |> log_target_resolution_warnings()
+      |> choose_issues(state)
     else
       {:error, reason} ->
         Logger.error(dispatch_error_message(reason))
@@ -437,6 +440,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec order_candidate_issues_for_test(RunTarget.Resolution.t()) :: [Issue.t()]
+  def order_candidate_issues_for_test(%RunTarget.Resolution{} = resolution) do
+    order_candidate_issues(resolution)
   end
 
   @doc false
@@ -958,12 +967,12 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
-  defp choose_issues(issues, state) do
+  defp choose_issues(%RunTarget.Resolution{} = resolution, state) do
     active_states = active_state_set()
     terminal_states = terminal_state_set()
 
-    issues
-    |> sort_issues_for_dispatch()
+    resolution
+    |> order_candidate_issues()
     |> Enum.reduce_while(state, fn issue, state_acc ->
       maybe_choose_issue(issue, state_acc, active_states, terminal_states)
     end)
@@ -981,6 +990,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp continue_or_halt_dispatch(state) do
     if dispatch_budget_available?(state), do: {:cont, state}, else: {:halt, state}
+  end
+
+  defp order_candidate_issues(%RunTarget.Resolution{ordering: :target, issues: issues}) when is_list(issues), do: issues
+  defp order_candidate_issues(%RunTarget.Resolution{issues: issues}) when is_list(issues), do: sort_issues_for_dispatch(issues)
+
+  defp log_target_resolution_warnings(%RunTarget.Resolution{warnings: warnings} = resolution) when is_list(warnings) do
+    Enum.each(warnings, fn warning ->
+      Logger.warning(
+        "Run target warning code=#{inspect(Map.get(warning, :code))} issue_id=#{inspect(Map.get(warning, :issue_id))} issue_identifier=#{inspect(Map.get(warning, :issue_identifier))} message=#{inspect(Map.get(warning, :message))}"
+      )
+    end)
+
+    resolution
   end
 
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
