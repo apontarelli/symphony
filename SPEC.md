@@ -907,18 +907,25 @@ Minimal shape:
 
 Configuration is resolved in this order:
 
-1. Select the target repo manifest path.
-2. Parse and validate the manifest.
-3. Resolve presets, modules, pins, and overrides.
-4. Merge service deployment config for host-specific values such as workspace root, credentials,
-   runner commands, harness root, logs, ports, and worker hosts.
-5. Compile the workflow.
-6. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
-7. Coerce and validate typed runtime values.
+1. Select the target repo manifest path and, when using saved setups, the local run setup name.
+2. Parse and validate the target repo manifest.
+3. Load local operator config and saved run setup from implementation-defined operator storage.
+4. Resolve presets, modules, pins, and overrides.
+5. Merge service deployment config for host-specific values such as workspace root, credentials,
+   runner commands, harness root, logs, ports, worker hosts, and capacity ceilings.
+6. Compile the workflow.
+7. Resolve `$VAR_NAME` indirection only for config values that explicitly contain `$VAR_NAME`.
+8. Coerce and validate typed runtime values.
 
 Environment variables do not globally override manifest or compiled workflow values. They are used
 only when a config value explicitly references them or when service deployment config declares them
 as the source for secrets.
+
+Saved run setup implementations SHOULD keep operator-owned config outside target app repositories.
+The Elixir reference implementation uses `~/.config/symphony/config.yml` for operator defaults and
+`~/.config/symphony/runs/<name>.yml` for named run setups. Missing local config MAY be created with
+implementation defaults during first run. Run-specific capacity MAY be selected by profile name, but
+the resolved capacity MUST NOT exceed deployment ceilings.
 
 Value coercion semantics:
 
@@ -1280,11 +1287,15 @@ CLI commands:
   existing manifest unless the operator passes an explicit replacement flag.
 - `symphony workflow check` validates manifest schema, selected preset/modules, repo doc
   entrypoints, validation command shape, VCS/delivery defaults, and configured harness readiness.
-- The runner-agnostic cutover does not require a durable migration CLI. Operators may update
-  manifests through an explicit one-time edit during upgrade; shipped config validation should teach
-  the new `runtime.runners` shape rather than preserving legacy fields.
 - `symphony workflow print` prints the resolved preset/modules/defaults. It MAY include the
   compiled workflow config and prompt without writing generated prompt files into the target repo.
+- `symphony setup migrate` MAY migrate existing mixed manifests by extracting runtime/target fields
+  into local operator config and a saved run setup. It MUST support a preview/dry-run mode, report
+  every moved field, preserve moved values, and leave `symphony.yml` valid under the setup-only
+  schema when applied.
+- `symphony run <name>` MAY resolve a saved run setup from operator storage, compose it with local
+  config and the target repo manifest, and start the runtime without storing saved setup files in the
+  target app repository.
 
 CLI validation failures MUST exit nonzero and point to the manifest field or missing repo/harness
 evidence with concise remediation.

@@ -88,6 +88,9 @@ moving the issue as ready for merge.
    - Keep committed `symphony.yml` to durable repo setup fields. Put Linear project scope, workspace
      roots, polling, agent capacity, runner commands, and host deployment settings in local config
      or run setup.
+   - For existing mixed manifests, run `./bin/symphony setup migrate --repo /path/to/repo --name <run-name> --dry-run`
+     to preview the split, then rerun with `--apply` to write local files and remove runtime fields
+     from `symphony.yml`.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
      Team Settings → Workflow in Linear.
@@ -127,6 +130,17 @@ and passes the raw escript's local-run acknowledgement flag.
 
 When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; it does not use the
 checked-in setup-only `symphony.yml` to start the daemon.
+
+The raw escript also supports saved run setups. `./bin/symphony run <name>` reads
+`~/.config/symphony/runs/<name>.yml`, creates `~/.config/symphony/config.yml` with defaults if it is
+missing, materializes a runtime manifest under the local config directory, and starts the daemon.
+Use `--dry-run` to verify the resolved setup without starting the daemon; include the acknowledgement
+flag for a real raw-escript start:
+
+```bash
+./bin/symphony run my-project --dry-run
+./bin/symphony run my-project --i-understand-that-this-will-be-running-without-the-usual-guardrails
+```
 
 Use the current shell environment when secrets are already exported:
 
@@ -207,6 +221,31 @@ For the Codex app-server adapter, `harness.codex_home: null` means Symphony deri
 harness `CODEX_HOME`; if a path is set, `workflow check` requires that directory and its
 `AGENTS.md` to exist. Runner selection and runner commands belong in the local runtime setup file,
 not in the checked-in repo manifest.
+
+Local operator config is stored at `~/.config/symphony/config.yml`. Defaults include workspace root
+`~/dev/symphony-workspaces`, Linear active states `Todo`, `In Progress`, `Merging`, and `Rework`,
+terminal states `Closed`, `Cancelled`, `Canceled`, `Duplicate`, and `Done`, polling interval
+`30000`, Codex app-server runner defaults, and capacity profiles:
+
+- `light`: 1 agent / 1 startup
+- `normal`: 4 agents / 1 startup
+- `swarm`: 10 agents / 2 startups
+
+Deployment ceilings default to 10 agents and 2 startups. A saved run setup may choose a named
+profile or an explicit capacity map, but the resolved capacity cannot exceed those ceilings.
+
+Saved run setups live at `~/.config/symphony/runs/<name>.yml`. Names are limited to alphanumeric,
+dot, underscore, and dash characters so setup files cannot escape the global runs directory. A setup
+stores the target repo reference, tracker target, mode, capacity, and restrictive flags such as
+required labels; app repositories are not used as saved run setup storage.
+
+For migration, `setup migrate` requires an explicit `--repo`, reads that repo's existing mixed
+`symphony.yml`, reports every runtime/target field it will move, and leaves a setup-only manifest after apply:
+
+```bash
+./bin/symphony setup migrate --repo /path/to/repo --name my-project --dry-run
+./bin/symphony setup migrate --repo /path/to/repo --name my-project --apply
+```
 
 Pass a local runtime setup path to `./bin/symphony` when starting the service directly:
 

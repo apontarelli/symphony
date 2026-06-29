@@ -5,6 +5,8 @@ defmodule SymphonyElixir.CLI do
 
   alias SymphonyElixir.LogFile
   alias SymphonyElixir.ReviewRecords.Command, as: ReviewRecordsCommand
+  alias SymphonyElixir.RunSetup
+  alias SymphonyElixir.SetupMigration
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @switches [
@@ -50,6 +52,14 @@ defmodule SymphonyElixir.CLI do
   @spec evaluate([String.t()], deps()) :: :ok | {:ok, String.t()} | {:error, String.t()}
   def evaluate(["workflow" | workflow_args], _deps) do
     SymphonyElixir.WorkflowCLI.evaluate(workflow_args)
+  end
+
+  def evaluate(["run" | run_args], deps) do
+    evaluate_run(run_args, deps)
+  end
+
+  def evaluate(["setup", "migrate" | migrate_args], _deps) do
+    evaluate_setup_migrate(migrate_args)
   end
 
   def evaluate(["review-records" | review_record_args], _deps) do
@@ -105,7 +115,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]"
+    "Usage: symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]\n       symphony run <name> [--config-root <path>] [--dry-run] [--i-understand-that-this-will-be-running-without-the-usual-guardrails]\n       symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]"
   end
 
   defp default_workflow_path(_deps), do: Path.expand("symphony.yml")
@@ -123,7 +133,169 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp workflow_command?(["workflow" | _args]), do: true
+  defp workflow_command?(["setup" | _args]), do: true
   defp workflow_command?(_args), do: false
+
+  defp evaluate_run(args, deps) do
+    switches = [
+      {@acknowledgement_switch, :boolean},
+      config_root: :string,
+      dry_run: :boolean,
+      logs_root: :string,
+      port: :integer,
+      profile: :string
+    ]
+
+    case OptionParser.parse(args, strict: switches) do
+      {opts, [name], []} ->
+        run_saved_setup(name, opts, deps)
+
+      _ ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp run_saved_setup(name, opts, deps) do
+    config_opts = config_opts(opts)
+
+    with {:ok, _status, config, config_path} <- SymphonyElixir.LocalConfig.ensure(config_opts),
+         {:ok, setup, setup_path} <- RunSetup.read(name, config_opts),
+         {:ok, runtime_manifest} <- RunSetup.runtime_manifest(config, setup) do
+      continue_saved_setup_run(%{
+        name: name,
+        opts: opts,
+        deps: deps,
+        config_opts: config_opts,
+        config: config,
+        setup: setup,
+        config_path: config_path,
+        setup_path: setup_path,
+        runtime_manifest: runtime_manifest
+      })
+    else
+      {:error, reason} -> {:error, format_command_error(reason)}
+    end
+  end
+
+  defp continue_saved_setup_run(context) do
+    case Keyword.get(context.opts, :dry_run, false) do
+      true ->
+        {:ok, run_dry_run_output(context.name, context.config_path, context.setup_path, context.setup, context.runtime_manifest)}
+
+      false ->
+        start_saved_setup_runtime(context.name, context.opts, context.deps, context.config_opts, context.config, context.setup)
+    end
+  end
+
+  defp start_saved_setup_runtime(name, opts, deps, config_opts, config, setup) do
+    with :ok <- require_guardrails_acknowledgement(opts),
+         :ok <- maybe_set_logs_root(opts, deps),
+         :ok <- maybe_set_server_port(opts, deps),
+         :ok <- maybe_set_profile_override(opts, deps),
+         {:ok, runtime_path} <- RunSetup.materialize_runtime_manifest(name, config, setup, config_opts) do
+      run(runtime_path, opts, deps)
+    end
+  end
+
+  defp evaluate_setup_migrate(args) do
+    switches = [
+      repo: :string,
+      name: :string,
+      config_root: :string,
+      dry_run: :boolean,
+      apply: :boolean
+    ]
+
+    case OptionParser.parse(args, strict: switches) do
+      {opts, [], []} ->
+        migrate_setup(opts)
+
+      _ ->
+        {:error, usage_message()}
+    end
+  end
+
+  defp migrate_setup(opts) do
+    case {Keyword.get(opts, :dry_run, false), Keyword.get(opts, :apply, false)} do
+      {true, true} -> {:error, "Choose either --dry-run or --apply, not both."}
+      {_dry_run?, apply?} -> migrate_setup(opts, apply?)
+    end
+  end
+
+  defp migrate_setup(opts, apply?) do
+    with {:ok, repo} <- fetch_migration_repo(opts) do
+      name = Keyword.get(opts, :name, default_run_setup_name(repo))
+      config_opts = config_opts(opts)
+
+      case apply? do
+        true -> apply_migration(repo, name, config_opts)
+        false -> preview_migration(repo, name, config_opts)
+      end
+    end
+  end
+
+  defp fetch_migration_repo(opts) do
+    case Keyword.fetch(opts, :repo) do
+      {:ok, repo} -> {:ok, repo}
+      :error -> {:error, "setup migrate requires --repo <path>."}
+    end
+  end
+
+  defp apply_migration(repo, name, config_opts) do
+    case SetupMigration.apply(repo, name, config_opts) do
+      {:ok, plan} -> {:ok, SetupMigration.format(plan, :apply)}
+      {:error, reason} -> {:error, format_command_error(reason)}
+    end
+  end
+
+  defp preview_migration(repo, name, config_opts) do
+    case SetupMigration.plan(repo, name, config_opts) do
+      {:ok, plan} -> {:ok, SetupMigration.format(plan, :dry_run)}
+      {:error, reason} -> {:error, format_command_error(reason)}
+    end
+  end
+
+  defp config_opts(opts) do
+    case Keyword.get(opts, :config_root) do
+      nil -> []
+      root -> [config_root: root]
+    end
+  end
+
+  defp default_run_setup_name(repo) do
+    repo
+    |> Path.expand()
+    |> Path.basename()
+  end
+
+  defp run_dry_run_output(name, config_path, setup_path, setup, runtime_manifest) do
+    [
+      "Resolved saved run setup #{name}",
+      "local config: #{config_path}",
+      "run setup: #{setup_path}",
+      "repo manifest: #{get_in(runtime_manifest, ["repo", "manifest"]) || get_in(setup, ["repo", "manifest"]) || get_in(setup, ["repo", "path"])}",
+      "capacity: #{RunSetup.capacity_label(setup)}",
+      "mode: #{Map.get(setup, "mode", "unattended")}",
+      "dry run: daemon not started"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp format_command_error({:invalid_run_setup_name, name}), do: "Invalid run setup name: #{inspect(name)}"
+  defp format_command_error({:unknown_capacity_profile, name}), do: "Unknown capacity profile: #{name}"
+  defp format_command_error({:invalid_capacity, capacity}), do: "Invalid capacity: #{inspect(capacity)}"
+
+  defp format_command_error({:invalid_deployment_ceilings, ceilings}) do
+    "Invalid deployment ceilings: #{inspect(ceilings)}. Values must be positive integers."
+  end
+
+  defp format_command_error({:capacity_exceeds_deployment_ceiling, label, capacity, ceilings}) do
+    "Capacity #{label} exceeds deployment ceilings: requested #{inspect(capacity)}, ceilings #{inspect(ceilings)}"
+  end
+
+  defp format_command_error({:missing_manifest_file, path, reason}), do: "Manifest file not found: #{path} (#{reason})"
+  defp format_command_error({:invalid_manifest, diagnostics}) when is_list(diagnostics), do: inspect({:invalid_manifest, diagnostics})
+  defp format_command_error(reason), do: inspect(reason)
 
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do
