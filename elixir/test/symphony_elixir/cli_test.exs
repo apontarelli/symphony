@@ -249,6 +249,110 @@ defmodule SymphonyElixir.CLITest do
     assert export_output =~ "Records: 1"
   end
 
+  test "run command resolves a saved setup and creates missing local config on dry run" do
+    root = tmp_repo!("symphony-cli-run-config")
+    repo = tmp_repo!("symphony-cli-run-target")
+    write_cli_repo_manifest!(repo)
+    runs_dir = Path.join(root, "runs")
+    File.mkdir_p!(runs_dir)
+
+    File.write!(
+      Path.join(runs_dir, "dogfood.yml"),
+      Renderer.to_yaml(%{
+        "repo" => %{"path" => repo},
+        "target" => %{"tracker" => %{"project_slug" => "symphony"}},
+        "mode" => "unattended",
+        "capacity" => "light",
+        "restrictive_flags" => %{"required_labels" => ["symphony"]}
+      })
+    )
+
+    assert {:ok, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+    assert output =~ "Resolved saved run setup dogfood"
+    assert output =~ Path.join([root, "runs", "dogfood.yml"])
+    assert output =~ "capacity: light"
+    assert File.regular?(Path.join(root, "config.yml"))
+  end
+
+  test "saved-run dry-run rejects invalid composed runtime config" do
+    root = tmp_repo!("symphony-cli-run-config")
+    repo = tmp_repo!("symphony-cli-run-target")
+    write_cli_repo_manifest!(repo)
+
+    File.mkdir_p!(Path.join(root, "runs"))
+
+    File.write!(
+      Path.join(root, "config.yml"),
+      SymphonyElixir.LocalConfig.default_config()
+      |> put_in(["polling", "interval_ms"], 0)
+      |> Renderer.to_yaml()
+    )
+
+    File.write!(
+      Path.join([root, "runs", "dogfood.yml"]),
+      Renderer.to_yaml(%{
+        "repo" => %{"path" => repo},
+        "target" => %{"tracker" => %{"project_slug" => "symphony"}},
+        "mode" => "unattended",
+        "capacity" => "light"
+      })
+    )
+
+    assert {:error, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+    assert output =~ "invalid_manifest"
+    assert output =~ "runtime"
+    assert output =~ "interval_ms"
+  end
+
+  test "usage documents explicit migration repo and saved-run acknowledgement" do
+    assert {:error, usage} = CLI.evaluate(["run"], daemon_forbidden_deps())
+    assert usage =~ "symphony run <name>"
+    assert usage =~ @ack_flag
+    assert usage =~ "symphony setup migrate --repo <path>"
+    refute usage =~ "setup migrate [--repo"
+  end
+
+  test "setup migrate requires an explicit repo" do
+    root = tmp_repo!("symphony-cli-migrate")
+
+    assert {:error, message} =
+             CLI.evaluate(["setup", "migrate", "--name", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+
+    assert message == "setup migrate requires --repo <path>."
+    refute File.exists?(Path.join(root, "config.yml"))
+    refute File.exists?(Path.join([root, "runs", "dogfood.yml"]))
+  end
+
+  test "setup migrate dry-run reports moved fields without writing files" do
+    root = tmp_repo!("symphony-cli-migrate")
+    repo = mixed_manifest_repo!("symphony-cli-migrate-repo")
+
+    assert {:ok, output} =
+             CLI.evaluate(["setup", "migrate", "--repo", repo, "--name", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+
+    assert output =~ "Migration dry run"
+    assert output =~ "runtime.tracker.project_slug -> run setup target"
+    assert output =~ "runtime.runners.codex.command -> local config"
+    refute File.exists?(Path.join(root, "config.yml"))
+    refute File.exists?(Path.join([root, "runs", "dogfood.yml"]))
+  end
+
+  test "setup migrate apply writes local config and run setup" do
+    root = tmp_repo!("symphony-cli-migrate")
+    repo = mixed_manifest_repo!("symphony-cli-migrate-repo")
+
+    assert {:ok, output} =
+             CLI.evaluate(["setup", "migrate", "--repo", repo, "--name", "dogfood", "--config-root", root, "--apply"], daemon_forbidden_deps())
+
+    assert output =~ "Migration applied"
+    assert output =~ Path.join(root, "config.yml")
+    assert output =~ Path.join([root, "runs", "dogfood.yml"])
+    assert File.regular?(Path.join(root, "config.yml"))
+    assert File.regular?(Path.join([root, "runs", "dogfood.yml"]))
+
+    assert {:ok, _workflow} = Manifest.load(Path.join(repo, "symphony.yml"))
+  end
+
   test "workflow init creates a thin manifest from repo inspection" do
     repo = tmp_repo!("symphony-elixir-init")
     File.write!(Path.join(repo, "README.md"), "repo docs\n")
@@ -569,6 +673,79 @@ defmodule SymphonyElixir.CLITest do
     {:ok, manifest} = YamlElixir.read_from_file(manifest_path)
     manifest = put_in(manifest, ["project", "repository"], repository)
     File.write!(manifest_path, Renderer.to_yaml(manifest))
+  end
+
+  defp daemon_forbidden_deps do
+    %{
+      file_regular?: fn _path -> flunk("command should not check daemon manifest paths") end,
+      set_workflow_file_path: fn _path -> flunk("command should not set daemon workflow paths") end,
+      set_logs_root: fn _path -> flunk("command should not set daemon logs") end,
+      set_server_port_override: fn _port -> flunk("command should not set daemon ports") end,
+      set_profile_override: fn _profile -> flunk("command should not set daemon profiles") end,
+      ensure_all_started: fn -> flunk("command should not start the daemon") end
+    }
+  end
+
+  defp write_cli_repo_manifest!(repo) do
+    File.write!(Path.join(repo, "README.md"), "docs\n")
+
+    File.write!(
+      Path.join(repo, "symphony.yml"),
+      """
+      version: 1
+      project:
+        slug: target-repo
+        repository: https://github.com/example/target-repo
+      docs:
+        entrypoints:
+          - README.md
+      delivery:
+        pr_target: main
+      workflow:
+        preset: default
+      """
+    )
+  end
+
+  defp mixed_manifest_repo!(name) do
+    repo = tmp_repo!(name)
+    File.write!(Path.join(repo, "README.md"), "docs\n")
+
+    File.write!(
+      Path.join(repo, "symphony.yml"),
+      """
+      version: 1
+      project:
+        slug: target-repo
+        repository: https://github.com/example/target-repo
+      docs:
+        entrypoints:
+          - README.md
+      delivery:
+        pr_target: main
+      workflow:
+        preset: default
+      runtime:
+        tracker:
+          project_slug: symphony
+          required_labels:
+            - symphony
+        workspace:
+          root: ~/dogfood-workspaces
+        agent:
+          max_concurrent_agents: 4
+          max_concurrent_startups: 1
+          max_turns: 9
+        runners:
+          codex:
+            kind: codex_app_server
+            command:
+              - codex
+              - app-server
+      """
+    )
+
+    repo
   end
 
   defp repo_root!, do: Path.expand("../../..", __DIR__)

@@ -82,9 +82,23 @@ mise exec -- ./bin/symphony workflow check --repo /path/to/target-repo
 mise exec -- ./bin/symphony workflow print --repo /path/to/target-repo --compiled
 ```
 
-To start the service from this checkout, select a local runtime setup file that supplies tracker
-scope, workspace, runner, and host settings. Either export required secrets in the current
-environment and skip the launcher env file:
+To start the service from this checkout, select a local run setup that supplies tracker target,
+capacity, and repo reference, while `~/.config/symphony/config.yml` supplies operator defaults such
+as workspace root, eligible states, deployment ceilings, polling, and runner settings. First use
+creates a default config with workspace root `~/dev/symphony-workspaces`. Saved run setups live under
+`~/.config/symphony/runs/<name>.yml`.
+
+`setup migrate` intentionally requires an explicit `--repo` so the target repository never depends on
+the launcher's working directory.
+
+```bash
+mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo --dry-run
+mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo --apply
+mise exec -- ./bin/symphony run my-repo --dry-run
+```
+
+You can also start from an explicit local runtime setup file. Either export required secrets in the
+current environment and skip the launcher env file:
 
 ```bash
 export LINEAR_API_KEY=...

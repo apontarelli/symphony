@@ -5,6 +5,8 @@ usage() {
   cat <<'USAGE'
 Usage:
   symphony [project-name] [--workflow /path/to/symphony.runtime.yml] [options]
+  symphony run <name> [--config-root <path>] [--dry-run] [--env-file <path>|--no-env-file]
+  symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]
   symphony --workflow /path/to/symphony.runtime.yml [options]
   symphony workflow <init|check|print> [options]
 
@@ -162,11 +164,8 @@ run_elixir() {
   exec mise exec -- ./bin/symphony "${args[@]}"
 }
 
-run_workflow_cli() {
-  local repo_root="$1"
-  shift
-
-  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+prepare_elixir_cli() {
+  local symphony_home="$1"
 
   [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
 
@@ -191,8 +190,76 @@ run_workflow_cli() {
     printf 'hint: rerun without SYMPHONY_SKIP_BUILD=1 so the launcher can build it\n' >&2
     exit 127
   fi
+}
+
+run_workflow_cli() {
+  local repo_root="$1"
+  shift
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+
+  prepare_elixir_cli "$symphony_home"
 
   exec mise exec -- ./bin/symphony "$@"
+}
+
+run_saved_setup_cli() {
+  local repo_root="$1"
+  shift
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
+  local use_env_file=1
+  local escript_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
+  local arg
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+
+    case "$arg" in
+      --env-file)
+        require_value "$arg" "${2:-}"
+        env_file="$2"
+        shift 2
+        ;;
+      --no-env-file)
+        use_env_file=0
+        shift
+        ;;
+      --skip-build)
+        export SYMPHONY_SKIP_BUILD=1
+        shift
+        ;;
+      *)
+        escript_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  symphony_home="$(expand_path "$symphony_home")"
+  env_file="$(expand_path "$env_file")"
+  symphony_home="$(absolute_path "$symphony_home")"
+  env_file="$(absolute_path "$env_file")"
+
+  prepare_elixir_cli "$symphony_home"
+
+  local cmd
+
+  if [[ "$use_env_file" == "1" ]]; then
+    [[ -f "$env_file" ]] || die "env file not found: $env_file; copy symphony.env.example there or pass --no-env-file"
+    command -v op >/dev/null 2>&1 || {
+      printf 'error: op not found on PATH\n' >&2
+      printf 'hint: install the 1Password CLI or pass --no-env-file\n' >&2
+      exit 127
+    }
+
+    cmd=(env "SYMPHONY_HOME=$symphony_home" op run --env-file "$env_file" -- mise exec -- ./bin/symphony "${escript_args[@]}")
+  else
+    cmd=(env "SYMPHONY_HOME=$symphony_home" mise exec -- ./bin/symphony "${escript_args[@]}")
+  fi
+
+  exec "${cmd[@]}"
 }
 
 main() {
@@ -204,8 +271,13 @@ main() {
     run_elixir "$repo_root"
   fi
 
-  if [[ "${1:-}" == "workflow" ]]; then
+  if [[ "${1:-}" == "workflow" || "${1:-}" == "setup" ]]; then
     run_workflow_cli "$repo_root" "$@"
+  fi
+
+  if [[ "${1:-}" == "run" ]]; then
+    shift
+    run_saved_setup_cli "$repo_root" "$@"
   fi
 
   local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
