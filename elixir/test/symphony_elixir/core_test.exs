@@ -52,7 +52,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil
     )
 
-    assert {:error, :missing_linear_project_scope} = Config.validate!()
+    assert {:error, :missing_linear_run_target} = Config.validate!()
 
     previous_linear_api_key = System.get_env("LINEAR_API_KEY")
     System.put_env("LINEAR_API_KEY", "token")
@@ -75,7 +75,7 @@ defmodule SymphonyElixir.CoreTest do
             pr_target: main
       """)
 
-      assert {:error, :missing_linear_project_scope} = Config.validate!()
+      assert {:error, :missing_linear_run_target} = Config.validate!()
     after
       restore_env("LINEAR_API_KEY", previous_linear_api_key)
     end

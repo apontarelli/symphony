@@ -516,6 +516,33 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule IssueMarkers do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+    alias SymphonyElixir.RunTarget.RepoMarkers, as: RunTargetRepoMarkers
+
+    @primary_key false
+
+    embedded_schema do
+      field(:labels, {:array, :string}, default: [])
+      field(:allowed_projects, {:array, :string}, default: [])
+    end
+
+    @type t :: %__MODULE__{
+            labels: [String.t()],
+            allowed_projects: [String.t()]
+          }
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:labels, :allowed_projects], empty_values: [])
+      |> update_change(:labels, &RunTargetRepoMarkers.normalize_labels/1)
+      |> update_change(:allowed_projects, &RunTargetRepoMarkers.normalize_projects/1)
+    end
+  end
+
   defmodule WorkflowModules do
     @moduledoc false
     use Ecto.Schema
@@ -553,6 +580,8 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:quality_gate, QualityGate, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:issue_markers, IssueMarkers, on_replace: :update, defaults_to_struct: true)
+    field(:target, :map)
     field(:runners, :map, default: @default_runners)
     field(:profiles, :map, default: %{})
     field(:policy_metadata, :map, default: %{})
@@ -675,7 +704,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp changeset(attrs) do
     %__MODULE__{}
-    |> cast(attrs, [:runners, :profiles, :policy_metadata])
+    |> cast(attrs, [:runners, :profiles, :policy_metadata, :target])
     |> cast_embed(:tracker, with: &Tracker.changeset/2)
     |> cast_embed(:polling, with: &Polling.changeset/2)
     |> cast_embed(:workspace, with: &Workspace.changeset/2)
@@ -687,6 +716,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:quality_gate, with: &QualityGate.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> cast_embed(:issue_markers, with: &IssueMarkers.changeset/2)
     |> cast_embed(:workflow_modules, with: &WorkflowModules.changeset/2)
     |> update_change(:runners, &normalize_runner_map/1)
     |> validate_runners()

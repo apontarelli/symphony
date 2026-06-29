@@ -952,9 +952,6 @@ Tracker:
   `runtime.tracker.kind=linear`
 - `runtime.tracker.api_key`: string or `$VAR`, canonical env `LINEAR_API_KEY` when
   `runtime.tracker.kind=linear`
-- `runtime.tracker.project_id`: string, optional Linear project ID.
-- `runtime.tracker.project_slug`: string, optional Linear project `slugId`.
-- `runtime.tracker.team_key`: string, optional Linear team key used when no project scope is set.
 - `runtime.tracker.workspace_slug`: string, optional Linear workspace URL slug used to render team
   links such as `https://linear.app/<workspace_slug>/team/<team_key>/all`.
 - `runtime.tracker.required_labels`: list of strings, default `[]`
@@ -963,6 +960,20 @@ Tracker:
   `["Todo", "In Progress", "Merging", "Rework"]`
 - `runtime.tracker.terminal_states`: list of strings, default
   `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+
+Run target:
+
+- `runtime.target.tracker`: string, default `linear` for the Linear implementation.
+- `runtime.target.type`: one of `project`, `team`, `query`, or `issues`.
+- `runtime.target.project_id`: string, optional for `project` targets.
+- `runtime.target.project_slug`: string, optional Linear project `slugId` for `project` targets.
+- `runtime.target.team_key`: string, REQUIRED for `team` targets.
+- `runtime.target.filter`: map, REQUIRED for `query` targets; interpreted as a Linear-native issue
+  filter object and intersected with eligible states.
+- `runtime.target.issue_ids`: list of strings, REQUIRED for `issues` targets.
+- Legacy `runtime.tracker.project_id`, `runtime.tracker.project_slug`, and
+  `runtime.tracker.team_key` MAY be interpreted as compatibility fallbacks when `runtime.target` is
+  absent. New run setup files SHOULD use `runtime.target`.
 
 Dispatchability is a tracker-state contract:
 
@@ -1280,10 +1291,10 @@ it.
   derives a managed harness root.
 - `auto_land` and `review_routing` (objects): durable repository policy inputs.
 
-Runtime tracker scope, workspace/log roots, polling, agent capacity, concrete runners, saved run
+Runtime run targets, workspace/log roots, polling, agent capacity, concrete runners, saved run
 setups, and host/deployment settings MUST live in local runtime setup, not in `symphony.yml`.
-Runtime tracker scope MAY target a Linear project, team, explicit issue ID batch, or
-implementation-defined Linear query source.
+Runtime `target` MAY select a Linear project, team, explicit issue ID batch, or Linear-native query
+filter object.
 
 CLI commands:
 
@@ -1366,9 +1377,9 @@ Validation checks:
 - Compiled workflow can be produced and validated.
 - `runtime.tracker.kind` is present and supported.
 - `runtime.tracker.api_key` is present after `$` resolution.
-- `runtime.tracker.project_id`, `runtime.tracker.project_slug`, or `runtime.tracker.team_key` is
-  present when required by the selected tracker kind. Linear polling prefers `project_id`, then
-  `project_slug`, then `team_key`.
+- `runtime.target` is valid when required by the selected tracker kind. Linear run target resolution
+  supports `project`, `team`, `query`, and `issues`; legacy tracker scope fields MAY satisfy this
+  validation only as compatibility fallback.
 - `runtime.agent.default_runner` resolves to a configured runner.
 - The selected runner command is present, non-empty, and represented as argv.
 - Legacy `runtime.codex.*` fields are rejected after the runner-agnostic cutover with a clear error
@@ -2028,7 +2039,7 @@ Note:
 An implementation MUST support these tracker adapter operations:
 
 1. `fetch_candidate_issues()`
-   - Return issues in configured active states for a configured project.
+   - Return issues in configured active states for the resolved run target.
 
 2. `fetch_issues_by_states(state_names)`
    - Used for startup terminal cleanup.
@@ -2043,18 +2054,27 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
 - `runtime.tracker.kind == "linear"`
 - GraphQL endpoint (default `https://api.linear.app/graphql`)
 - Auth token sent in `Authorization` header
-- `runtime.tracker.project_id` maps to Linear project `id` and is the preferred candidate polling
-  selector.
-- `runtime.tracker.project_slug` maps to Linear project `slugId` and is used only when
-  `project_id` is absent.
-- `runtime.tracker.team_key` maps to Linear team `key` and is used only when project scope is
+- `runtime.target.type=project` maps `project_id` to Linear project `id` when present, otherwise
+  maps `project_slug` to Linear project `slugId`.
+- `runtime.target.type=team` maps `team_key` to Linear team `key`.
+- `runtime.target.type=query` sends `filter` as a Linear-native issue filter object and intersects it
+  with eligible state names.
+- `runtime.target.type=issues` fetches the requested GraphQL issue IDs and preserves requested order
+  where practical.
+- Legacy `runtime.tracker.project_id`, `runtime.tracker.project_slug`, and
+  `runtime.tracker.team_key` MAY map to equivalent project/team targets when `runtime.target` is
   absent.
 - Candidate and issue-state refresh queries include issue labels. Required-label and excluded-label
   filtering happens after normalization so refresh can observe label changes and stop or release
   existing work.
 - Candidate issue query filters by `project: { id: { eq: $projectId } }` when `project_id` is set,
   by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set, or by
-  `team: { key: { eq: $teamKey } }` when only team scope is set.
+  `team: { key: { eq: $teamKey } }` for project/team targets; query targets use the supplied native
+  filter object.
+- Team and query targets require repo `issue_markers.labels` or `issue_markers.allowed_projects`.
+  When markers exist, project, team, and query targets are intersected with those labels/projects.
+  Explicit issue targets return marker mismatch warnings instead of silently dropping mismatched
+  requested issues.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues
 - Page size default: `50`
@@ -2305,7 +2325,7 @@ If implemented:
 - Created issues SHOULD target `Backlog` by default, MAY target `Todo` only through explicit
   configuration, MUST reject terminal states, SHOULD map severity to tracker priority, SHOULD route
   by configured project/team evidence, MUST reject payload target projects outside the selected
-  workflow tracker scope, and SHOULD include explicit labels before any agent dispatch path can pick
+  workflow run target, and SHOULD include explicit labels before any agent dispatch path can pick
   them up.
 - Project-specific monitoring remains responsible for alert thresholds, source credentials,
   webhook hosting, and source-specific payload normalization. Symphony owns only the shared intake
@@ -3258,7 +3278,7 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI can initialize a target repo `symphony.yml` without overwriting an existing manifest unless
   explicitly forced
 - CLI can check a target repo manifest and fail nonzero with field-level remediation for schema,
-  module, doc, tracker scope, or configured harness problems
+  module, doc, run target, or configured harness problems
 - CLI can preview the resolved workflow preset/modules/defaults and optionally include the compiled
   workflow config/prompt
 - CLI surfaces startup failure cleanly

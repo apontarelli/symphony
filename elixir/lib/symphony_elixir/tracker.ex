@@ -3,9 +3,10 @@ defmodule SymphonyElixir.Tracker do
   Adapter boundary for issue tracker reads and writes.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, RunTarget}
 
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
+  @callback resolve_candidate_issues(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
@@ -13,7 +14,14 @@ defmodule SymphonyElixir.Tracker do
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
-    adapter().fetch_candidate_issues()
+    with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_candidate_issues() do
+      {:ok, issues}
+    end
+  end
+
+  @spec resolve_candidate_issues(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_candidate_issues(target \\ nil) do
+    adapter().resolve_candidate_issues(target)
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}

@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, Orchestrator, RunTarget, StatusDashboard}
 
   @stale_after_seconds 5 * 60
   @default_profile "default"
@@ -620,20 +620,19 @@ defmodule SymphonyElixirWeb.Presenter do
   defp config_warning_payloads do
     case Config.settings() do
       {:ok, settings} ->
-        settings.tracker
-        |> tracker_config_warnings()
+        config_warnings(settings)
 
       {:error, reason} ->
         [config_warning("workflow_config", "Workflow config could not be loaded: #{inspect(reason)}.")]
     end
   end
 
-  defp tracker_config_warnings(tracker) do
+  defp config_warnings(%{tracker: tracker} = settings) do
     [
       missing_tracker_kind_warning(tracker),
       unsupported_tracker_kind_warning(tracker),
       missing_linear_api_token_warning(tracker),
-      missing_linear_project_scope_warning(tracker)
+      missing_linear_run_target_warning(settings)
     ]
     |> Enum.reject(&is_nil/1)
   end
@@ -653,17 +652,20 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp missing_linear_api_token_warning(_tracker), do: nil
 
-  defp missing_linear_project_scope_warning(%{
-         kind: "linear",
-         project_id: project_id,
-         project_slug: project_slug,
-         team_key: team_key
-       })
-       when not is_binary(project_id) and not is_binary(project_slug) and not is_binary(team_key) do
-    config_warning("missing_linear_project_scope", "Linear project_id, project_slug, or team_key is not configured.")
+  defp missing_linear_run_target_warning(%{tracker: %{kind: "linear"}} = settings) do
+    case RunTarget.from_settings(settings) do
+      {:ok, target} ->
+        case RunTarget.validate_marker_safety(target, RunTarget.repo_markers(settings)) do
+          :ok -> nil
+          {:error, :run_target_requires_issue_markers} -> config_warning("run_target_requires_issue_markers", "Linear team and query run targets require repo issue markers.")
+        end
+
+      {:error, _reason} ->
+        config_warning("missing_linear_run_target", "Linear run target is not configured.")
+    end
   end
 
-  defp missing_linear_project_scope_warning(_tracker), do: nil
+  defp missing_linear_run_target_warning(_settings), do: nil
 
   defp config_warning(code, message), do: %{code: code, message: message}
 

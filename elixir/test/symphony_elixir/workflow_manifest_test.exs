@@ -257,6 +257,10 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       saved_run_setups:
         default:
           path: /tmp/local.yml
+      target:
+        tracker: linear
+        type: project
+        project_slug: today
       server:
         port: 4000
       """)
@@ -275,6 +279,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert_runtime_setup_diagnostic!(diagnostics, "host")
     assert_runtime_setup_diagnostic!(diagnostics, "deployment")
     assert_runtime_setup_diagnostic!(diagnostics, "saved_run_setups")
+    assert_runtime_setup_diagnostic!(diagnostics, "target")
   end
 
   test "repo setup manifest rejects the runtime key even when empty or null" do
@@ -1017,7 +1022,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     Workflow.set_workflow_file_path(path)
     if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
-    assert {:error, :missing_linear_project_scope} = Config.validate!()
+    assert {:error, :missing_linear_run_target} = Config.validate!()
 
     settings = Config.settings!()
     assert settings.tracker.kind == "linear"
@@ -1082,7 +1087,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     Workflow.set_workflow_file_path(path)
     if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
 
-    assert {:error, :missing_linear_project_scope} = Config.validate!()
+    assert {:error, :missing_linear_run_target} = Config.validate!()
 
     settings = Config.settings!()
     assert settings.tracker.project_id == nil
@@ -1098,8 +1103,8 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert Config.format_error(:missing_linear_api_token) ==
              "Linear API token missing in selected workflow config"
 
-    assert Config.format_error(:missing_linear_project_scope) ==
-             "Linear project_id, project_slug, team_key, issue_ids, query, or query_file missing in selected workflow config"
+    assert Config.format_error(:missing_linear_run_target) ==
+             "Linear run target missing in selected workflow config"
 
     assert Config.format_error(:missing_tracker_kind) ==
              "Tracker kind missing in selected workflow config"
