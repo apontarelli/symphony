@@ -8,7 +8,6 @@ defmodule SymphonyElixir.AgentRuntimeContract do
     fake = Keyword.fetch!(opts, :fake)
     expected_runtime = Keyword.fetch!(opts, :expected_runtime)
 
-    # credo:disable-for-next-line Credo.Check.Refactor.LongQuoteBlocks
     quote bind_quoted: [adapter: adapter, fake: fake, expected_runtime: expected_runtime] do
       use SymphonyElixir.TestSupport
 
@@ -216,18 +215,28 @@ defmodule SymphonyElixir.AgentRuntimeContract do
 
       test "stops the runtime process and descendant processes where supported", %{runtime_context: runtime_context} do
         if SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() do
-          runtime_context = @agent_runtime_fake.install!(runtime_context, :descendant_cleanup)
-
-          assert {:ok, session} =
-                   @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
-
-          child_pid = eventually(fn -> @agent_runtime_fake.child_pid(runtime_context) end)
-          assert os_pid_alive?(child_pid)
-          assert :ok = @agent_runtime_adapter.stop(session)
-          assert eventually(fn -> stopped_when_not_alive(child_pid) end) == :stopped
+          assert_descendant_cleanup(runtime_context)
         else
           assert SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() == false
         end
+      end
+
+      defp assert_descendant_cleanup(runtime_context) do
+        runtime_context = @agent_runtime_fake.install!(runtime_context, :descendant_cleanup)
+
+        assert {:ok, session} =
+                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+
+        child_pid =
+          try do
+            child_pid = eventually(fn -> @agent_runtime_fake.child_pid(runtime_context) end)
+            assert os_pid_alive?(child_pid)
+            child_pid
+          after
+            assert :ok = @agent_runtime_adapter.stop(session)
+          end
+
+        assert eventually(fn -> stopped_when_not_alive(child_pid) end) == :stopped
       end
 
       defp stopped_when_not_alive(os_pid) do
