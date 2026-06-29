@@ -231,6 +231,46 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "Mode: issue-batch"
   end
 
+  test "run command with only repo uses the interactive local setup builder" do
+    repo = tmp_repo!("symphony-elixir-run-repo-interactive")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      slug: symphony
+      name: Symphony
+      repository: https://github.com/apontarelli/symphony
+    delivery:
+      pr_target: main
+    """)
+
+    parent = self()
+    {:ok, answers} = Agent.start_link(fn -> ["1", "SID-374", "1", "", "n", "n"] end)
+
+    deps = %{
+      file_regular?: fn _path -> flunk("interactive local setup should not check a runtime manifest") end,
+      set_workflow_file_path: fn _path -> flunk("cancelled local setup should not start the daemon") end,
+      set_logs_root: fn _path -> flunk("cancelled local setup should not set logs") end,
+      set_server_port_override: fn _port -> flunk("cancelled local setup should not set ports") end,
+      set_profile_override: fn _profile -> flunk("cancelled local setup should not set profiles") end,
+      ensure_all_started: fn -> flunk("cancelled local setup should not start applications") end,
+      local_run_deps: %{
+        home: fn -> repo end,
+        cwd: fn -> repo end,
+        prompt: fn prompt ->
+          send(parent, {:prompt, prompt})
+          Agent.get_and_update(answers, fn [answer | rest] -> {answer, rest} end)
+        end
+      }
+    }
+
+    assert {:ok, output} = CLI.evaluate(["run", "--repo", repo], deps)
+    assert output =~ "Run preview"
+    assert output =~ "Target: Issues SID-374"
+    assert_received {:prompt, prompt}
+    assert prompt =~ "Target type:"
+  end
+
   test "local run startup requires the guardrail acknowledgement" do
     repo = tmp_repo!("symphony-elixir-run-ack")
 

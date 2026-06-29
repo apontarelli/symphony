@@ -45,8 +45,5 @@ capabilities:
     - linear
     - github_pr
     - browser
-issue_markers:
-  labels:
-    - symphony
 harness:
   codex_home: null

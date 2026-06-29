@@ -36,7 +36,7 @@ defmodule SymphonyElixir.CLI do
 
   @run_switch_keys Keyword.keys(@run_switches)
   @base_switch_keys Keyword.keys(@switches)
-  @runtime_selection_switches @run_switch_keys -- (@base_switch_keys -- [:repo])
+  @runtime_selection_switches @run_switch_keys -- (@base_switch_keys ++ [:repo])
   @shared_runtime_switches @base_switch_keys -- [@acknowledgement_switch]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}

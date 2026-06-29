@@ -15,8 +15,8 @@ Usage:
 Project resolution:
   project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.runtime.yml.
   --workflow <path>           Uses the explicit runtime setup path.
-  no project or workflow      Uses SYMPHONY_WORKFLOW from the env file, then ./symphony.runtime.yml,
-                              then repo setup ./symphony.yml for interactive run setup.
+  no project or workflow      In a repo setup directory, builds an interactive local run setup.
+                              Else uses SYMPHONY_WORKFLOW from the env file, then ./symphony.runtime.yml.
   run                         Builds or loads a local runtime setup, previews it, then starts it.
 
 Options:
@@ -383,6 +383,54 @@ main() {
   dev_root="$(expand_path "$dev_root")"
   env_file="$(expand_path "$env_file")"
   logs_root="$(expand_path "$logs_root")"
+
+  if [[ -z "$project" && -z "$workflow" && -f symphony.yml ]]; then
+    local local_run_args=()
+    local repo_arg_present=0
+    local index
+
+    for ((index = 0; index < ${#run_args[@]}; index++)); do
+      if [[ "${run_args[$index]}" == "--repo" ]]; then
+        repo_arg_present=1
+        break
+      fi
+    done
+
+    if [[ "$repo_arg_present" == "0" ]]; then
+      local_run_args+=(--repo "$PWD")
+    fi
+
+    if [[ "$use_env_file" == "0" ]]; then
+      local_run_args+=(--no-env-file)
+    elif [[ "$env_file" != "$HOME/.config/symphony/.env" ]]; then
+      local_run_args+=(--env-file "$env_file")
+    fi
+
+    if [[ "$dry_run" == "1" ]]; then
+      local_run_args+=(--dry-run)
+    fi
+
+    if [[ -n "$port" ]]; then
+      local_run_args+=(--port "$port")
+    fi
+
+    if [[ -n "$logs_root" ]]; then
+      local_run_args+=(--logs-root "$logs_root")
+    fi
+
+    if [[ -n "$profile" ]]; then
+      local_run_args+=(--profile "$profile")
+    fi
+
+    if [[ "${SYMPHONY_SKIP_BUILD:-0}" == "1" ]]; then
+      local_run_args+=(--skip-build)
+    fi
+
+    if [[ "${#run_args[@]}" -gt 0 ]]; then
+      local_run_args+=("${run_args[@]}")
+    fi
+    run_saved_setup_cli "$repo_root" "${local_run_args[@]}"
+  fi
 
   if [[ "$use_env_file" == "1" && -z "$workflow" && -f "$env_file" ]]; then
     workflow="$(env_file_value "$env_file" SYMPHONY_WORKFLOW || true)"

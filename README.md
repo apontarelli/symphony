@@ -86,13 +86,15 @@ mise exec -- ./bin/symphony setup preview --repo /path/to/target-repo --compiled
 For local solo runs, use `symphony run` to build or load a saved local run setup instead of
 hand-writing runtime YAML. First use creates `~/.config/symphony/config.yml` with operator defaults
 such as workspace root, capacity profiles, deployment ceilings, polling, and runner settings. Saved
-named setups live under `~/.config/symphony/runs/<name>.yml`.
+named setups live under `~/.config/symphony/runs/<name>.yml`. Bare `symphony` in a directory with a
+valid `symphony.yml` enters the same interactive local run setup flow.
 
 ```bash
 export LINEAR_API_KEY=...
 ../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run
 ../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --no-env-file --dry-run
 ../bin/symphony run my-saved-setup --no-env-file --dry-run
+../bin/symphony --no-env-file
 ```
 
 `setup migrate` can convert an existing checked-in runtime setup into local config plus a saved run
@@ -114,14 +116,15 @@ export LINEAR_API_KEY=...
 ../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env`, set
-`SYMPHONY_WORKFLOW` to a local `symphony.runtime.yml`, and use the default launcher behavior, which
-resolves that env file through the 1Password CLI:
+or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env` and keep secrets
+there for the default launcher to resolve through the 1Password CLI. If you still need to launch an
+explicit legacy runtime setup, pass it with `--workflow`; otherwise bare `symphony` in a repo setup
+directory prefers interactive local run setup over `SYMPHONY_WORKFLOW` from the env file.
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
-../bin/symphony
+../bin/symphony --workflow /path/to/local-symphony-runtime.yml
 ```
 
 The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. A

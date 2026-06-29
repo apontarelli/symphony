@@ -231,8 +231,8 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   @query_by_ids """
-  query SymphonyLinearIssuesById($ids: [ID!]!, $identifiers: [String!]!, $first: Int!, $relationFirst: Int!) {
-    issues(filter: {or: [{id: {in: $ids}}, {identifier: {in: $identifiers}}]}, first: $first) {
+  query SymphonyLinearIssuesByUuid($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
+    issues(filter: {id: {in: $ids}}, first: $first) {
       nodes {
         id
         identifier
@@ -277,6 +277,55 @@ defmodule SymphonyElixir.Linear.Client do
         createdAt
         updatedAt
       }
+    }
+  }
+  """
+
+  @query_by_issue_ref """
+  query SymphonyLinearIssueById($id: String!, $relationFirst: Int!) {
+    issue(id: $id) {
+      id
+      identifier
+      title
+      description
+      priority
+      state {
+        name
+      }
+      branchName
+      url
+      assignee {
+        id
+      }
+      team {
+        id
+        key
+        name
+      }
+      project {
+        id
+        slugId
+        name
+      }
+      labels {
+        nodes {
+          name
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+      createdAt
+      updatedAt
     }
   }
   """
@@ -631,20 +680,9 @@ defmodule SymphonyElixir.Linear.Client do
     {batch_ids, rest_ids} = Enum.split(ids, @issue_page_size)
     {linear_ids, identifiers} = split_issue_refs(batch_ids)
 
-    case graphql_fun.(@query_by_ids, %{
-           ids: linear_ids,
-           identifiers: identifiers,
-           first: length(batch_ids),
-           relationFirst: @issue_page_size
-         }) do
-      {:ok, body} ->
-        with {:ok, issues} <- decode_linear_response(body, assignee_filter) do
-          updated_acc = prepend_page_issues(issues, acc_issues)
-          do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+    with {:ok, issues} <- fetch_issue_ref_batch(linear_ids, identifiers, assignee_filter, graphql_fun) do
+      updated_acc = prepend_page_issues(issues, acc_issues)
+      do_fetch_issue_states_page(rest_ids, assignee_filter, graphql_fun, updated_acc, issue_order_index)
     end
   end
 
@@ -657,6 +695,44 @@ defmodule SymphonyElixir.Linear.Client do
       end
     end)
     |> then(fn {linear_ids, identifiers} -> {Enum.reverse(linear_ids), Enum.reverse(identifiers)} end)
+  end
+
+  defp fetch_issue_ref_batch(linear_ids, identifiers, assignee_filter, graphql_fun) do
+    with {:ok, linear_issues} <- fetch_linear_ids(linear_ids, assignee_filter, graphql_fun),
+         {:ok, identifier_issues} <- fetch_issue_identifiers(identifiers, assignee_filter, graphql_fun) do
+      {:ok, linear_issues ++ identifier_issues}
+    end
+  end
+
+  defp fetch_linear_ids([], _assignee_filter, _graphql_fun), do: {:ok, []}
+
+  defp fetch_linear_ids(linear_ids, assignee_filter, graphql_fun) do
+    case graphql_fun.(@query_by_ids, %{
+           ids: linear_ids,
+           first: length(linear_ids),
+           relationFirst: @issue_page_size
+         }) do
+      {:ok, body} -> decode_linear_response(body, assignee_filter)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp fetch_issue_identifiers([], _assignee_filter, _graphql_fun), do: {:ok, []}
+
+  defp fetch_issue_identifiers(identifiers, assignee_filter, graphql_fun) do
+    Enum.reduce_while(identifiers, {:ok, []}, fn identifier, {:ok, acc} ->
+      case fetch_issue_identifier(identifier, assignee_filter, graphql_fun) do
+        {:ok, issues} -> {:cont, {:ok, acc ++ issues}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp fetch_issue_identifier(identifier, assignee_filter, graphql_fun) do
+    case graphql_fun.(@query_by_issue_ref, %{id: identifier, relationFirst: @issue_page_size}) do
+      {:ok, body} -> decode_linear_response(body, assignee_filter)
+      {:error, reason} -> {:error, reason}
+    end
   end
 
   defp issue_order_index(ids) when is_list(ids) do
@@ -817,6 +893,17 @@ defmodule SymphonyElixir.Linear.Client do
       nodes
       |> Enum.map(&normalize_issue(&1, assignee_filter))
       |> Enum.reject(&is_nil(&1))
+
+    {:ok, issues}
+  end
+
+  defp decode_linear_response(%{"data" => %{"issue" => nil}}, _assignee_filter), do: {:ok, []}
+
+  defp decode_linear_response(%{"data" => %{"issue" => issue}}, assignee_filter) when is_map(issue) do
+    issues =
+      issue
+      |> normalize_issue(assignee_filter)
+      |> List.wrap()
 
     {:ok, issues}
   end

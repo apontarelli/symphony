@@ -69,8 +69,13 @@ defmodule SymphonyElixir.LocalConfig do
           "max_concurrent_startups" => 2
         }
       },
-      "runners" => Schema.default_runners()
+      "runners" => local_default_runners()
     }
+  end
+
+  defp local_default_runners do
+    Schema.default_runners()
+    |> put_in(["codex", "approval_policy"], "never")
   end
 
   @spec ensure(keyword()) :: {:ok, :created | :existing, config(), Path.t()} | {:error, term()}

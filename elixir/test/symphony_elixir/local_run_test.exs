@@ -34,9 +34,51 @@ defmodule SymphonyElixir.LocalRunTest do
     assert result.setup["runtime"]["tracker"]["project_id"] == "project-id"
     assert result.setup["runtime"]["agent"]["max_concurrent_agents"] == 4
     assert result.setup["runtime"]["target"]["mode"] == "continuous"
+    assert result.setup["runtime"]["runners"]["codex"]["approval_policy"] == "never"
     assert result.preview =~ "Run preview"
     assert result.preview =~ "Target: Linear project Symphony (project-id)"
     assert result.preview =~ "Capacity: normal (agents=4, startups=1)"
+  end
+
+  test "default Linear discovery starts Req before fetching projects" do
+    root = tmp_root!("local-run-default-discovery")
+    repo = tmp_repo!(root)
+    config_root = Path.join(root, "config")
+    previous_options = Application.get_env(:symphony_elixir, :linear_discovery_req_options)
+
+    Application.put_env(:symphony_elixir, :linear_discovery_req_options, plug: {Req.Test, __MODULE__})
+
+    on_exit(fn ->
+      if previous_options do
+        Application.put_env(:symphony_elixir, :linear_discovery_req_options, previous_options)
+      else
+        Application.delete_env(:symphony_elixir, :linear_discovery_req_options)
+      end
+    end)
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{
+        "data" => %{
+          "projects" => %{
+            "nodes" => [
+              %{"id" => "project-id", "name" => "Symphony", "slugId" => "symphony"}
+            ]
+          }
+        }
+      })
+    end)
+
+    assert {:ok, result} =
+             LocalRun.evaluate(
+               ["--repo", repo, "--config-root", config_root, "--dry-run"],
+               deps(root,
+                 prompt_answers: ["2", "1", "2", "", "n"],
+                 env: %{"LINEAR_API_KEY" => "linear-token"}
+               )
+             )
+
+    assert result.setup["runtime"]["tracker"]["project_id"] == "project-id"
+    assert result.preview =~ "Target: Linear project Symphony (project-id)"
   end
 
   test "manual target entry works when discovery fails" do
@@ -202,7 +244,7 @@ defmodule SymphonyElixir.LocalRunTest do
   defp deps(root, opts) do
     answers = Keyword.fetch!(opts, :prompt_answers)
     env = Keyword.get(opts, :env, %{})
-    discovery = Keyword.get(opts, :discovery, fn _kind, _token -> {:error, :unexpected_discovery} end)
+    discovery = Keyword.get(opts, :discovery)
     parent = self()
 
     prompt_agent =
@@ -210,7 +252,7 @@ defmodule SymphonyElixir.LocalRunTest do
         id: {:prompt_answers, System.unique_integer([:positive])}
       )
 
-    %{
+    deps = %{
       prompt: fn prompt ->
         send(parent, {:prompt, prompt})
 
@@ -222,9 +264,14 @@ defmodule SymphonyElixir.LocalRunTest do
       puts: fn output -> send(parent, {:output, output}) end,
       env: fn key -> Map.get(env, key) end,
       home: fn -> root end,
-      cwd: fn -> root end,
-      linear_discovery: discovery
+      cwd: fn -> root end
     }
+
+    if discovery do
+      Map.put(deps, :linear_discovery, discovery)
+    else
+      deps
+    end
   end
 
   defp tmp_root!(prefix) do

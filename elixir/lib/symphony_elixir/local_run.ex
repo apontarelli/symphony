@@ -900,12 +900,20 @@ defmodule SymphonyElixir.LocalRun do
           """
       end
 
-    case Req.post("https://api.linear.app/graphql",
-           headers: [{"Authorization", token}, {"Content-Type", "application/json"}],
-           json: %{"query" => query}
-         ) do
-      {:ok, %{status: 200, body: body}} -> decode_discovery(kind, body)
-      {:ok, %{status: status}} -> {:error, {:linear_api_status, status}}
+    req_options =
+      [
+        headers: [{"Authorization", token}, {"Content-Type", "application/json"}],
+        json: %{"query" => query}
+      ]
+      |> Keyword.merge(Application.get_env(:symphony_elixir, :linear_discovery_req_options, []))
+
+    with {:ok, _apps} <- Application.ensure_all_started(:req),
+         {:ok, response} <- Req.post("https://api.linear.app/graphql", req_options) do
+      case response do
+        %{status: 200, body: body} -> decode_discovery(kind, body)
+        %{status: status} -> {:error, {:linear_api_status, status}}
+      end
+    else
       {:error, reason} -> {:error, reason}
     end
   end

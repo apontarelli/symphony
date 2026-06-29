@@ -415,10 +415,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Enum.map(merged, & &1.identifier) == ["MT-1", "MT-2", "MT-3"]
   end
 
-  test "linear client paginates issue state fetches by identifier beyond one page" do
+  test "linear client fetches issue state identifiers without invalid IssueFilter fields" do
     issue_ids = Enum.map(1..55, &"issue-#{&1}")
-    first_batch_ids = Enum.take(issue_ids, 50)
-    second_batch_ids = Enum.drop(issue_ids, 50)
 
     raw_issue = fn issue_id ->
       suffix = String.replace_prefix(issue_id, "issue-", "")
@@ -435,40 +433,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
 
     graphql_fun = fn query, variables ->
-      send(self(), {:fetch_issue_states_page, query, variables})
+      send(self(), {:fetch_issue_state, query, variables})
 
-      body = %{
-        "data" => %{
-          "issues" => %{
-            "nodes" => Enum.map(variables.identifiers, raw_issue)
-          }
-        }
-      }
-
-      {:ok, body}
+      {:ok, %{"data" => %{"issue" => raw_issue.(variables.id)}}}
     end
 
     assert {:ok, issues} = Client.fetch_issue_states_by_ids_for_test(issue_ids, graphql_fun)
 
     assert Enum.map(issues, & &1.id) == issue_ids
 
-    assert_receive {:fetch_issue_states_page, query,
-                    %{
-                      ids: [],
-                      identifiers: ^first_batch_ids,
-                      first: 50,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_state, query, %{id: "issue-1", relationFirst: 50}}
+    assert query =~ "SymphonyLinearIssueById"
+    refute query =~ "identifier: {in: $identifiers}"
+    refute query =~ "IssueFilter"
 
-    assert query =~ "SymphonyLinearIssuesById"
-
-    assert_receive {:fetch_issue_states_page, ^query,
-                    %{
-                      ids: [],
-                      identifiers: ^second_batch_ids,
-                      first: 5,
-                      relationFirst: 50
-                    }}
+    assert_receive {:fetch_issue_state, ^query, %{id: "issue-2", relationFirst: 50}}
   end
 
   test "linear client sends UUIDs as ids and issue keys as identifiers" do
@@ -477,21 +456,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     graphql_fun = fn query, variables ->
       send(self(), {:fetch_issue_states_page, query, variables})
 
-      {:ok,
-       %{
-         "data" => %{
-           "issues" => %{
-             "nodes" => [
-               %{
-                 "id" => uuid,
-                 "identifier" => "SID-999",
-                 "title" => "Internal ID lookup",
-                 "description" => "Use Linear UUID.",
-                 "state" => %{"name" => "Todo"},
-                 "labels" => %{"nodes" => []},
-                 "inverseRelations" => %{"nodes" => []}
-               },
-               %{
+      case variables do
+        %{ids: [^uuid]} ->
+          {:ok,
+           %{
+             "data" => %{
+               "issues" => %{
+                 "nodes" => [
+                   %{
+                     "id" => uuid,
+                     "identifier" => "SID-999",
+                     "title" => "Internal ID lookup",
+                     "description" => "Use Linear UUID.",
+                     "state" => %{"name" => "Todo"},
+                     "labels" => %{"nodes" => []},
+                     "inverseRelations" => %{"nodes" => []}
+                   }
+                 ]
+               }
+             }
+           }}
+
+        %{id: "SID-374"} ->
+          {:ok,
+           %{
+             "data" => %{
+               "issue" => %{
                  "id" => "issue-374",
                  "identifier" => "SID-374",
                  "title" => "Identifier lookup",
@@ -500,25 +490,32 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                  "labels" => %{"nodes" => []},
                  "inverseRelations" => %{"nodes" => []}
                }
-             ]
-           }
-         }
-       }}
+             }
+           }}
+      end
     end
 
     assert {:ok, issues} = Client.fetch_issue_states_by_ids_for_test([uuid, "SID-374"], graphql_fun)
 
     assert Enum.map(issues, & &1.id) == [uuid, "issue-374"]
 
-    assert_receive {:fetch_issue_states_page, query,
+    assert_receive {:fetch_issue_states_page, uuid_query,
                     %{
                       ids: [^uuid],
-                      identifiers: ["SID-374"],
-                      first: 2,
+                      first: 1,
                       relationFirst: 50
                     }}
 
-    assert query =~ "identifier: {in: $identifiers}"
+    assert uuid_query =~ "SymphonyLinearIssuesByUuid"
+    refute uuid_query =~ "identifier: {in: $identifiers}"
+
+    assert_receive {:fetch_issue_states_page, identifier_query,
+                    %{
+                      id: "SID-374",
+                      relationFirst: 50
+                    }}
+
+    assert identifier_query =~ "SymphonyLinearIssueById"
   end
 
   test "linear client fetches URL-style project slugs by Linear slugId suffix" do
@@ -753,42 +750,37 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       allowed_projects: ["repo-project"]
     }
 
+    raw_issues = %{
+      "issue-1" => %{
+        "id" => "issue-1",
+        "identifier" => "SID-701",
+        "title" => "First issue",
+        "description" => "Linear returned this first.",
+        "priority" => 1,
+        "state" => %{"name" => "Todo"},
+        "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+        "project" => %{"id" => "project-id", "slugId" => "other-project", "name" => "Other"},
+        "labels" => %{"nodes" => [%{"name" => "other"}]},
+        "inverseRelations" => %{"nodes" => []}
+      },
+      "issue-2" => %{
+        "id" => "issue-2",
+        "identifier" => "SID-702",
+        "title" => "Second issue",
+        "description" => "Requested first.",
+        "priority" => 2,
+        "state" => %{"name" => "Todo"},
+        "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
+        "project" => %{"id" => "project-id", "slugId" => "repo-project", "name" => "Repo Project"},
+        "labels" => %{"nodes" => [%{"name" => "Symphony"}]},
+        "inverseRelations" => %{"nodes" => []}
+      }
+    }
+
     graphql_fun = fn query, variables ->
       send(self(), {:fetch_issues, query, variables})
 
-      {:ok,
-       %{
-         "data" => %{
-           "issues" => %{
-             "nodes" => [
-               %{
-                 "id" => "issue-1",
-                 "identifier" => "SID-701",
-                 "title" => "First issue",
-                 "description" => "Linear returned this first.",
-                 "priority" => 1,
-                 "state" => %{"name" => "Todo"},
-                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
-                 "project" => %{"id" => "project-id", "slugId" => "other-project", "name" => "Other"},
-                 "labels" => %{"nodes" => [%{"name" => "other"}]},
-                 "inverseRelations" => %{"nodes" => []}
-               },
-               %{
-                 "id" => "issue-2",
-                 "identifier" => "SID-702",
-                 "title" => "Second issue",
-                 "description" => "Requested first.",
-                 "priority" => 2,
-                 "state" => %{"name" => "Todo"},
-                 "team" => %{"id" => "team-sid", "key" => "SID", "name" => "Side Projects"},
-                 "project" => %{"id" => "project-id", "slugId" => "repo-project", "name" => "Repo Project"},
-                 "labels" => %{"nodes" => [%{"name" => "Symphony"}]},
-                 "inverseRelations" => %{"nodes" => []}
-               }
-             ]
-           }
-         }
-       }}
+      {:ok, %{"data" => %{"issue" => Map.fetch!(raw_issues, variables.id)}}}
     end
 
     assert {:ok, %RunTarget.Resolution{issues: issues, warnings: [warning]}} =
@@ -800,13 +792,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert_receive {:fetch_issues, query,
                     %{
-                      ids: [],
-                      identifiers: ["issue-2", "issue-1"],
-                      first: 2,
+                      id: "issue-2",
                       relationFirst: 50
                     }}
 
-    assert query =~ "SymphonyLinearIssuesById"
+    assert_receive {:fetch_issues, ^query,
+                    %{
+                      id: "issue-1",
+                      relationFirst: 50
+                    }}
+
+    assert query =~ "SymphonyLinearIssueById"
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
