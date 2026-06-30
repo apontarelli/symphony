@@ -234,6 +234,25 @@ pre,
   background: var(--danger-soft);
 }
 
+.tracker-limit-card {
+  border-color: #e3c872;
+  background: var(--warning-soft);
+}
+
+.tracker-limit-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  padding: 0 1rem 1rem;
+  color: var(--warning);
+  font-size: 0.86rem;
+}
+
+.tracker-limit-details strong {
+  margin-left: 0.25rem;
+  color: var(--ink);
+}
+
 .metric-label {
   margin: 0;
   color: var(--muted);

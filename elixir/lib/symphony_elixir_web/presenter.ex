@@ -55,6 +55,7 @@ defmodule SymphonyElixirWeb.Presenter do
           token_hotspot: token_hotspot_payload(running),
           handoff_routes: Enum.map(Map.get(snapshot, :handoff_routes, []), &handoff_route_payload/1),
           runtime_totals: snapshot.runtime_totals,
+          tracker: tracker_payload(Map.get(snapshot, :tracker)),
           rate_limits: snapshot.rate_limits,
           rate_limits_available: meaningful_rate_limits?(snapshot.rate_limits)
         }
@@ -139,6 +140,35 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)
+
+  defp tracker_payload(%{limited?: limited?, rate_limit: rate_limit}) do
+    %{
+      status: if(limited?, do: "tracker_rate_limited", else: "ok"),
+      limited: limited?,
+      rate_limit: rate_limit_payload(rate_limit)
+    }
+  end
+
+  defp tracker_payload(_tracker), do: %{status: "ok", limited: false, rate_limit: nil}
+
+  defp rate_limit_payload(nil), do: nil
+
+  defp rate_limit_payload(rate_limit) when is_map(rate_limit) do
+    %{
+      reason: atom_to_string(Map.get(rate_limit, :reason)),
+      source: atom_to_string(Map.get(rate_limit, :source)),
+      retry_after_ms: Map.get(rate_limit, :retry_after_ms),
+      remaining_ms: Map.get(rate_limit, :remaining_ms),
+      limited_until: Map.get(rate_limit, :limited_until),
+      reset_at: Map.get(rate_limit, :reset_at),
+      status: Map.get(rate_limit, :status),
+      errors: Map.get(rate_limit, :errors, [])
+    }
+  end
+
+  defp atom_to_string(value) when is_atom(value), do: Atom.to_string(value)
+  defp atom_to_string(value) when is_binary(value), do: value
+  defp atom_to_string(_value), do: nil
 
   defp restart_count(retry), do: max(retry_attempt(retry) - 1, 0)
   defp retry_attempt(nil), do: 0

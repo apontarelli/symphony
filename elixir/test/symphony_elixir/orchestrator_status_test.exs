@@ -179,6 +179,222 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  test "active tracker backoff skips polling while preserving running agents" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue = %Issue{
+      id: "issue-tracker-limited",
+      identifier: "MT-LIMIT",
+      title: "Tracker limited",
+      state: "In Progress"
+    }
+
+    running_entry = %{
+      pid: self(),
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "thread-limited-turn-limited",
+      startup_slot?: false,
+      started_at: DateTime.utc_now()
+    }
+
+    state =
+      %Orchestrator.State{
+        poll_interval_ms: 1_000,
+        max_concurrent_agents: 2,
+        max_concurrent_startups: 1,
+        run_mode: :continuous,
+        running: %{issue.id => running_entry},
+        claimed: MapSet.new([issue.id]),
+        runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+      |> Orchestrator.record_tracker_rate_limit_for_test(
+        {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED"}]}},
+        :running_refresh
+      )
+
+    assert {:noreply, updated_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert Map.has_key?(updated_state.running, issue.id)
+    assert updated_state.tracker_rate_limit.reason == :tracker_rate_limited
+    assert updated_state.tracker_rate_limit.source == :running_refresh
+    refute_receive {:memory_tracker_resolve_candidate_issues, _target}, 10
+    refute_receive {:memory_tracker_fetch_issue_states_by_ids, _issue_ids}, 10
+    refute_receive {:memory_tracker_fetch_issues_by_states, _state_names}, 10
+  end
+
+  test "running refresh rate limit enters backoff before blocked refresh" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    running_issue = %Issue{id: "issue-running-limited", identifier: "MT-RUN", title: "Running", state: "In Progress"}
+    blocked_issue = %Issue{id: "issue-blocked-limited", identifier: "MT-BLOCK", title: "Blocked", state: "In Progress"}
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [running_issue, blocked_issue])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_errors, %{
+      fetch_issue_states_by_ids: {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED"}]}}
+    })
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 1_000,
+      max_concurrent_agents: 2,
+      max_concurrent_startups: 1,
+      run_mode: :continuous,
+      running: %{
+        running_issue.id => %{
+          pid: self(),
+          ref: make_ref(),
+          identifier: running_issue.identifier,
+          issue: running_issue,
+          session_id: "thread-running-turn-limited",
+          startup_slot?: false,
+          started_at: DateTime.utc_now()
+        }
+      },
+      blocked: %{
+        blocked_issue.id => %{
+          identifier: blocked_issue.identifier,
+          issue: blocked_issue,
+          session_id: "thread-blocked-turn-limited",
+          blocked_at: DateTime.utc_now()
+        }
+      },
+      claimed: MapSet.new([running_issue.id, blocked_issue.id]),
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, updated_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert updated_state.tracker_rate_limit.source == :running_refresh
+    assert Map.has_key?(updated_state.running, running_issue.id)
+    assert Map.has_key?(updated_state.blocked, blocked_issue.id)
+    assert_receive {:memory_tracker_fetch_issue_states_by_ids, [running_id]}
+    assert running_id == running_issue.id
+    blocked_id = blocked_issue.id
+    refute_receive {:memory_tracker_fetch_issue_states_by_ids, [^blocked_id]}
+  end
+
+  test "dispatch revalidation rate limit halts remaining candidate refreshes" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    first_issue = %Issue{id: "issue-first-limited", identifier: "MT-FIRST", title: "First", state: "Todo"}
+    second_issue = %Issue{id: "issue-second-limited", identifier: "MT-SECOND", title: "Second", state: "Todo"}
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [first_issue, second_issue])
+
+    Application.put_env(:symphony_elixir, :memory_tracker_errors, %{
+      fetch_issue_states_by_ids: {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED"}]}}
+    })
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 1_000,
+      max_concurrent_agents: 2,
+      max_concurrent_startups: 1,
+      run_mode: :continuous,
+      running: %{},
+      claimed: MapSet.new(),
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, updated_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert updated_state.tracker_rate_limit.source == :dispatch_revalidation
+    assert_receive {:memory_tracker_fetch_issue_states_by_ids, [first_id]}
+    assert first_id == first_issue.id
+    second_id = second_issue.id
+    refute_receive {:memory_tracker_fetch_issue_states_by_ids, [^second_id]}
+  end
+
+  test "expired tracker backoff clears on the next poll cycle" do
+    state = %Orchestrator.State{
+      poll_interval_ms: 1_000,
+      max_concurrent_agents: 2,
+      max_concurrent_startups: 1,
+      run_mode: :issue_batch,
+      issue_batch_limit: nil,
+      running: %{},
+      claimed: MapSet.new(),
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      tracker_rate_limit: %{
+        reason: :tracker_rate_limited,
+        source: :candidate_fetch,
+        limited_until_ms: System.monotonic_time(:millisecond) - 1,
+        limited_until: DateTime.utc_now() |> DateTime.add(-1, :second) |> DateTime.to_iso8601(),
+        retry_after_ms: 1
+      }
+    }
+
+    assert {:noreply, updated_state} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert updated_state.tracker_rate_limit == nil
+  end
+
+  test "retry refresh skips tracker reads during active tracker backoff" do
+    issue_id = "issue-retry-tracker-limited"
+    retry_token = make_ref()
+
+    state =
+      %Orchestrator.State{
+        poll_interval_ms: 1_000,
+        max_concurrent_agents: 2,
+        max_concurrent_startups: 1,
+        run_mode: :continuous,
+        running: %{},
+        claimed: MapSet.new([issue_id]),
+        retry_attempts: %{
+          issue_id => %{
+            attempt: 2,
+            retry_token: retry_token,
+            identifier: "MT-RETRY-LIMIT",
+            error: "continuation check"
+          }
+        },
+        runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+      }
+      |> Orchestrator.record_tracker_rate_limit_for_test(
+        {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED"}]}},
+        :candidate_fetch
+      )
+
+    assert {:noreply, updated_state} = Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+    assert updated_state.tracker_rate_limit.reason == :tracker_rate_limited
+    assert %{attempt: 2, error: "tracker rate limited", due_at_ms: due_at_ms} = updated_state.retry_attempts[issue_id]
+    assert due_at_ms > System.monotonic_time(:millisecond)
+  end
+
+  test "snapshot and API payload expose tracker-limited status" do
+    orchestrator_name = Module.concat(__MODULE__, :TrackerLimitedPayloadOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    limited_state =
+      pid
+      |> :sys.get_state()
+      |> Orchestrator.record_tracker_rate_limit_for_test(
+        {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED", message: "Rate limit exhausted"}]}},
+        :candidate_fetch
+      )
+
+    :sys.replace_state(pid, fn _ -> limited_state end)
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert snapshot.tracker.limited? == true
+    assert snapshot.tracker.rate_limit.reason == :tracker_rate_limited
+    assert snapshot.tracker.rate_limit.source == :candidate_fetch
+    assert snapshot.tracker.rate_limit.remaining_ms > 0
+
+    payload = SymphonyElixirWeb.Presenter.state_payload(orchestrator_name, 1_000)
+    assert payload.tracker.status == "tracker_rate_limited"
+    assert payload.tracker.limited == true
+    assert payload.tracker.rate_limit.reason == "tracker_rate_limited"
+    assert payload.tracker.rate_limit.source == "candidate_fetch"
+  end
+
   test "repeated non-progress error notifications do not refresh stall protection" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -2061,6 +2277,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     checking_rendered = StatusDashboard.format_snapshot_content_for_test(checking_snapshot, 0.0)
     assert checking_rendered =~ "checking now…"
+  end
+
+  test "status dashboard renders tracker-limited status" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil,
+         tracker: %{
+           limited?: true,
+           rate_limit: %{source: :dispatch_revalidation, remaining_ms: 2_000}
+         },
+         polling: %{checking?: false, next_poll_in_ms: 2_000, poll_interval_ms: 30_000}
+       }}
+
+    rendered =
+      snapshot_data
+      |> StatusDashboard.format_snapshot_content_for_test(0.0)
+      |> String.replace(~r/\e\[[0-9;]*m/, "")
+
+    assert rendered =~ "Tracker:"
+    assert rendered =~ "tracker_rate_limited"
+    assert rendered =~ "source=dispatch_revalidation"
+    assert rendered =~ "retry_in=2s"
   end
 
   test "status dashboard adds a spacer line before backoff queue when no agents are active" do

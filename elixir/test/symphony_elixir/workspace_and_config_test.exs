@@ -834,6 +834,58 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert log =~ "Variable \\\"$ids\\\" got invalid value"
   end
 
+  test "linear client classifies RATELIMITED graphql responses distinctly" do
+    request_fun = fn _payload, _headers ->
+      {:ok,
+       %{
+         status: 400,
+         headers: [{"X-RateLimit-Requests-Reset", "1893456000000"}],
+         body: %{
+           "errors" => [
+             %{
+               "message" => "Rate limit exhausted",
+               "extensions" => %{"code" => "RATELIMITED"}
+             }
+           ]
+         }
+       }}
+    end
+
+    assert {:error, {:linear_rate_limited, details}} =
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+
+    assert details.status == 400
+    refute Map.has_key?(details, :retry_after_ms)
+    assert details.reset_at == "2030-01-01T00:00:00.000Z"
+    assert details.errors == [%{code: "RATELIMITED", message: "Rate limit exhausted"}]
+  end
+
+  test "linear client prefers endpoint-specific rate limit reset headers" do
+    request_fun = fn _payload, _headers ->
+      {:ok,
+       %{
+         status: 400,
+         headers: [
+           {"X-RateLimit-Requests-Reset", "1893456000000"},
+           {"X-RateLimit-Endpoint-Requests-Reset", "1893455940000"}
+         ],
+         body: %{
+           "errors" => [
+             %{
+               "message" => "Endpoint rate limit exhausted",
+               "extensions" => %{"code" => "RATELIMITED"}
+             }
+           ]
+         }
+       }}
+    end
+
+    assert {:error, {:linear_rate_limited, details}} =
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+
+    assert details.reset_at == "2029-12-31T23:59:00.000Z"
+  end
+
   test "orchestrator sorts dispatch by priority then oldest created_at" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",

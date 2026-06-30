@@ -9,6 +9,10 @@ defmodule SymphonyElixir.Linear.Client do
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
+  @linear_rate_limit_reset_headers [
+    "x-ratelimit-endpoint-requests-reset",
+    "x-ratelimit-requests-reset"
+  ]
 
   @query_by_project_slug """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
@@ -415,7 +419,7 @@ defmodule SymphonyElixir.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error, {:linear_api_status, response.status, graphql_error_messages(response.body)}}
+        response_error(response)
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
@@ -857,6 +861,106 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp graphql_error_messages(_body), do: []
+
+  defp response_error(%{status: status, body: body} = response) do
+    errors = graphql_error_messages(body)
+
+    case linear_rate_limit_details(response, errors) do
+      nil -> {:error, {:linear_api_status, status, errors}}
+      details -> {:error, {:linear_rate_limited, details}}
+    end
+  end
+
+  defp linear_rate_limit_details(%{status: status, body: body} = response, errors) do
+    if status == 400 and rate_limited_errors?(body, errors) do
+      %{
+        status: status,
+        retry_after_ms: retry_after_ms(response),
+        reset_at: rate_limit_reset_at(response),
+        errors: errors
+      }
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+    end
+  end
+
+  defp rate_limited_errors?(%{"errors" => errors}, _messages) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{"extensions" => %{"code" => "RATELIMITED"}} -> true
+      %{"extensions" => %{"code" => code}} when is_binary(code) -> String.upcase(code) == "RATELIMITED"
+      _error -> false
+    end)
+  end
+
+  defp rate_limited_errors?(_body, errors) when is_list(errors) do
+    Enum.any?(errors, fn
+      %{code: "RATELIMITED"} -> true
+      %{code: code} when is_binary(code) -> String.upcase(code) == "RATELIMITED"
+      _error -> false
+    end)
+  end
+
+  defp retry_after_ms(response) do
+    response
+    |> response_header("retry-after")
+    |> parse_retry_after_ms()
+  end
+
+  defp rate_limit_reset_at(response) do
+    @linear_rate_limit_reset_headers
+    |> Enum.find_value(&response_header(response, &1))
+    |> parse_reset_at()
+  end
+
+  defp response_header(%{headers: headers}, name), do: header_value(headers, String.downcase(name))
+  defp response_header(_response, _name), do: nil
+
+  defp header_value(headers, name) when is_list(headers) do
+    Enum.find_value(headers, fn
+      {key, value} when is_binary(key) ->
+        if String.downcase(key) == name, do: value
+
+      _header ->
+        nil
+    end)
+  end
+
+  defp header_value(headers, name) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn {key, value} ->
+      if key |> to_string() |> String.downcase() == name, do: value
+    end)
+  end
+
+  defp header_value(_headers, _name), do: nil
+
+  defp parse_retry_after_ms(value) when is_binary(value) do
+    value = String.trim(value)
+
+    case Integer.parse(value) do
+      {seconds, ""} when seconds >= 0 -> seconds * 1_000
+      _ -> nil
+    end
+  end
+
+  defp parse_retry_after_ms(value) when is_integer(value) and value >= 0, do: value * 1_000
+  defp parse_retry_after_ms(_value), do: nil
+
+  defp parse_reset_at(value) when is_binary(value) do
+    case value |> String.trim() |> Integer.parse() do
+      {milliseconds, ""} when milliseconds >= 0 -> parse_reset_at(milliseconds)
+      _parse_error -> nil
+    end
+  end
+
+  defp parse_reset_at(value) when is_integer(value) and value >= 0 do
+    case DateTime.from_unix(value, :millisecond) do
+      {:ok, datetime} -> DateTime.to_iso8601(datetime)
+      _error -> nil
+    end
+  end
+
+  defp parse_reset_at(_value), do: nil
 
   defp truncate_error_body(body) when is_binary(body) do
     if byte_size(body) > @max_error_body_log_bytes do
