@@ -2073,6 +2073,63 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "trusted-local profile can enable localhost network without changing default sandbox posture" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-trusted-local-profile-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      issue_workspace = Path.join(workspace_root, "MT-TRUSTED")
+
+      File.mkdir_p!(issue_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        profiles: %{
+          default: %{
+            delivery: %{pr_target: "main"},
+            capabilities: %{required: []}
+          },
+          trusted_local: %{
+            capabilities: %{required: ["localhost_tcp", "git_metadata", "github_pr"]},
+            runners: %{
+              codex: %{
+                turn_sandbox_policy: %{
+                  type: "workspaceWrite",
+                  writableRoots: [issue_workspace],
+                  networkAccess: true,
+                  readOnlyAccess: %{type: "fullAccess"},
+                  excludeTmpdirEnvVar: false,
+                  excludeSlashTmp: false
+                }
+              }
+            }
+          }
+        }
+      )
+
+      settings = Config.settings!()
+
+      assert {:ok, default_policy} = Schema.resolve_effective_policy(settings, "default")
+      assert {:ok, default_runtime} = Config.codex_runtime_settings(issue_workspace, policy: default_policy)
+      assert default_runtime.turn_sandbox_policy["type"] == "workspaceWrite"
+      assert default_runtime.turn_sandbox_policy["networkAccess"] == false
+
+      assert {:ok, trusted_policy} = Schema.resolve_effective_policy(settings, "trusted_local")
+      assert get_in(trusted_policy, ["capabilities", "required"]) == ["localhost_tcp", "git_metadata", "github_pr"]
+
+      assert {:ok, trusted_runtime} = Config.codex_runtime_settings(issue_workspace, policy: trusted_policy)
+      assert trusted_runtime.turn_sandbox_policy["type"] == "workspaceWrite"
+      assert trusted_runtime.turn_sandbox_policy["networkAccess"] == true
+      assert trusted_runtime.turn_sandbox_policy["writableRoots"] == [issue_workspace]
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workflow prompt is used when building base prompt" do
     workflow_prompt = "Workflow prompt body used as codex instruction."
 

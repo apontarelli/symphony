@@ -1755,7 +1755,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
     assert decision.route == :blocked
     assert decision.target_state == "Human Review"
-    assert decision.recommendation =~ "Restore host VCS/GitHub publish capability"
+    assert decision.recommendation =~ "Authenticate GitHub CLI/API access"
 
     assert Enum.any?(
              decision.evidence,
@@ -1766,7 +1766,57 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
     assert Enum.any?(
              evidence,
-             &(&1.kind == "publish_preflight" and &1.metadata.failure_class == :remote_push_unavailable)
+             &(&1.kind == "publish_preflight" and &1.metadata.failure_class == :remote_push_unavailable and
+                 &1.metadata.reason == :github_publish_unavailable)
+           )
+  end
+
+  test "legacy publish preflight classes map to specific capability reasons" do
+    decision =
+      HandoffRouteRecorder.classify_completion(%{
+        checks: [%{name: "tests", status: :passed}],
+        publish_preflight: %{
+          status: :blocked,
+          repository: "https://github.com/example/project",
+          base_branch: "main",
+          failures: [
+            %{class: :workspace_vcs_metadata_unavailable, summary: "Git metadata unavailable."},
+            %{class: :pr_creation_unavailable, summary: "PR creation unavailable."}
+          ]
+        }
+      })
+
+    assert decision.route == :blocked
+    assert decision.recommendation =~ "write Git metadata"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :publish_preflight and &1.metadata.reason == :git_metadata_denied)
+           )
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :publish_preflight and &1.metadata.reason == :github_publish_unavailable)
+           )
+  end
+
+  test "capability preflight blocker surfaces all missing capability reasons" do
+    decision =
+      HandoffRouteRecorder.classify_completion(%{}, %{
+        reason: "sandbox_tcp_denied, git_metadata_denied, github_publish_unavailable",
+        required_action:
+          "Run trusted-local validation with localhost TCP enabled. Run trusted-local validation or host-owned delivery with permission to write Git metadata. Authenticate GitHub CLI/API access and remote publish permission."
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+    assert decision.recommendation =~ "localhost TCP"
+    assert decision.recommendation =~ "GitHub"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :blocker and &1.summary =~ "sandbox_tcp_denied" and
+                 &1.summary =~ "git_metadata_denied" and &1.summary =~ "github_publish_unavailable")
            )
   end
 

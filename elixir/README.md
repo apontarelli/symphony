@@ -458,6 +458,42 @@ runtime:
 - Workflows that run package managers or other commands that resolve external hosts should set
   `networkAccess: true` in `runtime.runners.codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
   by the Codex turn sandbox.
+- Elixir/Phoenix validation that starts Mix/Phoenix PubSub also needs localhost TCP listen
+  capability. Keep the normal implementation profile restricted, and add an explicit trusted-local
+  profile in local config or a saved run setup for validation or host-owned delivery:
+
+```yaml
+runtime:
+  profiles:
+    default:
+      delivery:
+        pr_target: main
+    trusted_local:
+      capabilities:
+        required:
+          - localhost_tcp
+          - git_metadata
+          - github_pr
+      runners:
+        codex:
+          turn_sandbox_policy:
+            type: workspaceWrite
+            writableRoots:
+              - /path/to/workspace/root
+            readOnlyAccess:
+              type: fullAccess
+            networkAccess: true
+            excludeTmpdirEnvVar: false
+            excludeSlashTmp: false
+```
+
+  Select it for a trusted local run with `--profile trusted_local`. Symphony preflights declared
+  capabilities before the implementation turn starts: Codex turn-sandbox or worker localhost TCP
+  denial routes `sandbox_tcp_denied`, Git or jj metadata/fetch denial routes `git_metadata_denied`,
+  and missing GitHub repository/base-branch API access or publish permission routes
+  `github_publish_unavailable`. This is narrower than making `dangerFullAccess` the global default
+  because only the named local runtime profile expands the Codex turn sandbox and only runs that
+  declare the capability names are blocked by these checks.
 - `runtime.runners.codex.execution_profiles` lets the host run implementation, planner, reviewer,
   runtime QA, product visual review, security review, and synthesis jobs with typed reasoning,
   timeout, retry, budget, model, or command settings. `runtime.runners.codex.model` is the default

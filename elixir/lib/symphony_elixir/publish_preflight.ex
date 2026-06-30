@@ -15,6 +15,11 @@ defmodule SymphonyElixir.PublishPreflight do
     remote_push_unavailable: "Remote push dry-run is unavailable to the host.",
     pr_creation_unavailable: "PR creation preflight is unavailable for the configured repository/base branch."
   }
+  @failure_reasons %{
+    workspace_vcs_metadata_unavailable: :git_metadata_denied,
+    remote_push_unavailable: :github_publish_unavailable,
+    pr_creation_unavailable: :github_publish_unavailable
+  }
 
   @type failure_class ::
           :workspace_vcs_metadata_unavailable | :remote_push_unavailable | :pr_creation_unavailable
@@ -25,6 +30,7 @@ defmodule SymphonyElixir.PublishPreflight do
         }
   @type failure :: %{
           class: failure_class(),
+          reason: :git_metadata_denied | :github_publish_unavailable,
           summary: String.t(),
           command: String.t() | nil,
           exit_status: non_neg_integer() | nil,
@@ -200,6 +206,7 @@ defmodule SymphonyElixir.PublishPreflight do
   defp failure(class, command, exit_status, details) do
     %{
       class: class,
+      reason: Map.fetch!(@failure_reasons, class),
       summary: Map.fetch!(@failure_summaries, class),
       command: command,
       exit_status: exit_status,

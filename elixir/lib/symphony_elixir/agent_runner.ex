@@ -4,7 +4,7 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRuntime, CapabilityPreflight, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.AgentRuntime.Event
 
   @type worker_host :: String.t() | nil
@@ -43,7 +43,8 @@ defmodule SymphonyElixir.AgentRunner do
         send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host) do
+          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
+               :ok <- run_capability_preflight(workspace, issue, codex_update_recipient, opts, worker_host) do
             run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
           end
         after
@@ -153,6 +154,48 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
+  defp run_capability_preflight(workspace, issue, recipient, opts, worker_host) do
+    with {:ok, policy} <- policy_for_issue(issue, opts) do
+      preflight =
+        CapabilityPreflight.run(
+          workspace,
+          policy,
+          capability_preflight_opts(opts, worker_host)
+        )
+
+      case CapabilityPreflight.blocker(preflight) do
+        nil ->
+          :ok
+
+        blocker ->
+          send_capability_blocker(recipient, issue, blocker, preflight)
+          {:error, {:capability_preflight_blocked, blocker}}
+      end
+    end
+  end
+
+  defp send_capability_blocker(recipient, issue, blocker, preflight) do
+    send_codex_update(recipient, issue, %{
+      event: :agent_blocked,
+      timestamp: DateTime.utc_now(),
+      completion: %{
+        outcome: :blocked,
+        blocker: blocker,
+        capability_preflight: preflight
+      }
+    })
+  end
+
+  defp capability_preflight_opts(opts, worker_host) do
+    []
+    |> Keyword.put(:worker_host, worker_host)
+    |> maybe_put_opt(:runner, Keyword.get(opts, :capability_preflight_runner))
+    |> maybe_put_opt(:tcp_probe, Keyword.get(opts, :capability_tcp_probe))
+  end
+
+  defp maybe_put_opt(opts, _key, nil), do: opts
+  defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
@@ -182,7 +225,16 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(
+         app_session,
+         workspace,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
     prompt_bundle = build_turn_prompt(issue, opts, turn_number, max_turns)
     log_workflow_module_resolution(issue, prompt_bundle)
     send_workflow_module_resolution(codex_update_recipient, issue, prompt_bundle.workflow_module_resolution)
@@ -214,6 +266,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         {:continue, refreshed_issue} ->
           Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
           send_max_turns_exhausted(codex_update_recipient, refreshed_issue, turn_number, max_turns)
 
           :ok
@@ -260,7 +313,9 @@ defmodule SymphonyElixir.AgentRunner do
     })
   end
 
-  defp log_workflow_module_resolution(issue, %{workflow_module_resolution: %{module_refs: refs, policy_hash: policy_hash}}) do
+  defp log_workflow_module_resolution(issue, %{
+         workflow_module_resolution: %{module_refs: refs, policy_hash: policy_hash}
+       }) do
     module_refs = Enum.map_join(refs, ",", &"#{&1.name}@#{&1.version}")
 
     Logger.info("Resolved workflow modules for #{issue_context(issue)} workflow_module_policy_hash=#{policy_hash} workflow_modules=#{module_refs}")
