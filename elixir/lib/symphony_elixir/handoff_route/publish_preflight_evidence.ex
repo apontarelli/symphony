@@ -13,6 +13,7 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
     "failure_class" => :failure_class,
     "failures" => :failures,
     "pr_creation" => :pr_creation,
+    "reason" => :reason,
     "remote_push" => :remote_push,
     "repository" => :repository,
     "status" => :status,
@@ -23,6 +24,11 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
     "workspace_vcs_metadata_unavailable" => :workspace_vcs_metadata_unavailable,
     "remote_push_unavailable" => :remote_push_unavailable,
     "pr_creation_unavailable" => :pr_creation_unavailable
+  }
+  @reason_tokens %{
+    "git_metadata_denied" => :git_metadata_denied,
+    "github_publish_unavailable" => :github_publish_unavailable,
+    "sandbox_tcp_denied" => :sandbox_tcp_denied
   }
   @status_tokens %{
     "blocked" => :blocked,
@@ -69,14 +75,14 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
   def blocker(%{failures: []}), do: nil
 
   def blocker(%{failures: failures}) do
-    classes =
+    reasons =
       failures
-      |> Enum.map(& &1.class)
+      |> Enum.map(& &1.reason)
       |> Enum.map_join(", ", &Atom.to_string/1)
 
     %{
-      reason: "Publish preflight failed: #{classes}",
-      required_action: "Restore host VCS/GitHub publish capability before commit, push, or PR creation."
+      reason: "Publish preflight failed: #{reasons}",
+      required_action: required_action(failures)
     }
   end
 
@@ -105,6 +111,7 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
           |> metadata()
           |> Map.merge(%{
             failure_class: failure.class,
+            reason: failure.reason,
             command: failure.command,
             exit_status: failure.exit_status,
             details: failure.details
@@ -131,6 +138,7 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
       class ->
         %{
           class: normalize_token(class, @failure_tokens, :unknown),
+          reason: failure_reason(failure),
           summary: fetch(failure, :summary, "Publish preflight failed.") |> to_string(),
           command: fetch(failure, :command, nil) |> optional_string(),
           exit_status: fetch(failure, :exit_status, nil),
@@ -143,6 +151,37 @@ defmodule SymphonyElixir.HandoffRoute.PublishPreflightEvidence do
 
   defp status([]), do: :passed
   defp status(_failures), do: :blocked
+
+  defp failure_reason(failure) do
+    case fetch(failure, :reason, nil) do
+      nil -> legacy_failure_reason(fetch(failure, :class, fetch(failure, :failure_class, nil)))
+      reason -> normalize_token(reason, @reason_tokens, :unknown)
+    end
+  end
+
+  defp legacy_failure_reason(class) do
+    case normalize_token(class, @failure_tokens, :unknown) do
+      :workspace_vcs_metadata_unavailable -> :git_metadata_denied
+      :remote_push_unavailable -> :github_publish_unavailable
+      :pr_creation_unavailable -> :github_publish_unavailable
+      _class -> :unknown
+    end
+  end
+
+  defp required_action(failures) do
+    reasons = failures |> Enum.map(& &1.reason) |> MapSet.new()
+
+    cond do
+      MapSet.member?(reasons, :git_metadata_denied) ->
+        "Run trusted-local validation or host-owned delivery with permission to write Git metadata and fetch the target remote."
+
+      MapSet.member?(reasons, :github_publish_unavailable) ->
+        "Authenticate GitHub CLI/API access and remote publish permission for the configured repository before PR handoff."
+
+      true ->
+        "Restore host VCS/GitHub publish capability before commit, push, or PR creation."
+    end
+  end
 
   defp metadata(preflight) do
     %{

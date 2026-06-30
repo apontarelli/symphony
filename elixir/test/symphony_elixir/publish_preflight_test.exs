@@ -49,6 +49,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     refute result.capabilities.remote_push
     assert result.capabilities.pr_creation
     assert Enum.map(result.failures, & &1.class) == [:workspace_vcs_metadata_unavailable]
+    assert Enum.map(result.failures, & &1.reason) == [:git_metadata_denied]
   end
 
   test "reports missing workspace and publish repository" do
@@ -78,6 +79,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     refute result.capabilities.remote_push
     assert result.capabilities.pr_creation
     assert Enum.map(result.failures, & &1.class) == [:remote_push_unavailable]
+    assert Enum.map(result.failures, & &1.reason) == [:github_publish_unavailable]
   end
 
   test "uses jj remote push dry-run when git compatibility commands are unavailable" do
@@ -156,13 +158,16 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert result.capabilities.remote_push
     refute result.capabilities.pr_creation
     assert Enum.map(result.failures, & &1.class) == [:pr_creation_unavailable]
+    assert Enum.map(result.failures, & &1.reason) == [:github_publish_unavailable]
   end
 
   test "reports missing and malformed PR target configuration" do
     workspace = preflight_workspace!()
 
     missing_base =
-      PublishPreflight.run(workspace, %{"manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}}},
+      PublishPreflight.run(
+        workspace,
+        %{"manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}}},
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {0, "ok"},
@@ -174,7 +179,12 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert Enum.map(missing_base.failures, & &1.class) == [:pr_creation_unavailable]
 
     malformed_repo =
-      PublishPreflight.run(workspace, %{"manifest" => %{"project" => %{"repository" => "https://example.com/project"}}, "delivery" => %{"pr_target" => "main"}},
+      PublishPreflight.run(
+        workspace,
+        %{
+          "manifest" => %{"project" => %{"repository" => "https://example.com/project"}},
+          "delivery" => %{"pr_target" => "main"}
+        },
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {0, "ok"},
@@ -185,7 +195,9 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert Enum.map(malformed_repo.failures, & &1.class) == [:pr_creation_unavailable]
 
     blank_values =
-      PublishPreflight.run(workspace, %{"manifest" => %{"project" => %{"repository" => " "}}, "delivery" => %{"pr_target" => " "}},
+      PublishPreflight.run(
+        workspace,
+        %{"manifest" => %{"project" => %{"repository" => " "}}, "delivery" => %{"pr_target" => " "}},
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {0, "ok"},
@@ -238,7 +250,9 @@ defmodule SymphonyElixir.PublishPreflightTest do
       )
 
     assert invalid_repository.status == :blocked
-    assert [%{class: :pr_creation_unavailable, details: "publish repository is not a GitHub repository"}] = invalid_repository.failures
+
+    assert [%{class: :pr_creation_unavailable, details: "publish repository is not a GitHub repository"}] =
+             invalid_repository.failures
   end
 
   test "reports command runner errors" do
@@ -303,7 +317,9 @@ defmodule SymphonyElixir.PublishPreflightTest do
 
   test "supports remote worker command execution" do
     previous_path = System.get_env("PATH")
-    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-publish-preflight-ssh-#{System.unique_integer([:positive])}")
+
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-publish-preflight-ssh-#{System.unique_integer([:positive])}")
 
     try do
       fake_bin = Path.join(test_root, "bin")
@@ -322,7 +338,9 @@ defmodule SymphonyElixir.PublishPreflightTest do
 
   test "reports remote SSH execution failures" do
     previous_path = System.get_env("PATH")
-    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-publish-preflight-no-ssh-#{System.unique_integer([:positive])}")
+
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-elixir-publish-preflight-no-ssh-#{System.unique_integer([:positive])}")
 
     try do
       fake_bin = Path.join(test_root, "bin")
