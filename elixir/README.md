@@ -24,6 +24,12 @@ file is the implementation setup and operation guide.
 
 The current production runner is the Codex app-server adapter.
 
+Local daemon processes coordinate tracker reads through an operator-owned tracker coordinator state
+file under the configured workspace root (`.symphony/tracker_coordinator.state`). Candidate issue
+polls for equivalent targets are cached briefly, Linear rate-limit backoff is shared by local
+daemons, and issue leases prevent two coordinated daemons from dispatching the same issue at the
+same time. This state is runtime-owned and is not written to target repository `symphony.yml` files.
+
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that
 bundled workflow modules and agents can make raw Linear GraphQL calls when the direct tracker tool
 surface is not enough.
