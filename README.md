@@ -91,11 +91,19 @@ valid `symphony.yml` enters the same interactive local run setup flow.
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run
+../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run          # interactive project/team/query setup
 ../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --no-env-file --dry-run
 ../bin/symphony run my-saved-setup --no-env-file --dry-run
+../bin/symphony run --setup my-saved-setup --repo /path/to/target-repo --no-env-file --dry-run
+../bin/symphony run --repo /path/to/target-repo --save my-saved-setup --no-env-file --dry-run
+../bin/symphony run --preview --workflow ~/.config/symphony/runs/.current.yml --max-agents 2 --max-startups 1
 ../bin/symphony --no-env-file
 ```
+
+Project, team, and query/file targets are selected by the interactive builder or stored in saved run
+setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,
+`target.tracker.query_file`, or `target.tracker.issue_ids`. Capacity belongs to the run setup or CLI
+launch override, never to the checked-in repo setup manifest.
 
 `setup migrate` can convert an existing checked-in runtime setup into local config plus a saved run
 setup. It intentionally requires an explicit `--repo` so the target repository never depends on the
@@ -131,6 +139,10 @@ The root launcher rebuilds the Elixir escript before launch unless `--skip-build
 workflow can enable the dashboard/API with `runtime.server.port`; `--port <port>` or
 `SYMPHONY_PORT` overrides that value for one process. Use `--profile <name>` to select a workflow
 profile.
+
+The legacy `workflow init`, `workflow check`, and `workflow print` command family is a one-release
+compatibility alias. Use `setup init`, `setup check`, and `setup preview`; use `run --preview` for
+launch-time run setup inspection.
 
 ## Implement your own
 

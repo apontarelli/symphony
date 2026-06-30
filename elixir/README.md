@@ -193,9 +193,11 @@ Target repos can use a committed `symphony.yml` manifest for setup and audit:
 `init` inspects common repo files and creates `symphony.yml`. If the manifest already exists, it is
 left unchanged unless `--force` is passed. `check` validates the setup-only manifest schema, selected
 modules, repo doc entrypoints, validation command shape, required capability declarations, publish
-target defaults, and configured harness `CODEX_HOME`. `print` shows the resolved
+target defaults, and configured harness `CODEX_HOME`. `preview` shows the resolved
 preset/modules/defaults and can include the compiled workflow config and prompt without writing
-generated prompt files into the target repo.
+generated prompt files into the target repo. `workflow init`, `workflow check`, and `workflow print`
+remain one-release compatibility aliases; new docs and scripts should use `setup init`,
+`setup check`, and `setup preview`.
 
 `symphony.yml` v1 contains:
 
@@ -256,6 +258,60 @@ dot, underscore, and dash characters so setup files cannot escape the global run
 stores the target repo reference, tracker target, mode, capacity, and restrictive flags such as
 required labels; app repositories are not used as saved run setup storage.
 
+Run setup target examples:
+
+```yaml
+repo:
+  path: /path/to/repo
+target:
+  type: project
+  tracker:
+    project_slug: symphony
+mode: continuous
+capacity: normal
+```
+
+```yaml
+repo:
+  path: /path/to/repo
+target:
+  type: team
+  tracker:
+    team_key: SID
+mode: continuous
+capacity:
+  max_concurrent_agents: 2
+  max_concurrent_startups: 1
+```
+
+```yaml
+repo:
+  path: /path/to/repo
+target:
+  type: query
+  tracker:
+    query_file: ~/.config/symphony/queries/ready.yml
+mode: query
+capacity: light
+```
+
+```yaml
+repo:
+  path: /path/to/repo
+target:
+  type: issues
+  tracker:
+    issue_ids:
+      - SID-123
+      - SID-124
+mode: issue-batch
+capacity: normal
+```
+
+Run setup may make a launch stricter with lower capacity, marker intersections, required labels, or
+human-review-only flags. It cannot weaken repo-owned safety: validation commands, delivery target,
+required capabilities, workflow modules, and checked-in policy come from repo setup.
+
 For migration, `setup migrate` requires an explicit `--repo`, reads that repo's existing mixed
 `symphony.yml`, reports every runtime/target field it will move, and leaves a setup-only manifest after apply:
 
@@ -275,6 +331,10 @@ Preview the resolved run setup before side effects, then pass a local runtime se
 Interactive `run` prints the same preview and requires a TTY confirmation before starting. A
 checked-in repo `symphony.yml` contains setup and audit data only; direct daemon runs still need
 local runtime setup for tracker scope, workspace roots, runner commands, and host settings.
+
+Shared cloud/team run setup import is intentionally deferred. Today, operator defaults and saved run
+setups are local files under `~/.config/symphony`; future shared import must compose with repo setup
+under the same rule that launch-time setup can restrict but not weaken repo-owned policy.
 
 `project.criticality` and `project.deployment_coupling` describe how risky the project is to land
 automatically. Local, prototype, and internal work default to permissive auto-land policy; production

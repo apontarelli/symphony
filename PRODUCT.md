@@ -44,8 +44,12 @@ Symphony should make autonomous engineering work:
 
 ## Core Workflows
 
-- Bootstrap a target repository by committing a thin `symphony.yml` manifest and validating the
-  compiled workflow before running unattended automation.
+- Bootstrap a target repository by committing a thin repo setup `symphony.yml` manifest and
+  validating the compiled workflow before running unattended automation.
+- Compose a local run setup at launch time for the active Linear target, workspace root, runner
+  command, polling, and capacity. Run setup may add restrictions such as smaller capacity or
+  human-review-only routing, but it must not weaken repo-owned validation, delivery, capability, or
+  safety policy.
 - Poll Linear for eligible issue work and dispatch bounded concurrent agent sessions.
 - Launch the configured coding-agent runtime with Symphony-owned harness isolation, then layer target
   repo instructions and docs after harness policy. The current reference implementation launches
@@ -84,6 +88,8 @@ Public reusable automation remains experimental until these operational surfaces
   contracts.
 - Symphony does not require target repositories to copy generated workflow prompts or install
   private global workflow skills.
+- Symphony does not yet import team/cloud-managed run setups. Current saved run setups are
+  local-operator files; future shared run setup import must preserve the same repo-safety invariant.
 - Symphony does not default to production auto-land without explicit repository policy and
   evidence.
 - Linear is the current issue-tracker integration. Additional tracker adapters should not outrank
