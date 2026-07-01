@@ -77,7 +77,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            %{
              id: "product_visual_review",
              version: "v1",
-             config: %{"workflow_modules" => %{"product_visual_review" => %{"route_policy" => "required"}}}
+             config: %{
+               "workflow_modules" => %{"product_visual_review" => %{"route_policy" => "required"}}
+             }
            }
          ]
        }}
@@ -121,7 +123,9 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.workflow_modules == [%{name: "product_visual_review", version: "v1"}]
     assert snapshot_entry.session_id == "thread-live-turn-live"
 
-    assert snapshot_entry.adapter.diagnostics.command == "codex --config 'model=\"gpt-5.5\"' app-server"
+    assert snapshot_entry.adapter.diagnostics.command ==
+             "codex --config 'model=\"gpt-5.5\"' app-server"
+
     assert snapshot_entry.adapter.diagnostics.home == "/tmp/symphony/.symphony/codex_home"
     assert snapshot_entry.adapter.diagnostics.workspace == "/tmp/symphony/MT-188"
     assert snapshot_entry.adapter.diagnostics.execution_profile.name == "implementation"
@@ -228,8 +232,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-    running_issue = %Issue{id: "issue-running-limited", identifier: "MT-RUN", title: "Running", state: "In Progress"}
-    blocked_issue = %Issue{id: "issue-blocked-limited", identifier: "MT-BLOCK", title: "Blocked", state: "In Progress"}
+    running_issue = %Issue{
+      id: "issue-running-limited",
+      identifier: "MT-RUN",
+      title: "Running",
+      state: "In Progress"
+    }
+
+    blocked_issue = %Issue{
+      id: "issue-blocked-limited",
+      identifier: "MT-BLOCK",
+      title: "Blocked",
+      state: "In Progress"
+    }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [running_issue, blocked_issue])
 
@@ -279,8 +294,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
-    first_issue = %Issue{id: "issue-first-limited", identifier: "MT-FIRST", title: "First", state: "Todo"}
-    second_issue = %Issue{id: "issue-second-limited", identifier: "MT-SECOND", title: "Second", state: "Todo"}
+    first_issue = %Issue{
+      id: "issue-first-limited",
+      identifier: "MT-FIRST",
+      title: "First",
+      state: "Todo"
+    }
+
+    second_issue = %Issue{
+      id: "issue-second-limited",
+      identifier: "MT-SECOND",
+      title: "Second",
+      state: "Todo"
+    }
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [first_issue, second_issue])
 
@@ -356,10 +382,60 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         :candidate_fetch
       )
 
-    assert {:noreply, updated_state} = Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+
     assert updated_state.tracker_rate_limit.reason == :tracker_rate_limited
-    assert %{attempt: 2, error: "tracker rate limited", due_at_ms: due_at_ms} = updated_state.retry_attempts[issue_id]
+
+    assert %{attempt: 2, error: "tracker rate limited", due_at_ms: due_at_ms} =
+             updated_state.retry_attempts[issue_id]
+
     assert due_at_ms > System.monotonic_time(:millisecond)
+  end
+
+  test "retry refresh honors shared tracker backoff from another daemon" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    issue_id = "issue-retry-shared-limited"
+    retry_token = make_ref()
+
+    assert %{remaining_ms: remaining_ms} =
+             SymphonyElixir.TrackerCoordinator.record_rate_limit(
+               %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED"}]},
+               :candidate_fetch
+             )
+
+    assert remaining_ms > 0
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 1_000,
+      max_concurrent_agents: 2,
+      max_concurrent_startups: 1,
+      run_mode: :continuous,
+      running: %{},
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{
+        issue_id => %{
+          attempt: 2,
+          retry_token: retry_token,
+          identifier: "MT-RETRY-SHARED-LIMIT",
+          error: "continuation check"
+        }
+      },
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    assert {:noreply, updated_state} =
+             Orchestrator.handle_info({:retry_issue, issue_id, retry_token}, state)
+
+    assert updated_state.tracker_rate_limit.reason == :tracker_rate_limited
+
+    assert %{attempt: 2, error: "tracker rate limited", due_at_ms: due_at_ms} =
+             updated_state.retry_attempts[issue_id]
+
+    assert due_at_ms > System.monotonic_time(:millisecond)
+    refute_receive {:memory_tracker_resolve_candidate_issues, _target}, 10
   end
 
   test "snapshot and API payload expose tracker-limited status" do
@@ -376,7 +452,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid
       |> :sys.get_state()
       |> Orchestrator.record_tracker_rate_limit_for_test(
-        {:linear_rate_limited, %{status: 400, retry_after_ms: 60_000, errors: [%{code: "RATELIMITED", message: "Rate limit exhausted"}]}},
+        {:linear_rate_limited,
+         %{
+           status: 400,
+           retry_after_ms: 60_000,
+           errors: [%{code: "RATELIMITED", message: "Rate limit exhausted"}]
+         }},
         :candidate_fetch
       )
 
@@ -564,14 +645,18 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     running_snapshot = GenServer.call(pid, :snapshot)
     assert %{running: [running_entry_snapshot]} = running_snapshot
     assert running_entry_snapshot.session_id == "thread-loop-turn-loop"
-    assert running_entry_snapshot.last_runtime_error_signature == "remote_compaction_failed:property_name_above_max_length"
+
+    assert running_entry_snapshot.last_runtime_error_signature ==
+             "remote_compaction_failed:property_name_above_max_length"
 
     send(pid, {:DOWN, process_ref, :process, self(), :boom})
 
     retry_snapshot = GenServer.call(pid, :snapshot)
     assert %{retrying: [retry_entry]} = retry_snapshot
     assert retry_entry.session_id == "thread-loop-turn-loop"
-    assert retry_entry.last_error_signature == "remote_compaction_failed:property_name_above_max_length"
+
+    assert retry_entry.last_error_signature ==
+             "remote_compaction_failed:property_name_above_max_length"
 
     rendered =
       StatusDashboard.format_snapshot_content_for_test(
@@ -579,7 +664,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          %{
            running: [],
            retrying: [retry_entry],
-           runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+           runtime_totals: %{
+             input_tokens: 0,
+             output_tokens: 0,
+             total_tokens: 0,
+             seconds_running: 0
+           },
            rate_limits: nil
          }},
         0.0
@@ -848,7 +938,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          timestamp: DateTime.utc_now(),
          completion: %{
            checks: [%{name: "tests", status: :passed}],
-           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "tests", status: "passed"}]}
+           change_manifest: %{
+             changed_files: ["lib/source.ex"],
+             validation: [%{name: "tests", status: "passed"}]
+           }
          }
        }}
     )
@@ -864,7 +957,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert Enum.any?(
              evidence,
-             &(&1.kind == "publish_preflight" and &1.status == "blocked" and &1.metadata.failure_class == :remote_push_unavailable)
+             &(&1.kind == "publish_preflight" and &1.status == "blocked" and
+                 &1.metadata.failure_class == :remote_push_unavailable)
            )
   end
 
@@ -889,7 +983,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {:ok, %{status: 0, output: "ok"}}
     end)
 
-    Application.put_env(:symphony_elixir, :publish_handoff_runner, fn %{step: step, command: command, args: args} ->
+    Application.put_env(:symphony_elixir, :publish_handoff_runner, fn %{
+                                                                        step: step,
+                                                                        command: command,
+                                                                        args: args
+                                                                      } ->
       send(parent, {:publish_handoff_command, step, command, args})
 
       output =
@@ -984,7 +1082,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            checks: [%{name: "all", status: :passed, summary: "all passed"}],
            review: %{status: :clean, summary: "automated review passed"},
            changed_surfaces: ["workflow"],
-           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "all", status: "passed"}]}
+           change_manifest: %{
+             changed_files: ["lib/source.ex"],
+             validation: [%{name: "all", status: "passed"}]
+           }
          }
        }}
     )
@@ -993,8 +1094,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     completed_state = :sys.get_state(pid)
 
     assert_receive {:publish_handoff_command, :jj_push, "jj", ["git", "push", "--remote", "origin", "-b", "ticket/sid-309", "--allow-new"]}
+
     assert_receive {:memory_tracker_comment, ^issue_id, comment}
-    assert comment =~ "publish/passed: Published PR https://github.com/example/project/pull/309 targeting example/project:main."
+
+    assert comment =~
+             "publish/passed: Published PR https://github.com/example/project/pull/309 targeting example/project:main."
+
     assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
 
     assert %{
@@ -1605,6 +1710,90 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end
   end
 
+  test "two local orchestrators share candidate cache and coordinator leases" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-coordinated-dispatch-#{System.unique_integer([:positive])}"
+      )
+
+    issue = policy_issue("issue-coordinated-dispatch", "MT-COORD")
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      coordinator_state_path = Path.join(test_root, "runtime/tracker_coordinator.state")
+
+      File.mkdir_p!(test_root)
+      write_holding_codex!(codex_binary, "coordinated")
+
+      write_policy_workflow!(workspace_root, codex_binary,
+        target: "main",
+        checks: ["coordinated"],
+        prompt: "Coordinate {{ issue.identifier }}"
+      )
+
+      Application.put_env(
+        :symphony_elixir,
+        :tracker_coordinator_state_path,
+        coordinator_state_path
+      )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+      {:ok, first_pid} =
+        Orchestrator.start_link(
+          name: Module.concat(__MODULE__, :CoordinatedFirstOrchestrator),
+          coordinator_owner_id: "daemon-a"
+        )
+
+      on_exit(fn ->
+        stop_orchestrator_and_workers(first_pid)
+      end)
+
+      assert %{running: [%{issue_id: "issue-coordinated-dispatch"}]} =
+               wait_for_snapshot(
+                 first_pid,
+                 fn
+                   %{running: [%{issue_id: "issue-coordinated-dispatch"}]} -> true
+                   _ -> false
+                 end,
+                 1_000
+               )
+
+      {:ok, second_pid} =
+        Orchestrator.start_link(
+          name: Module.concat(__MODULE__, :CoordinatedSecondOrchestrator),
+          coordinator_owner_id: "daemon-b"
+        )
+
+      on_exit(fn -> stop_orchestrator_and_workers(second_pid) end)
+
+      assert %{running: []} =
+               wait_for_snapshot(
+                 second_pid,
+                 fn
+                   %{polling: %{checking?: false, next_poll_in_ms: due_in_ms}}
+                   when is_integer(due_in_ms) and due_in_ms > 0 ->
+                     true
+
+                   _ ->
+                     false
+                 end,
+                 1_000
+               )
+
+      assert_receive {:memory_tracker_resolve_candidate_issues, nil}
+      refute_receive {:memory_tracker_resolve_candidate_issues, nil}, 100
+
+      assert [%{issue_id: "issue-coordinated-dispatch", owner_id: "daemon-a"}] =
+               SymphonyElixir.TrackerCoordinator.snapshot(state_path: coordinator_state_path).leases
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "retry queue preserves resolved policy and retry dispatch uses original policy after reload" do
     test_root =
       Path.join(
@@ -1832,7 +2021,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
                  Orchestrator.handle_info(:run_poll_cycle, %Orchestrator.State{
                    poll_interval_ms: 30_000,
                    max_concurrent_agents: 10,
-                   runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+                   runtime_totals: %{
+                     input_tokens: 0,
+                     output_tokens: 0,
+                     total_tokens: 0,
+                     seconds_running: 0
+                   }
                  })
       end)
 
@@ -2058,7 +2252,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     issue_id = "issue-input-required"
-    issue = %Issue{id: issue_id, identifier: "MT-INPUT", title: "Needs input", state: "In Progress"}
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-INPUT",
+      title: "Needs input",
+      state: "In Progress"
+    }
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredBlockOrchestrator)
@@ -2097,7 +2298,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), {:shutdown, :input_required}})
-    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "runtime turn requires operator input"))
+
+    blocked_entry =
+      wait_for_blocked_entry(pid, issue_id, &(&1.error == "runtime turn requires operator input"))
+
     state = :sys.get_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
@@ -2114,7 +2318,14 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     issue_id = "issue-input-required-normal"
-    issue = %Issue{id: issue_id, identifier: "MT-INPUT-NORMAL", title: "Needs input", state: "In Progress"}
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-INPUT-NORMAL",
+      title: "Needs input",
+      state: "In Progress"
+    }
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
     orchestrator_name = Module.concat(__MODULE__, :InputRequiredNormalBlockOrchestrator)
@@ -2149,7 +2360,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "runtime turn requires operator input"))
+
+    blocked_entry =
+      wait_for_blocked_entry(pid, issue_id, &(&1.error == "runtime turn requires operator input"))
+
     state = :sys.get_state(pid)
 
     refute Map.has_key?(state.running, issue_id)
@@ -2390,7 +2604,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     if is_pid(orchestrator_pid) do
-      assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
+      assert :ok =
+               Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
     end
 
     {:ok, pid} =
@@ -2880,7 +3095,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       poll_interval_ms: 30_000,
       profiles: %{
         default: %{delivery: %{pr_target: "main"}, checks: ["default"]},
-        strict: %{delivery: %{pr_target: Keyword.fetch!(opts, :target)}, checks: Keyword.fetch!(opts, :checks)}
+        strict: %{
+          delivery: %{pr_target: Keyword.fetch!(opts, :target)},
+          checks: Keyword.fetch!(opts, :checks)
+        }
       },
       prompt: Keyword.fetch!(opts, :prompt)
     )

@@ -49,8 +49,22 @@ defmodule SymphonyElixir.TestSupport do
         write_workflow_file!(workflow_file)
         Workflow.set_workflow_file_path(workflow_file)
         previous_log_file = Application.get_env(:symphony_elixir, :log_file)
-        Application.put_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file(Path.join(workflow_root, "runtime")))
-        if Process.whereis(SymphonyElixir.WorkflowStore), do: SymphonyElixir.WorkflowStore.force_reload()
+
+        Application.put_env(
+          :symphony_elixir,
+          :log_file,
+          SymphonyElixir.LogFile.default_log_file(Path.join(workflow_root, "runtime"))
+        )
+
+        Application.put_env(
+          :symphony_elixir,
+          :tracker_coordinator_state_path,
+          Path.join([workflow_root, ".symphony", "tracker_coordinator.state"])
+        )
+
+        if Process.whereis(SymphonyElixir.WorkflowStore),
+          do: SymphonyElixir.WorkflowStore.force_reload()
+
         stop_default_http_server()
 
         on_exit(fn ->
@@ -60,6 +74,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
           Application.delete_env(:symphony_elixir, :memory_tracker_errors)
+          Application.delete_env(:symphony_elixir, :tracker_coordinator_state_path)
           Application.delete_env(:symphony_elixir, :publish_handoff_runner)
           Application.delete_env(:symphony_elixir, :publish_preflight_runner)
           Application.delete_env(:symphony_elixir, :quality_gate_runner)
@@ -251,9 +266,15 @@ defmodule SymphonyElixir.TestSupport do
     poll_interval_ms = Keyword.get(config, :poll_interval_ms)
     workspace_root = Keyword.get(config, :workspace_root)
     worker_ssh_hosts = Keyword.get(config, :worker_ssh_hosts)
-    worker_max_concurrent_agents_per_host = Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
+    worker_max_concurrent_agents_per_host =
+      Keyword.get(config, :worker_max_concurrent_agents_per_host)
+
     default_runner = Keyword.get(config, :default_runner)
-    worker_max_concurrent_startups_per_host = Keyword.get(config, :worker_max_concurrent_startups_per_host)
+
+    worker_max_concurrent_startups_per_host =
+      Keyword.get(config, :worker_max_concurrent_startups_per_host)
+
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_concurrent_startups = Keyword.get(config, :max_concurrent_startups)
     max_turns = Keyword.get(config, :max_turns)
@@ -271,7 +292,10 @@ defmodule SymphonyElixir.TestSupport do
     codex_stall_timeout_ms = Keyword.get(config, :codex_stall_timeout_ms)
     runner_max_concurrent_startups = Keyword.get(config, :runner_max_concurrent_startups)
     quality_gate_enabled = Keyword.get(config, :quality_gate_enabled)
-    quality_gate_source_max_concurrency = Keyword.get(config, :quality_gate_source_max_concurrency)
+
+    quality_gate_source_max_concurrency =
+      Keyword.get(config, :quality_gate_source_max_concurrency)
+
     quality_gate_max_repair_passes = Keyword.get(config, :quality_gate_max_repair_passes)
     quality_gate_runtime_isolation = Keyword.get(config, :quality_gate_runtime_isolation)
     quality_gate_reviewer_timeout_ms = Keyword.get(config, :quality_gate_reviewer_timeout_ms)
@@ -293,7 +317,10 @@ defmodule SymphonyElixir.TestSupport do
     issue_markers = Keyword.get(config, :issue_markers)
     target = Keyword.get(config, :target)
     workflow_module_ids = Keyword.get(config, :workflow_module_ids)
-    workflow_modules_product_visual_review = Keyword.get(config, :workflow_modules_product_visual_review)
+
+    workflow_modules_product_visual_review =
+      Keyword.get(config, :workflow_modules_product_visual_review)
+
     prompt = Keyword.get(config, :prompt)
 
     runtime_sections =
@@ -315,7 +342,11 @@ defmodule SymphonyElixir.TestSupport do
         "  interval_ms: #{yaml_value(poll_interval_ms)}",
         "workspace:",
         "  root: #{yaml_value(workspace_root)}",
-        worker_yaml(worker_ssh_hosts, worker_max_concurrent_agents_per_host, worker_max_concurrent_startups_per_host),
+        worker_yaml(
+          worker_ssh_hosts,
+          worker_max_concurrent_agents_per_host,
+          worker_max_concurrent_startups_per_host
+        ),
         "agent:",
         "  default_runner: #{yaml_value(default_runner)}",
         "  max_concurrent_agents: #{yaml_value(max_concurrent_agents)}",
@@ -343,8 +374,18 @@ defmodule SymphonyElixir.TestSupport do
         "  reviewer_timeout_ms: #{yaml_value(quality_gate_reviewer_timeout_ms)}",
         "  reviewer_max_retries: #{yaml_value(quality_gate_reviewer_max_retries)}",
         "profiles: #{yaml_value(profiles)}",
-        hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
-        observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
+        hooks_yaml(
+          hook_after_create,
+          hook_before_run,
+          hook_after_run,
+          hook_before_remove,
+          hook_timeout_ms
+        ),
+        observability_yaml(
+          observability_enabled,
+          observability_refresh_ms,
+          observability_render_interval_ms
+        ),
         server_yaml(server_port, server_host)
       ]
       |> Enum.reject(&(&1 in [nil, ""]))
@@ -408,7 +449,8 @@ defmodule SymphonyElixir.TestSupport do
     "workflow:\n  preset: \"default\""
   end
 
-  defp workflow_yaml(module_ids, product_visual_review) when module_ids in [nil, []] and is_map(product_visual_review) do
+  defp workflow_yaml(module_ids, product_visual_review)
+       when module_ids in [nil, []] and is_map(product_visual_review) do
     workflow_yaml([], product_visual_review)
   end
 
@@ -429,7 +471,13 @@ defmodule SymphonyElixir.TestSupport do
     "hooks:\n  timeout_ms: #{yaml_value(timeout_ms)}\n  after_create: null"
   end
 
-  defp hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, timeout_ms) do
+  defp hooks_yaml(
+         hook_after_create,
+         hook_before_run,
+         hook_after_run,
+         hook_before_remove,
+         timeout_ms
+       ) do
     [
       "hooks:",
       "  timeout_ms: #{yaml_value(timeout_ms)}",

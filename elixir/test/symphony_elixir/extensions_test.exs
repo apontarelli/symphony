@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.HandoffRoute
+  alias SymphonyElixir.{HandoffRoute, RunTarget, Tracker}
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
 
@@ -259,12 +259,16 @@ defmodule SymphonyElixir.ExtensionsTest do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     assert Config.settings!().tracker.kind == "memory"
-    assert SymphonyElixir.Tracker.adapter() == Memory
-    assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_candidate_issues()
-    assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issues_by_states([" in progress ", 42])
-    assert {:ok, [^issue]} = SymphonyElixir.Tracker.fetch_issue_states_by_ids(["issue-1"])
-    assert :ok = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
-    assert :ok = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    assert Tracker.adapter() == Memory
+    assert {:ok, [^issue]} = Tracker.fetch_candidate_issues()
+
+    explicit_target = %RunTarget{type: :issues, issue_ids: ["issue-1"]}
+    assert {:ok, %{issues: [^issue]}} = Tracker.resolve_candidate_issues(explicit_target)
+
+    assert {:ok, [^issue]} = Tracker.fetch_issues_by_states([" in progress ", 42])
+    assert {:ok, [^issue]} = Tracker.fetch_issue_states_by_ids(["issue-1"])
+    assert :ok = Tracker.create_comment("issue-1", "comment")
+    assert :ok = Tracker.update_issue_state("issue-1", "Done")
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
 
@@ -273,7 +277,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
-    assert SymphonyElixir.Tracker.adapter() == Adapter
+    assert Tracker.adapter() == Adapter
   end
 
   test "linear adapter delegates reads and validates mutation responses" do

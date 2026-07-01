@@ -109,31 +109,38 @@ Important boundary:
    - Decides which issues to dispatch, retry, stop, or release.
    - Tracks session metrics and retry queue state.
 
-7. `Workspace Manager`
+7. `Local Tracker Coordinator`
+   - Coordinates tracker candidate polling, shared tracker rate-limit backoff, and issue leases for
+     local daemons that share the same authenticated tracker quota.
+   - Stores implementation-defined operator/runtime state outside target repository manifests.
+   - MAY be file-backed, SQLite-backed, or process-backed locally; future implementations MAY replace
+     it with a cloud or webhook-backed coordinator without changing orchestrator dispatch semantics.
+
+8. `Workspace Manager`
    - Maps issue identifiers to workspace paths.
    - Ensures per-issue workspace directories exist.
    - Runs workspace lifecycle hooks.
    - Cleans workspaces for terminal issues.
 
-8. `AgentRuntime`
+9. `AgentRuntime`
    - Provides the runner seam between Symphony orchestration and a concrete coding-agent runtime.
    - Starts sessions in prepared workspaces, streams normalized runtime events, stops sessions, and
      reports runtime capabilities.
    - The initial reference adapter is Codex app-server; future adapters MAY target other agent
      runtimes without changing orchestrator event semantics.
 
-9. `ProcessSupervisor`
+10. `ProcessSupervisor`
    - Provides the shared OS process primitive used by `AgentRuntime` adapters.
    - Spawns configured runner argv without an intermediate shell by default.
    - Tracks process identity needed for timeout handling, process-group termination, descendant
      cleanup, and startup stale-child recovery.
    - Owns process lifecycle mechanics; `AgentRuntime` owns runtime protocol translation.
 
-10. `Status Surface` (OPTIONAL)
+11. `Status Surface` (OPTIONAL)
    - Presents human-readable runtime status (for example terminal output, dashboard, or other
      operator-facing view).
 
-10. `Logging`
+12. `Logging`
    - Emits structured runtime logs to one or more configured sinks.
 
 ### 3.2 Abstraction Levels
