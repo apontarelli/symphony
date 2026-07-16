@@ -2418,7 +2418,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert argv_line =~ "CODEX_HOME="
       assert argv_line =~ " exec "
       assert argv_line =~ "fake-remote-codex --config"
-      assert argv_line =~ "model=\"gpt-5.5\""
+      assert argv_line =~ "model=\"gpt-5.6-sol\""
       assert argv_line =~ "app-server"
 
       expected_turn_policy = %{

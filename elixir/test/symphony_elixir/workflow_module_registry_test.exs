@@ -43,6 +43,23 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     refute linear_module.content =~ "symphony-linear"
   end
 
+  test "codex harness routes GPT-5.6 models by workload" do
+    assert {:ok, harness_module} = ModuleRegistry.module_defaults("codex.harness", 0)
+    runner = get_in(harness_module, [:config, "runners", "codex"])
+    profiles = runner["execution_profiles"]
+
+    assert runner["model"] == "gpt-5.6-sol"
+
+    assert Map.new(profiles, fn {name, profile} -> {name, profile["model"]} end) == %{
+             "docs_reviewer" => "gpt-5.6-luna",
+             "product_visual_review" => "gpt-5.6-sol",
+             "runtime_qa" => "gpt-5.6-terra",
+             "security_reviewer" => "gpt-5.6-sol",
+             "source_reviewer" => "gpt-5.6-sol",
+             "test_reviewer" => "gpt-5.6-terra"
+           }
+  end
+
   test "core module registry resolves prompt metadata from the default preset" do
     assert {:ok, resolution} = ModuleRegistry.default_prompt_module_resolution()
 
@@ -104,7 +121,13 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
   test "default preset compiles a self-contained core workflow prompt" do
     assert {:ok, prompt} = ModuleRegistry.compile_default_preset()
 
-    assert prompt =~ "You are working on a Linear ticket `{{ issue.identifier }}`"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `{{ issue.identifier }}`."
+    assert prompt =~ "Goal: Complete the ticket end to end"
+    assert prompt =~ "End the turn after reaching the workflow-defined handoff or terminal state."
+    assert prompt =~ "Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition."
+    assert prompt =~ "Success criteria:"
+    assert prompt =~ "Autonomy and boundaries:"
+    refute prompt =~ "Metadata:"
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Module registry: core-workflow-modules@v1"
     assert prompt =~ "### Linear Operation"
@@ -230,7 +253,7 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear ticket `SID-292`"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `SID-292`."
     assert prompt =~ "Identifier: SID-292"
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "### Linear Operation"

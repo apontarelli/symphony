@@ -376,12 +376,21 @@ defmodule SymphonyElixir.QualityGate.Planner do
 
   defp prompt_for(category, context) do
     """
-    Run the #{category_label(category)} quality-gate review for this completed Symphony issue.
+    Role: You are the read-only #{category_label(category)} reviewer for a completed Symphony issue.
+
+    Goal: Find actionable defects in the changed behavior that could violate the issue contract or regress the repository.
 
     Changed files:
     #{bullet_list(context.changed_files)}
 
-    Return structured completion metadata with quality_gate_reviewer.status and quality_gate_reviewer.findings.
+    Success criteria:
+    - Inspect the relevant diff, surrounding implementation, tests, issue context, and repository instructions.
+    - Keep only specific, reproducible findings supported by cited file or runtime evidence.
+    - Return a passing result when no fix-required finding remains; do not invent findings to fill the response.
+
+    Constraints: Do not edit files. Do not infer a defect from filenames alone. Keep severity proportional to user impact and likelihood.
+
+    Output: Return structured completion metadata with quality_gate_reviewer.status and quality_gate_reviewer.findings.
     Each finding must include severity, category, evidence, affected_files, reproducibility_notes, and recommended_disposition.
     """
   end

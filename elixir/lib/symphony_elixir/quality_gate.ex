@@ -897,9 +897,14 @@ defmodule SymphonyElixir.QualityGate do
 
   defp repair_prompt(plan, synthesis, attempt) do
     """
-    Repair pass #{attempt} for the Symphony quality gate.
+    Role: You are implementing repair pass #{attempt} for the Symphony quality gate.
 
-    Address only the fix-required findings below, then return structured completion evidence.
+    Goal: Resolve only the fix-required findings below without expanding the ticket.
+
+    Success criteria:
+    - Each finding is fixed at its source or reported with an exact blocker.
+    - Relevant validation passes after the changes.
+    - Structured completion evidence lists changed files, validation, and any blocker.
 
     Changed files:
     #{bullet_list(plan.changed_files)}

@@ -1381,7 +1381,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     runner = Config.default_runner!()
     assert runner["kind"] == "codex_app_server"
     assert runner["command"] == ["codex", "app-server"]
-    assert runner["model"] == "gpt-5.5"
+    assert runner["model"] == "gpt-5.6-sol"
     assert runner["approval_policy"] == "never"
 
     assert runner["thread_sandbox"] == "workspace-write"

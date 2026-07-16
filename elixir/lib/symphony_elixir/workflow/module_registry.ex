@@ -186,20 +186,19 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
           "codex" => %{
             "kind" => "codex_app_server",
             "command" => ["codex", "app-server"],
+            "model" => "gpt-5.6-sol",
             "approval_policy" => "never",
             "thread_sandbox" => "workspace-write",
             "turn_timeout_ms" => 3_600_000,
             "read_timeout_ms" => 30_000,
             "stall_timeout_ms" => 300_000,
             "execution_profiles" => %{
-              "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
-              "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-              "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-              "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-              "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
-              "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-              "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
-              "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+              "source_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "medium", "budget" => "standard"},
+              "test_reviewer" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
+              "runtime_qa" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
+              "product_visual_review" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"},
+              "docs_reviewer" => %{"model" => "gpt-5.6-luna", "reasoning_effort" => "medium", "budget" => "standard"},
+              "security_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"}
             }
           }
         },
@@ -363,7 +362,6 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       before handoff. If the journey cannot run because of required external systems, record the
       exact blocked leg and human-verification need instead of calling the work complete.
 
-      Only stop early for missing required auth, permissions, secrets, or unavailable required tools.
       For meaningful out-of-scope work, create a separate Backlog issue instead of expanding scope.
       """,
       description: "Planning, reproduction, implementation, validation, and workpad execution loop"
@@ -844,16 +842,29 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     rendered_modules = Enum.map_join(modules, "\n\n", &render_core_module/1)
 
     [
-      "You are working on a Linear ticket `{{ issue.identifier }}`",
+      "Role: You are an autonomous software-engineering agent resolving Linear ticket `{{ issue.identifier }}`.",
+      "",
+      "Goal: Complete the ticket end to end in the assigned workspace and route it to the correct workflow state.",
+      "",
+      "Success criteria:",
+      "- The issue's acceptance criteria are satisfied by the smallest in-scope change.",
+      "- Required validation and review complete with recorded evidence.",
+      "- Linear, the workpad, the workspace, and the delivery artifact agree on the final state.",
+      "- The issue is routed according to the workflow contract below.",
+      "",
+      "Autonomy and boundaries:",
+      "- Read, inspect, edit in-scope files, and run non-destructive validation without asking.",
+      "- Perform ticket-authorized Linear and delivery writes required by this workflow without asking.",
+      "- Do not perform destructive actions, expand scope materially, or modify paths outside the assigned workspace.",
+      "- End the turn after reaching the workflow-defined handoff or terminal state.",
+      "- Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition.",
       "",
       manifest_context(manifest),
       "{% if attempt %}",
       "Continuation context:",
       "",
-      "- This is retry attempt {{ attempt }} because the ticket is still in an active state.",
-      "- Resume from the current workspace state instead of restarting from scratch.",
-      "- Do not repeat already-completed investigation or validation unless needed for new code changes.",
-      "- Do not end the turn while the issue remains in an active state unless you are blocked by missing required permissions/secrets.",
+      "- This is retry attempt {{ attempt }} because the ticket is still active.",
+      "- Resume from the current workspace and workpad; do not repeat completed work unless later changes invalidate it.",
       "{% endif %}",
       "",
       "Issue context:",
@@ -870,12 +881,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       "No description provided.",
       "{% endif %}",
       "",
-      "Instructions:",
-      "",
-      "1. This is an unattended orchestration session. Never ask a human to perform follow-up actions.",
-      "2. Only stop early for a true blocker: missing required auth, permissions, secrets, or unavailable required tools.",
-      "3. Final message must report completed actions and blockers only. Do not include next steps for the user.",
-      "4. Work only in the provided repository copy. Do not touch any other path.",
+      "Output: Report completed actions, validation evidence, and blockers only. Omit generic summaries and user follow-up steps.",
       "",
       "## Core Workflow Modules",
       "",
@@ -932,14 +938,6 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp render_core_module(module) do
     """
     ### #{module_title(module.id)}
-
-    Metadata:
-    - id: `#{module.id}`
-    - version: `#{module.version}`
-    - summary: #{module.summary}
-    - default inclusion: #{module.default?}
-    - compatibility: #{inspect(module.compatibility)}
-    - pins: #{inspect(module.pins)}
 
     #{String.trim(module.content)}
     """

@@ -215,7 +215,7 @@ defmodule SymphonyElixir.TestSupport do
           max_concurrent_agents_by_state: %{},
           runner_kind: "codex_app_server",
           codex_command: "codex app-server",
-          codex_model: "gpt-5.5",
+          codex_model: "gpt-5.6-sol",
           codex_approval_policy: "never",
           codex_thread_sandbox: "workspace-write",
           codex_turn_sandbox_policy: nil,

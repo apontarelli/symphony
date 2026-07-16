@@ -34,7 +34,7 @@ defmodule SymphonyElixir.Config.Schema do
   @default_runner_config %{
     "kind" => "codex_app_server",
     "command" => ["codex", "app-server"],
-    "model" => "gpt-5.5",
+    "model" => "gpt-5.6-sol",
     "approval_policy" => "never",
     "thread_sandbox" => "workspace-write",
     "turn_timeout_ms" => 3_600_000,
@@ -243,7 +243,7 @@ defmodule SymphonyElixir.Config.Schema do
   defmodule Codex do
     @moduledoc false
     defstruct command: "codex app-server",
-              model: "gpt-5.5",
+              model: "gpt-5.6-sol",
               approval_policy: "never",
               thread_sandbox: "workspace-write",
               turn_sandbox_policy: nil,

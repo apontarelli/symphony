@@ -1036,7 +1036,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.agent.max_concurrent_startups == 2
     assert Config.default_runner!(settings)["kind"] == "codex_app_server"
     assert Config.default_runner!(settings)["command"] == ["codex", "app-server"]
-    assert Config.default_runner!(settings)["model"] == "gpt-5.5"
+    assert Config.default_runner!(settings)["model"] == "gpt-5.6-sol"
     assert settings.polling.interval_ms == 30_000
 
     prompt =

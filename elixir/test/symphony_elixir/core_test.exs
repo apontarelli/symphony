@@ -906,7 +906,7 @@ defmodule SymphonyElixir.CoreTest do
     assert get_in(profiles, ["default", "delivery", "pr_target"]) == "main"
 
     assert String.trim(prompt) != ""
-    assert prompt =~ "You are working on a Linear ticket `{{ issue.identifier }}`"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `{{ issue.identifier }}`."
     assert prompt =~ "Project context:"
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Validation commands:\n- all: cd elixir && mise exec -- make all"
@@ -2202,7 +2202,7 @@ defmodule SymphonyElixir.CoreTest do
 
     prompt = PromptBuilder.build_prompt(issue)
 
-    assert prompt =~ "You are working on a Linear ticket `MT-777`"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `MT-777`."
     assert prompt =~ "Project context:"
     assert prompt =~ "Identifier: MT-777"
     assert prompt =~ "Title: Make fallback prompt useful"
@@ -2379,7 +2379,7 @@ defmodule SymphonyElixir.CoreTest do
     prompt_bundle = PromptBuilder.build_prompt_bundle(issue, attempt: 2)
     prompt = prompt_bundle.prompt
 
-    assert prompt =~ "You are working on a Linear ticket `MT-616`"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `MT-616`."
     assert prompt =~ "Project slug: symphony"
     assert prompt =~ "Repository: https://github.com/apontarelli/symphony"
     assert prompt =~ "## Core Workflow Modules"
@@ -2394,9 +2394,10 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Final responses report completed actions and blockers only."
     assert prompt =~ "### Land Merge"
     assert prompt =~ "Merging, locate the attached PR"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include next steps for the user."
+    assert prompt =~ "Autonomy and boundaries:"
+    assert prompt =~ "End the turn after reaching the workflow-defined handoff or terminal state."
+    assert prompt =~ "Stop early only when required auth, permissions, secrets, or tools are unavailable"
+    assert prompt =~ "Omit generic summaries and user follow-up steps."
     assert prompt_bundle.workflow_module_resolution.policy_hash =~ ~r/^sha256:[a-f0-9]{64}$/
     assert %{name: "linear-operation", version: "v1"} in prompt_bundle.workflow_module_resolution.module_refs
     refute prompt =~ ".codex/skills"
@@ -2902,7 +2903,7 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
-  test "agent runner continues with a follow-up turn while the issue remains active" do
+  test "agent runner continues until reaching a workflow handoff" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -2971,21 +2972,22 @@ defmodule SymphonyElixir.CoreTest do
       state_fetcher = fn [_issue_id] ->
         attempt = Process.get(:agent_turn_fetch_count, 0) + 1
         Process.put(:agent_turn_fetch_count, attempt)
-        send(parent, {:issue_state_fetch, attempt})
 
         state =
           if attempt == 1 do
             "In Progress"
           else
-            "Done"
+            "Human Review"
           end
+
+        send(parent, {:issue_state_fetch, attempt, state})
 
         {:ok,
          [
            %Issue{
              id: "issue-continue",
              identifier: "MT-247",
-             title: "Continue until done",
+             title: "Continue until handoff",
              description: "Still active after first turn",
              state: state,
              project_slug: "project"
@@ -2996,7 +2998,7 @@ defmodule SymphonyElixir.CoreTest do
       issue = %Issue{
         id: "issue-continue",
         identifier: "MT-247",
-        title: "Continue until done",
+        title: "Continue until handoff",
         description: "Still active after first turn",
         state: "In Progress",
         url: "https://example.org/issues/MT-247",
@@ -3005,8 +3007,8 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-      assert_receive {:issue_state_fetch, 1}
-      assert_receive {:issue_state_fetch, 2}
+      assert_receive {:issue_state_fetch, 1, "In Progress"}
+      assert_receive {:issue_state_fetch, 2, "Human Review"}
 
       lines = File.read!(trace_file) |> String.split("\n", trim: true)
 
@@ -3027,8 +3029,14 @@ defmodule SymphonyElixir.CoreTest do
       assert length(turn_texts) == 2
       assert Enum.at(turn_texts, 0) =~ "You are an agent for this repository."
       refute Enum.at(turn_texts, 1) =~ "You are an agent for this repository."
-      assert Enum.at(turn_texts, 1) =~ "Continuation guidance:"
-      assert Enum.at(turn_texts, 1) =~ "continuation turn #2 of 3"
+      assert Enum.at(turn_texts, 1) =~ "Continue turn 2 of 3."
+      assert Enum.at(turn_texts, 1) =~ "Goal: Finish the remaining ticket work"
+
+      assert Enum.at(turn_texts, 1) =~
+               "End the turn after reaching the workflow-defined handoff or terminal state."
+
+      assert Enum.at(turn_texts, 1) =~
+               "Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition."
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

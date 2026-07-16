@@ -560,12 +560,19 @@ runtime:
   `github_publish_unavailable`. This is narrower than making `dangerFullAccess` the global default
   because only the named local runtime profile expands the Codex turn sandbox and only runs that
   declare the capability names are blocked by these checks.
-- `runtime.runners.codex.execution_profiles` lets the host run implementation, planner, reviewer,
-  runtime QA, product visual review, security review, and synthesis jobs with typed reasoning,
-  timeout, retry, budget, model, or command settings. `runtime.runners.codex.model` is the default
-  launch model. Profile `model` values override it for that launch, and explicit model flags already
-  present in `runtime.runners.codex.command` control the command unchanged. Operators do not need to
-  rewrite the argv list for normal profile tuning.
+- `runtime.runners.codex.execution_profiles` covers the production-selected implementation workload
+  plus six reviewer/runtime QA workloads: `source_reviewer`, `test_reviewer`, `runtime_qa`,
+  `product_visual_review`, `docs_reviewer`, and `security_reviewer`. Each profile supports typed
+  reasoning, timeout, retry, budget, model, or command settings. Planning remains in the
+  implementation session, and quality-gate synthesis is host-owned Elixir rather than a launched
+  Codex profile. `runtime.runners.codex.model` is the default launch model. Profile `model` values
+  override it for that launch, and explicit model flags already present in
+  `runtime.runners.codex.command` control the command unchanged. Operators do not need to rewrite
+  the argv list for normal profile tuning.
+  The bundled default uses GPT-5.6 Sol for implementation and source, visual, and security review;
+  GPT-5.6 Terra for test review and runtime QA; and GPT-5.6 Luna for docs review. Supported Codex
+  reasoning efforts are `none`, `low`, `medium`, `high`, `xhigh`, and `max`; the bundled profiles
+  preserve their pre-5.6 effort levels.
 - Workflow profiles may include `runners.codex` with `approval_policy`, `thread_sandbox`, and
   `turn_sandbox_policy` overrides. Use this sparingly for scoped, interactive work like repo skill
   authoring that needs to edit protected repo-local skill or tooling paths. Profile overrides do
@@ -607,6 +614,10 @@ runtime:
   each run records module names, versions, and a policy hash. The default delivery workflow is
   self-contained in bundled modules selected through `workflow.modules`; runtime behavior comes from
   the registry, manifest, and recorded module policy hash.
+  The compiled prompt keeps a stable outcome-first prefix—role, goal, success criteria, autonomy
+  boundaries, and output contract—while module bodies contain the detailed workflow invariants.
+  Resolution versions and policy hashes remain recorded without repeating module metadata inside
+  the agent-facing prompt.
 - `product_visual_review` can be selected in `workflow.modules` and configured under
   `workflow.config.product_visual_review` to adjust product/design QA prompts and durable handoff
   route evidence. When selected without explicit config, it defaults to `enabled: true`. Set

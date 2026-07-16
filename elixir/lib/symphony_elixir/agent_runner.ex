@@ -285,13 +285,14 @@ defmodule SymphonyElixir.AgentRunner do
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     %{
       prompt: """
-      Continuation guidance:
+      Continue turn #{turn_number} of #{max_turns}.
 
-      - The previous Codex turn completed normally, but the Linear issue is still in an active state.
-      - This is continuation turn ##{turn_number} of #{max_turns} for the current agent run.
-      - Resume from the current workspace and workpad state instead of restarting from scratch.
-      - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
-      - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+      Goal: Finish the remaining ticket work and route the issue according to the original workflow contract.
+
+      Resume from the current workspace, workpad, and thread context. Do not restate the task or repeat completed work unless later changes invalidate it.
+
+      End the turn after reaching the workflow-defined handoff or terminal state.
+      Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition.
       """,
       workflow_module_resolution: nil
     }

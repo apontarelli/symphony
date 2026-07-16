@@ -957,10 +957,11 @@ defmodule SymphonyElixir.CLITest do
     assert get_in(config, ["runners", "codex", "kind"]) == "codex_app_server"
 
     assert get_in(config, ["runners", "codex", "command"]) == ["codex", "app-server"]
+    assert get_in(config, ["runners", "codex", "model"]) == "gpt-5.6-sol"
 
     refute Map.has_key?(config, "codex")
     assert config["policy_metadata"]["source"] == "symphony_manifest"
-    assert prompt =~ "You are working on a Linear ticket"
+    assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket"
     assert prompt =~ "## Core Workflow Modules"
   end
 
@@ -988,7 +989,7 @@ defmodule SymphonyElixir.CLITest do
     assert compiled_output =~ "runners:"
     assert compiled_output =~ "kind: \"codex_app_server\""
     assert compiled_output =~ "command:"
-    assert compiled_output =~ "You are working on a Linear ticket"
+    assert compiled_output =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket"
     assert compiled_output =~ "## Core Workflow Modules"
     assert compiled_output =~ "Docs entrypoints:"
     refute compiled_output =~ "harness_codex_home"

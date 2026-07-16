@@ -45,6 +45,9 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.all?(plan.jobs, &(&1.required? == true))
     assert source_job = Enum.find(plan.jobs, &(&1.category == :source_correctness))
     assert source_job.execution_mode == :parallel_source
+    assert source_job.prompt =~ "Role: You are the read-only source correctness reviewer"
+    assert source_job.prompt =~ "Return a passing result when no fix-required finding remains"
+    assert source_job.prompt =~ "Constraints: Do not edit files."
 
     assert qa_job = Enum.find(plan.jobs, &(&1.category == :scenario_qa))
     assert qa_job.execution_mode == :serialized_runtime
@@ -355,23 +358,32 @@ defmodule SymphonyElixir.QualityGateTest do
     settings = Config.settings!()
 
     assert %{
-             name: "planner",
-             reasoning_effort: "high",
+             name: "test_reviewer",
+             model: "gpt-5.6-terra",
+             reasoning_effort: "medium",
              budget: "standard",
              timeout_ms: 1_200_000,
              max_retries: 0
-           } = ExecutionProfile.resolve(settings, "planner")
+           } = ExecutionProfile.resolve(settings, "test_reviewer")
 
     assert %{reasoning_effort: "medium"} = ExecutionProfile.resolve(settings, "source_reviewer")
 
     command =
       ExecutionProfile.command(
         ["codex", "--config", "model_reasoning_effort=xhigh", "app-server"],
-        ExecutionProfile.resolve(settings, "planner")
+        ExecutionProfile.resolve(settings, "test_reviewer")
       )
 
-    assert command ==
-             ["codex", "--config", "model_reasoning_effort=xhigh", "--config", "model_reasoning_effort=high", "app-server"]
+    assert command == [
+             "codex",
+             "--config",
+             "model_reasoning_effort=xhigh",
+             "--config",
+             "model=\"gpt-5.6-terra\"",
+             "--config",
+             "model_reasoning_effort=medium",
+             "app-server"
+           ]
 
     assert {:ok, overridden_settings} =
              Schema.parse(%{
@@ -386,7 +398,9 @@ defmodule SymphonyElixir.QualityGateTest do
                        "budget" => "cheap",
                        "timeout_ms" => 60_000,
                        "max_retries" => 1
-                     }
+                     },
+                     "runtime_qa" => %{"reasoning_effort" => "none"},
+                     "security_reviewer" => %{"reasoning_effort" => "max"}
                    }
                  }
                }
@@ -399,6 +413,9 @@ defmodule SymphonyElixir.QualityGateTest do
              timeout_ms: 60_000,
              max_retries: 1
            } = ExecutionProfile.resolve(overridden_settings, "source_reviewer")
+
+    assert %{reasoning_effort: "none"} = ExecutionProfile.resolve(overridden_settings, "runtime_qa")
+    assert %{reasoning_effort: "max"} = ExecutionProfile.resolve(overridden_settings, "security_reviewer")
   end
 
   test "handoff routing consumes quality gate evidence" do
@@ -1908,7 +1925,7 @@ defmodule SymphonyElixir.QualityGateTest do
                    "command" => ["codex", "app-server"],
                    "execution_profiles" => %{
                      "" => "bad",
-                     "planner" => %{"reasoning_effort" => "x-high", "timeout_ms" => 0, "max_retries" => -1}
+                     "test_reviewer" => %{"reasoning_effort" => "x-high", "timeout_ms" => 0, "max_retries" => -1}
                    }
                  }
                },
@@ -1916,7 +1933,7 @@ defmodule SymphonyElixir.QualityGateTest do
              })
 
     assert settings.quality_gate.runtime_isolation == "blocked"
-    assert %{reasoning_effort: "xhigh", timeout_ms: 1_200_000, max_retries: 0} = ExecutionProfile.resolve(settings, "planner")
+    assert %{reasoning_effort: "xhigh", timeout_ms: 1_200_000, max_retries: 0} = ExecutionProfile.resolve(settings, "test_reviewer")
 
     non_map_profiles = %{settings | runners: put_in(settings.runners, ["codex", "execution_profiles"], "bad")}
     assert %{reasoning_effort: "medium"} = ExecutionProfile.resolve(non_map_profiles, "source_reviewer")

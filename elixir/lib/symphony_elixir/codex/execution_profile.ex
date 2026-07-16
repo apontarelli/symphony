@@ -18,17 +18,15 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
 
   @defaults %{
     "implementation" => %{"reasoning_effort" => nil, "budget" => "standard"},
-    "planner" => %{"reasoning_effort" => "high", "budget" => "standard"},
     "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
     "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
     "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},
     "product_visual_review" => %{"reasoning_effort" => "high", "budget" => "standard"},
     "docs_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
-    "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"},
-    "synthesis" => %{"reasoning_effort" => "high", "budget" => "standard"}
+    "security_reviewer" => %{"reasoning_effort" => "high", "budget" => "standard"}
   }
 
-  @valid_reasoning_efforts MapSet.new(~w(low medium high xhigh))
+  @valid_reasoning_efforts MapSet.new(~w(none low medium high xhigh max))
 
   @spec resolve(Schema.t(), String.t() | atom() | nil) :: t()
   def resolve(%Schema{} = settings, profile_ref) do
