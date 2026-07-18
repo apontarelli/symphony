@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with a manifest.
   """
 
-  alias SymphonyElixir.{LocalRun, LogFile, RunSetup, SetupMigration}
+  alias SymphonyElixir.{LocalRun, LogFile, ProjectWorkflows, RunSetup, SetupMigration}
   alias SymphonyElixir.ReviewRecords.Command, as: ReviewRecordsCommand
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -14,6 +14,7 @@ defmodule SymphonyElixir.CLI do
     port: :integer,
     profile: :string
   ]
+  @list_switches [repo: :string, config_root: :string, help: :boolean]
   @run_switches @switches ++
                   [
                     allow_missing_capabilities: :boolean,
@@ -102,6 +103,10 @@ defmodule SymphonyElixir.CLI do
     evaluate_run(run_args, deps)
   end
 
+  def evaluate(["list" | list_args], deps) do
+    evaluate_list(list_args, deps)
+  end
+
   def evaluate(["review-records" | review_record_args], _deps) do
     ReviewRecordsCommand.evaluate(review_record_args)
   end
@@ -139,6 +144,111 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  defp evaluate_list(args, deps) do
+    case OptionParser.parse(args, strict: @list_switches, aliases: [h: :help]) do
+      {opts, [], []} ->
+        evaluate_list_options(opts, deps)
+
+      _other ->
+        {:error, list_usage_message()}
+    end
+  end
+
+  defp evaluate_list_options(opts, deps) do
+    if Keyword.get(opts, :help, false) do
+      {:ok, list_usage_message()}
+    else
+      evaluate_list_catalog(opts, deps)
+    end
+  end
+
+  defp evaluate_list_catalog(opts, deps) do
+    project = Keyword.get(opts, :repo) || list_cwd(deps)
+
+    case ProjectWorkflows.list(project, config_opts(opts)) do
+      {:ok, workflows, warnings} ->
+        {:ok, format_workflow_catalog(Path.expand(project), workflows, warnings)}
+
+      {:error, message} ->
+        {:error, message}
+    end
+  end
+
+  defp list_cwd(deps) do
+    deps
+    |> Map.get(:cwd, fn -> System.get_env("SYMPHONY_RUN_REPO_ROOT") || File.cwd!() end)
+    |> apply([])
+  end
+
+  defp format_workflow_catalog(project, workflows, warnings) do
+    body =
+      case workflows do
+        [] ->
+          "No saved workflows found for #{project}."
+
+        workflows ->
+          rows =
+            Enum.map(workflows, fn workflow ->
+              [
+                workflow_name(workflow),
+                workflow.target,
+                workflow.mode,
+                workflow.capacity,
+                workflow_source(workflow)
+              ]
+            end)
+
+          table = format_table(["NAME", "TARGET", "MODE", "CAPACITY", "SOURCE"], rows)
+          "Project workflows for #{project}\n\n#{table}"
+      end
+
+    append_catalog_warnings(body, warnings)
+  end
+
+  defp workflow_name(%{default_rank: :default, name: name}), do: "#{name} [default]"
+  defp workflow_name(%{default_rank: :main, name: name}), do: "#{name} [main]"
+  defp workflow_name(%{name: name}), do: name
+
+  defp workflow_source(%{source: :current, path: path}), do: "recent/unsaved (#{path})"
+  defp workflow_source(%{path: path}), do: "saved (#{path})"
+
+  defp format_table(headers, rows) do
+    widths =
+      [headers | rows]
+      |> Enum.zip_with(fn column -> column |> Enum.map(&String.length/1) |> Enum.max() end)
+
+    separator = Enum.map(widths, &String.duplicate("-", &1))
+
+    [headers, separator | rows]
+    |> Enum.map_join("\n", &format_table_row(&1, widths))
+  end
+
+  defp format_table_row(row, widths) do
+    last_index = length(row) - 1
+
+    row
+    |> Enum.with_index()
+    |> Enum.map_join("  ", fn {value, index} ->
+      if index == last_index, do: value, else: String.pad_trailing(value, Enum.at(widths, index))
+    end)
+  end
+
+  defp append_catalog_warnings(output, []), do: output
+
+  defp append_catalog_warnings(output, warnings) do
+    output <> "\n\nWarnings:\n" <> Enum.map_join(warnings, "\n", &"  - #{&1}")
+  end
+
+  defp list_usage_message do
+    """
+    Usage:
+      symphony list [--repo <path>] [--config-root <path>] [--no-env-file]
+
+    Lists saved workflows for the active repo without starting Symphony or changing local config.
+    """
+    |> String.trim()
+  end
+
   @spec run(String.t(), deps()) :: :ok | {:error, String.t()}
   def run(workflow_path, deps), do: run(workflow_path, [], deps)
 
@@ -169,6 +279,7 @@ defmodule SymphonyElixir.CLI do
     Usage:
       symphony setup <init|check|preview> [options]
       symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]
+      symphony list [--repo <path>] [--config-root <path>]
       symphony run [target...] [--repo <path>] [--config-root <path>] [--setup <name>] [--save <name>] [--dry-run] [--yes]
       symphony run [--preview] [--workflow <path>] [--mode watch|drain|issue_batch] [options]
       symphony run <name> [--config-root <path>] [--dry-run] [--i-understand-that-this-will-be-running-without-the-usual-guardrails]
@@ -187,6 +298,7 @@ defmodule SymphonyElixir.CLI do
       set_logs_root: &set_logs_root/1,
       set_server_port_override: &set_server_port_override/1,
       set_profile_override: &SymphonyElixir.Config.set_profile_override/1,
+      cwd: fn -> System.get_env("SYMPHONY_RUN_REPO_ROOT") || File.cwd!() end,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end

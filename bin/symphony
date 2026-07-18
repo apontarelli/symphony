@@ -5,6 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   symphony setup <init|check|preview> [options]
+  symphony list [--repo <path>] [--config-root <path>] [--no-env-file]
   symphony run [--preview] [--workflow /path/to/symphony.runtime.yml] [options]
   symphony [project-name] [--workflow /path/to/symphony.runtime.yml] [options]
   symphony run [target...] [--repo <path>] [--config-root <path>] [--setup <name>] [--save <name>] [--dry-run] [--yes] [--env-file <path>|--no-env-file]
@@ -18,6 +19,7 @@ Project resolution:
   no project or workflow      In a repo setup directory, builds an interactive local run setup.
                               Else uses SYMPHONY_WORKFLOW from the env file, then ./symphony.runtime.yml.
   run                         Builds or loads a local runtime setup, previews it, then starts it.
+  list                        Lists saved workflows for the active repo without starting Symphony.
 
 Options:
   --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
@@ -33,6 +35,7 @@ Options:
   --human-review-only         Route completed work to human review.
   --dev-root <path>           Project root directory. Default: ~/dev.
   --skip-build                Do not rebuild elixir/bin/symphony before launch.
+  --config-root <path>        Saved workflow config root. Default: ~/.config/symphony.
   --dry-run                   Print the launch command and exit.
   -h, --help                  Show this help.
 
@@ -211,6 +214,47 @@ run_workflow_cli() {
   exec mise exec -- ./bin/symphony "$@"
 }
 
+run_list_cli() {
+  local repo_root="$1"
+  shift
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local caller_root="$PWD"
+  local args=(list)
+  local arg value
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+
+    case "$arg" in
+      --repo|--config-root)
+        require_value "$arg" "${2:-}"
+        value="$(expand_path "$2")"
+        args+=("$arg" "$(absolute_path "$value")")
+        shift 2
+        ;;
+      --no-env-file)
+        shift
+        ;;
+      --skip-build)
+        export SYMPHONY_SKIP_BUILD=1
+        shift
+        ;;
+      *)
+        args+=("$arg")
+        shift
+        ;;
+    esac
+  done
+
+  symphony_home="$(expand_path "$symphony_home")"
+  symphony_home="$(absolute_path "$symphony_home")"
+
+  prepare_elixir_cli "$symphony_home"
+
+  exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- ./bin/symphony "${args[@]}"
+}
+
 run_saved_setup_cli() {
   local repo_root="$1"
   shift
@@ -282,6 +326,11 @@ main() {
 
   if [[ "${1:-}" == "workflow" || "${1:-}" == "setup" ]]; then
     run_workflow_cli "$repo_root" "$@"
+  fi
+
+  if [[ "${1:-}" == "list" ]]; then
+    shift
+    run_list_cli "$repo_root" "$@"
   fi
 
   if [[ "${1:-}" == "run" ]]; then

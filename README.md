@@ -89,8 +89,13 @@ such as workspace root, capacity profiles, deployment ceilings, polling, and run
 named setups live under `~/.config/symphony/runs/<name>.yml`. Bare `symphony` in a directory with a
 valid `symphony.yml` enters the same interactive local run setup flow.
 
+Use `symphony list` to inspect the saved setups that belong to the active repo. It reads
+`~/.config/symphony/runs/*.yml`, orders `default` and `main` first, and does not create local config,
+materialize runtime manifests, contact Linear, or start the daemon.
+
 ```bash
 export LINEAR_API_KEY=...
+../bin/symphony list --repo /path/to/target-repo --no-env-file
 ../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run          # interactive project/team/query setup
 ../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --no-env-file --dry-run
 ../bin/symphony run my-saved-setup --no-env-file --dry-run
