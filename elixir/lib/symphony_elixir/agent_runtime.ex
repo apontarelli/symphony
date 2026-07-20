@@ -8,7 +8,7 @@ defmodule SymphonyElixir.AgentRuntime do
   callback options they support.
   """
 
-  alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event}
+  alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OpenCodeServer}
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
 
@@ -181,7 +181,7 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp default_adapter_registry do
-    %{"codex_app_server" => CodexAppServer}
+    %{"codex_app_server" => CodexAppServer, "opencode_server" => OpenCodeServer}
   end
 
   defp start_adapter_opts(opts, runner_name, runner_config, settings) do

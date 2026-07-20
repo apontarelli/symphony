@@ -13,10 +13,11 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   @type argv :: [String.t()]
   @type cleanup :: :descendants | :port_only
+  @type env_value :: String.t() | charlist() | false
   @type env_overlay ::
-          %{optional(String.t()) => String.t()}
+          %{optional(String.t()) => env_value()}
           | [
-              {String.t() | charlist(), String.t() | charlist()}
+              {String.t() | charlist(), env_value()}
             ]
   @type identity :: %{os_pid: non_neg_integer() | nil}
   @type startup_timeout :: (-> non_neg_integer())
@@ -227,12 +228,15 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   defp normalize_env_entry({key, value}) do
     with {:ok, port_key} <- port_text(key),
-         {:ok, port_value} <- port_text(value) do
+         {:ok, port_value} <- port_env_value(value) do
       {:ok, {port_key, port_value}}
     end
   end
 
   defp normalize_env_entry(_entry), do: {:error, :invalid_env}
+
+  defp port_env_value(false), do: {:ok, false}
+  defp port_env_value(value), do: port_text(value)
 
   defp port_text(value) when is_binary(value), do: {:ok, String.to_charlist(value)}
   defp port_text(value) when is_list(value), do: {:ok, value}

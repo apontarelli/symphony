@@ -912,11 +912,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    if Map.has_key?(state.blocked, issue_id) do
-      state
-    else
-      restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
+    cond do
+      Map.has_key?(state.blocked, issue_id) -> state
+      not stall_watchdog_supported?(running_entry) -> state
+      true -> restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
     end
+  end
+
+  defp stall_watchdog_supported?(running_entry) do
+    Map.get(running_entry, :runtime) not in [:opencode_server, "opencode_server"]
   end
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -980,11 +984,10 @@ defmodule SymphonyElixir.Orchestrator do
       Map.get(running_entry, :started_at)
   end
 
-  defp last_activity_timestamp(_running_entry), do: nil
-
   defp agent_blocker?(running_entry) when is_map(running_entry) do
     input_required_blocker?(running_entry) or
       Map.get(running_entry, :last_runtime_event) in [
+        :blocked,
         :agent_max_turns_exhausted,
         :max_turns_exhausted
       ] or
@@ -1066,6 +1069,8 @@ defmodule SymphonyElixir.Orchestrator do
     do: "runtime turn requires operator input"
 
   defp runtime_event_blocker_error(:approval_required), do: "runtime turn requires approval"
+
+  defp runtime_event_blocker_error(:blocked), do: "runtime turn is blocked"
 
   defp runtime_event_blocker_error(event)
        when event in [:agent_max_turns_exhausted, :max_turns_exhausted],
@@ -1616,6 +1621,7 @@ defmodule SymphonyElixir.Orchestrator do
             issue: issue,
             worker_host: worker_host,
             workspace_path: nil,
+            runtime: nil,
             session_id: nil,
             last_runtime_message: nil,
             last_runtime_timestamp: nil,
@@ -2746,6 +2752,7 @@ defmodule SymphonyElixir.Orchestrator do
         last_runtime_timestamp: timestamp,
         last_runtime_message: summarize_runtime_event(update),
         session_id: session_id_for_update(running_entry.session_id, update),
+        runtime: Map.get(update, :runtime, Map.get(running_entry, :runtime)),
         last_runtime_progress_timestamp: last_progress_timestamp,
         last_runtime_event: event,
         last_runtime_error_signature: last_error_signature,
@@ -2827,7 +2834,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp summarize_runtime_event(update) do
     %{
       event: update[:event],
-      message: update[:payload] || update[:raw] || error_message_from_update(update),
+      message: update[:payload] || update[:native] || update[:raw] || error_message_from_update(update),
       timestamp: update[:timestamp]
     }
   end
@@ -3167,18 +3174,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp absolute_token_usage_from_payload(payload) when is_map(payload) do
-    absolute_paths = [
-      ["params", "msg", "payload", "info", "total_token_usage"],
-      [:params, :msg, :payload, :info, :total_token_usage],
-      ["params", "msg", "info", "total_token_usage"],
-      [:params, :msg, :info, :total_token_usage],
-      ["params", "tokenUsage", "total"],
-      [:params, :tokenUsage, :total],
-      ["tokenUsage", "total"],
-      [:tokenUsage, :total]
-    ]
+    if integer_token_map?(payload) do
+      payload
+    else
+      absolute_paths = [
+        ["params", "msg", "payload", "info", "total_token_usage"],
+        [:params, :msg, :payload, :info, :total_token_usage],
+        ["params", "msg", "info", "total_token_usage"],
+        [:params, :msg, :info, :total_token_usage],
+        ["params", "tokenUsage", "total"],
+        [:params, :tokenUsage, :total],
+        ["tokenUsage", "total"],
+        [:tokenUsage, :total]
+      ]
 
-    explicit_map_at_paths(payload, absolute_paths)
+      explicit_map_at_paths(payload, absolute_paths)
+    end
   end
 
   defp absolute_token_usage_from_payload(_payload), do: nil

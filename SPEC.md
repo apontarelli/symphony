@@ -1075,19 +1075,23 @@ OpenCodeServer runner-specific fields:
 - `hostname`: non-empty string, default `127.0.0.1`.
 - `port`: `"auto"` or an integer from `1` through `65535`, default `"auto"`. The adapter owns
   automatic port allocation.
-- `config_dir`: optional non-empty path supplied as `OPENCODE_CONFIG_DIR`.
-- `config_path`: optional non-empty path supplied as `OPENCODE_CONFIG`.
-- `config_content`: optional non-empty string or map supplied through
-  `OPENCODE_CONFIG_CONTENT`; map values are encoded by the adapter.
-- `server_auth`: optional map containing non-empty `username` and/or `password` values for
-  OpenCode server basic auth.
-- `permissions`: map of OpenCode permission policy values, default `{}`.
+- `config_dir`: optional non-empty path reserved for an isolated `OPENCODE_CONFIG_DIR` overlay.
+- `config_path`: optional non-empty path reserved for an isolated `OPENCODE_CONFIG` overlay.
+- `config_content`: optional non-empty string or map reserved for `OPENCODE_CONFIG_CONTENT`; map
+  values are encoded by the adapter that enables the overlay.
+- `server_auth`: optional map containing a REQUIRED non-empty `password` and an optional non-empty
+  `username` for OpenCode server basic auth. The username defaults to `opencode`. The local adapter
+  supports direct values; environment-reference hardening is a later layer.
+- `permissions`: map of OpenCode permission policy values, default `{}`. The initial local lifecycle
+  observes unresolved permission requests as blocked; explicit policy injection requires the
+  unattended config overlay.
 - `startup_timeout_ms`: positive integer, default `30000`.
 
 The OpenCode runner also accepts the common `command`, `model`, `turn_timeout_ms`,
 `read_timeout_ms`, `stall_timeout_ms`, `execution_profiles`, and
 `max_concurrent_startups` fields. Its `command` is REQUIRED until an implementation explicitly
-defines a compatibility default.
+defines a compatibility default. When present, `model` MUST use the `provider/model` selector form
+required by the OpenCode message API.
 
 Quality gate:
 

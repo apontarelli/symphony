@@ -831,10 +831,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       {:runtime_event, issue_id,
        %{
          event: :turn_completed,
-         payload: %{
-           method: "turn/completed",
-           usage: %{"input_tokens" => "12", "output_tokens" => 4, "total_tokens" => 16}
-         },
+         runtime: :opencode_server,
+         usage: %{"input_tokens" => "12", "output_tokens" => 4, "total_tokens" => 16},
          timestamp: DateTime.utc_now()
        }}
     )
@@ -2157,6 +2155,63 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_at_ms > System.monotonic_time(:millisecond)
   end
 
+  test "orchestrator leaves synchronous OpenCode turns to their turn deadline" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      codex_stall_timeout_ms: 1_000
+    )
+
+    issue_id = "issue-opencode-long-turn"
+    issue = %Issue{id: issue_id, identifier: "MT-OPENCODE-LONG", state: "In Progress"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeLongTurnOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid), do: send(worker_pid, :done)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    stale_activity_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      runtime: :opencode_server,
+      identifier: "MT-OPENCODE-LONG",
+      issue: issue,
+      session_id: "session-opencode-long",
+      last_runtime_message: nil,
+      last_runtime_timestamp: stale_activity_at,
+      last_runtime_event: :turn_started,
+      started_at: stale_activity_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(pid, :tick)
+    Process.sleep(100)
+    state = :sys.get_state(pid)
+
+    assert Process.alive?(worker_pid)
+    assert state.running[issue_id].runtime == :opencode_server
+    refute Map.has_key?(state.retry_attempts, issue_id)
+  end
+
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -2312,6 +2367,84 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
              identifier: "MT-INPUT",
              error: "runtime turn requires operator input"
            } = blocked_entry
+  end
+
+  test "orchestrator blocks failed workers after a normalized blocked event" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+
+    issue_id = "issue-normalized-blocked"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-BLOCKED",
+      title: "Blocked runtime",
+      state: "In Progress"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :NormalizedBlockedOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    ref = make_ref()
+    started_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "session-blocked",
+      last_runtime_message: nil,
+      last_runtime_timestamp: nil,
+      last_runtime_event: nil,
+      started_at: started_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    native_request = %{"id" => "permission-contract", "sessionID" => "session-blocked"}
+
+    send(
+      pid,
+      {:runtime_event, issue_id,
+       %{
+         event: :blocked,
+         runtime: :opencode_server,
+         session_id: "session-blocked",
+         timestamp: started_at,
+         request: native_request,
+         native: native_request,
+         reason: :approval_required
+       }}
+    )
+
+    assert eventually(fn ->
+             case :sys.get_state(pid).running[issue_id] do
+               %{last_runtime_event: :blocked} -> :updated
+               _running_entry -> nil
+             end
+           end) == :updated
+
+    send(pid, {:DOWN, ref, :process, self(), {:shutdown, :approval_required}})
+
+    blocked_entry = wait_for_blocked_entry(pid, issue_id, &(&1.error == "runtime turn is blocked"))
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute Map.has_key?(state.retry_attempts, issue_id)
+    assert MapSet.member?(state.claimed, issue_id)
+    assert %{identifier: "MT-BLOCKED", error: "runtime turn is blocked"} = blocked_entry
+    assert blocked_entry.last_runtime_message.message == native_request
   end
 
   test "orchestrator blocks normal worker exits after input required completion" do

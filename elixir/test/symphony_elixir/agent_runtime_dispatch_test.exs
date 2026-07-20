@@ -106,6 +106,9 @@ defmodule SymphonyElixir.AgentRuntimeDispatchTest do
                profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
+    assert %{adapter: :opencode_server, client_side_tools: [], continuation_turns: true} =
+             AgentRuntime.capabilities(settings: opencode_settings)
+
     assert {:error, {:runner_adapter_unavailable, "open", "opencode_server"}} =
              AgentRuntime.start_session("/tmp/workspace", %{},
                settings: opencode_settings,

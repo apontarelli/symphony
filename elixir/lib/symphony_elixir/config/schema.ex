@@ -46,6 +46,7 @@ defmodule SymphonyElixir.Config.Schema do
                              )
   @default_runner_name "codex"
   @supported_runner_kinds MapSet.new(["codex_app_server", "opencode_server"])
+  @opencode_loopback_hosts MapSet.new(["127.0.0.1", "localhost", "::1"])
   @default_runner_config %{
     "kind" => "codex_app_server",
     "command" => ["codex", "app-server"],
@@ -843,6 +844,7 @@ defmodule SymphonyElixir.Config.Schema do
     kind
     |> runner_defaults()
     |> Map.merge(runner)
+    |> restore_nil_runner_defaults(kind)
     |> update_runner_optional_map("approval_policy")
     |> update_runner_optional_map("turn_sandbox_policy")
     |> update_runner_optional_map("config_content")
@@ -861,6 +863,14 @@ defmodule SymphonyElixir.Config.Schema do
   defp runner_defaults("codex_app_server"), do: @default_runner_config
   defp runner_defaults("opencode_server"), do: @opencode_runner_defaults
   defp runner_defaults(kind), do: %{"kind" => kind}
+
+  defp restore_nil_runner_defaults(runner, "opencode_server") do
+    Enum.reduce(@opencode_runner_defaults, runner, fn {field, default}, acc ->
+      if is_nil(Map.get(acc, field)), do: Map.put(acc, field, default), else: acc
+    end)
+  end
+
+  defp restore_nil_runner_defaults(runner, _kind), do: runner
 
   defp update_runner_optional_map(runner, key) do
     case Map.get(runner, key) do
@@ -961,7 +971,7 @@ defmodule SymphonyElixir.Config.Schema do
   defp opencode_runner_validation_errors(name, runner) do
     [
       validate_runner_optional_non_empty_string(name, "agent", Map.get(runner, "agent")),
-      validate_runner_non_empty_string(name, "hostname", Map.get(runner, "hostname")),
+      validate_opencode_hostname(name, Map.get(runner, "hostname")),
       validate_opencode_port(name, Map.get(runner, "port")),
       validate_runner_optional_non_empty_string(name, "config_dir", Map.get(runner, "config_dir")),
       validate_runner_optional_non_empty_string(name, "config_path", Map.get(runner, "config_path")),
@@ -1013,10 +1023,39 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_runner_model(name, "codex_app_server", value), do: validate_runner_string(name, "model", value)
 
-  defp validate_runner_model(name, "opencode_server", value),
-    do: validate_runner_optional_non_empty_string(name, "model", value)
+  defp validate_runner_model(_name, "opencode_server", nil), do: nil
+
+  defp validate_runner_model(name, "opencode_server", value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        "runtime.runners.#{name}.model must be a non-empty string"
+
+      model_selector ->
+        case String.split(model_selector, "/", parts: 2) do
+          [provider, model] when provider != "" and model != "" -> nil
+          _invalid -> "runtime.runners.#{name}.model must use provider/model"
+        end
+    end
+  end
+
+  defp validate_runner_model(name, "opencode_server", _value),
+    do: "runtime.runners.#{name}.model must be a non-empty string"
 
   defp validate_runner_model(_name, _kind, _value), do: nil
+
+  defp validate_opencode_hostname(name, value) do
+    case validate_runner_non_empty_string(name, "hostname", value) do
+      nil ->
+        if MapSet.member?(@opencode_loopback_hosts, value) do
+          nil
+        else
+          "runtime.runners.#{name}.hostname must be a loopback hostname (127.0.0.1, localhost, or ::1)"
+        end
+
+      error ->
+        error
+    end
+  end
 
   defp validate_runner_approval_policy(name, value) do
     format_codex_action_approval_policy_error("runtime.runners.#{name}.approval_policy", value)
@@ -1076,7 +1115,14 @@ defmodule SymphonyElixir.Config.Schema do
       |> Enum.map(&validate_runner_optional_non_empty_string(name, "server_auth.#{&1}", Map.get(auth, &1)))
       |> Enum.reject(&is_nil/1)
 
-    unsupported ++ field_errors
+    required_password_errors =
+      if is_nil(Map.get(auth, "password")) do
+        ["runtime.runners.#{name}.server_auth.password is required when server_auth is configured"]
+      else
+        []
+      end
+
+    unsupported ++ field_errors ++ required_password_errors
   end
 
   defp validate_opencode_server_auth(name, _value),

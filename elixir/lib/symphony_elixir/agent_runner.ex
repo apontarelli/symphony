@@ -71,6 +71,7 @@ defmodule SymphonyElixir.AgentRunner do
     |> maybe_put_runtime_field(:session_id, event.session_id)
     |> maybe_put_runtime_field(:usage, event.usage)
     |> maybe_put_runtime_field(:native, event.native)
+    |> maybe_put_runtime_field(:runtime, event.runtime)
     |> maybe_put_runtime_field(:reason, event.reason)
   end
 

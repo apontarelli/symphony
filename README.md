@@ -3,7 +3,7 @@
 Symphony is an experimental service for turning issue-tracker work into isolated,
 autonomous coding-agent runs. It polls Linear, creates a per-issue workspace, launches the
 configured `AgentRuntime` runner, and records validation, review, publish, and handoff evidence
-back to the tracker. The current production adapter targets Codex app-server.
+back to the tracker. The production adapters target Codex app-server and local OpenCode server.
 
 This is my personal, independent public fork of the
 [OpenAI Symphony](https://github.com/openai/symphony) prototype. It is not an official OpenAI
@@ -36,9 +36,9 @@ OpenAI project include:
   landing, rework, requirement validation, project closeout, and run recovery.
 - No copied runtime prompt requirement: public runtime behavior no longer depends on target repos
   copying `WORKFLOW.md` files or globally installing private `symphony-*` skills.
-- Runner-agnostic runtime seam: unattended runs dispatch through an `AgentRuntime` adapter. The
-  current production adapter uses a Symphony-owned Codex `CODEX_HOME` and then layers target-repo
-  `AGENTS.md` and docs after the harness instructions.
+- Runner-agnostic runtime seam: unattended runs dispatch through a selected `AgentRuntime` adapter.
+  Codex uses a Symphony-owned `CODEX_HOME` layered with target-repo `AGENTS.md` and docs; OpenCode
+  uses a supervised local `opencode serve` lifecycle.
 - Repo setup inspection commands: the Elixir CLI initializes, validates, and previews compiled
   setup policy with `setup init`, `setup check`, and `setup preview --compiled`. The legacy
   `workflow` command has been removed.

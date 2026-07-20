@@ -16,6 +16,7 @@ defmodule SymphonyElixir.MixProject do
           Mix.Tasks.Incident.LinearIssue,
           SymphonyElixir.AgentRuntime,
           SymphonyElixir.AgentRuntime.CodexAppServer,
+          SymphonyElixir.AgentRuntime.OpenCodeServer,
           SymphonyElixir.Config,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,

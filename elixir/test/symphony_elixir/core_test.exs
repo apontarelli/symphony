@@ -2644,6 +2644,7 @@ defmodule SymphonyElixir.CoreTest do
       assert_receive {:runtime_event, "issue-live-updates",
                       %{
                         event: :session_started,
+                        runtime: :codex_app_server,
                         timestamp: %DateTime{},
                         session_id: session_id,
                         workflow_module_policy_hash: workflow_module_policy_hash,

@@ -1919,6 +1919,40 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              "stall_timeout_ms" => 300_000
            } = Schema.default_runner_config!(defaulted_settings)
 
+    for hostname <- ["localhost", "::1"] do
+      assert {:ok, _settings} =
+               Schema.parse(%{
+                 agent: %{default_runner: "open"},
+                 runners: %{
+                   open: %{kind: "opencode_server", command: ["opencode", "serve"], hostname: hostname}
+                 },
+                 profiles: %{default: %{delivery: %{pr_target: "main"}}}
+               })
+    end
+
+    assert {:ok, null_defaulted_settings} =
+             Schema.parse(%{
+               agent: %{default_runner: "open"},
+               runners: %{
+                 open: %{
+                   kind: "opencode_server",
+                   command: ["opencode", "serve"],
+                   startup_timeout_ms: nil,
+                   turn_timeout_ms: nil,
+                   read_timeout_ms: nil,
+                   stall_timeout_ms: nil
+                 }
+               },
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert %{
+             "startup_timeout_ms" => 30_000,
+             "turn_timeout_ms" => 3_600_000,
+             "read_timeout_ms" => 30_000,
+             "stall_timeout_ms" => 300_000
+           } = Schema.default_runner_config!(null_defaulted_settings)
+
     assert {:error, {:invalid_workflow_config, missing_command_message}} =
              Schema.parse(%{
                agent: %{default_runner: "open"},
@@ -1930,8 +1964,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     malformed_fields = [
       {%{model: " "}, "runtime.runners.open.model must be a non-empty string"},
+      {%{model: "claude-sonnet"}, "runtime.runners.open.model must use provider/model"},
+      {%{model: 123}, "runtime.runners.open.model must be a non-empty string"},
       {%{agent: 123}, "runtime.runners.open.agent must be a non-empty string"},
       {%{hostname: " "}, "runtime.runners.open.hostname must be a non-empty string"},
+      {%{hostname: "0.0.0.0"}, "runtime.runners.open.hostname must be a loopback hostname (127.0.0.1, localhost, or ::1)"},
+      {%{hostname: " localhost "}, "runtime.runners.open.hostname must be a loopback hostname (127.0.0.1, localhost, or ::1)"},
       {%{port: 0}, "runtime.runners.open.port must be \"auto\" or an integer between 1 and 65535"},
       {%{port: 65_536}, "runtime.runners.open.port must be \"auto\" or an integer between 1 and 65535"},
       {%{config_dir: []}, "runtime.runners.open.config_dir must be a non-empty string"},
@@ -1941,6 +1979,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       {%{server_auth: "bad"}, "runtime.runners.open.server_auth must be a map"},
       {%{server_auth: %{token: "bad"}}, "runtime.runners.open.server_auth.token is not supported"},
       {%{server_auth: %{username: " "}}, "runtime.runners.open.server_auth.username must be a non-empty string"},
+      {%{server_auth: %{username: "symphony"}}, "runtime.runners.open.server_auth.password is required when server_auth is configured"},
+      {%{server_auth: %{}}, "runtime.runners.open.server_auth.password is required when server_auth is configured"},
       {%{permissions: []}, "runtime.runners.open.permissions must be a map"},
       {%{startup_timeout_ms: 0}, "runtime.runners.open.startup_timeout_ms must be a positive integer"},
       {%{approval_policy: "never"}, "runtime.runners.open.approval_policy is not supported for opencode_server"}

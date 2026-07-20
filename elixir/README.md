@@ -42,8 +42,9 @@ wraps that argv only to preserve app-server stdin and cleanup behavior. Remote w
 the argv into an explicit SSH shell command; Symphony supervises the local ssh port, but remote
 process-group and descendant cleanup are not guaranteed by this local primitive.
 
-Codex app-server remains the only production adapter today. The next approved adapter target and
-required OpenCode contract gaps are recorded in
+Codex app-server and local `opencode serve` are production adapters. Codex remains the dogfood
+default; OpenCode is local-worker only and does not yet receive Symphony's client-side
+`linear_graphql` tool. Adapter boundaries and remaining hardening are recorded in
 [`docs/agent_runtime_adapters.md`](docs/agent_runtime_adapters.md).
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
@@ -500,12 +501,17 @@ runtime:
   - `runtime.runners.codex.approval_policy` defaults to `never`
   - `runtime.runners.codex.thread_sandbox` defaults to `workspace-write`
   - `runtime.runners.codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- `opencode_server` is a validated runner kind but is not registered as a production adapter yet.
-  Selecting it fails before process launch until the local HTTP adapter lands. Its staged schema
-  requires command argv and supports `model`, `agent`, `hostname`, automatic or static `port`,
-  `config_dir`, `config_path`, string/map `config_content`, `server_auth`, `permissions`,
-  `execution_profiles`, `max_concurrent_startups`, and startup/turn/read/stall timeouts. See
-  `docs/agent_runtime_adapters.md`.
+- `opencode_server` launches a supervised localhost `opencode serve` process, waits for health,
+  creates and reuses a session, submits prompts, maps messages/tools/failures/blocking requests into
+  normalized runtime events, aborts timed-out turns, and disposes the server during stop. Remote
+  OpenCode workers fail before launch. Its schema requires command argv and supports `model`,
+  `agent`, `hostname`, automatic or static `port`, `config_dir`, `config_path`, string/map
+  `config_content`, `server_auth`, `permissions`, `execution_profiles`, `max_concurrent_startups`,
+  and startup/turn/read/stall timeouts. Synchronous OpenCode turns use `turn_timeout_ms`; the generic
+  stall watchdog remains disabled until the adapter consumes trustworthy SSE progress. Config
+  overlays, permission injection, and environment-backed auth hardening remain intentionally staged;
+  see `docs/agent_runtime_adapters.md`.
+  OpenCode `model` selectors use `provider/model`.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

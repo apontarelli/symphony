@@ -7,13 +7,15 @@ work closed by SID-344.
 
 ## Current Posture
 
-- Codex app-server remains the only production adapter and the dogfood default.
+- Codex app-server and local OpenCode server are production adapters; Codex remains the dogfood
+  default.
 - `SymphonyElixir.Config.Schema` accepts `codex_app_server` and `opencode_server` runner kinds.
 - `SymphonyElixir.AgentRuntime` selects start, turn, stop, and capability callbacks from
-  `runtime.agent.default_runner` and its runner `kind`. Until the OpenCode adapter lands, selecting
-  `opencode_server` fails before launch with `{:runner_adapter_unavailable, name, kind}`.
-- SID-344 intentionally deferred Oh My Pi and OpenCode until the Codex adapter proved the runtime
-  boundary. SID-382 closed the config and dispatch foundation without launching OpenCode.
+  `runtime.agent.default_runner` and its runner `kind`.
+- `opencode_server` is local-worker only. Remote selection fails before launch with
+  `{:unsupported_remote_runner, "opencode_server", worker_host}`.
+- SID-382 closed runner schema and dispatch. SID-383 added the local HTTP lifecycle, normalized
+  events, blocking/timeout handling, and fake-server contract coverage.
 
 ## Decision
 
@@ -47,68 +49,73 @@ Reference sources for the OpenCode assessment:
 
 ## Selected OpenCode Surface
 
-The first production adapter should target `opencode serve` over localhost HTTP.
+The production adapter targets `opencode serve` over localhost HTTP.
 
 Use `opencode run` only for smoke tests or diagnostics. It is useful for single prompt execution but
 does not expose enough session and permission lifecycle surface for Symphony's normal continuation,
-blocked, and stop semantics. Keep `opencode acp` as the fallback investigation path if the HTTP
-server cannot provide stable turn completion or event mapping.
+blocked, and stop semantics. Keep `opencode acp` as a future option if remote execution needs a stdio
+transport.
 
-## Completed Foundation
+## Completed Implementation
 
-The first OpenCode wave established:
+The OpenCode waves established:
 
-- Adapter dispatch through the selected `runtime.agent.default_runner` and runner `kind`.
-- The `opencode_server` config schema for command argv; optional model and agent selectors;
+- The `opencode_server` config schema for required command argv; optional model and agent selectors;
   hostname and automatic or static port allocation; config directory, path, or content overlays;
   server basic auth; permissions; execution profiles; per-runner startup limits; and startup, turn,
-  read, and stall timeouts.
-- Codex remains the default. The adapter registry intentionally does not register
-  `opencode_server` until the local HTTP adapter exists.
+  read, and stall timeouts. Defaults are loopback hostname, automatic port allocation, empty
+  permissions and execution profiles, 30-second startup/read timeouts, a 5-minute stall timeout,
+  and a 1-hour turn timeout.
+- A local `opencode serve` lifecycle: append loopback host and port flags, launch through
+  `ProcessSupervisor`, wait for `/global/health`, create one session, reuse it across turns, abort on
+  timeout or blocking requests, delete the session, dispose the instance, and stop the process.
+- Response mapping for assistant text, native tool parts, cumulative runner-neutral token/cost usage,
+  assistant failures, process exits, permission requests, and question requests. Native payloads
+  remain in `Event.native` and are preserved in blocked orchestration evidence.
+- Fake-server coverage for startup, continuation, tools, failures, operator input, timeout/abort,
+  server exit, remote rejection, and descendant cleanup.
+- No Symphony-provided client-side tools for OpenCode. Codex's `linear_graphql` integration remains
+  Codex-specific.
 
 ## Remaining Runtime Contract Gaps
 
-The OpenCode adapter wave still needs to close these gaps:
-- OpenCode launch isolation: create a Symphony-owned OpenCode config overlay without replacing the
-  target workspace cwd. Worker machines still provide the `opencode` executable and provider
-  credentials.
-- Server lifecycle: allocate a local port, launch `opencode serve`, wait for `/global/health`,
-  create a session, submit prompts, consume events, abort on timeout, dispose the instance, and stop
-  the supervised process.
-- Remote workers: block or explicitly defer remote OpenCode runs until Symphony can either tunnel
-  the HTTP server over SSH or use an stdio protocol such as ACP. The current SSH worker path is
-  sufficient for stdio app-server traffic, not for host-local HTTP callbacks without extra plumbing.
-- Permission and input handling: decide how `ask` maps in unattended mode. The safe default is to
-  avoid prompts through injected permissions and map any unresolved permission or question event to a
-  normalized `blocked` event.
-- Client-side tools: Codex exposes a dynamic `linear_graphql` tool today. OpenCode does not get that
-  integration automatically, so the first adapter must either configure an OpenCode MCP/custom-tool
-  equivalent or explicitly document that the OpenCode implementation profile starts without
-  Symphony-provided client-side tools.
-- Contract tests: extend the shared fake-binary adapter contract with a fake OpenCode server covering
-  startup readiness, normalized events, permission blocking, timeout/abort, and process cleanup.
+The unattended hardening wave still needs to:
+
+- Create a Symphony-owned OpenCode config overlay without replacing the target workspace cwd.
+  Worker machines still provide the `opencode` executable and provider credentials.
+- Resolve environment-backed server auth, fail clearly when configured secrets are absent, and map
+  provider authentication failures to stable blocked evidence.
+- Inject an explicit unattended permission policy so normal runs avoid `ask`; unresolved permission
+  and question requests already map to normalized `blocked` events.
+- Consume OpenCode SSE progress before enabling the generic stall watchdog. Until then, synchronous
+  OpenCode turns are governed by `turn_timeout_ms`; `stall_timeout_ms` remains schema-compatible but
+  is not enforced for this adapter because no trustworthy in-turn progress signal is available.
+
+Remote workers remain intentionally unsupported until Symphony can either tunnel the HTTP server
+over SSH or use an stdio protocol such as ACP.
 
 ## Launch And Auth Assumptions
-
-- The default command should be an argv list similar to
-  `["opencode", "serve", "--hostname", "127.0.0.1", "--port", "<allocated>"]`.
-- Symphony should allocate the port; static manifest ports are acceptable only for local
-  development because concurrent issue runs can collide.
-- Bind to `127.0.0.1` by default. Do not expose the server externally unless the manifest opts into
-  that and supplies authentication.
-- If server auth is enabled, inject `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD` from
-  runner config or environment references.
-- Prefer `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_CONTENT` for Symphony-owned
-  per-run config. Do not write operator-global OpenCode config during unattended runs.
-- Provider credentials remain host-owned. The adapter may rely on OpenCode's existing auth file or
-  environment-based provider keys, but missing provider auth must normalize to `auth_missing` or
-  `blocked`.
-- Set permissions explicitly for unattended work. Avoid `ask` defaults unless the adapter is prepared
-  to answer permission requests or convert them to `blocked`.
+- The adapter appends `--hostname` and `--port` to configured command argv. In automatic mode,
+  Symphony reserves an available concrete loopback port before launch and confirms it from the
+  startup banner.
+- The adapter accepts loopback hosts only. Static ports are suitable for local development; automatic
+  ports avoid collisions across concurrent issue runs. Startup waits for the launched process's
+  bound-port banner before health checks, so it cannot attach to a stale daemon on a configured port.
+- Direct `server_auth.password` values enable server Basic auth;
+  `server_auth.username` is optional and defaults to `opencode`. When auth is omitted, the adapter
+  clears inherited OpenCode server-auth variables. Environment references and missing-secret
+  handling belong to the unattended hardening wave.
+- `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_CONTENT` must be isolated per run.
+  The current adapter does not apply the staged config overlay fields yet and never writes
+  operator-global OpenCode config.
+- Provider credentials remain host-owned. Missing provider auth is currently a turn failure; the
+  hardening wave will normalize it to `auth_missing` or `blocked`.
+- Unresolved permission or question requests are polled during each turn, normalized to `blocked`,
+  aborted, and returned as an error.
 
 ## Event Mapping
 
-The OpenCode adapter should translate native server events and message parts into
+The OpenCode adapter translates native server responses and message parts into
 `SymphonyElixir.AgentRuntime.Event` values:
 
 | OpenCode signal | Symphony event |
@@ -122,8 +129,8 @@ The OpenCode adapter should translate native server events and message parts int
 | Message fails, aborts, server exits, or HTTP/SSE protocol breaks | `turn_failed` |
 | Permission request, question request, missing auth, or unsupported required capability | `blocked` |
 
-OpenCode-specific payloads belong in the event `native` field. Usage metadata should be filled only
-when the server exposes reliable token or cost counters.
+OpenCode-specific payloads belong in the event `native` field. Per-message OpenCode counters are
+accumulated into runner-neutral usage totals before orchestration consumes them.
 
 ## Process Lifecycle Constraints
 
@@ -131,8 +138,8 @@ when the server exposes reliable token or cost counters.
   server sharing.
 - Keep the OpenCode server alive across continuation turns for the same issue so session context is
   preserved.
-- Subscribe to server events only for the session owned by the worker run; do not let one issue
-  consume another issue's events.
+- Observe only response parts and pending permission/question requests for the session owned by the
+  worker run; do not let one issue consume another issue's signals.
 - On timeout, call the OpenCode abort endpoint when a session/message is active, then stop the
   supervised process.
 - On normal completion, dispose the OpenCode instance if supported, then stop the supervised process
@@ -144,11 +151,6 @@ when the server exposes reliable token or cost counters.
 
 ## Implementation Wave
 
-Create the next implementation wave as normal Linear issues in Backlog:
-
-1. Add OpenCode runner schema and adapter dispatch.
-2. Implement a local OpenCode server adapter with normalized events.
-3. Harden OpenCode unattended config, permissions, auth, and docs.
-
-Each issue should link back to SID-371 and SID-344. Keep dogfood default runner on Codex until the
-OpenCode adapter has fake-server contract coverage and at least one explicit live smoke path.
+The schema/dispatch and local adapter issues are implemented. The remaining wave hardens unattended
+config isolation, permissions, authentication, and operator docs before any dogfood default switch.
+Keep the dogfood default runner on Codex until that hardening passes its live smoke path.
