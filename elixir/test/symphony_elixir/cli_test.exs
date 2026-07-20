@@ -1007,6 +1007,64 @@ defmodule SymphonyElixir.CLITest do
     refute output =~ "$LINEAR_PROJECT_SLUG"
   end
 
+  test "list command renders matching workflows without starting the daemon or creating config" do
+    root = tmp_repo!("symphony-cli-list-config")
+    repo = tmp_repo!("symphony-cli-list-repo")
+    other_repo = tmp_repo!("symphony-cli-list-other-repo")
+    write_cli_repo_manifest!(repo)
+    write_cli_repo_manifest!(other_repo)
+    File.mkdir_p!(Path.join(root, "runs"))
+
+    for {name, setup_repo} <- [
+          {"zeta", repo},
+          {"main", repo},
+          {"default", repo},
+          {"foreign", other_repo}
+        ] do
+      File.write!(
+        Path.join([root, "runs", name <> ".yml"]),
+        Renderer.to_yaml(%{
+          "repo" => %{"path" => setup_repo},
+          "target" => %{"type" => "issues", "tracker" => %{"issue_ids" => ["SID-399"]}},
+          "mode" => "issue_batch",
+          "capacity" => "normal"
+        })
+      )
+    end
+
+    assert {:ok, output} =
+             CLI.evaluate(["list", "--repo", repo, "--config-root", root], daemon_forbidden_deps())
+
+    assert output =~ "Project workflows for #{repo}"
+    assert output =~ "default [default]"
+    assert output =~ "main [main]"
+    assert output =~ "Issues SID-399"
+    refute output =~ "foreign"
+    assert :binary.match(output, "default [default]") < :binary.match(output, "main [main]")
+    assert :binary.match(output, "main [main]") < :binary.match(output, "zeta")
+    refute File.exists?(Path.join(root, "config.yml"))
+  end
+
+  test "list command resolves cwd and leaves a missing config root untouched" do
+    root = Path.join(tmp_repo!("symphony-cli-list-empty"), "missing")
+    repo = tmp_repo!("symphony-cli-list-cwd")
+    write_cli_repo_manifest!(repo)
+    deps = Map.put(daemon_forbidden_deps(), :cwd, fn -> repo end)
+
+    assert {:ok, output} = CLI.evaluate(["list", "--config-root", root], deps)
+    assert output == "No saved workflows found for #{repo}."
+    refute File.exists?(root)
+  end
+
+  test "list help and invalid arguments use command-specific usage" do
+    assert {:ok, help} = CLI.evaluate(["list", "--help", "--no-env-file"], daemon_forbidden_deps())
+    assert help =~ "symphony list [--repo <path>]"
+    refute help =~ "symphony run [target...]"
+
+    assert {:error, usage} = CLI.evaluate(["list", "--unknown"], daemon_forbidden_deps())
+    assert usage == help
+  end
+
   defp tmp_repo!(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")
     File.rm_rf!(path)
