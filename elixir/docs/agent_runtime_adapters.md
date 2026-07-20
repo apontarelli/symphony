@@ -7,13 +7,13 @@ work closed by SID-344.
 
 ## Current Posture
 
-- Codex app-server is the only production adapter today.
-- `SymphonyElixir.Config.Schema` currently accepts only `codex_app_server` runner kinds.
-- `SymphonyElixir.AgentRuntime` still exposes convenience functions that delegate directly to
-  `AgentRuntime.CodexAppServer`; adapter selection by runner kind is a required next step before a
-  second production adapter can run.
+- Codex app-server remains the only production adapter and the dogfood default.
+- `SymphonyElixir.Config.Schema` accepts `codex_app_server` and `opencode_server` runner kinds.
+- `SymphonyElixir.AgentRuntime` selects start, turn, stop, and capability callbacks from
+  `runtime.agent.default_runner` and its runner `kind`. Until the OpenCode adapter lands, selecting
+  `opencode_server` fails before launch with `{:runner_adapter_unavailable, name, kind}`.
 - SID-344 intentionally deferred Oh My Pi and OpenCode until the Codex adapter proved the runtime
-  boundary.
+  boundary. SID-382 closed the config and dispatch foundation without launching OpenCode.
 
 ## Decision
 
@@ -54,15 +54,21 @@ does not expose enough session and permission lifecycle surface for Symphony's n
 blocked, and stop semantics. Keep `opencode acp` as the fallback investigation path if the HTTP
 server cannot provide stable turn completion or event mapping.
 
-## Runtime Contract Gaps
+## Completed Foundation
 
-The first OpenCode wave should close these gaps:
+The first OpenCode wave established:
 
-- Adapter dispatch: route `AgentRuntime` calls through the selected `runtime.agent.default_runner`
-  and runner `kind`, instead of hard-coding Codex.
-- Config schema: add an OpenCode runner kind, likely `opencode_server`, with adapter-owned fields
-  for command argv, model, agent, hostname, port allocation, config directory/content, server auth,
-  and permission policy.
+- Adapter dispatch through the selected `runtime.agent.default_runner` and runner `kind`.
+- The `opencode_server` config schema for command argv; optional model and agent selectors;
+  hostname and automatic or static port allocation; config directory, path, or content overlays;
+  server basic auth; permissions; execution profiles; per-runner startup limits; and startup, turn,
+  read, and stall timeouts.
+- Codex remains the default. The adapter registry intentionally does not register
+  `opencode_server` until the local HTTP adapter exists.
+
+## Remaining Runtime Contract Gaps
+
+The OpenCode adapter wave still needs to close these gaps:
 - OpenCode launch isolation: create a Symphony-owned OpenCode config overlay without replacing the
   target workspace cwd. Worker machines still provide the `opencode` executable and provider
   credentials.

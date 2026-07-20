@@ -1037,8 +1037,8 @@ Scheduler and workspace:
 Agent runtimes:
 
 - `runtime.runners`: map of runner name to runner config, default implementation-defined
-- `runtime.runners.<name>.kind`: string, REQUIRED for configured runners; initial supported kind is
-  `codex_app_server`
+- `runtime.runners.<name>.kind`: string, REQUIRED for configured runners; supported kinds are
+  `codex_app_server` and `opencode_server`
 - `runtime.runners.<name>.command`: list of argv strings, REQUIRED for configured runners unless an
   implementation provides a compatibility default
 - `runtime.runners.<name>.max_concurrent_startups`: integer or null, optional per-runner startup cap
@@ -1068,6 +1068,26 @@ values are defined by the targeted Codex app-server version. To inspect the inst
 run `codex app-server generate-json-schema --out <dir>` and inspect the relevant definitions
 referenced by `v2/ThreadStartParams.json` and `v2/TurnStartParams.json`. Implementations MAY validate
 these fields locally if they want stricter startup checks.
+
+OpenCodeServer runner-specific fields:
+
+- `agent`: optional OpenCode agent name.
+- `hostname`: non-empty string, default `127.0.0.1`.
+- `port`: `"auto"` or an integer from `1` through `65535`, default `"auto"`. The adapter owns
+  automatic port allocation.
+- `config_dir`: optional non-empty path supplied as `OPENCODE_CONFIG_DIR`.
+- `config_path`: optional non-empty path supplied as `OPENCODE_CONFIG`.
+- `config_content`: optional non-empty string or map supplied through
+  `OPENCODE_CONFIG_CONTENT`; map values are encoded by the adapter.
+- `server_auth`: optional map containing non-empty `username` and/or `password` values for
+  OpenCode server basic auth.
+- `permissions`: map of OpenCode permission policy values, default `{}`.
+- `startup_timeout_ms`: positive integer, default `30000`.
+
+The OpenCode runner also accepts the common `command`, `model`, `turn_timeout_ms`,
+`read_timeout_ms`, `stall_timeout_ms`, `execution_profiles`, and
+`max_concurrent_startups` fields. Its `command` is REQUIRED until an implementation explicitly
+defines a compatibility default.
 
 Quality gate:
 

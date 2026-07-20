@@ -16,21 +16,36 @@ defmodule SymphonyElixir.Config.Schema do
   @delivery_pr_target_key "pr_target"
   @delivery_v1_fields MapSet.new([@delivery_pr_target_key])
   @profile_runner_v1_fields MapSet.new(["approval_policy", "thread_sandbox", "turn_sandbox_policy"])
-  @runner_v1_fields MapSet.new([
-                      "kind",
-                      "command",
-                      "model",
-                      "approval_policy",
-                      "thread_sandbox",
-                      "turn_sandbox_policy",
-                      "turn_timeout_ms",
-                      "read_timeout_ms",
-                      "stall_timeout_ms",
-                      "execution_profiles",
-                      "max_concurrent_startups"
-                    ])
+  @runner_common_v1_fields MapSet.new([
+                             "kind",
+                             "command",
+                             "model",
+                             "turn_timeout_ms",
+                             "read_timeout_ms",
+                             "stall_timeout_ms",
+                             "execution_profiles",
+                             "max_concurrent_startups"
+                           ])
+  @codex_runner_v1_fields MapSet.union(
+                            @runner_common_v1_fields,
+                            MapSet.new(["approval_policy", "thread_sandbox", "turn_sandbox_policy"])
+                          )
+  @opencode_runner_v1_fields MapSet.union(
+                               @runner_common_v1_fields,
+                               MapSet.new([
+                                 "agent",
+                                 "hostname",
+                                 "port",
+                                 "config_dir",
+                                 "config_path",
+                                 "config_content",
+                                 "server_auth",
+                                 "permissions",
+                                 "startup_timeout_ms"
+                               ])
+                             )
   @default_runner_name "codex"
-  @supported_runner_kinds MapSet.new(["codex_app_server"])
+  @supported_runner_kinds MapSet.new(["codex_app_server", "opencode_server"])
   @default_runner_config %{
     "kind" => "codex_app_server",
     "command" => ["codex", "app-server"],
@@ -41,6 +56,17 @@ defmodule SymphonyElixir.Config.Schema do
     "read_timeout_ms" => 30_000,
     "stall_timeout_ms" => 300_000,
     "execution_profiles" => %{}
+  }
+  @opencode_runner_defaults %{
+    "kind" => "opencode_server",
+    "hostname" => "127.0.0.1",
+    "port" => "auto",
+    "turn_timeout_ms" => 3_600_000,
+    "read_timeout_ms" => 30_000,
+    "stall_timeout_ms" => 300_000,
+    "startup_timeout_ms" => 30_000,
+    "execution_profiles" => %{},
+    "permissions" => %{}
   }
   @default_runners %{@default_runner_name => @default_runner_config}
 
@@ -657,7 +683,13 @@ defmodule SymphonyElixir.Config.Schema do
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
           {:ok, map()} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case default_runner_config!(settings)["turn_sandbox_policy"] do
+    runner =
+      case Keyword.get(opts, :runner_config) do
+        %{} = selected_runner -> selected_runner
+        _no_selected_runner -> default_runner_config!(settings)
+      end
+
+    case runner["turn_sandbox_policy"] do
       %{} = policy ->
         {:ok, policy}
 
@@ -804,17 +836,31 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   defp normalize_runner_config(name, runner) when is_map(runner) do
-    @default_runner_config
-    |> Map.put("kind", default_kind_for_runner(name))
-    |> Map.merge(normalize_keys(runner))
+    runner = normalize_keys(runner)
+    kind = runner |> Map.get("kind", default_kind_for_runner(name)) |> normalize_runner_kind()
+    runner = Map.put(runner, "kind", kind)
+
+    kind
+    |> runner_defaults()
+    |> Map.merge(runner)
     |> update_runner_optional_map("approval_policy")
     |> update_runner_optional_map("turn_sandbox_policy")
+    |> update_runner_optional_map("config_content")
+    |> update_runner_optional_map("server_auth")
+    |> update_runner_optional_map("permissions")
   end
 
   defp normalize_runner_config(_name, runner), do: runner
 
   defp default_kind_for_runner(@default_runner_name), do: "codex_app_server"
   defp default_kind_for_runner(_runner_name), do: nil
+
+  defp normalize_runner_kind(kind) when is_binary(kind), do: String.trim(kind)
+  defp normalize_runner_kind(kind), do: kind
+
+  defp runner_defaults("codex_app_server"), do: @default_runner_config
+  defp runner_defaults("opencode_server"), do: @opencode_runner_defaults
+  defp runner_defaults(kind), do: %{"kind" => kind}
 
   defp update_runner_optional_map(runner, key) do
     case Map.get(runner, key) do
@@ -858,31 +904,74 @@ defmodule SymphonyElixir.Config.Schema do
   defp runner_validation_errors("", _runner), do: ["runtime.runners runner names must not be blank"]
 
   defp runner_validation_errors(name, runner) when is_map(runner) do
+    kind = Map.get(runner, "kind")
+
     unsupported =
       runner
       |> Map.keys()
-      |> Enum.reject(&MapSet.member?(@runner_v1_fields, &1))
+      |> Enum.reject(&runner_field?(kind, &1))
       |> Enum.sort()
-      |> Enum.map(fn field -> "runtime.runners.#{name}.#{field} is not supported in v1" end)
+      |> Enum.map(&unsupported_runner_field_message(name, kind, &1))
 
-    [
-      validate_runner_kind(name, Map.get(runner, "kind")),
+    common_errors = [
+      validate_runner_kind(name, kind),
       validate_runner_command(name, Map.get(runner, "command")),
-      validate_runner_string(name, "model", Map.get(runner, "model")),
-      validate_runner_approval_policy(name, Map.get(runner, "approval_policy")),
-      validate_runner_string(name, "thread_sandbox", Map.get(runner, "thread_sandbox")),
-      validate_runner_map(name, "turn_sandbox_policy", Map.get(runner, "turn_sandbox_policy")),
+      validate_runner_model(name, kind, Map.get(runner, "model")),
       validate_runner_positive_integer(name, "turn_timeout_ms", Map.get(runner, "turn_timeout_ms")),
       validate_runner_positive_integer(name, "read_timeout_ms", Map.get(runner, "read_timeout_ms")),
       validate_runner_non_negative_integer(name, "stall_timeout_ms", Map.get(runner, "stall_timeout_ms")),
       validate_runner_map(name, "execution_profiles", Map.get(runner, "execution_profiles")),
       validate_runner_positive_integer(name, "max_concurrent_startups", Map.get(runner, "max_concurrent_startups"))
     ]
+
+    kind_errors =
+      case kind do
+        "codex_app_server" -> codex_runner_validation_errors(name, runner)
+        "opencode_server" -> opencode_runner_validation_errors(name, runner)
+        _kind -> []
+      end
+
+    (common_errors ++ kind_errors)
     |> Enum.reject(&is_nil/1)
     |> Kernel.++(unsupported)
   end
 
   defp runner_validation_errors(name, _runner), do: ["runtime.runners.#{name} must be a map"]
+
+  defp unsupported_runner_field_message(name, "codex_app_server", field),
+    do: "runtime.runners.#{name}.#{field} is not supported in v1"
+
+  defp unsupported_runner_field_message(name, kind, field) do
+    kind_label = if is_binary(kind), do: kind, else: "an unknown runner kind"
+    "runtime.runners.#{name}.#{field} is not supported for #{kind_label}"
+  end
+
+  defp runner_field?("codex_app_server", field), do: MapSet.member?(@codex_runner_v1_fields, field)
+  defp runner_field?("opencode_server", field), do: MapSet.member?(@opencode_runner_v1_fields, field)
+  defp runner_field?(_kind, field), do: MapSet.member?(@runner_common_v1_fields, field)
+
+  defp codex_runner_validation_errors(name, runner) do
+    [
+      validate_runner_approval_policy(name, Map.get(runner, "approval_policy")),
+      validate_runner_string(name, "thread_sandbox", Map.get(runner, "thread_sandbox")),
+      validate_runner_map(name, "turn_sandbox_policy", Map.get(runner, "turn_sandbox_policy"))
+    ]
+  end
+
+  defp opencode_runner_validation_errors(name, runner) do
+    [
+      validate_runner_optional_non_empty_string(name, "agent", Map.get(runner, "agent")),
+      validate_runner_non_empty_string(name, "hostname", Map.get(runner, "hostname")),
+      validate_opencode_port(name, Map.get(runner, "port")),
+      validate_runner_optional_non_empty_string(name, "config_dir", Map.get(runner, "config_dir")),
+      validate_runner_optional_non_empty_string(name, "config_path", Map.get(runner, "config_path")),
+      validate_runner_string_or_map(name, "config_content", Map.get(runner, "config_content")),
+      validate_runner_map(name, "permissions", Map.get(runner, "permissions")),
+      validate_runner_positive_integer(name, "startup_timeout_ms", Map.get(runner, "startup_timeout_ms"))
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Kernel.++(validate_opencode_server_auth(name, Map.get(runner, "server_auth")))
+  end
 
   defp validate_runner_kind(name, value) when is_binary(value) do
     kind = String.trim(value)
@@ -895,7 +984,8 @@ defmodule SymphonyElixir.Config.Schema do
         nil
 
       true ->
-        "runtime.runners.#{name}.kind #{inspect(kind)} is not supported; supported kinds: codex_app_server"
+        supported_kinds = @supported_runner_kinds |> Enum.sort() |> Enum.join(", ")
+        "runtime.runners.#{name}.kind #{inspect(kind)} is not supported; supported kinds: #{supported_kinds}"
     end
   end
 
@@ -917,7 +1007,16 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp validate_runner_command(name, nil), do: "runtime.runners.#{name}.command is required"
+
   defp validate_runner_command(name, _value), do: "runtime.runners.#{name}.command must be a list"
+
+  defp validate_runner_model(name, "codex_app_server", value), do: validate_runner_string(name, "model", value)
+
+  defp validate_runner_model(name, "opencode_server", value),
+    do: validate_runner_optional_non_empty_string(name, "model", value)
+
+  defp validate_runner_model(_name, _kind, _value), do: nil
 
   defp validate_runner_approval_policy(name, value) do
     format_codex_action_approval_policy_error("runtime.runners.#{name}.approval_policy", value)
@@ -933,6 +1032,55 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_runner_string(_name, _field, value) when is_binary(value), do: nil
   defp validate_runner_string(name, field, _value), do: "runtime.runners.#{name}.#{field} must be a string"
+
+  defp validate_runner_non_empty_string(name, field, value) when is_binary(value) do
+    if String.trim(value) == "", do: "runtime.runners.#{name}.#{field} must be a non-empty string"
+  end
+
+  defp validate_runner_non_empty_string(name, field, _value),
+    do: "runtime.runners.#{name}.#{field} must be a non-empty string"
+
+  defp validate_runner_optional_non_empty_string(_name, _field, nil), do: nil
+
+  defp validate_runner_optional_non_empty_string(name, field, value),
+    do: validate_runner_non_empty_string(name, field, value)
+
+  defp validate_runner_string_or_map(_name, _field, nil), do: nil
+  defp validate_runner_string_or_map(_name, _field, value) when is_map(value), do: nil
+
+  defp validate_runner_string_or_map(name, field, value) when is_binary(value) do
+    if String.trim(value) == "", do: "runtime.runners.#{name}.#{field} must be a non-empty string or map"
+  end
+
+  defp validate_runner_string_or_map(name, field, _value),
+    do: "runtime.runners.#{name}.#{field} must be a non-empty string or map"
+
+  defp validate_opencode_port(_name, "auto"), do: nil
+  defp validate_opencode_port(_name, value) when is_integer(value) and value > 0 and value <= 65_535, do: nil
+
+  defp validate_opencode_port(name, _value),
+    do: "runtime.runners.#{name}.port must be \"auto\" or an integer between 1 and 65535"
+
+  defp validate_opencode_server_auth(_name, nil), do: []
+
+  defp validate_opencode_server_auth(name, auth) when is_map(auth) do
+    unsupported =
+      auth
+      |> Map.keys()
+      |> Enum.reject(&(&1 in ["username", "password"]))
+      |> Enum.sort()
+      |> Enum.map(fn field -> "runtime.runners.#{name}.server_auth.#{field} is not supported" end)
+
+    field_errors =
+      ["username", "password"]
+      |> Enum.map(&validate_runner_optional_non_empty_string(name, "server_auth.#{&1}", Map.get(auth, &1)))
+      |> Enum.reject(&is_nil/1)
+
+    unsupported ++ field_errors
+  end
+
+  defp validate_opencode_server_auth(name, _value),
+    do: ["runtime.runners.#{name}.server_auth must be a map"]
 
   defp validate_runner_map(_name, _field, nil), do: nil
   defp validate_runner_map(_name, _field, value) when is_map(value), do: nil

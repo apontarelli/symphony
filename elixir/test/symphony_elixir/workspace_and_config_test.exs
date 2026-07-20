@@ -1816,6 +1816,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       {%{agent: %{default_runner: "missing"}}, "runtime.agent.default_runner \"missing\" must reference runtime.runners.missing"},
       {%{runners: %{codex: "bad"}}, "runtime.runners.codex must be a map"},
       {%{runners: %{codex: %{kind: 123}}}, "runtime.runners.codex.kind must be a string"},
+      {%{runners: %{custom: %{kind: %{}, command: ["runner"], agent: "build"}}}, "runtime.runners.custom.kind must be a string"},
       {%{runners: %{codex: %{kind: "typo_runner"}}}, "runtime.runners.codex.kind \"typo_runner\" is not supported"},
       {%{runners: %{codex: %{command: ["codex", " "]}}}, "runtime.runners.codex.command[1] must be a non-empty string"},
       {%{runners: %{codex: %{command: ["codex", 123]}}}, "runtime.runners.codex.command[1] must be a non-empty string"},
@@ -1860,6 +1861,104 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
                Config.codex_runtime_settings(nil,
                  policy: %{"runners" => %{"codex" => %{"approval_policy" => approval_policy}}}
                )
+    end
+  end
+
+  test "schema accepts OpenCode runner fields and rejects malformed values" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               agent: %{default_runner: "open"},
+               runners: %{
+                 open: %{
+                   kind: "opencode_server",
+                   command: ["opencode", "serve"],
+                   model: "anthropic/claude-sonnet-4-5",
+                   agent: "build",
+                   hostname: "127.0.0.1",
+                   port: 4_321,
+                   config_dir: "/tmp/opencode",
+                   config_path: "/tmp/opencode/config.json",
+                   config_content: %{permission: %{bash: "allow"}},
+                   server_auth: %{username: "symphony", password: "$OPENCODE_PASSWORD"},
+                   permissions: %{bash: "allow"},
+                   startup_timeout_ms: 5_000,
+                   turn_timeout_ms: 60_000,
+                   read_timeout_ms: 1_000,
+                   stall_timeout_ms: 0
+                 }
+               },
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    runner = Schema.default_runner_config!(settings)
+    assert runner["kind"] == "opencode_server"
+    assert runner["command"] == ["opencode", "serve"]
+    assert runner["model"] == "anthropic/claude-sonnet-4-5"
+    assert runner["agent"] == "build"
+    assert runner["hostname"] == "127.0.0.1"
+    assert runner["port"] == 4_321
+    assert runner["config_content"] == %{"permission" => %{"bash" => "allow"}}
+    assert runner["server_auth"] == %{"username" => "symphony", "password" => "$OPENCODE_PASSWORD"}
+    assert runner["permissions"] == %{"bash" => "allow"}
+
+    assert {:ok, defaulted_settings} =
+             Schema.parse(%{
+               agent: %{default_runner: "open"},
+               runners: %{open: %{kind: "opencode_server", command: ["opencode", "serve"]}},
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert %{
+             "hostname" => "127.0.0.1",
+             "port" => "auto",
+             "permissions" => %{},
+             "execution_profiles" => %{},
+             "startup_timeout_ms" => 30_000,
+             "turn_timeout_ms" => 3_600_000,
+             "read_timeout_ms" => 30_000,
+             "stall_timeout_ms" => 300_000
+           } = Schema.default_runner_config!(defaulted_settings)
+
+    assert {:error, {:invalid_workflow_config, missing_command_message}} =
+             Schema.parse(%{
+               agent: %{default_runner: "open"},
+               runners: %{open: %{kind: "opencode_server"}},
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert missing_command_message =~ "runtime.runners.open.command is required"
+
+    malformed_fields = [
+      {%{model: " "}, "runtime.runners.open.model must be a non-empty string"},
+      {%{agent: 123}, "runtime.runners.open.agent must be a non-empty string"},
+      {%{hostname: " "}, "runtime.runners.open.hostname must be a non-empty string"},
+      {%{port: 0}, "runtime.runners.open.port must be \"auto\" or an integer between 1 and 65535"},
+      {%{port: 65_536}, "runtime.runners.open.port must be \"auto\" or an integer between 1 and 65535"},
+      {%{config_dir: []}, "runtime.runners.open.config_dir must be a non-empty string"},
+      {%{config_path: " "}, "runtime.runners.open.config_path must be a non-empty string"},
+      {%{config_content: []}, "runtime.runners.open.config_content must be a non-empty string or map"},
+      {%{config_content: " "}, "runtime.runners.open.config_content must be a non-empty string or map"},
+      {%{server_auth: "bad"}, "runtime.runners.open.server_auth must be a map"},
+      {%{server_auth: %{token: "bad"}}, "runtime.runners.open.server_auth.token is not supported"},
+      {%{server_auth: %{username: " "}}, "runtime.runners.open.server_auth.username must be a non-empty string"},
+      {%{permissions: []}, "runtime.runners.open.permissions must be a map"},
+      {%{startup_timeout_ms: 0}, "runtime.runners.open.startup_timeout_ms must be a positive integer"},
+      {%{approval_policy: "never"}, "runtime.runners.open.approval_policy is not supported for opencode_server"}
+    ]
+
+    for {overrides, expected_message} <- malformed_fields do
+      runner =
+        %{kind: "opencode_server", command: ["opencode", "serve"]}
+        |> Map.merge(overrides)
+
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{
+                 agent: %{default_runner: "open"},
+                 runners: %{open: runner},
+                 profiles: %{default: %{delivery: %{pr_target: "main"}}}
+               })
+
+      assert message =~ expected_message
     end
   end
 
@@ -1925,6 +2024,39 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
              approval_policy: %{"custom_policy" => %{"sandbox_approval" => false}},
              thread_sandbox: "danger-full-access",
              turn_sandbox_policy: %{"type" => "dangerFullAccess"}
+           }
+  end
+
+  test "codex runtime settings use the selected runner snapshot" do
+    assert {:ok, settings} =
+             Schema.parse(%{profiles: %{default: %{delivery: %{pr_target: "main"}}}})
+
+    selected_runner =
+      Schema.default_runner_config!(settings)
+      |> Map.merge(%{
+        "approval_policy" => "never",
+        "thread_sandbox" => "read-only",
+        "turn_sandbox_policy" => %{"type" => "readOnly"}
+      })
+
+    policy = %{
+      "runners" => %{
+        "snapshot" => %{"approval_policy" => %{"selected" => %{"allow" => true}}}
+      }
+    }
+
+    assert {:ok, runtime_settings} =
+             Config.codex_runtime_settings(nil,
+               runtime_settings: settings,
+               runner_name: "snapshot",
+               runner_config: selected_runner,
+               policy: policy
+             )
+
+    assert runtime_settings == %{
+             approval_policy: %{"selected" => %{"allow" => true}},
+             thread_sandbox: "read-only",
+             turn_sandbox_policy: %{"type" => "readOnly"}
            }
   end
 

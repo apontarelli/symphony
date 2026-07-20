@@ -3,4 +3,40 @@ defmodule SymphonyElixir.AgentRuntimeCodexAppServerContractTest do
     adapter: SymphonyElixir.AgentRuntime.CodexAppServer,
     expected_runtime: :codex_app_server,
     fake: SymphonyElixir.AgentRuntimeContract.FakeCodex
+
+  alias SymphonyElixir.Config
+  alias SymphonyElixir.Config.Schema
+
+  test "selected runner snapshot controls Codex launch policies", %{runtime_context: runtime_context} do
+    runtime_context = @agent_runtime_fake.install!(runtime_context, :start_only)
+    settings = Config.settings!()
+
+    selected_runner =
+      settings
+      |> Schema.default_runner_config!()
+      |> Map.merge(%{
+        "approval_policy" => %{"selected" => %{"allow" => true}},
+        "thread_sandbox" => "danger-full-access",
+        "turn_sandbox_policy" => %{"type" => "readOnly"}
+      })
+
+    assert {:ok, session} =
+             @agent_runtime_adapter.start(
+               runtime_context.workspace,
+               %{identifier: runtime_context.issue_identifier},
+               runtime_settings: settings,
+               runner_name: "selected",
+               runner_config: selected_runner,
+               startup_timeout_ms: 1_000
+             )
+
+    try do
+      assert session.runner_config == selected_runner
+      assert session.approval_policy == %{"selected" => %{"allow" => true}}
+      assert session.thread_sandbox == "danger-full-access"
+      assert session.turn_sandbox_policy == %{"type" => "readOnly"}
+    after
+      assert :ok = @agent_runtime_adapter.stop(session)
+    end
+  end
 end

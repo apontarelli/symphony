@@ -500,6 +500,12 @@ runtime:
   - `runtime.runners.codex.approval_policy` defaults to `never`
   - `runtime.runners.codex.thread_sandbox` defaults to `workspace-write`
   - `runtime.runners.codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- `opencode_server` is a validated runner kind but is not registered as a production adapter yet.
+  Selecting it fails before process launch until the local HTTP adapter lands. Its staged schema
+  requires command argv and supports `model`, `agent`, `hostname`, automatic or static `port`,
+  `config_dir`, `config_path`, string/map `config_content`, `server_auth`, `permissions`,
+  `execution_profiles`, `max_concurrent_startups`, and startup/turn/read/stall timeouts. See
+  `docs/agent_runtime_adapters.md`.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

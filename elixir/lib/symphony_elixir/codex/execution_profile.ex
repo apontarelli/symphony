@@ -30,12 +30,17 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
 
   @spec resolve(Schema.t(), String.t() | atom() | nil) :: t()
   def resolve(%Schema{} = settings, profile_ref) do
+    resolve(settings, Config.default_runner!(settings), profile_ref)
+  end
+
+  @spec resolve(Schema.t(), map(), String.t() | atom() | nil) :: t()
+  def resolve(%Schema{} = settings, runner, profile_ref) when is_map(runner) do
     name = normalize_profile_name(profile_ref)
 
     profile =
       @defaults
       |> Map.get(name, @defaults["source_reviewer"])
-      |> Map.merge(Config.default_runner!(settings)["execution_profiles"] |> normalize_profiles() |> Map.get(name, %{}))
+      |> Map.merge(runner["execution_profiles"] |> normalize_profiles() |> Map.get(name, %{}))
 
     %{
       name: name,

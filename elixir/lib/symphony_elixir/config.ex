@@ -151,9 +151,14 @@ defmodule SymphonyElixir.Config do
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
-    with {:ok, settings} <- settings() do
-      runner_name = Schema.default_runner_name(settings)
-      runner = Schema.default_runner_config!(settings)
+    with {:ok, settings} <- selected_runtime_settings(opts) do
+      runner_name = Keyword.get(opts, :runner_name, Schema.default_runner_name(settings))
+
+      runner =
+        case Keyword.get(opts, :runner_config) do
+          %{} = selected_runner -> selected_runner
+          _no_selected_runner -> Schema.default_runner_config!(settings)
+        end
 
       with {:ok, runner_policy_overrides} <- policy_runner_overrides(Keyword.get(opts, :policy), runner_name),
            {:ok, turn_sandbox_policy} <-
@@ -167,6 +172,13 @@ defmodule SymphonyElixir.Config do
            turn_sandbox_policy: turn_sandbox_policy
          }}
       end
+    end
+  end
+
+  defp selected_runtime_settings(opts) do
+    case Keyword.get(opts, :runtime_settings) do
+      %Schema{} = selected_settings -> {:ok, selected_settings}
+      _no_selected_settings -> settings()
     end
   end
 

@@ -414,6 +414,14 @@ defmodule SymphonyElixir.QualityGateTest do
              max_retries: 1
            } = ExecutionProfile.resolve(overridden_settings, "source_reviewer")
 
+    selected_runner =
+      overridden_settings
+      |> Schema.default_runner_config!()
+      |> put_in(["execution_profiles", "source_reviewer", "reasoning_effort"], "xhigh")
+
+    assert %{reasoning_effort: "xhigh"} =
+             ExecutionProfile.resolve(overridden_settings, selected_runner, "source_reviewer")
+
     assert %{reasoning_effort: "none"} = ExecutionProfile.resolve(overridden_settings, "runtime_qa")
     assert %{reasoning_effort: "max"} = ExecutionProfile.resolve(overridden_settings, "security_reviewer")
   end

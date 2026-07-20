@@ -43,7 +43,8 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
           thread_id: String.t(),
           workspace: Path.t(),
           codex_home: Path.t(),
-          worker_host: String.t() | nil
+          worker_host: String.t() | nil,
+          runner_config: map()
         }
 
   @impl true
@@ -85,12 +86,13 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
   def start_session(workspace, opts \\ []) do
     worker_host = Keyword.get(opts, :worker_host)
 
-    settings = Config.settings!()
-    runner = Config.default_runner!(settings)
-    execution_profile = ExecutionProfile.resolve(settings, Keyword.get(opts, :execution_profile, "implementation"))
+    settings = Keyword.get_lazy(opts, :runtime_settings, &Config.settings!/0)
+    runner = Keyword.get_lazy(opts, :runner_config, fn -> Config.default_runner!(settings) end)
+    execution_profile = ExecutionProfile.resolve(settings, runner, Keyword.get(opts, :execution_profile, "implementation"))
     codex_command = ExecutionProfile.command(runner["command"], execution_profile, runner["model"])
     codex_command_display = Shell.argv_to_command(codex_command)
-    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, Config.runner_read_timeout_ms())
+    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, runner["read_timeout_ms"])
+    runtime_opts = opts |> Keyword.put(:runner_config, runner) |> Keyword.put(:runtime_settings, settings)
 
     with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
          {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
@@ -104,12 +106,13 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
 
       Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command_display}")
 
-      case session_policies(expanded_workspace, worker_host, opts) do
+      case session_policies(expanded_workspace, worker_host, runtime_opts) do
         {:ok, session_policies} ->
           finish_session_startup(process, port, expanded_workspace, session_policies, startup_timeout_ms,
             metadata: metadata,
             codex_home: launch.codex_home,
-            worker_host: worker_host
+            worker_host: worker_host,
+            runner_config: runner
           )
 
         {:error, reason} ->
@@ -134,7 +137,8 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
            thread_id: thread_id,
            workspace: workspace,
            codex_home: Keyword.fetch!(opts, :codex_home),
-           worker_host: Keyword.fetch!(opts, :worker_host)
+           worker_host: Keyword.fetch!(opts, :worker_host),
+           runner_config: Keyword.fetch!(opts, :runner_config)
          }}
 
       {:error, reason} ->
@@ -157,7 +161,8 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
           auto_approve_requests: auto_approve_requests,
           turn_sandbox_policy: turn_sandbox_policy,
           thread_id: thread_id,
-          workspace: workspace
+          workspace: workspace,
+          runner_config: runner_config
         },
         prompt,
         issue,
@@ -171,9 +176,10 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
-    timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.runner_turn_timeout_ms())
+    timeout_ms = Keyword.get(opts, :turn_timeout_ms, runner_config["turn_timeout_ms"])
+    read_timeout_ms = runner_config["read_timeout_ms"]
 
-    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+    case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, read_timeout_ms) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
@@ -369,7 +375,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     end
   end
 
-  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
+  defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, read_timeout_ms) do
     send_message(port, %{
       "method" => "turn/start",
       "id" => @turn_start_id,
@@ -388,7 +394,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
       }
     })
 
-    case await_response(port, @turn_start_id) do
+    case await_response(port, @turn_start_id, read_timeout_ms) do
       {:ok, %{"turn" => %{"id" => turn_id}}} -> {:ok, turn_id}
       other -> other
     end
@@ -1180,10 +1186,6 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
       |> String.downcase()
 
     String.starts_with?(normalized_label, "approve") or String.starts_with?(normalized_label, "allow")
-  end
-
-  defp await_response(port, request_id) do
-    await_response(port, request_id, Config.runner_read_timeout_ms())
   end
 
   defp await_response(port, request_id, timeout) when is_function(timeout, 0) do
