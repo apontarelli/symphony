@@ -3,7 +3,7 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with a manifest.
   """
 
-  alias SymphonyElixir.{LocalRun, LogFile, ProjectWorkflows, RunSetup, SetupMigration}
+  alias SymphonyElixir.{LocalConfig, LocalRun, LogFile, ProjectWorkflows, RunSetup, SetupMigration}
   alias SymphonyElixir.ReviewRecords.Command, as: ReviewRecordsCommand
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -15,6 +15,16 @@ defmodule SymphonyElixir.CLI do
     profile: :string
   ]
   @list_switches [repo: :string, config_root: :string, no_env_file: :boolean, help: :boolean]
+  @saved_run_switches [
+    {@acknowledgement_switch, :boolean},
+    config_root: :string,
+    logs_root: :string,
+    port: :integer,
+    preview: :boolean,
+    profile: :string,
+    repo: :string,
+    yes: :boolean
+  ]
   @run_switches @switches ++
                   [
                     allow_missing_capabilities: :boolean,
@@ -32,7 +42,8 @@ defmodule SymphonyElixir.CLI do
                     require_validation: :boolean,
                     skip_review: :boolean,
                     skip_validation: :boolean,
-                    workflow: :string
+                    workflow: :string,
+                    picker: :boolean
                   ]
 
   @run_switch_keys Keyword.keys(@run_switches)
@@ -50,7 +61,9 @@ defmodule SymphonyElixir.CLI do
           required(:ensure_all_started) => (-> ensure_started_result()),
           optional(:cwd) => (-> String.t()),
           optional(:tty?) => (-> boolean()),
-          optional(:confirm) => (String.t() -> boolean())
+          optional(:confirm) => (String.t() -> boolean()),
+          optional(:prompt) => (String.t() -> String.t() | nil | :eof),
+          optional(:puts) => (String.t() -> term())
         }
 
   @spec main([String.t()]) :: no_return()
@@ -77,10 +90,8 @@ defmodule SymphonyElixir.CLI do
   def evaluate(args), do: evaluate(args, runtime_deps())
 
   @spec evaluate([String.t()], deps()) :: :ok | {:ok, String.t()} | {:error, String.t()}
-  def evaluate(["workflow" | workflow_args], _deps) do
-    workflow_args
-    |> SymphonyElixir.WorkflowCLI.evaluate()
-    |> add_workflow_deprecation()
+  def evaluate(["workflow" | _workflow_args], _deps) do
+    {:error, "`symphony workflow` was removed; use `symphony setup init|check|preview`."}
   end
 
   def evaluate(["setup", "migrate" | migrate_args], _deps) do
@@ -115,7 +126,7 @@ defmodule SymphonyElixir.CLI do
     cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
 
     if RunSetup.repo_setup_valid?(cwd) do
-      evaluate_run([], deps)
+      evaluate_picker([repo: cwd], deps)
     else
       {:ok, usage_message()}
     end
@@ -278,12 +289,11 @@ defmodule SymphonyElixir.CLI do
     """
     Usage:
       symphony setup <init|check|preview> [options]
-      symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]
+      symphony setup migrate --repo <path> [--name <lowercase-slug>] [--config-root <path>] [--apply]
       symphony list [--repo <path>] [--config-root <path>]
-      symphony run [target...] [--repo <path>] [--config-root <path>] [--setup <name>] [--save <name>] [--dry-run] [--yes]
-      symphony run [--preview] [--workflow <path>] [--mode watch|drain|issue_batch] [options]
-      symphony run <name> [--config-root <path>] [--dry-run] [--i-understand-that-this-will-be-running-without-the-usual-guardrails]
-      symphony [--logs-root <path>] [--port <port>] [--profile <name>] [path-to-symphony.yml]
+      symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
+      symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
+      symphony run --workflow <path> [--mode watch|drain|issue_batch] [options]
     """
     |> String.trim()
   end
@@ -303,23 +313,49 @@ defmodule SymphonyElixir.CLI do
     }
   end
 
-  defp workflow_command?(["workflow" | _args]), do: true
   defp workflow_command?(["setup" | _args]), do: true
   defp workflow_command?(_args), do: false
 
   defp evaluate_run(args, deps) do
-    if runtime_run_args?(args) do
-      evaluate_runtime_run(args, deps)
-    else
-      evaluate_saved_or_local_run(args, deps)
+    with :ok <- validate_run_args(args) do
+      evaluate_supported_run(args, deps)
     end
   end
 
-  defp evaluate_saved_or_local_run(args, deps) do
-    case legacy_saved_setup_args(args) do
-      {:legacy, name, opts} -> run_saved_setup(name, opts, deps)
-      :not_legacy -> evaluate_local_run(args, deps)
+  defp validate_run_args(args) do
+    cond do
+      "--dry-run" in args ->
+        {:error, "`--dry-run` was removed; use `symphony run <saved-name> --preview`."}
+
+      "--setup" in args ->
+        {:error, "`--setup` was removed; use `symphony run <saved-name>`."}
+
+      "--preview" in args and "--workflow" in args ->
+        {:error, "`--preview` requires a saved workflow name; explicit runtime files are start-only."}
+
+      true ->
+        :ok
     end
+  end
+
+  defp evaluate_supported_run(args, deps) do
+    if "--picker" in args do
+      evaluate_picker_args(args, deps)
+    else
+      evaluate_run_target(args, deps)
+    end
+  end
+
+  defp evaluate_run_target(args, deps) do
+    case saved_setup_args(args) do
+      {:saved, name, opts} -> run_saved_setup(name, opts, deps)
+      {:invalid_name, name} -> {:error, format_command_error({:invalid_run_setup_name, name})}
+      :not_saved -> evaluate_non_saved_run(args, deps)
+    end
+  end
+
+  defp evaluate_non_saved_run(args, deps) do
+    if runtime_run_args?(args), do: evaluate_runtime_run(args, deps), else: evaluate_local_run(args, deps)
   end
 
   defp runtime_run_args?(args) do
@@ -340,41 +376,24 @@ defmodule SymphonyElixir.CLI do
     not Keyword.has_key?(opts, :repo) and Enum.any?(@shared_runtime_switches, &Keyword.has_key?(opts, &1))
   end
 
-  defp legacy_saved_setup_args(args) do
-    switches = [
-      {@acknowledgement_switch, :boolean},
-      config_root: :string,
-      dry_run: :boolean,
-      logs_root: :string,
-      port: :integer,
-      profile: :string
-    ]
-
-    case OptionParser.parse(args, strict: switches) do
+  defp saved_setup_args(args) do
+    case OptionParser.parse(args, strict: @saved_run_switches) do
       {opts, [name], []} ->
-        if legacy_saved_setup?(name, opts) do
-          {:legacy, name, opts}
-        else
-          :not_legacy
+        cond do
+          issue_identifier?(name) -> :not_saved
+          RunSetup.validate_name(name) == :ok -> {:saved, name, opts}
+          true -> {:invalid_name, name}
         end
 
-      {_opts, _rest, []} ->
-        :not_legacy
-
-      {_opts, _rest, _invalid} ->
-        :not_legacy
+      _other ->
+        :not_saved
     end
   end
 
-  defp legacy_saved_setup?(name, opts) do
-    case RunSetup.read(name, config_opts(opts)) do
-      {:ok, setup, _setup_path} -> legacy_saved_setup_shape?(setup)
-      {:error, _reason} -> false
-    end
+  defp issue_identifier?(value) do
+    Regex.match?(~r/^[A-Z][A-Z0-9]+-\d+$/, value) or
+      Regex.match?(~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, value)
   end
-
-  defp legacy_saved_setup_shape?(%{"repo" => repo}) when is_map(repo), do: true
-  defp legacy_saved_setup_shape?(_setup), do: false
 
   defp evaluate_local_run(args, deps) do
     local_run_args = Enum.reject(args, &(&1 == @acknowledgement_flag))
@@ -395,13 +414,129 @@ defmodule SymphonyElixir.CLI do
     if Enum.member?(args, @acknowledgement_flag), do: [{@acknowledgement_switch, true}], else: []
   end
 
-  defp run_saved_setup(name, opts, deps) do
-    config_opts = config_opts(opts)
+  defp evaluate_picker_args(args, deps) do
+    switches = @saved_run_switches ++ [picker: :boolean]
 
-    with {:ok, _status, config, config_path} <- SymphonyElixir.LocalConfig.ensure(config_opts),
-         {:ok, setup, setup_path} <- RunSetup.read(name, config_opts),
-         {:ok, runtime_manifest} <- RunSetup.runtime_manifest(config, setup) do
-      continue_saved_setup_run(%{
+    case OptionParser.parse(args, strict: switches) do
+      {opts, [], []} -> evaluate_picker(opts, deps)
+      _other -> {:error, usage_message()}
+    end
+  end
+
+  defp evaluate_picker(opts, deps) do
+    cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
+    repo = opts |> Keyword.get(:repo, cwd) |> Path.expand()
+    tty? = deps |> Map.get(:tty?, fn -> IO.ANSI.enabled?() end) |> apply([])
+
+    cond do
+      not RunSetup.repo_setup_valid?(repo) ->
+        {:error, "No valid symphony.yml found for #{repo}."}
+
+      not tty? ->
+        {:error, "Interactive workflow selection requires a TTY. Use `symphony list --repo #{repo}` then `symphony run <saved-name>`."}
+
+      true ->
+        picker_opts =
+          case Keyword.get(opts, :config_root) do
+            nil -> []
+            root -> [config_root: root]
+          end
+
+        with {:ok, workflows, warnings} <- ProjectWorkflows.list(repo, picker_opts),
+             {:ok, selection} <- prompt_workflow_selection(workflows, warnings, deps) do
+          run_picker_selection(selection, workflows, Keyword.put(opts, :repo, repo), deps)
+        end
+    end
+  end
+
+  defp prompt_workflow_selection(workflows, warnings, deps) do
+    workflow_lines =
+      workflows
+      |> Enum.with_index(1)
+      |> Enum.map(fn {workflow, index} ->
+        "  #{index}. #{workflow.name} — #{workflow.target} · #{workflow.mode} · #{workflow.capacity}"
+      end)
+
+    warning_lines = Enum.map(warnings, &"  warning: #{&1}")
+    create_index = length(workflows) + 1
+
+    prompt_text =
+      (["Saved workflows:"] ++
+         workflow_lines ++
+         ["  #{create_index}. Create new workflow", "  q. Cancel"] ++
+         warning_lines ++ ["Select workflow: "])
+      |> Enum.join("\n")
+
+    case prompt_cli(deps, prompt_text) do
+      nil -> {:ok, :cancel}
+      :eof -> {:ok, :cancel}
+      answer -> parse_picker_selection(answer, length(workflows), create_index)
+    end
+  end
+
+  defp parse_picker_selection(answer, workflow_count, create_index) do
+    normalized = answer |> String.trim() |> String.downcase()
+
+    cond do
+      normalized in ["q", "quit", "cancel"] ->
+        {:ok, :cancel}
+
+      normalized == Integer.to_string(create_index) ->
+        {:ok, :create}
+
+      true ->
+        case Integer.parse(normalized) do
+          {index, ""} when index >= 1 and index <= workflow_count -> {:ok, {:saved, index - 1}}
+          _other -> {:error, "Invalid workflow selection."}
+        end
+    end
+  end
+
+  defp run_picker_selection(:cancel, _workflows, _opts, _deps), do: {:ok, "Run cancelled."}
+
+  defp run_picker_selection(:create, _workflows, opts, deps) do
+    opts
+    |> Keyword.delete(:picker)
+    |> picker_local_run_args()
+    |> evaluate_local_run(deps)
+  end
+
+  defp run_picker_selection({:saved, index}, workflows, opts, deps) do
+    workflow = Enum.fetch!(workflows, index)
+    launch_name = if workflow.source == :current, do: "current", else: workflow.name
+    run_saved_setup(launch_name, Keyword.delete(opts, :picker), deps, workflow.path)
+  end
+
+  defp picker_local_run_args(opts) do
+    []
+    |> append_cli_option("--repo", Keyword.get(opts, :repo))
+    |> append_cli_option("--config-root", Keyword.get(opts, :config_root))
+    |> append_cli_flag("--yes", Keyword.get(opts, :yes, false))
+    |> append_cli_flag(@acknowledgement_flag, Keyword.get(opts, @acknowledgement_switch, false))
+  end
+
+  defp append_cli_option(args, _flag, nil), do: args
+  defp append_cli_option(args, flag, value), do: args ++ [flag, to_string(value)]
+  defp append_cli_flag(args, _flag, false), do: args
+  defp append_cli_flag(args, flag, true), do: args ++ [flag]
+
+  defp prompt_cli(deps, message) do
+    case Map.get(deps, :prompt) do
+      prompt when is_function(prompt, 1) -> prompt.(message)
+      _other -> IO.gets(message)
+    end
+  end
+
+  defp run_saved_setup(name, opts, deps, selected_path \\ nil) do
+    config_opts = config_opts(opts)
+    preview? = Keyword.get(opts, :preview, false)
+
+    with {:ok, config, config_path} <- load_saved_run_config(config_opts, preview?),
+         {:ok, setup, setup_path} <- read_saved_workflow(name, selected_path, config_opts),
+         {:ok, runtime_manifest} <- RunSetup.runtime_manifest(config, setup),
+         {:ok, resolved_setup} <-
+           resolve_saved_run_setup(runtime_manifest, setup, setup_path, opts, deps) do
+      context = %{
         name: name,
         opts: opts,
         deps: deps,
@@ -410,30 +545,97 @@ defmodule SymphonyElixir.CLI do
         setup: setup,
         config_path: config_path,
         setup_path: setup_path,
-        runtime_manifest: runtime_manifest
-      })
+        runtime_manifest: runtime_manifest,
+        resolved_setup: resolved_setup
+      }
+
+      continue_saved_setup_run(context)
     else
       {:error, reason} -> {:error, format_command_error(reason)}
     end
   end
 
-  defp continue_saved_setup_run(context) do
-    case Keyword.get(context.opts, :dry_run, false) do
-      true ->
-        {:ok, run_dry_run_output(context.name, context.config_path, context.setup_path, context.setup, context.runtime_manifest)}
+  defp read_saved_workflow(name, nil, config_opts), do: RunSetup.read(name, config_opts)
+  defp read_saved_workflow(_name, selected_path, _config_opts), do: RunSetup.read_path(selected_path)
 
-      false ->
-        start_saved_setup_runtime(context.name, context.opts, context.deps, context.config_opts, context.config, context.setup)
+  defp load_saved_run_config(config_opts, true) do
+    case LocalConfig.load(config_opts) do
+      {:ok, config} -> {:ok, config, LocalConfig.path(config_opts)}
+      {:error, :enoent} -> {:ok, LocalConfig.default_config(), LocalConfig.path(config_opts)}
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp start_saved_setup_runtime(name, opts, deps, config_opts, config, setup) do
-    with :ok <- require_guardrails_acknowledgement(opts),
-         :ok <- maybe_set_logs_root(opts, deps),
-         :ok <- maybe_set_server_port(opts, deps),
-         :ok <- maybe_set_profile_override(opts, deps),
-         {:ok, runtime_path} <- RunSetup.materialize_runtime_manifest(name, config, setup, config_opts) do
-      run(runtime_path, opts, deps)
+  defp load_saved_run_config(config_opts, false) do
+    case LocalConfig.ensure(config_opts) do
+      {:ok, _status, config, config_path} -> {:ok, config, config_path}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_saved_run_setup(runtime_manifest, setup, setup_path, opts, deps) do
+    cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
+    repo = get_in(setup, ["repo", "path"]) || Keyword.get(opts, :repo, cwd)
+
+    RunSetup.resolve_manifest(
+      runtime_manifest,
+      opts
+      |> Keyword.put(:cwd, Path.expand(repo))
+      |> Keyword.put(:repo_setup_source, "repo symphony.yml")
+      |> Keyword.put(:runtime_setup_path, setup_path)
+      |> Keyword.put(:runtime_setup_source, "saved workflow")
+    )
+  end
+
+  defp continue_saved_setup_run(%{opts: opts, resolved_setup: resolved_setup} = context) do
+    if Keyword.get(opts, :preview, false) do
+      {:ok, RunSetup.preview(resolved_setup)}
+    else
+      start_saved_setup_runtime(context)
+    end
+  end
+
+  defp start_saved_setup_runtime(context) do
+    preview = RunSetup.preview(context.resolved_setup)
+
+    with :ok <- require_guardrails_acknowledgement(context.opts),
+         :ok <- validate_startup(context.resolved_setup),
+         :ok <- maybe_confirm_saved_run(preview, context.opts, context.deps),
+         :ok <- maybe_set_logs_root(context.opts, context.deps),
+         :ok <- maybe_set_server_port(context.opts, context.deps),
+         :ok <- maybe_set_profile_override(context.opts, context.deps),
+         {:ok, runtime_path} <-
+           RunSetup.materialize_runtime_manifest(
+             context.name,
+             context.config,
+             context.setup,
+             context.config_opts
+           ) do
+      resolved_setup = %{
+        context.resolved_setup
+        | runtime_setup_path: runtime_path,
+          runtime_setup_source: "materialized saved workflow"
+      }
+
+      :ok = RunSetup.put_current(resolved_setup)
+      :ok = context.deps.set_workflow_file_path.(runtime_path)
+      start_runtime(runtime_path, context.deps)
+    end
+  end
+
+  defp maybe_confirm_saved_run(preview, opts, deps) when is_list(opts) do
+    if Keyword.get(opts, :yes, false) do
+      emit_preview(preview, deps)
+      :ok
+    else
+      confirm_run(preview, deps)
+    end
+  end
+
+  defp emit_preview(preview, deps) do
+    case Map.get(deps, :puts) do
+      puts when is_function(puts, 1) -> puts.(preview)
+      _other -> IO.puts(preview)
     end
   end
 
@@ -442,23 +644,12 @@ defmodule SymphonyElixir.CLI do
       repo: :string,
       name: :string,
       config_root: :string,
-      dry_run: :boolean,
       apply: :boolean
     ]
 
     case OptionParser.parse(args, strict: switches) do
-      {opts, [], []} ->
-        migrate_setup(opts)
-
-      _ ->
-        {:error, usage_message()}
-    end
-  end
-
-  defp migrate_setup(opts) do
-    case {Keyword.get(opts, :dry_run, false), Keyword.get(opts, :apply, false)} do
-      {true, true} -> {:error, "Choose either --dry-run or --apply, not both."}
-      {_dry_run?, apply?} -> migrate_setup(opts, apply?)
+      {opts, [], []} -> migrate_setup(opts, Keyword.get(opts, :apply, false))
+      _other -> {:error, usage_message()}
     end
   end
 
@@ -467,10 +658,7 @@ defmodule SymphonyElixir.CLI do
       name = Keyword.get(opts, :name, default_run_setup_name(repo))
       config_opts = config_opts(opts)
 
-      case apply? do
-        true -> apply_migration(repo, name, config_opts)
-        false -> preview_migration(repo, name, config_opts)
-      end
+      if apply?, do: apply_migration(repo, name, config_opts), else: preview_migration(repo, name, config_opts)
     end
   end
 
@@ -508,21 +696,10 @@ defmodule SymphonyElixir.CLI do
     |> Path.basename()
   end
 
-  defp run_dry_run_output(name, config_path, setup_path, setup, runtime_manifest) do
-    [
-      "Resolved saved run setup #{name}",
-      "local config: #{config_path}",
-      "run setup: #{setup_path}",
-      "repo manifest: #{get_in(runtime_manifest, ["repo", "manifest"]) || get_in(setup, ["repo", "manifest"]) || get_in(setup, ["repo", "path"])}",
-      "capacity: #{RunSetup.capacity_label(setup)}",
-      "mode: #{Map.get(setup, "mode", "unattended")}",
-      "dry run: daemon not started"
-    ]
-    |> Enum.join("
-")
+  defp format_command_error({:invalid_run_setup_name, name}) do
+    "Invalid saved workflow name #{inspect(name)}; use a lowercase slug such as `main` or `opencode-dogfood`."
   end
 
-  defp format_command_error({:invalid_run_setup_name, name}), do: "Invalid run setup name: #{inspect(name)}"
   defp format_command_error({:unknown_capacity_profile, name}), do: "Unknown capacity profile: #{name}"
   defp format_command_error({:invalid_capacity, capacity}), do: "Invalid capacity: #{inspect(capacity)}"
 
@@ -536,6 +713,7 @@ defmodule SymphonyElixir.CLI do
 
   defp format_command_error({:missing_manifest_file, path, reason}), do: "Manifest file not found: #{path} (#{reason})"
   defp format_command_error({:invalid_manifest, diagnostics}) when is_list(diagnostics), do: inspect({:invalid_manifest, diagnostics})
+  defp format_command_error(reason) when is_binary(reason), do: reason
   defp format_command_error(reason), do: inspect(reason)
 
   defp evaluate_runtime_run(args, deps) do
@@ -558,7 +736,7 @@ defmodule SymphonyElixir.CLI do
 
   defp maybe_preview_or_start_run(setup, opts, deps) do
     if Keyword.get(opts, :preview, false) do
-      {:ok, RunSetup.preview(setup)}
+      {:error, "`--preview` requires a saved workflow name."}
     else
       start_confirmed_run(setup, opts, deps)
     end
@@ -650,13 +828,6 @@ defmodule SymphonyElixir.CLI do
     |> String.replace("symphony workflow", "symphony setup")
     |> String.replace("symphony setup print", "symphony setup preview")
   end
-
-  defp add_workflow_deprecation({status, output}) when status in [:ok, :error] and is_binary(output) do
-    guidance = "`symphony workflow` is deprecated; use `symphony setup`."
-    {status, guidance <> "\n\n" <> output}
-  end
-
-  defp add_workflow_deprecation(result), do: result
 
   defp maybe_set_logs_root(opts, deps) do
     case Keyword.get_values(opts, :logs_root) do

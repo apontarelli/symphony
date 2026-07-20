@@ -63,6 +63,16 @@ defmodule SymphonyElixir.Workflow.Manifest do
     end
   end
 
+  @spec load_map(map(), keyword()) :: {:ok, Workflow.loaded_workflow()} | {:error, manifest_error()}
+  def load_map(raw, opts \\ []) when is_map(raw) do
+    with {:ok, manifest} <- normalize_manifest(normalize_keys(raw), opts) do
+      case compile_diagnostics(manifest) do
+        [] -> {:ok, compile(manifest)}
+        diagnostics -> {:error, {:invalid_manifest, diagnostics}}
+      end
+    end
+  end
+
   @spec read(Path.t(), keyword()) :: {:ok, map()} | {:error, manifest_error()}
   def read(path_or_repo_root, opts \\ []) when is_binary(path_or_repo_root) do
     path = manifest_source_path(path_or_repo_root)

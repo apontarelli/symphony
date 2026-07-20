@@ -13,10 +13,10 @@ defmodule SymphonyElixir.RunSetupTest do
   test "run setup names cannot escape the global runs directory" do
     root = tmp_repo!("symphony-run-setup")
 
-    assert {:ok, path} = RunSetup.path("daily.local-1", config_root: root)
-    assert path == Path.join([root, "runs", "daily.local-1.yml"])
+    assert {:ok, path} = RunSetup.path("daily-local-1", config_root: root)
+    assert path == Path.join([root, "runs", "daily-local-1.yml"])
 
-    for unsafe <- ["", ".", "..", "../daily", "daily/name", "daily name", ".hidden"] do
+    for unsafe <- ["", ".", "..", "../daily", "daily/name", "daily name", ".hidden", "Main", "daily_run", "daily.local"] do
       assert {:error, {:invalid_run_setup_name, ^unsafe}} = RunSetup.path(unsafe, config_root: root)
     end
   end
@@ -143,7 +143,7 @@ defmodule SymphonyElixir.RunSetupTest do
     assert preview =~ "runtime setup: #{runtime_path} (source: cwd symphony.runtime.yml)"
     assert preview =~ "tracker: linear project_id=project-id; required labels: symphony"
     assert preview =~ "marker intersection: symphony"
-    assert preview =~ "mode: issue_batch (limit: 2)"
+    assert preview =~ "mode: issue-batch (limit: 2)"
     assert preview =~ "max agents: 3 (ceiling: 4)"
     assert preview =~ "max startups: 1 (ceiling: 1)"
     assert preview =~ "worker: ssh hosts: worker-a"

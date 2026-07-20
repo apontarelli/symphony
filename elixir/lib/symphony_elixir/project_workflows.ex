@@ -116,7 +116,8 @@ defmodule SymphonyElixir.ProjectWorkflows do
     source = if Path.basename(path) == @current_file, do: :current, else: :saved
     name = if source == :current, do: ".current", else: Path.basename(path, ".yml")
 
-    with {:ok, mode} <- mode_label(setup),
+    with :ok <- validate_catalog_name(source, name),
+         {:ok, mode} <- mode_label(setup),
          {:ok, capacity} <- capacity_label(setup) do
       {:ok,
        %{
@@ -128,6 +129,15 @@ defmodule SymphonyElixir.ProjectWorkflows do
          source: source,
          default_rank: default_rank(name, source)
        }}
+    end
+  end
+
+  defp validate_catalog_name(:current, _name), do: :ok
+
+  defp validate_catalog_name(:saved, name) do
+    case RunSetup.validate_name(name) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, "saved workflow name must be a lowercase slug"}
     end
   end
 

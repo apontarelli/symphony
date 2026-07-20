@@ -92,10 +92,10 @@ defmodule SymphonyElixir.WorkflowCLI do
         {:ok, manifest}
 
       {:error, {:missing_manifest_file, path, _reason}} ->
-        {:error, "symphony.yml not found at #{path}. Run `symphony workflow init --repo #{repo_root}` to create it."}
+        {:error, "symphony.yml not found at #{path}. Run `symphony setup init --repo #{repo_root}` to create it."}
 
       {:error, {:manifest_parse_error, reason}} ->
-        {:error, "Failed to parse symphony.yml at #{Manifest.manifest_path(repo_root)}: #{inspect(reason)}. Fix the YAML or rerun `symphony workflow init --force`."}
+        {:error, "Failed to parse symphony.yml at #{Manifest.manifest_path(repo_root)}: #{inspect(reason)}. Fix the YAML or rerun `symphony setup init --force`."}
 
       {:error, {:invalid_manifest, diagnostics}} ->
         {:error, Renderer.check_failure(Manifest.validation_report_from_diagnostics(diagnostics))}
@@ -105,9 +105,9 @@ defmodule SymphonyElixir.WorkflowCLI do
   defp usage do
     """
     Usage:
-      symphony workflow init [--repo <path>] [--preset <name>] [--modules <a,b>] [--force]
-      symphony workflow check [--repo <path>]
-      symphony workflow print [--repo <path>] [--compiled]
+      symphony setup init [--repo <path>] [--preset <name>] [--modules <a,b>] [--force]
+      symphony setup check [--repo <path>]
+      symphony setup preview [--repo <path>] [--compiled]
     """
     |> String.trim()
   end

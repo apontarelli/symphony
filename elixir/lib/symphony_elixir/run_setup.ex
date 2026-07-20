@@ -8,7 +8,7 @@ defmodule SymphonyElixir.RunSetup do
 
   @app :symphony_elixir
   @current_key :run_setup
-  @name_pattern ~r/\A[A-Za-z0-9][A-Za-z0-9._-]*\z/
+  @name_pattern ~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/
   @tracker_target_keys ~w(project_id project_slug team_key workspace_slug assignee issue_ids query query_file)
   @modes [:watch, :drain, :issue_batch]
   @restrictive_flags [:human_review_only, :no_land, :require_review, :require_validation]
@@ -64,44 +64,107 @@ defmodule SymphonyElixir.RunSetup do
     with :ok <- reject_weakening_flags(opts),
          {:ok, mode, issue_batch_limit} <- resolve_mode(opts),
          {:ok, runtime_setup_path, runtime_source} <- resolve_runtime_setup_path(opts, cwd),
-         {:ok, %{config: config}, manifest} <- load_runtime_setup(runtime_setup_path),
-         {:ok, settings} <- Schema.parse(config),
-         {:ok, repo_setup_path, repo_source, repo_manifest} <- resolve_repo_setup(opts, cwd, runtime_setup_path),
-         {:ok, capacity} <- resolve_capacity(settings, opts),
-         restrictive_flags <- selected_flags(opts, @restrictive_flags),
-         profile <- normalized_string(Keyword.get(opts, :profile)) || policy_profile(settings) || "default" do
-      setup = %__MODULE__{
-        repo_setup_path: repo_setup_path,
-        repo_setup_source: repo_source,
-        runtime_setup_path: runtime_setup_path,
-        runtime_setup_source: runtime_source,
-        manifest: manifest,
-        repo_manifest: repo_manifest,
-        settings: settings,
-        mode: mode,
-        issue_batch_limit: issue_batch_limit,
-        profile: profile,
-        capacity: capacity,
-        restrictive_flags: restrictive_flags,
-        cli_overrides: cli_overrides(opts),
-        source_provenance: source_provenance(repo_source, runtime_source, opts),
-        warnings: marker_warnings(repo_manifest || manifest, settings)
-      }
-
+         {:ok, loaded, manifest} <- load_runtime_setup(runtime_setup_path),
+         {:ok, setup} <-
+           resolve_loaded(
+             manifest,
+             loaded.config,
+             runtime_setup_path,
+             runtime_source,
+             opts,
+             cwd,
+             mode,
+             issue_batch_limit
+           ) do
       {:ok, setup}
     else
       {:error, reason} -> {:error, if(is_binary(reason), do: reason, else: inspect(reason))}
     end
   end
 
+  @spec resolve_manifest(map(), keyword()) :: {:ok, t()} | {:error, String.t()}
+  def resolve_manifest(manifest, opts \\ []) when is_map(manifest) and is_list(opts) do
+    manifest = LocalConfig.normalize_keys(manifest)
+    cwd = opts |> Keyword.get(:cwd, File.cwd!()) |> Path.expand()
+    runtime_setup_path = Keyword.get(opts, :runtime_setup_path, "<in-memory>")
+    runtime_source = Keyword.get(opts, :runtime_setup_source, "in-memory run setup")
+    opts = Keyword.put_new(opts, :mode, persisted_runtime_mode(manifest))
+
+    with :ok <- reject_weakening_flags(opts),
+         {:ok, mode, issue_batch_limit} <- resolve_mode(opts),
+         {:ok, loaded} <- Manifest.load_map(manifest, repo_setup?: false),
+         {:ok, setup} <-
+           resolve_loaded(
+             manifest,
+             loaded.config,
+             runtime_setup_path,
+             runtime_source,
+             opts,
+             cwd,
+             mode,
+             issue_batch_limit
+           ) do
+      {:ok, setup}
+    else
+      {:error, reason} -> {:error, if(is_binary(reason), do: reason, else: inspect(reason))}
+    end
+  end
+
+  defp resolve_loaded(
+         manifest,
+         config,
+         runtime_setup_path,
+         runtime_source,
+         opts,
+         cwd,
+         mode,
+         issue_batch_limit
+       ) do
+    with {:ok, settings} <- Schema.parse(config),
+         {:ok, repo_setup_path, repo_source, repo_manifest} <-
+           resolve_repo_setup(opts, cwd, runtime_setup_path),
+         {:ok, capacity} <- resolve_capacity(settings, opts) do
+      restrictive_flags = selected_flags(opts, @restrictive_flags)
+      profile = normalized_string(Keyword.get(opts, :profile)) || policy_profile(settings) || "default"
+
+      {:ok,
+       %__MODULE__{
+         repo_setup_path: repo_setup_path,
+         repo_setup_source: repo_source,
+         runtime_setup_path: runtime_setup_path,
+         runtime_setup_source: runtime_source,
+         manifest: manifest,
+         repo_manifest: repo_manifest,
+         settings: settings,
+         mode: mode,
+         issue_batch_limit: issue_batch_limit,
+         profile: profile,
+         capacity: capacity,
+         restrictive_flags: restrictive_flags,
+         cli_overrides: cli_overrides(opts),
+         source_provenance: source_provenance(repo_source, runtime_source, opts),
+         warnings: marker_warnings(repo_manifest || manifest, settings)
+       }}
+    end
+  end
+
+  defp persisted_runtime_mode(manifest) do
+    get_in(manifest, ["runtime", "target", "mode"]) ||
+      get_in(manifest, ["runtime", "run_target", "mode"]) ||
+      "watch"
+  end
+
+  @spec validate_name(String.t()) :: :ok | {:error, {:invalid_run_setup_name, String.t()}}
+  def validate_name(name) when is_binary(name) do
+    if valid_name?(name), do: :ok, else: {:error, {:invalid_run_setup_name, name}}
+  end
+
   @type setup :: map()
 
   @spec path(String.t(), keyword()) :: {:ok, Path.t()} | {:error, term()}
   def path(name, opts \\ []) when is_binary(name) do
-    if valid_name?(name) do
+    with :ok <- validate_name(name) do
       {:ok, Path.join(LocalConfig.runs_dir(opts), name <> ".yml")}
-    else
-      {:error, {:invalid_run_setup_name, name}}
     end
   end
 
@@ -109,6 +172,16 @@ defmodule SymphonyElixir.RunSetup do
   def read(name, opts \\ []) do
     with {:ok, setup_path} <- path(name, opts),
          {:ok, content} <- File.read(setup_path),
+         {:ok, setup} <- decode_yaml(content) do
+      {:ok, setup, setup_path}
+    end
+  end
+
+  @spec read_path(Path.t()) :: {:ok, setup(), Path.t()} | {:error, term()}
+  def read_path(setup_path) when is_binary(setup_path) do
+    setup_path = Path.expand(setup_path)
+
+    with {:ok, content} <- File.read(setup_path),
          {:ok, setup} <- decode_yaml(content) do
       {:ok, setup, setup_path}
     end
@@ -181,9 +254,8 @@ defmodule SymphonyElixir.RunSetup do
     |> summarize_target()
   end
 
-  defp default_mode_for_target(%{"type" => type}) when type in ["query", "query_file", "query_manual"], do: "query"
   defp default_mode_for_target(%{"type" => "issues"}), do: "issue-batch"
-  defp default_mode_for_target(_target), do: "continuous"
+  defp default_mode_for_target(_target), do: "watch"
 
   defp summarize_target(%{"type" => "issues", "issue_ids" => issue_ids}) do
     "Issues #{Enum.join(issue_ids || [], ", ")}"
@@ -243,6 +315,7 @@ defmodule SymphonyElixir.RunSetup do
       "  delivery target: #{delivery_target(setup)}",
       "marker intersection: #{marker_intersection(setup.repo_manifest || setup.manifest, tracker)}",
       "eligible states: #{Enum.join(tracker.active_states, ", ")}",
+      "tracker status: not checked (offline preview)",
       "mode: #{mode_label(setup)}",
       "capacity:",
       "  max agents: #{capacity.max_concurrent_agents} (ceiling: #{capacity.max_concurrent_agents_ceiling})",
@@ -255,6 +328,7 @@ defmodule SymphonyElixir.RunSetup do
       "  server port: #{server_port_summary(settings)}",
       "workspace root: #{settings.workspace.root}",
       "restrictive flags: #{flags_summary(setup.restrictive_flags)}",
+      "safety/landing posture: #{safety_summary(settings)}",
       warning_section(setup.warnings),
       "source provenance:",
       "  repo setup: #{setup.source_provenance.repo_setup}",
@@ -580,7 +654,7 @@ defmodule SymphonyElixir.RunSetup do
     %{
       repo_setup: repo_source,
       runtime_setup: runtime_source,
-      profile: if(Keyword.has_key?(opts, :profile), do: "cli --profile", else: "workflow policy metadata")
+      profile: if(Keyword.has_key?(opts, :profile), do: "cli --profile", else: "runtime policy metadata")
     }
   end
 
@@ -608,17 +682,19 @@ defmodule SymphonyElixir.RunSetup do
   end
 
   defp tracker_target(tracker) do
-    selector =
-      cond do
-        is_binary(tracker.project_slug) -> "project_slug=#{tracker.project_slug}"
-        is_binary(tracker.project_id) -> "project_id=#{tracker.project_id}"
-        is_binary(tracker.team_key) -> "team_key=#{tracker.team_key}"
-        true -> "missing Linear scope"
-      end
-
     labels = if tracker.required_labels == [], do: "none", else: Enum.join(tracker.required_labels, ", ")
-    "#{tracker.kind || "missing"} #{selector}; required labels: #{labels}"
+    "#{tracker.kind || "missing"} #{tracker_selector(tracker)}; required labels: #{labels}"
   end
+
+  defp tracker_selector(%{issue_ids: issue_ids}) when issue_ids != [],
+    do: "issues=#{Enum.join(issue_ids, ",")}"
+
+  defp tracker_selector(%{project_slug: value}) when is_binary(value), do: "project_slug=#{value}"
+  defp tracker_selector(%{project_id: value}) when is_binary(value), do: "project_id=#{value}"
+  defp tracker_selector(%{team_key: value}) when is_binary(value), do: "team_key=#{value}"
+  defp tracker_selector(%{query_file: value}) when is_binary(value), do: "query_file=#{value}"
+  defp tracker_selector(%{query: value}) when is_binary(value), do: "query=#{value}"
+  defp tracker_selector(_tracker), do: "missing Linear scope"
 
   defp delivery_target(%__MODULE__{settings: %{policy_metadata: _metadata}, manifest: manifest}) do
     get_in(manifest, ["delivery", "pr_target"]) || "missing"
@@ -642,7 +718,7 @@ defmodule SymphonyElixir.RunSetup do
     end
   end
 
-  defp mode_label(%__MODULE__{mode: :issue_batch, issue_batch_limit: limit}), do: "issue_batch (limit: #{limit})"
+  defp mode_label(%__MODULE__{mode: :issue_batch, issue_batch_limit: limit}), do: "issue-batch (limit: #{limit})"
   defp mode_label(%__MODULE__{mode: mode}), do: to_string(mode)
 
   defp worker_summary(%Schema{worker: %{ssh_hosts: []}}), do: "local"
@@ -653,6 +729,12 @@ defmodule SymphonyElixir.RunSetup do
 
   defp flags_summary([]), do: "none"
   defp flags_summary(flags), do: flags |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")
+
+  defp safety_summary(settings) do
+    posture = settings.auto_land.posture || "off"
+    landing = if settings.auto_land.dry_run, do: "simulation only", else: "enabled"
+    "project=#{settings.project.criticality}/#{settings.project.deployment_coupling}; auto-land=#{posture} (#{landing})"
+  end
 
   defp warning_section([]), do: "warnings: none"
   defp warning_section(warnings), do: ["warnings:" | Enum.map(warnings, &"  - #{&1}")]

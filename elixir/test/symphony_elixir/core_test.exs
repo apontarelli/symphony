@@ -899,7 +899,7 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") == nil
 
     assert get_in(config, ["capabilities", "required"]) == ["linear", "github_pr", "browser"]
-    assert get_in(config, ["issue_markers", "labels"]) == []
+    assert get_in(config, ["issue_markers", "labels"]) == ["repo:symphony"]
     assert get_in(config, ["workflow_modules", "product_visual_review", "route_policy"]) == "auto"
 
     profiles = Map.get(config, "profiles", %{})

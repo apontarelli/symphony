@@ -6,7 +6,6 @@ defmodule SymphonyElixir.LocalRun do
   alias SymphonyElixir.{LocalConfig, RunSetup}
   alias SymphonyElixir.Workflow.Renderer
 
-  @default_workspace_root "~/dev/symphony-workspaces"
   @default_config_dir "~/.config/symphony"
   @local_config_file "config.yml"
   @runs_dir "runs"
@@ -24,19 +23,19 @@ defmodule SymphonyElixir.LocalRun do
   @switches [
     repo: :string,
     config_root: :string,
-    setup: :string,
     save: :string,
     yes: :boolean,
-    dry_run: :boolean
+    preview: :boolean
   ]
 
   @type setup :: map()
   @type result :: %{
           required(:setup) => setup(),
+          required(:resolved_setup) => RunSetup.t(),
           required(:workflow_path) => Path.t(),
           required(:preview) => String.t(),
           required(:start?) => boolean(),
-          required(:source) => :interactive | :issues | :saved,
+          required(:source) => :interactive | :issues,
           optional(:saved_path) => Path.t() | nil
         }
   @type deps :: map()
@@ -49,9 +48,10 @@ defmodule SymphonyElixir.LocalRun do
     deps = Map.merge(runtime_deps(), deps)
 
     with {:ok, opts, rest} <- parse_args(args),
-         {:ok, local_config, config_root} <- ensure_local_config(opts, deps),
+         {:ok, local_config, config_root} <- local_config(opts, deps),
          {:ok, setup, source, workflow_path} <- resolve_setup(rest, opts, local_config, config_root, deps),
-         preview = preview(setup, workflow_path),
+         {:ok, resolved_setup} <- resolve_preview_setup(setup, workflow_path, opts),
+         preview = RunSetup.preview(resolved_setup),
          {:ok, saved_path, workflow_path} <-
            maybe_save_setup(setup, workflow_path, source, opts, config_root, preview, deps),
          :ok <- persist_current_setup(setup, workflow_path, source, opts, deps),
@@ -59,8 +59,9 @@ defmodule SymphonyElixir.LocalRun do
       {:ok,
        %{
          setup: setup,
+         resolved_setup: resolved_setup,
          workflow_path: workflow_path,
-         preview: preview(setup, workflow_path),
+         preview: preview,
          start?: start?,
          source: source,
          saved_path: saved_path
@@ -68,29 +69,15 @@ defmodule SymphonyElixir.LocalRun do
     end
   end
 
-  @spec preview(setup(), Path.t()) :: String.t()
-  def preview(setup, workflow_path) when is_map(setup) and is_binary(workflow_path) do
-    runtime = Map.get(setup, "runtime", %{})
-    target = Map.get(runtime, "target") || Map.get(runtime, "run_target", %{})
-    tracker = Map.get(runtime, "tracker", %{})
-    agent = Map.get(runtime, "agent", %{})
-    workspace = Map.get(runtime, "workspace", %{})
-    capacity_name = Map.get(target, "capacity", "custom")
-    max_agents = Map.get(agent, "max_concurrent_agents")
-    max_startups = Map.get(agent, "max_concurrent_startups")
+  defp resolve_preview_setup(setup, workflow_path, opts) do
+    repo = repo_root(opts)
 
-    [
-      "Run preview",
-      "Runtime setup: #{workflow_path}",
-      "Target: #{RunSetup.target_summary(%{"target" => Map.put(target, "tracker", tracker)})}",
-      "Mode: #{Map.get(target, "mode", "continuous")}",
-      "Workspace root: #{Map.get(workspace, "root", @default_workspace_root)}",
-      "Capacity: #{capacity_name} (agents=#{max_agents}, startups=#{max_startups})",
-      "Tracker auth: LINEAR_API_KEY",
-      discovery_summary(target)
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("\n")
+    RunSetup.resolve_manifest(setup,
+      cwd: repo,
+      repo: repo,
+      runtime_setup_path: workflow_path,
+      runtime_setup_source: "local run setup"
+    )
   end
 
   @spec default_local_config() :: map()
@@ -105,17 +92,11 @@ defmodule SymphonyElixir.LocalRun do
 
   defp resolve_setup(rest, opts, local_config, config_root, deps) do
     cond do
-      setup_ref = Keyword.get(opts, :setup) ->
-        load_setup(setup_ref, config_root, local_config, deps)
-
       rest == [] ->
         interactive_setup(opts, local_config, config_root, deps)
 
       explicit_issue_ids?(rest) ->
         issue_setup(rest, opts, local_config, config_root, deps)
-
-      length(rest) == 1 ->
-        load_setup(List.first(rest), config_root, local_config, deps)
 
       true ->
         {:error, usage()}
@@ -137,34 +118,6 @@ defmodule SymphonyElixir.LocalRun do
 
     with {:ok, setup} <- build_setup(opts, target, capacity, "issue-batch", local_config) do
       {:ok, setup, :issues, current_setup_path(config_root)}
-    end
-  end
-
-  defp load_setup(setup_ref, config_root, local_config, deps) do
-    path = setup_path(setup_ref, config_root)
-
-    with {:ok, content} <- deps.read_file.(path),
-         {:ok, setup} <- decode_yaml(content, path),
-         {:ok, runtime_setup, workflow_path} <- materialize_loaded_setup(setup, path, config_root, local_config) do
-      {:ok, runtime_setup, :saved, workflow_path}
-    else
-      {:error, :enoent} -> {:error, "Saved run setup not found: #{path}"}
-      {:error, reason} when is_atom(reason) -> {:error, "Failed to read run setup #{path}: #{inspect(reason)}"}
-      {:error, message} when is_binary(message) -> {:error, message}
-    end
-  end
-
-  defp materialize_loaded_setup(%{"runtime" => _runtime} = setup, path, _config_root, _local_config) do
-    {:ok, setup, path}
-  end
-
-  defp materialize_loaded_setup(run_setup, path, config_root, local_config) do
-    case RunSetup.runtime_manifest(local_config, run_setup) do
-      {:ok, runtime_manifest} ->
-        {:ok, put_run_target(runtime_manifest, RunSetup.run_target(run_setup)), current_setup_path(config_root)}
-
-      {:error, reason} ->
-        {:error, "Invalid saved run setup #{path}: #{inspect(reason)}"}
     end
   end
 
@@ -224,6 +177,21 @@ defmodule SymphonyElixir.LocalRun do
     |> Path.expand()
   end
 
+  defp local_config(opts, deps) do
+    if Keyword.get(opts, :preview, false) do
+      config_root = config_root(opts, deps)
+      config_path = Path.join(config_root, @local_config_file)
+
+      if deps.file_regular?.(config_path) do
+        read_local_config(config_path, config_root, deps)
+      else
+        {:ok, default_local_config(), config_root}
+      end
+    else
+      ensure_local_config(opts, deps)
+    end
+  end
+
   defp ensure_local_config(opts, deps) do
     config_root = config_root(opts, deps)
     config_path = Path.join(config_root, @local_config_file)
@@ -273,27 +241,38 @@ defmodule SymphonyElixir.LocalRun do
     |> expand_user_path(deps)
   end
 
-  defp maybe_save_setup(_setup, workflow_path, :saved, _opts, _config_root, _preview, _deps) do
-    {:ok, nil, workflow_path}
+  defp maybe_save_setup(setup, workflow_path, source, opts, config_root, preview, deps) do
+    case Keyword.get(opts, :preview, false) do
+      true -> {:ok, nil, workflow_path}
+      false -> save_named_setup(setup, workflow_path, source, opts, config_root, preview, deps)
+    end
   end
 
-  defp maybe_save_setup(setup, workflow_path, source, opts, config_root, preview, deps) do
-    case save_name(source, opts, preview, deps) do
-      {:ok, nil} ->
-        {:ok, nil, workflow_path}
+  defp save_named_setup(setup, workflow_path, source, opts, config_root, preview, deps) do
+    with {:ok, name} <- save_name(source, opts, preview, deps) do
+      persist_named_setup(name, setup, workflow_path, opts, config_root, deps)
+    end
+  end
 
-      {:ok, name} ->
-        path = named_setup_path(name, config_root)
+  defp persist_named_setup(nil, _setup, workflow_path, _opts, _config_root, _deps),
+    do: {:ok, nil, workflow_path}
 
-        with :ok <- deps.mkdir_p.(Path.dirname(path)),
-             :ok <- deps.write_file.(path, Renderer.to_yaml(run_setup_from_runtime(setup, opts))) do
-          {:ok, path, workflow_path}
-        else
-          {:error, reason} -> {:error, "Failed to save run setup #{path}: #{inspect(reason)}"}
-        end
+  defp persist_named_setup(name, setup, workflow_path, opts, config_root, deps) do
+    path = named_setup_path(name, config_root)
 
-      {:error, message} ->
-        {:error, message}
+    if deps.file_regular?.(path) do
+      {:error, "Saved workflow already exists: #{path}"}
+    else
+      write_named_setup(path, setup, workflow_path, opts, deps)
+    end
+  end
+
+  defp write_named_setup(path, setup, workflow_path, opts, deps) do
+    with :ok <- deps.mkdir_p.(Path.dirname(path)),
+         :ok <- deps.write_file.(path, Renderer.to_yaml(run_setup_from_runtime(setup, opts))) do
+      {:ok, path, workflow_path}
+    else
+      {:error, reason} -> {:error, "Failed to save run setup #{path}: #{inspect(reason)}"}
     end
   end
 
@@ -310,7 +289,7 @@ defmodule SymphonyElixir.LocalRun do
     %{
       "repo" => %{"path" => repo_root(opts)},
       "target" => target,
-      "mode" => Map.get(run_target, "mode", "continuous"),
+      "mode" => Map.get(run_target, "mode", "watch"),
       "capacity" => runtime_capacity_for_run_setup(runtime, run_target)
     }
   end
@@ -355,32 +334,31 @@ defmodule SymphonyElixir.LocalRun do
   defp normalize_save_name(name) when is_binary(name) do
     trimmed = String.trim(name)
 
-    cond do
-      trimmed == "" ->
-        {:error, "Run setup name cannot be blank"}
-
-      String.contains?(trimmed, ["/", "\\"]) ->
-        {:error, "Run setup name must not contain path separators"}
-
-      true ->
+    case RunSetup.validate_name(trimmed) do
+      :ok ->
         {:ok, trimmed}
+
+      {:error, _reason} ->
+        {:error, "Saved workflow name must be a lowercase slug such as `main` or `opencode-dogfood`"}
     end
   end
 
-  defp persist_current_setup(_setup, _workflow_path, :saved, _opts, _deps), do: :ok
-
-  defp persist_current_setup(setup, workflow_path, _source, _opts, deps) do
-    with :ok <- deps.mkdir_p.(Path.dirname(workflow_path)),
-         :ok <- deps.write_file.(workflow_path, Renderer.to_yaml(setup)) do
+  defp persist_current_setup(setup, workflow_path, _source, opts, deps) do
+    if Keyword.get(opts, :preview, false) do
       :ok
     else
-      {:error, reason} -> {:error, "Failed to write run setup #{workflow_path}: #{inspect(reason)}"}
+      with :ok <- deps.mkdir_p.(Path.dirname(workflow_path)),
+           :ok <- deps.write_file.(workflow_path, Renderer.to_yaml(setup)) do
+        :ok
+      else
+        {:error, reason} -> {:error, "Failed to write run setup #{workflow_path}: #{inspect(reason)}"}
+      end
     end
   end
 
   defp confirm_start?(opts, preview, deps) do
     cond do
-      Keyword.get(opts, :dry_run, false) ->
+      Keyword.get(opts, :preview, false) ->
         {:ok, false}
 
       Keyword.get(opts, :yes, false) ->
@@ -662,7 +640,7 @@ defmodule SymphonyElixir.LocalRun do
   end
 
   defp prompt_mode(default, deps) do
-    with {:ok, answer} <- prompt(deps, "Run mode: continuous, issue-batch, or query [#{default}]: ") do
+    with {:ok, answer} <- prompt(deps, "Run mode: watch, drain, or issue-batch [#{default}]: ") do
       mode =
         answer
         |> String.trim()
@@ -670,20 +648,17 @@ defmodule SymphonyElixir.LocalRun do
 
       case mode do
         "" -> {:ok, default}
-        "continuous" -> {:ok, "continuous"}
+        "watch" -> {:ok, "watch"}
+        "drain" -> {:ok, "drain"}
         "issue-batch" -> {:ok, "issue-batch"}
         "issue_batch" -> {:ok, "issue-batch"}
-        "query" -> {:ok, "query"}
-        _ -> {:error, "Run mode must be continuous, issue-batch, or query"}
+        _ -> {:error, "Run mode must be watch, drain, or issue-batch"}
       end
     end
   end
 
   defp default_mode(%{type: "issues"}), do: "issue-batch"
-  defp default_mode(%{type: "query"}), do: "query"
-  defp default_mode(%{type: "query_file"}), do: "query"
-  defp default_mode(%{type: "query_manual"}), do: "query"
-  defp default_mode(_target), do: "continuous"
+  defp default_mode(_target), do: "watch"
 
   defp tracker_target_config(%{type: "issues", issue_ids: issue_ids}) do
     %{"issue_ids" => issue_ids}
@@ -701,6 +676,10 @@ defmodule SymphonyElixir.LocalRun do
     %{"team_key" => team_key}
   end
 
+  defp tracker_target_config(%{type: "query", query_file: query_file}) when is_binary(query_file) do
+    %{"query_file" => query_file}
+  end
+
   defp tracker_target_config(%{type: "query"}), do: %{}
 
   defp run_target_config(target, capacity_name, mode) do
@@ -710,9 +689,6 @@ defmodule SymphonyElixir.LocalRun do
     |> Map.put("mode", mode)
     |> Map.put("capacity", capacity_name)
   end
-
-  defp discovery_summary(%{"discovery" => discovery}) when is_binary(discovery), do: "Discovery: #{discovery}"
-  defp discovery_summary(_target), do: nil
 
   defp discover(kind, deps) do
     case deps.env.("LINEAR_API_KEY") do
@@ -757,16 +733,6 @@ defmodule SymphonyElixir.LocalRun do
 
   defp issue_key?(value), do: Regex.match?(~r/^[A-Z][A-Z0-9]+-\d+$/, value)
   defp linear_uuid?(value), do: Regex.match?(~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/, value)
-
-  defp setup_path(ref, config_root) do
-    expanded = Path.expand(ref)
-
-    cond do
-      Path.type(ref) == :absolute -> expanded
-      String.ends_with?(ref, ".yml") or String.ends_with?(ref, ".yaml") -> Path.expand(ref)
-      true -> named_setup_path(ref, config_root)
-    end
-  end
 
   defp named_setup_path(name, config_root), do: Path.join([config_root, @runs_dir, name <> ".yml"])
   defp current_setup_path(config_root), do: Path.join([config_root, @runs_dir, @current_run_file])
@@ -911,9 +877,7 @@ defmodule SymphonyElixir.LocalRun do
   defp usage do
     """
     Usage:
-      symphony run [ISSUE-ID ...] [--repo <path>] [--save <name>] [--dry-run] [--yes]
-      symphony run <saved-name> [--dry-run] [--yes]
-      symphony run --setup <name-or-path> [--dry-run] [--yes]
+      symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
     """
     |> String.trim()
   end

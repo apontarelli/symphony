@@ -40,6 +40,9 @@ automation:
   profile: default
   completion_requirements:
     - Run the strongest feasible validation gate before handoff.
+issue_markers:
+  labels:
+    - repo:symphony
 capabilities:
   required:
     - linear

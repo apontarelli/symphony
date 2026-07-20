@@ -98,7 +98,7 @@ moving the issue as ready for merge.
    - Keep committed `symphony.yml` to durable repo setup fields. Put Linear project scope, workspace
      roots, polling, agent capacity, runner commands, and host deployment settings in local config
      or run setup.
-   - For existing mixed manifests, run `./bin/symphony setup migrate --repo /path/to/repo --name <run-name> --dry-run`
+   - For existing mixed manifests, run `./bin/symphony setup migrate --repo /path/to/repo --name <run-name>`
      to preview the split, then rerun with `--apply` to write local files and remove runtime fields
      from `symphony.yml`.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
@@ -130,7 +130,6 @@ mise install
 mise exec -- mix setup
 mise exec -- mix build
 export LINEAR_API_KEY=...
-mise exec -- ./bin/symphony run --preview --workflow /path/to/local-symphony-runtime.yml
 mise exec -- ./bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 
@@ -139,61 +138,50 @@ It keeps local shell glue in this repo instead of dotfiles, resolves local runti
 optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
 and passes the resolved run setup to the Elixir CLI.
 
-For first-run local use, prefer the interactive builder:
+For first-run local use, invoke bare `symphony` from a repository with a valid `symphony.yml`.
+The launcher opens a picker showing saved `default`, then `main`, then other saved workflows,
+followed by the recent unsaved `current` entry, plus “Create new workflow”.
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony run --repo /path/to/repo --no-env-file
-../bin/symphony run SID-123 SID-124 --repo /path/to/repo --no-env-file
-../bin/symphony run my-saved-setup --no-env-file
+../bin/symphony
+../bin/symphony run main --preview --no-env-file
+../bin/symphony run main --no-env-file
+../bin/symphony run SID-123 SID-124 --repo /path/to/repo --preview --no-env-file
 ```
 
-`symphony run` creates `~/.config/symphony/config.yml` if it is missing, using
-`~/dev/symphony-workspaces` as the default workspace root and `light`, `normal`, and `swarm` capacity
-profiles. The builder previews the resolved run setup before confirmation and can save named setups
-to `~/.config/symphony/runs/<name>.yml`. Explicit issue IDs use issue-batch mode by default.
+Creating a workflow writes `~/.config/symphony/config.yml` if missing, using
+`~/dev/symphony-workspaces` as the default workspace root and `light`, `normal`, and `swarm`
+capacity profiles. Saved names are lowercase slugs and live at
+`~/.config/symphony/runs/<name>.yml`; saving fails rather than overwriting an existing name.
+Explicit issue IDs use issue-batch mode by default.
 
-Use `symphony list` to inspect the setups that belong to the active repo without creating config,
-materializing runtime manifests, contacting Linear, or starting the daemon. Saved `default` and
-`main` setups appear first, remaining saved names are sorted, and `.current.yml` appears last as a
-labelled recent/unsaved entry when present:
+Use `symphony list` for read-only catalog inspection:
 
 ```bash
 ../bin/symphony list --repo /path/to/repo --no-env-file
 ```
 
-When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; if only a checked-in
-setup-only `symphony.yml` is present, bare `symphony` enters the interactive run path and fails
-before side effects unless required local runtime scope and secrets are available.
+`symphony run <saved-name> --preview` is the canonical non-starting preflight. It composes repo
+setup, local operator config, and the saved workflow; prints the resolved target, mode, capacity,
+runner, safety/landing posture, provenance, eligible states, and offline tracker status; and does
+not create config, materialize a runtime manifest, contact Linear, or start the daemon. Without
+`--preview`, Symphony prints the same preview and asks for confirmation unless `--yes` is passed.
 
-The raw escript also supports saved run setups. `./bin/symphony run <name>` reads
-`~/.config/symphony/runs/<name>.yml`, creates `~/.config/symphony/config.yml` with defaults if it is
-missing, materializes a runtime manifest under the local config directory, and starts the daemon.
-Use `--dry-run` to verify the resolved setup without starting the daemon; include the acknowledgement
-flag for a real raw-escript start:
-
-```bash
-./bin/symphony run my-project --dry-run
-./bin/symphony run my-project --i-understand-that-this-will-be-running-without-the-usual-guardrails
-```
-
-Use the current shell environment when secrets are already exported:
+Explicit runtime files are a start-only escape hatch:
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony run --preview --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references.
-Set `SYMPHONY_WORKFLOW` there to run the default local runtime setup, or use project-name shorthand
-for `$SYMPHONY_DEV_ROOT/<project-name>/symphony.runtime.yml`:
+Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references:
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony
-../bin/symphony my-project
+../bin/symphony run main
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
@@ -214,9 +202,8 @@ left unchanged unless `--force` is passed. `check` validates the setup-only mani
 modules, repo doc entrypoints, validation command shape, required capability declarations, publish
 target defaults, and configured harness `CODEX_HOME`. `preview` shows the resolved
 preset/modules/defaults and can include the compiled workflow config and prompt without writing
-generated prompt files into the target repo. `workflow init`, `workflow check`, and `workflow print`
-remain one-release compatibility aliases; new docs and scripts should use `setup init`,
-`setup check`, and `setup preview`.
+generated prompt files into the target repo. The legacy `workflow` command has been removed; use
+`setup init`, `setup check`, and `setup preview`.
 
 `symphony.yml` v1 contains:
 
@@ -272,10 +259,10 @@ terminal states `Closed`, `Cancelled`, `Canceled`, `Duplicate`, and `Done`, poll
 Deployment ceilings default to 10 agents and 2 startups. A saved run setup may choose a named
 profile or an explicit capacity map, but the resolved capacity cannot exceed those ceilings.
 
-Saved run setups live at `~/.config/symphony/runs/<name>.yml`. Names are limited to alphanumeric,
-dot, underscore, and dash characters so setup files cannot escape the global runs directory. A setup
-stores the target repo reference, tracker target, mode, capacity, and restrictive flags such as
-required labels; app repositories are not used as saved run setup storage.
+Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
+letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target
+repo reference, tracker target, mode, capacity, and restrictive flags such as required labels; app
+repositories are not used as saved run setup storage.
 
 Run setup target examples:
 
@@ -286,7 +273,7 @@ target:
   type: project
   tracker:
     project_slug: symphony
-mode: continuous
+mode: watch
 capacity: normal
 ```
 
@@ -297,7 +284,7 @@ target:
   type: team
   tracker:
     team_key: SID
-mode: continuous
+mode: watch
 capacity:
   max_concurrent_agents: 2
   max_concurrent_startups: 1
@@ -310,7 +297,7 @@ target:
   type: query
   tracker:
     query_file: ~/.config/symphony/queries/ready.yml
-mode: query
+mode: watch
 capacity: light
 ```
 
@@ -335,15 +322,14 @@ For migration, `setup migrate` requires an explicit `--repo`, reads that repo's 
 `symphony.yml`, reports every runtime/target field it will move, and leaves a setup-only manifest after apply:
 
 ```bash
-./bin/symphony setup migrate --repo /path/to/repo --name my-project --dry-run
+./bin/symphony setup migrate --repo /path/to/repo --name my-project
 ./bin/symphony setup migrate --repo /path/to/repo --name my-project --apply
 ```
 
-Preview the resolved run setup before side effects, then pass a local runtime setup path to
-`./bin/symphony run` when starting the service directly:
+Preview a saved workflow before side effects. Explicit local runtime paths are start-only:
 
 ```bash
-./bin/symphony run --preview --workflow /path/to/local-symphony-runtime.yml
+./bin/symphony run my-project --preview
 ./bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 

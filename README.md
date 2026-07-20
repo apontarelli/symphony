@@ -39,9 +39,9 @@ OpenAI project include:
 - Runner-agnostic runtime seam: unattended runs dispatch through an `AgentRuntime` adapter. The
   current production adapter uses a Symphony-owned Codex `CODEX_HOME` and then layers target-repo
   `AGENTS.md` and docs after the harness instructions.
-- Repo setup inspection commands: the Elixir CLI can initialize, validate, and preview compiled
+- Repo setup inspection commands: the Elixir CLI initializes, validates, and previews compiled
   setup policy with `setup init`, `setup check`, and `setup preview --compiled`. The legacy
-  `workflow` command remains as a one-release compatibility alias with deprecation guidance.
+  `workflow` command has been removed.
 - Host-owned quality gates: completed implementation turns can fan out deterministic reviewer jobs
   for source correctness, tests, scenario QA, product visual review, docs alignment, and risky
   security/data/migration seams, then synthesize findings before handoff.
@@ -83,27 +83,29 @@ mise exec -- ./bin/symphony setup check --repo /path/to/target-repo
 mise exec -- ./bin/symphony setup preview --repo /path/to/target-repo --compiled
 ```
 
-For local solo runs, use `symphony run` to build or load a saved local run setup instead of
-hand-writing runtime YAML. First use creates `~/.config/symphony/config.yml` with operator defaults
-such as workspace root, capacity profiles, deployment ceilings, polling, and runner settings. Saved
-named setups live under `~/.config/symphony/runs/<name>.yml`. Bare `symphony` in a directory with a
-valid `symphony.yml` enters the same interactive local run setup flow.
+For local solo runs, bare `symphony` in a directory with a valid `symphony.yml` opens the saved
+workflow picker. It lists `default`, then `main`, then other saved workflows, followed by the
+recent unsaved `current` entry, and offers “Create new workflow”. First-time creation writes
+`~/.config/symphony/config.yml` with operator defaults such as workspace root, capacity profiles,
+deployment ceilings, polling, and runner settings. Saved workflows live under
+`~/.config/symphony/runs/<lowercase-slug>.yml`; an existing name is never overwritten.
 
-Use `symphony list` to inspect the setups that belong to the active repo. It reads saved setups from
-`~/.config/symphony/runs/*.yml`, appends `.current.yml` as a labelled recent/unsaved entry when
-present, orders `default` and `main` first and the unsaved entry last, and does not create local
-config, materialize runtime manifests, contact Linear, or start the daemon.
+`symphony list` is the read-only catalog for scripts and inspection.
+`symphony run <saved-name> --preview` is the only saved-workflow preflight form: it composes repo
+setup, local config, and the saved workflow; prints target, mode, capacity, runner,
+safety/landing posture, source provenance,
+eligible states, and offline tracker status; and does not write configuration, contact Linear,
+materialize runtime YAML, or start the daemon. Starting without `--preview` prints the same preview
+and requires confirmation unless `--yes` is passed.
 
 ```bash
 export LINEAR_API_KEY=...
+../bin/symphony                                                   # interactive picker
 ../bin/symphony list --repo /path/to/target-repo --no-env-file
-../bin/symphony run --repo /path/to/target-repo --no-env-file --dry-run          # interactive project/team/query setup
-../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --no-env-file --dry-run
-../bin/symphony run my-saved-setup --no-env-file --dry-run
-../bin/symphony run --setup my-saved-setup --repo /path/to/target-repo --no-env-file --dry-run
-../bin/symphony run --repo /path/to/target-repo --save my-saved-setup --no-env-file --dry-run
-../bin/symphony run --preview --workflow ~/.config/symphony/runs/.current.yml --max-agents 2 --max-startups 1
-../bin/symphony --no-env-file
+../bin/symphony run main --preview --no-env-file
+../bin/symphony run main --no-env-file                            # preview, confirm, start
+../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --preview --no-env-file
+../bin/symphony run SID-123 --repo /path/to/target-repo --save sid-123 --no-env-file
 ```
 
 Project, team, and query/file targets are selected by the interactive builder or stored in saved run
@@ -111,34 +113,31 @@ setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,
 `target.tracker.query_file`, or `target.tracker.issue_ids`. Capacity belongs to the run setup or CLI
 launch override, never to the checked-in repo setup manifest.
 
-`setup migrate` can convert an existing checked-in runtime setup into local config plus a saved run
-setup. It intentionally requires an explicit `--repo` so the target repository never depends on the
-launcher's working directory.
+`setup migrate` can convert an existing checked-in runtime setup into local config plus a saved
+workflow. It intentionally requires an explicit `--repo`. The command previews by default and
+writes only when `--apply` is passed.
 
 ```bash
-mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo --dry-run
+mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo
 mise exec -- ./bin/symphony setup migrate --repo /path/to/target-repo --name my-repo --apply
-mise exec -- ./bin/symphony run my-repo --dry-run
+mise exec -- ./bin/symphony run my-repo --preview
 ```
 
-You can also start from an explicit local runtime setup file. Either export required secrets in the
-current environment and skip the launcher env file:
+Explicit runtime files are a start-only escape hatch and always use the `run --workflow` form:
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony run --preview --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-or copy [`symphony.env.example`](symphony.env.example) to `~/.config/symphony/.env` and keep secrets
-there for the default launcher to resolve through the 1Password CLI. If you still need to launch an
-explicit legacy runtime setup, pass it with `--workflow`; otherwise bare `symphony` in a repo setup
-directory prefers interactive local run setup over `SYMPHONY_WORKFLOW` from the env file.
+Alternatively, copy [`symphony.env.example`](symphony.env.example) to
+`~/.config/symphony/.env` and keep secrets there for the launcher to resolve through the
+1Password CLI.
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
-../bin/symphony --workflow /path/to/local-symphony-runtime.yml
+../bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 
 The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. A

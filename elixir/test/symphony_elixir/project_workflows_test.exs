@@ -70,6 +70,7 @@ defmodule SymphonyElixir.ProjectWorkflowsTest do
     write_setup!(context.config_root, "bad-repo", %{"repo" => "not-a-map"})
     write_setup!(context.config_root, "bad-mode", setup(context.repo, %{}, %{}, "normal"))
     write_setup!(context.config_root, "bad-capacity", setup(context.repo, %{}, "watch", 4))
+    write_setup!(context.config_root, "Main", setup(context.repo, %{}, "watch", "normal"))
     File.mkdir_p!(Path.join(runs_dir, "unreadable.yml"))
     write_setup!(context.config_root, "valid", setup(context.repo, issues_target(["SID-399"]), "watch", "normal"))
 
@@ -82,12 +83,13 @@ defmodule SymphonyElixir.ProjectWorkflowsTest do
     assert {:ok, [%{name: "valid"}], warnings} =
              ProjectWorkflows.list(context.repo, config_root: context.config_root)
 
-    assert length(warnings) == 6
+    assert length(warnings) == 7
     assert Enum.any?(warnings, &(&1 =~ "invalid.yml" and &1 =~ "invalid YAML"))
     assert Enum.any?(warnings, &(&1 =~ "scalar.yml" and &1 =~ "expected a YAML map"))
     assert Enum.any?(warnings, &(&1 =~ "bad-mode.yml" and &1 =~ "mode must be"))
     assert Enum.any?(warnings, &(&1 =~ "bad-capacity.yml" and &1 =~ "capacity must be"))
     assert Enum.any?(warnings, &(&1 =~ "invalid-shape.yml" and &1 =~ "capacity must be"))
+    assert Enum.any?(warnings, &(&1 =~ "Main.yml" and &1 =~ "lowercase slug"))
     assert Enum.any?(warnings, &(&1 =~ "unreadable.yml" and &1 =~ ":eisdir"))
   end
 
@@ -104,7 +106,7 @@ defmodule SymphonyElixir.ProjectWorkflowsTest do
 
     assert {:ok, workflows, []} = ProjectWorkflows.list(context.repo, config_root: context.config_root)
     assert Enum.map(workflows, & &1.capacity) == ["normal", "normal"]
-    assert Enum.map(workflows, & &1.mode) == ["continuous", "continuous"]
+    assert Enum.map(workflows, & &1.mode) == ["watch", "watch"]
     assert Enum.map(workflows, & &1.target) == ["Linear project", "Linear project Named project"]
   end
 
@@ -121,7 +123,7 @@ defmodule SymphonyElixir.ProjectWorkflowsTest do
 
     assert {:ok, workflows, []} = ProjectWorkflows.list(context.repo, config_root: context.config_root)
     assert Enum.find(workflows, &(&1.name == "issues")).mode == "issue-batch"
-    assert Enum.find(workflows, &(&1.name == "query")).mode == "query"
+    assert Enum.find(workflows, &(&1.name == "query")).mode == "watch"
     assert Enum.find(workflows, &(&1.name == "query")).target == "Manual Linear query"
   end
 

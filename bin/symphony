@@ -4,49 +4,47 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
+  symphony
   symphony setup <init|check|preview> [options]
+  symphony setup migrate --repo <path> [--name <lowercase-slug>] [--config-root <path>] [--apply]
   symphony list [--repo <path>] [--config-root <path>] [--no-env-file]
-  symphony run [--preview] [--workflow /path/to/symphony.runtime.yml] [options]
-  symphony [project-name] [--workflow /path/to/symphony.runtime.yml] [options]
-  symphony run [target...] [--repo <path>] [--config-root <path>] [--setup <name>] [--save <name>] [--dry-run] [--yes] [--env-file <path>|--no-env-file]
-  symphony setup migrate --repo <path> [--name <name>] [--config-root <path>] [--dry-run|--apply]
-  symphony --workflow /path/to/symphony.runtime.yml [options]
-  symphony workflow <init|check|print> [options]  # deprecated; use setup
+  symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
+  symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
+  symphony run --workflow /path/to/symphony.runtime.yml [options]
 
-Project resolution:
-  project-name                Uses $SYMPHONY_DEV_ROOT/<project-name>/symphony.runtime.yml.
-  --workflow <path>           Uses the explicit runtime setup path.
-  no project or workflow      In a repo setup directory, builds an interactive local run setup.
-                              Else uses SYMPHONY_WORKFLOW from the env file, then ./symphony.runtime.yml.
-  run                         Builds or loads a local runtime setup, previews it, then starts it.
-  list                        Lists saved workflows for the active repo without starting Symphony.
+Commands:
+  no arguments                 Open the saved-workflow picker in a repo with symphony.yml.
+  setup                        Create, validate, or preview durable repo setup.
+  list                         List saved workflows for the active repo without starting Symphony.
+  run <saved-name>             Preview, confirm, and start a saved workflow.
+  run --workflow <path>        Start an explicit runtime file.
 
 Options:
-  --env-file <path>           1Password env file. Default: ~/.config/symphony/.env.
-  --no-env-file               Do not call `op run`; use the current environment.
-  --port <port>               Dashboard/API port override. Defaults to workflow runtime.server.port.
-  --logs-root <path>          Logs dir. Default: <symphony-elixir-dir>/log.
-  --profile <name>            Select one workflow profile for this process.
-  --mode <mode>               Run mode: watch, drain, or issue_batch.
-  --limit <count>             issue_batch dispatch limit.
-  --max-agents <count>        Lower per-run agent capacity without exceeding deployment ceiling.
-  --max-startups <count>      Lower per-run startup capacity without exceeding deployment ceiling.
-  --no-land                   Restrict this run away from auto-land.
-  --human-review-only         Route completed work to human review.
-  --dev-root <path>           Project root directory. Default: ~/dev.
-  --skip-build                Do not rebuild elixir/bin/symphony before launch.
-  --config-root <path>        Saved workflow config root. Default: ~/.config/symphony.
-  --dry-run                   Print the launch command and exit.
-  -h, --help                  Show this help.
+  --preview                    Resolve and print a saved workflow without side effects.
+  --env-file <path>            1Password env file. Default: ~/.config/symphony/.env.
+  --no-env-file                Do not call `op run`; use the current environment.
+  --port <port>                Dashboard/API port override.
+  --logs-root <path>           Logs directory override.
+  --profile <name>             Select one runtime policy profile.
+  --mode <mode>                Run mode: watch, drain, or issue_batch.
+  --limit <count>              issue_batch dispatch limit.
+  --max-agents <count>         Lower per-run agent capacity.
+  --max-startups <count>       Lower per-run startup capacity.
+  --no-land                    Restrict this run away from auto-land.
+  --human-review-only          Route completed work to human review.
+  --config-root <path>         Saved workflow config root. Default: ~/.config/symphony.
+  --save <lowercase-slug>      Save a newly built workflow; collisions fail.
+  --yes                        Skip the start confirmation.
+  --skip-build                 Do not rebuild elixir/bin/symphony before launch.
+  -h, --help                   Show this help.
 
 Environment:
-  SYMPHONY_HOME               Symphony Elixir dir. Default: <repo>/elixir.
-  SYMPHONY_DEV_ROOT           Project root directory. Default: ~/dev.
-  SYMPHONY_WORKFLOW           Local runtime setup file. May be set in the env file.
-  SYMPHONY_ENV_FILE           Default env file path.
-  SYMPHONY_SKIP_BUILD=1       Same as --skip-build.
+  SYMPHONY_HOME                Symphony Elixir dir. Default: <repo>/elixir.
+  SYMPHONY_ENV_FILE            Default env file path.
+  SYMPHONY_SKIP_BUILD=1        Same as --skip-build.
 
-The env file is resolved by `op run`; keep 1Password refs there, not literal secrets.
+The launcher loads ~/.config/symphony/.env through 1Password CLI unless
+--no-env-file is passed. Saved-workflow previews do not require that file.
 USAGE
 }
 
@@ -282,6 +280,7 @@ run_saved_setup_cli() {
   local caller_root="$PWD"
   local use_env_file=1
   local escript_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
+  local env_optional=0
   local arg
 
   while [[ $# -gt 0 ]]; do
@@ -295,6 +294,11 @@ run_saved_setup_cli() {
         ;;
       --no-env-file)
         use_env_file=0
+        shift
+        ;;
+      --preview|--picker)
+        env_optional=1
+        escript_args+=("$1")
         shift
         ;;
       --skip-build)
@@ -312,6 +316,10 @@ run_saved_setup_cli() {
   env_file="$(expand_path "$env_file")"
   symphony_home="$(absolute_path "$symphony_home")"
   env_file="$(absolute_path "$env_file")"
+
+  if [[ "$use_env_file" == "1" && ! -f "$env_file" && "$env_optional" == "1" ]]; then
+    use_env_file=0
+  fi
 
   prepare_elixir_cli "$symphony_home"
 
@@ -356,246 +364,16 @@ main() {
     run_saved_setup_cli "$repo_root" "$@"
   fi
 
-  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
-  local dev_root="${SYMPHONY_DEV_ROOT:-"$HOME/dev"}"
-  local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
-  local use_env_file=1
-  local dry_run=0
-  local project=""
-  local workflow=""
-  local port=""
-  local logs_root=""
-  local profile=""
-  local workflow_from_repo_setup=0
-  local run_args=()
-  local arg
-
-  while [[ $# -gt 0 ]]; do
-    arg="$1"
-
-    case "$arg" in
-      --env-file)
-        require_value "$arg" "${2:-}"
-        env_file="$2"
-        shift 2
-        ;;
-      --no-env-file)
-        use_env_file=0
-        shift
-        ;;
-      --workflow)
-        require_value "$arg" "${2:-}"
-        workflow="$2"
-        shift 2
-        ;;
-      --port)
-        require_value "$arg" "${2:-}"
-        port="$2"
-        shift 2
-        ;;
-      --logs-root)
-        require_value "$arg" "${2:-}"
-        logs_root="$2"
-        shift 2
-        ;;
-      --profile)
-        require_value "$arg" "${2:-}"
-        profile="$2"
-        shift 2
-        ;;
-      --preview|--no-land|--human-review-only|--require-validation|--require-review|--skip-validation|--skip-review|--auto-land|--allow-missing-capabilities|--ignore-markers)
-        run_args+=("$arg")
-        shift
-        ;;
-      --mode|--limit|--max-agents|--max-startups|--repo)
-        require_value "$arg" "${2:-}"
-        run_args+=("$arg" "$2")
-        shift 2
-        ;;
-      --dev-root)
-        require_value "$arg" "${2:-}"
-        dev_root="$2"
-        shift 2
-        ;;
-      --skip-build)
-        export SYMPHONY_SKIP_BUILD=1
-        shift
-        ;;
-      --dry-run)
-        dry_run=1
-        shift
-        ;;
-      -h|--help)
-        usage
-        exit 0
-        ;;
-      --)
-        shift
-        break
-        ;;
-      -*)
-        die "unknown argument: $arg"
-        ;;
-      *)
-        [[ -z "$project" ]] || die "unexpected extra argument: $arg"
-        project="$arg"
-        shift
-        ;;
-    esac
-  done
-
-  [[ $# -eq 0 ]] || die "unexpected extra argument: $1"
-
-  symphony_home="$(expand_path "$symphony_home")"
-  dev_root="$(expand_path "$dev_root")"
-  env_file="$(expand_path "$env_file")"
-  logs_root="$(expand_path "$logs_root")"
-
-  if [[ -z "$project" && -z "$workflow" && -f symphony.yml ]]; then
-    local local_run_args=()
-    local repo_arg_present=0
-    local index
-
-    for ((index = 0; index < ${#run_args[@]}; index++)); do
-      if [[ "${run_args[$index]}" == "--repo" ]]; then
-        repo_arg_present=1
-        break
-      fi
-    done
-
-    if [[ "$repo_arg_present" == "0" ]]; then
-      local_run_args+=(--repo "$PWD")
-    fi
-
-    if [[ "$use_env_file" == "0" ]]; then
-      local_run_args+=(--no-env-file)
-    elif [[ "$env_file" != "$HOME/.config/symphony/.env" ]]; then
-      local_run_args+=(--env-file "$env_file")
-    fi
-
-    if [[ "$dry_run" == "1" ]]; then
-      local_run_args+=(--dry-run)
-    fi
-
-    if [[ -n "$port" ]]; then
-      local_run_args+=(--port "$port")
-    fi
-
-    if [[ -n "$logs_root" ]]; then
-      local_run_args+=(--logs-root "$logs_root")
-    fi
-
-    if [[ -n "$profile" ]]; then
-      local_run_args+=(--profile "$profile")
-    fi
-
-    if [[ "${SYMPHONY_SKIP_BUILD:-0}" == "1" ]]; then
-      local_run_args+=(--skip-build)
-    fi
-
-    if [[ "${#run_args[@]}" -gt 0 ]]; then
-      local_run_args+=("${run_args[@]}")
-    fi
-    run_saved_setup_cli "$repo_root" "${local_run_args[@]}"
+  if [[ $# -eq 0 && -f symphony.yml ]]; then
+    run_saved_setup_cli "$repo_root" --picker --repo "$PWD"
   fi
 
-  if [[ "$use_env_file" == "1" && -z "$workflow" && -f "$env_file" ]]; then
-    workflow="$(env_file_value "$env_file" SYMPHONY_WORKFLOW || true)"
-  fi
-
-  workflow="$(expand_path "$workflow")"
-
-  symphony_home="$(absolute_path "$symphony_home")"
-  dev_root="$(absolute_path "$dev_root")"
-  env_file="$(absolute_path "$env_file")"
-
-  if [[ -n "$logs_root" ]]; then
-    logs_root="$(absolute_path "$logs_root")"
-  fi
-
-  local project_name=""
-
-  if [[ -n "$workflow" ]]; then
-    workflow="$(absolute_path "$workflow")"
-    project_name="$(basename "$(dirname "$workflow")")"
-  elif [[ -n "$project" ]]; then
-    local expanded_project
-    expanded_project="$(expand_path "$project")"
-
-    if [[ -f "$expanded_project" ]]; then
-      workflow="$(cd "$(dirname "$expanded_project")" >/dev/null 2>&1 && pwd)/$(basename "$expanded_project")"
-      project_name="$(basename "$(dirname "$workflow")")"
-    elif [[ -d "$expanded_project" ]]; then
-      workflow="$(cd "$expanded_project" >/dev/null 2>&1 && pwd)/symphony.runtime.yml"
-      project_name="$(basename "$expanded_project")"
-    else
-      workflow="$dev_root/$project/symphony.runtime.yml"
-      project_name="$project"
-    fi
-  elif [[ -f symphony.runtime.yml ]]; then
-    workflow="$PWD/symphony.runtime.yml"
-    project_name="$(basename "$PWD")"
-  elif [[ -f symphony.yml ]]; then
-    workflow="$PWD/symphony.yml"
-    project_name="$(basename "$PWD")"
-    workflow_from_repo_setup=1
-  else
+  if [[ $# -eq 0 ]]; then
     usage
     exit 0
   fi
 
-  [[ -f "$workflow" ]] || die "runtime setup not found: $workflow; create it from your local run setup or pass --workflow /path/to/symphony.runtime.yml"
-
-  if [[ -z "$logs_root" ]]; then
-    logs_root="$symphony_home/log"
-  fi
-
-  if [[ "$use_env_file" == "1" ]]; then
-    if [[ -f "$env_file" ]]; then
-      command -v op >/dev/null 2>&1 || {
-        printf 'error: op not found on PATH\n' >&2
-        printf 'hint: install the 1Password CLI or pass --no-env-file\n' >&2
-        exit 127
-      }
-    elif [[ "$workflow_from_repo_setup" == "1" ]]; then
-      use_env_file=0
-    else
-      die "env file not found: $env_file; copy symphony.env.example there or pass --no-env-file"
-    fi
-  fi
-
-  local runtime_env=(
-    "SYMPHONY_HOME=$symphony_home"
-    "SYMPHONY_WORKFLOW=$workflow"
-    "SYMPHONY_LOGS_ROOT=$logs_root"
-  )
-
-  if [[ -n "$port" ]]; then
-    runtime_env+=("SYMPHONY_PORT=$port")
-  fi
-
-  if [[ -n "$profile" ]]; then
-    runtime_env+=("SYMPHONY_PROFILE=$profile")
-  fi
-
-  local cmd
-
-  if [[ "$use_env_file" == "1" ]]; then
-    cmd=(env "${runtime_env[@]}" op run --env-file "$env_file" -- "$repo_root/bin/symphony" __run)
-  else
-    cmd=(env "${runtime_env[@]}" "$repo_root/bin/symphony" __run)
-  fi
-
-  if [[ "${#run_args[@]}" -gt 0 ]]; then
-    cmd+=("${run_args[@]}")
-  fi
-
-  if [[ "$dry_run" == "1" ]]; then
-    print_command "${cmd[@]}"
-    exit 0
-  fi
-
-  exec "${cmd[@]}"
+  die "unknown command: $1; use setup, list, or run"
 }
 
 main "$@"

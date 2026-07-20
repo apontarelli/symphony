@@ -198,51 +198,35 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:profile, "strict"}
   end
 
-  test "run command uses the local setup builder without starting the daemon on dry-run" do
+  test "run command previews an issue target without starting or writing configuration" do
     repo = tmp_repo!("symphony-elixir-run")
-
-    File.write!(Path.join(repo, "symphony.yml"), """
-    version: 1
-    project:
-      slug: symphony
-      name: Symphony
-      repository: https://github.com/apontarelli/symphony
-    delivery:
-      pr_target: main
-    """)
+    write_cli_repo_manifest!(repo)
 
     config_root = Path.join(repo, ".local-symphony")
 
     deps = %{
-      file_regular?: fn _path -> flunk("dry-run local setup should not check a runtime manifest") end,
-      set_workflow_file_path: fn _path -> flunk("dry-run local setup should not start the daemon") end,
-      set_logs_root: fn _path -> flunk("dry-run local setup should not set logs") end,
-      set_server_port_override: fn _port -> flunk("dry-run local setup should not set ports") end,
-      set_profile_override: fn _profile -> flunk("dry-run local setup should not set profiles") end,
-      ensure_all_started: fn -> flunk("dry-run local setup should not start applications") end,
+      file_regular?: fn _path -> flunk("preview should not check a materialized runtime manifest") end,
+      set_workflow_file_path: fn _path -> flunk("preview should not start the daemon") end,
+      set_logs_root: fn _path -> flunk("preview should not set logs") end,
+      set_server_port_override: fn _port -> flunk("preview should not set ports") end,
+      set_profile_override: fn _profile -> flunk("preview should not set profiles") end,
+      ensure_all_started: fn -> flunk("preview should not start applications") end,
       local_run_deps: %{home: fn -> repo end, cwd: fn -> repo end}
     }
 
     assert {:ok, output} =
-             CLI.evaluate(["run", "SID-374", "--repo", repo, "--config-root", config_root, "--dry-run"], deps)
+             CLI.evaluate(["run", "SID-374", "--repo", repo, "--config-root", config_root, "--preview"], deps)
 
     assert output =~ "Run preview"
-    assert output =~ "Target: Issues SID-374"
-    assert output =~ "Mode: issue-batch"
+    assert output =~ "tracker: linear issues=SID-374"
+    assert output =~ "mode: issue-batch"
+    refute File.exists?(config_root)
   end
 
   test "run command with only repo uses the interactive local setup builder" do
     repo = tmp_repo!("symphony-elixir-run-repo-interactive")
 
-    File.write!(Path.join(repo, "symphony.yml"), """
-    version: 1
-    project:
-      slug: symphony
-      name: Symphony
-      repository: https://github.com/apontarelli/symphony
-    delivery:
-      pr_target: main
-    """)
+    write_cli_repo_manifest!(repo)
 
     parent = self()
     {:ok, answers} = Agent.start_link(fn -> ["1", "SID-374", "1", "", "n", "n"] end)
@@ -266,7 +250,7 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:ok, output} = CLI.evaluate(["run", "--repo", repo], deps)
     assert output =~ "Run preview"
-    assert output =~ "Target: Issues SID-374"
+    assert output =~ "tracker: linear issues=SID-374"
     assert_received {:prompt, prompt}
     assert prompt =~ "Target type:"
   end
@@ -274,15 +258,7 @@ defmodule SymphonyElixir.CLITest do
   test "local run startup requires the guardrail acknowledgement" do
     repo = tmp_repo!("symphony-elixir-run-ack")
 
-    File.write!(Path.join(repo, "symphony.yml"), """
-    version: 1
-    project:
-      slug: symphony
-      name: Symphony
-      repository: https://github.com/apontarelli/symphony
-    delivery:
-      pr_target: main
-    """)
+    write_cli_repo_manifest!(repo)
 
     deps = %{
       file_regular?: fn _path -> flunk("unacknowledged local run should not check a runtime manifest") end,
@@ -358,7 +334,7 @@ defmodule SymphonyElixir.CLITest do
     assert export_output =~ "Records: 1"
   end
 
-  test "run command resolves a saved setup and creates missing local config on dry run" do
+  test "saved workflow preview is read-only and renders the full resolved run" do
     root = tmp_repo!("symphony-cli-run-config")
     repo = tmp_repo!("symphony-cli-run-target")
     write_cli_repo_manifest!(repo)
@@ -376,14 +352,64 @@ defmodule SymphonyElixir.CLITest do
       })
     )
 
-    assert {:ok, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
-    assert output =~ "Resolved saved run setup dogfood"
-    assert output =~ Path.join([root, "runs", "dogfood.yml"])
-    assert output =~ "capacity: light"
-    assert File.regular?(Path.join(root, "config.yml"))
+    assert {:ok, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--preview"], daemon_forbidden_deps())
+    assert output =~ "Run preview"
+    assert output =~ "runtime setup: #{Path.join([root, "runs", "dogfood.yml"])}"
+    assert output =~ "max agents: 1"
+    assert output =~ "tracker status: not checked (offline preview)"
+    assert output =~ "safety/landing posture:"
+    refute File.exists?(Path.join(root, "config.yml"))
   end
 
-  test "saved-run dry-run rejects invalid composed runtime config" do
+  test "saved workflow --yes prints the preview before starting" do
+    root = tmp_repo!("symphony-cli-run-yes-config")
+    repo = tmp_repo!("symphony-cli-run-yes-target")
+    write_cli_repo_manifest!(repo)
+    File.mkdir_p!(Path.join(root, "runs"))
+
+    config =
+      SymphonyElixir.LocalConfig.default_config()
+      |> put_in(["tracker", "api_key"], "linear-token")
+
+    File.write!(Path.join(root, "config.yml"), Renderer.to_yaml(config))
+
+    File.write!(
+      Path.join([root, "runs", "dogfood.yml"]),
+      Renderer.to_yaml(%{
+        "repo" => %{"path" => repo},
+        "target" => %{"tracker" => %{"project_slug" => "symphony"}},
+        "mode" => "watch",
+        "capacity" => "light"
+      })
+    )
+
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        puts: fn preview -> send(parent, {:previewed, preview}) end,
+        confirm: fn _preview -> flunk("--yes should not prompt") end,
+        ensure_all_started: fn ->
+          send(parent, :started)
+          {:ok, [:symphony_elixir]}
+        end
+      })
+
+    assert :ok =
+             CLI.evaluate(
+               ["run", "dogfood", "--config-root", root, "--yes", @ack_flag],
+               deps
+             )
+
+    assert_received {:previewed, preview}
+    assert preview =~ "Run preview"
+    assert preview =~ "runtime setup: #{Path.join([root, "runs", "dogfood.yml"])}"
+    assert_received :started
+  after
+    SymphonyElixir.RunSetup.clear_current()
+  end
+
+  test "saved workflow preview rejects invalid composed runtime config" do
     root = tmp_repo!("symphony-cli-run-config")
     repo = tmp_repo!("symphony-cli-run-target")
     write_cli_repo_manifest!(repo)
@@ -407,38 +433,40 @@ defmodule SymphonyElixir.CLITest do
       })
     )
 
-    assert {:error, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+    assert {:error, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--preview"], daemon_forbidden_deps())
     assert output =~ "invalid_manifest"
     assert output =~ "runtime"
     assert output =~ "interval_ms"
   end
 
-  test "usage documents run forms, explicit migration repo, and saved-run acknowledgement" do
+  test "usage documents canonical run forms and removed aliases" do
     assert {:error, usage} = CLI.evaluate(["--unknown"], daemon_forbidden_deps())
-    assert usage =~ "symphony run [target...]"
-    assert usage =~ "symphony run <name>"
-    assert usage =~ @ack_flag
+    assert usage =~ "symphony run <saved-name>"
+    assert usage =~ "symphony run [ISSUE-ID ...]"
+    assert usage =~ "symphony run --workflow <path>"
     assert usage =~ "symphony setup migrate --repo <path>"
-    refute usage =~ "setup migrate [--repo"
+    refute usage =~ @ack_flag
+    refute usage =~ "--dry-run"
+    refute usage =~ "--setup"
   end
 
   test "setup migrate requires an explicit repo" do
     root = tmp_repo!("symphony-cli-migrate")
 
     assert {:error, message} =
-             CLI.evaluate(["setup", "migrate", "--name", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+             CLI.evaluate(["setup", "migrate", "--name", "dogfood", "--config-root", root], daemon_forbidden_deps())
 
     assert message == "setup migrate requires --repo <path>."
     refute File.exists?(Path.join(root, "config.yml"))
     refute File.exists?(Path.join([root, "runs", "dogfood.yml"]))
   end
 
-  test "setup migrate dry-run reports moved fields without writing files" do
+  test "setup migrate previews moved fields without writing files" do
     root = tmp_repo!("symphony-cli-migrate")
     repo = mixed_manifest_repo!("symphony-cli-migrate-repo")
 
     assert {:ok, output} =
-             CLI.evaluate(["setup", "migrate", "--repo", repo, "--name", "dogfood", "--config-root", root, "--dry-run"], daemon_forbidden_deps())
+             CLI.evaluate(["setup", "migrate", "--repo", repo, "--name", "dogfood", "--config-root", root], daemon_forbidden_deps())
 
     assert output =~ "Migration dry run"
     assert output =~ "runtime.tracker.project_slug -> run setup target"
@@ -508,22 +536,13 @@ defmodule SymphonyElixir.CLITest do
     refute usage =~ "symphony setup print"
   end
 
-  test "workflow commands remain available with deprecation guidance" do
-    repo = tmp_repo!("symphony-elixir-workflow-deprecated")
-    File.write!(Path.join(repo, "README.md"), "repo docs
-")
-    File.write!(Path.join(repo, "AGENTS.md"), "repo instructions
-")
-
-    assert {:ok, _init_output} = CLI.evaluate(["setup", "init", "--repo", repo])
-    set_publish_repository!(repo, "https://github.com/example/workflow-repo")
-
-    assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "`symphony workflow` is deprecated; use `symphony setup`."
-    assert output =~ "Workflow check passed"
+  test "workflow command is removed with setup guidance" do
+    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", "/tmp/repo"])
+    assert output =~ "`symphony workflow` was removed"
+    assert output =~ "symphony setup init|check|preview"
   end
 
-  test "run preview renders resolved setup without starting the daemon" do
+  test "explicit runtime files reject preview mode" do
     runtime_path = tmp_runtime_setup!("symphony-elixir-run-preview", max_concurrent_agents: 4)
     parent = self()
 
@@ -535,35 +554,10 @@ defmodule SymphonyElixir.CLITest do
         end
       })
 
-    assert {:ok, output} =
-             CLI.evaluate(
-               [
-                 "run",
-                 "--preview",
-                 "--workflow",
-                 runtime_path,
-                 "--mode",
-                 "drain",
-                 "--max-agents",
-                 "2",
-                 "--no-land",
-                 "--human-review-only"
-               ],
-               deps
-             )
+    assert {:error, output} =
+             CLI.evaluate(["run", "--preview", "--workflow", runtime_path], deps)
 
-    assert output =~ "Run preview"
-    assert output =~ "repo setup:"
-    assert output =~ "runtime setup: #{runtime_path}"
-    assert output =~ "run target:"
-    assert output =~ "marker intersection:"
-    assert output =~ "eligible states: Todo, In Progress, Merging, Rework"
-    assert output =~ "mode: drain"
-    assert output =~ "max agents: 2 (ceiling: 4)"
-    assert output =~ "runner: codex (codex_app_server)"
-    assert output =~ "workspace root:"
-    assert output =~ "restrictive flags: human_review_only, no_land"
-    assert output =~ "source provenance:"
+    assert output =~ "`--preview` requires a saved workflow name"
     refute_received :started
   end
 
@@ -668,7 +662,7 @@ defmodule SymphonyElixir.CLITest do
       })
 
     assert {:error, output} =
-             CLI.evaluate(["run", "--preview", "--workflow", runtime_path, "--max-agents", "3"], deps)
+             CLI.evaluate(["run", "--workflow", runtime_path, "--max-agents", "3"], deps)
 
     assert output =~ "capacity override exceeds deployment ceiling"
     assert output =~ "max agents 3 > ceiling 2"
@@ -683,10 +677,80 @@ defmodule SymphonyElixir.CLITest do
       })
 
     assert {:error, output} =
-             CLI.evaluate(["run", "--preview", "--workflow", runtime_path, "--skip-validation"], deps)
+             CLI.evaluate(["run", "--workflow", runtime_path, "--skip-validation"], deps)
 
     assert output =~ "refusing to weaken repo safety policy"
     assert output =~ "--skip-validation"
+  end
+
+  test "bare invocation in a configured repo opens the picker and can cancel" do
+    repo = tmp_repo!("symphony-elixir-picker")
+    write_cli_repo_manifest!(repo)
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        cwd: fn -> repo end,
+        tty?: fn -> true end,
+        prompt: fn prompt ->
+          send(parent, {:picker_prompt, prompt})
+          "q"
+        end
+      })
+
+    assert {:ok, "Run cancelled."} = CLI.evaluate([], deps)
+    assert_received {:picker_prompt, prompt}
+    assert prompt =~ "Saved workflows:"
+    assert prompt =~ "Create new workflow"
+  end
+
+  test "picker orders default, main, other saved names, then current" do
+    repo = tmp_repo!("symphony-elixir-picker-order")
+    write_cli_repo_manifest!(repo)
+    config_root = Path.join(repo, "config")
+    setup = %{"repo" => %{"path" => repo}, "target" => %{"tracker" => %{"project_slug" => "symphony"}}}
+
+    for name <- ["zeta", "main", "default"] do
+      assert {:ok, _path} = SymphonyElixir.RunSetup.write(name, setup, config_root: config_root)
+    end
+
+    current_path = Path.join([config_root, "runs", ".current.yml"])
+    File.write!(current_path, Renderer.to_yaml(setup))
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        tty?: fn -> true end,
+        prompt: fn prompt ->
+          send(parent, {:picker_prompt, prompt})
+          "q"
+        end
+      })
+
+    assert {:ok, "Run cancelled."} =
+             CLI.evaluate(["run", "--picker", "--repo", repo, "--config-root", config_root], deps)
+
+    assert_received {:picker_prompt, prompt}
+    {default_offset, _} = :binary.match(prompt, "default —")
+    {main_offset, _} = :binary.match(prompt, "main —")
+    {zeta_offset, _} = :binary.match(prompt, "zeta —")
+    {current_offset, _} = :binary.match(prompt, "current —")
+    assert default_offset < main_offset
+    assert main_offset < zeta_offset
+    assert zeta_offset < current_offset
+  end
+
+  test "removed run aliases fail with migration guidance and invalid names fail clearly" do
+    assert {:error, dry_run} = CLI.evaluate(["run", "main", "--dry-run"])
+    assert dry_run =~ "`--dry-run` was removed"
+    assert dry_run =~ "run <saved-name> --preview"
+
+    assert {:error, setup_alias} = CLI.evaluate(["run", "--setup", "main"])
+    assert setup_alias =~ "`--setup` was removed"
+
+    assert {:error, invalid_name} = CLI.evaluate(["run", "Main", "--preview"])
+    assert invalid_name =~ "Invalid saved workflow name"
+    assert invalid_name =~ "lowercase slug"
   end
 
   test "bare invocation outside a repo setup directory prints help" do
@@ -705,7 +769,7 @@ defmodule SymphonyElixir.CLITest do
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
     File.write!(Path.join(repo, "mix.exs"), "defmodule Example.MixProject do\nend\n")
 
-    assert {:ok, output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    assert {:ok, output} = CLI.evaluate(["setup", "init", "--repo", repo])
     assert output =~ "Created symphony.yml"
 
     manifest_path = Path.join(repo, "symphony.yml")
@@ -725,11 +789,11 @@ defmodule SymphonyElixir.CLITest do
     existing_manifest = "version: 1\nproject:\n  name: custom-name\nworkflow:\n  preset: default\n"
     File.write!(manifest_path, existing_manifest)
 
-    assert {:ok, output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    assert {:ok, output} = CLI.evaluate(["setup", "init", "--repo", repo])
     assert output =~ "left unchanged"
     assert File.read!(manifest_path) == existing_manifest
 
-    assert {:ok, output} = CLI.evaluate(["workflow", "init", "--repo", repo, "--force"])
+    assert {:ok, output} = CLI.evaluate(["setup", "init", "--repo", repo, "--force"])
     assert output =~ "Replaced symphony.yml"
     refute File.read!(manifest_path) == existing_manifest
   end
@@ -764,8 +828,8 @@ defmodule SymphonyElixir.CLITest do
       codex_home: .symphony/codex-home
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "Workflow check failed"
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert output =~ "Repo setup check failed"
     assert output =~ "workflow.modules[0]"
     assert output =~ "missing.module"
     assert output =~ "docs.entrypoints[0]"
@@ -802,7 +866,7 @@ defmodule SymphonyElixir.CLITest do
       codex_home: null
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
     assert output =~ "docs.entrypoints[0]"
     assert output =~ "must stay inside the repo"
   end
@@ -822,8 +886,8 @@ defmodule SymphonyElixir.CLITest do
         command: codex app-server
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "Workflow check failed"
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert output =~ "Repo setup check failed"
     assert output =~ "runtime.codex"
     assert output =~ "is runtime setup, not repo setup"
     assert output =~ "Move this field to local config or run setup"
@@ -846,8 +910,8 @@ defmodule SymphonyElixir.CLITest do
           command: "codex app-server"
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "Workflow check failed"
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert output =~ "Repo setup check failed"
     assert output =~ "runtime.runners"
     assert output =~ "is runtime setup, not repo setup"
     assert output =~ "Move this field to local config or run setup"
@@ -871,8 +935,8 @@ defmodule SymphonyElixir.CLITest do
       posture: unattended
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "Workflow check failed"
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert output =~ "Repo setup check failed"
     assert output =~ "project.repository"
     assert output =~ "is required for publish handoff"
     assert output =~ "delivery.pr_target"
@@ -897,7 +961,7 @@ defmodule SymphonyElixir.CLITest do
       posture: unattended
     """)
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
     assert output =~ "project.repository"
     assert output =~ "must be a GitHub repository URL for publish handoff"
     assert output =~ "delivery.pr_target"
@@ -908,15 +972,15 @@ defmodule SymphonyElixir.CLITest do
   test "workflow check gives setup remediation when manifest is missing or malformed" do
     repo = tmp_repo!("symphony-elixir-check-missing")
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
     assert output =~ "symphony.yml not found"
-    assert output =~ "symphony workflow init --repo"
+    assert output =~ "symphony setup init --repo"
 
     File.write!(Path.join(repo, "symphony.yml"), "version: [\n")
 
-    assert {:error, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert {:error, output} = CLI.evaluate(["setup", "check", "--repo", repo])
     assert output =~ "Failed to parse symphony.yml"
-    assert output =~ "symphony workflow init --force"
+    assert output =~ "symphony setup init --force"
   end
 
   test "workflow check passes for a ready manifest" do
@@ -926,11 +990,11 @@ defmodule SymphonyElixir.CLITest do
     File.mkdir_p!(Path.join([repo, ".symphony", "codex-home"]))
     File.write!(Path.join([repo, ".symphony", "codex-home", "AGENTS.md"]), "harness\n")
 
-    assert {:ok, _output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    assert {:ok, _output} = CLI.evaluate(["setup", "init", "--repo", repo])
     set_publish_repository!(repo, "https://github.com/example/ready-repo")
-    assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
+    assert {:ok, output} = CLI.evaluate(["setup", "check", "--repo", repo])
 
-    assert output =~ "Workflow check passed"
+    assert output =~ "Repo setup check passed"
     assert output =~ "preset: default"
     assert output =~ "modules:"
     assert output =~ "tracker.linear"
@@ -943,8 +1007,8 @@ defmodule SymphonyElixir.CLITest do
   test "committed root symphony.yml validates and compiles through the daemon loader" do
     repo = repo_root!()
 
-    assert {:ok, output} = CLI.evaluate(["workflow", "check", "--repo", repo])
-    assert output =~ "Workflow check passed"
+    assert {:ok, output} = CLI.evaluate(["setup", "check", "--repo", repo])
+    assert output =~ "Repo setup check passed"
     assert output =~ "resolved: apontarelli/symphony:main"
 
     assert {:ok, %{config: config, prompt: prompt}} = Manifest.load(Path.join(repo, "symphony.yml"))
@@ -970,17 +1034,17 @@ defmodule SymphonyElixir.CLITest do
     File.write!(Path.join(repo, "README.md"), "repo docs\n")
     File.write!(Path.join(repo, "AGENTS.md"), "repo instructions\n")
 
-    assert {:ok, _output} = CLI.evaluate(["workflow", "init", "--repo", repo])
+    assert {:ok, _output} = CLI.evaluate(["setup", "init", "--repo", repo])
     set_publish_repository!(repo, "https://github.com/example/print-repo")
 
-    assert {:ok, output} = CLI.evaluate(["workflow", "print", "--repo", repo])
-    assert output =~ "Resolved workflow"
+    assert {:ok, output} = CLI.evaluate(["setup", "preview", "--repo", repo])
+    assert output =~ "Resolved repo setup"
     assert output =~ "preset: default"
     assert output =~ "repo.docs"
     assert output =~ "publish target:"
     assert output =~ "resolved: example/print-repo:main"
 
-    assert {:ok, compiled_output} = CLI.evaluate(["workflow", "print", "--repo", repo, "--compiled"])
+    assert {:ok, compiled_output} = CLI.evaluate(["setup", "preview", "--repo", repo, "--compiled"])
     assert compiled_output =~ "Compiled workflow"
     assert compiled_output =~ "publish_target:"
     assert compiled_output =~ "display: \"example/print-repo:main\""
@@ -999,7 +1063,7 @@ defmodule SymphonyElixir.CLITest do
     repo = repo_root!()
 
     assert {:ok, compiled} = Manifest.load(Path.join(repo, "symphony.yml"))
-    assert {:ok, output} = CLI.evaluate(["workflow", "print", "--repo", repo, "--compiled"])
+    assert {:ok, output} = CLI.evaluate(["setup", "preview", "--repo", repo, "--compiled"])
 
     assert output =~ "Compiled workflow"
     assert output =~ Renderer.to_yaml(compiled.config)
