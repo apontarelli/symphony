@@ -42,6 +42,10 @@ wraps that argv only to preserve app-server stdin and cleanup behavior. Remote w
 the argv into an explicit SSH shell command; Symphony supervises the local ssh port, but remote
 process-group and descendant cleanup are not guaranteed by this local primitive.
 
+Codex app-server remains the only production adapter today. The next approved adapter target and
+required OpenCode contract gaps are recorded in
+[`docs/agent_runtime_adapters.md`](docs/agent_runtime_adapters.md).
+
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
@@ -719,6 +723,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
+- `docs/agent_runtime_adapters.md`: production `AgentRuntime` adapter planning and OpenCode scope
 - `../symphony.yml`: root dogfood repo setup manifest used by CLI `setup check`/`preview`
 - `../.codex/`: repo-local Codex/Symphony helpers used by this fork's own automation runs; target
   repos do not need to install these globally for bundled workflow modules to run
