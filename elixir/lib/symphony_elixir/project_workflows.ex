@@ -122,7 +122,7 @@ defmodule SymphonyElixir.ProjectWorkflows do
        %{
          name: name,
          path: path,
-         target: target_summary(setup),
+         target: RunSetup.target_summary(setup),
          mode: mode,
          capacity: capacity,
          source: source,
@@ -132,7 +132,7 @@ defmodule SymphonyElixir.ProjectWorkflows do
   end
 
   defp mode_label(setup) do
-    case Map.get(setup, "mode", "continuous") do
+    case RunSetup.persisted_mode_label(setup) do
       mode when is_binary(mode) -> {:ok, mode}
       _other -> {:error, "mode must be a string"}
     end
@@ -158,79 +158,6 @@ defmodule SymphonyElixir.ProjectWorkflows do
         {:error, "capacity must be a profile name or custom capacity map"}
     end
   end
-
-  defp target_summary(setup) do
-    target = map_value(setup, "target")
-    tracker = map_value(target, "tracker")
-    values = Map.merge(tracker, target)
-
-    issue_target(values) ||
-      project_target_summary(values) ||
-      team_target(values) ||
-      query_file_target(values) ||
-      query_target(values) ||
-      "Unknown target"
-  end
-
-  defp issue_target(values) do
-    case non_empty_list(values["issue_ids"]) do
-      nil -> nil
-      issue_ids -> "Issues #{Enum.join(issue_ids, ", ")}"
-    end
-  end
-
-  defp project_target_summary(values) do
-    if values["type"] == "project" or present?(values["project_slug"]) or present?(values["project_id"]) do
-      project_target(values)
-    end
-  end
-
-  defp team_target(values) do
-    team = first_present([values["team_key"], values["name"]])
-
-    if values["type"] == "team" or present?(team) do
-      if team, do: "Linear team #{team}", else: "Linear team"
-    end
-  end
-
-  defp query_file_target(values) do
-    if present?(values["query_file"]), do: "Linear query file #{values["query_file"]}"
-  end
-
-  defp query_target(values) do
-    if values["type"] in ["query", "query_manual"] or present?(values["query"]), do: "Linear query"
-  end
-
-  defp project_target(values) do
-    selector = values["project_slug"] || values["project_id"]
-    name = values["name"]
-
-    cond do
-      present?(name) and present?(selector) and name != selector -> "Linear project #{name} (#{selector})"
-      present?(selector) -> "Linear project #{selector}"
-      present?(name) -> "Linear project #{name}"
-      true -> "Linear project"
-    end
-  end
-
-  defp map_value(map, key) do
-    case Map.get(map, key) do
-      value when is_map(value) -> value
-      _other -> %{}
-    end
-  end
-
-  defp non_empty_list(value) when is_list(value) do
-    values = Enum.filter(value, &present?/1)
-    if values == [], do: nil, else: values
-  end
-
-  defp non_empty_list(_value), do: nil
-
-  defp first_present(values), do: Enum.find(values, &present?/1)
-
-  defp present?(value) when is_binary(value), do: String.trim(value) != ""
-  defp present?(_value), do: false
 
   defp positive_integer?(value), do: is_integer(value) and value > 0
 

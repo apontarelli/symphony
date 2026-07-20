@@ -149,6 +149,15 @@ export LINEAR_API_KEY=...
 profiles. The builder previews the resolved run setup before confirmation and can save named setups
 to `~/.config/symphony/runs/<name>.yml`. Explicit issue IDs use issue-batch mode by default.
 
+Use `symphony list` to inspect the setups that belong to the active repo without creating config,
+materializing runtime manifests, contacting Linear, or starting the daemon. Saved `default` and
+`main` setups appear first, remaining saved names are sorted, and `.current.yml` appears last as a
+labelled recent/unsaved entry when present:
+
+```bash
+../bin/symphony list --repo /path/to/repo --no-env-file
+```
+
 When no `--workflow` is passed, the launcher looks for `symphony.runtime.yml`; if only a checked-in
 setup-only `symphony.yml` is present, bare `symphony` enters the interactive run path and fails
 before side effects unless required local runtime scope and secrets are available.

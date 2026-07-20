@@ -14,7 +14,7 @@ defmodule SymphonyElixir.CLI do
     port: :integer,
     profile: :string
   ]
-  @list_switches [repo: :string, config_root: :string, help: :boolean]
+  @list_switches [repo: :string, config_root: :string, no_env_file: :boolean, help: :boolean]
   @run_switches @switches ++
                   [
                     allow_missing_capabilities: :boolean,

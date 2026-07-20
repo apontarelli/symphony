@@ -155,6 +155,63 @@ defmodule SymphonyElixir.RunSetup do
     end
   end
 
+  @spec run_target(setup()) :: map()
+  def run_target(setup) when is_map(setup) do
+    setup = LocalConfig.normalize_keys(setup)
+    target = map_value(setup, "target")
+    tracker = map_value(target, "tracker")
+
+    target
+    |> Map.drop(["tracker"])
+    |> Map.merge(Map.take(tracker, @tracker_target_keys))
+    |> Map.put("mode", persisted_mode_label(setup))
+    |> Map.put("capacity", capacity_label(setup))
+  end
+
+  @spec persisted_mode_label(setup()) :: term()
+  def persisted_mode_label(setup) when is_map(setup) do
+    setup = LocalConfig.normalize_keys(setup)
+    Map.get(setup, "mode", default_mode_for_target(map_value(setup, "target")))
+  end
+
+  @spec target_summary(setup()) :: String.t()
+  def target_summary(setup) when is_map(setup) do
+    setup
+    |> run_target()
+    |> summarize_target()
+  end
+
+  defp default_mode_for_target(%{"type" => type}) when type in ["query", "query_file", "query_manual"], do: "query"
+  defp default_mode_for_target(%{"type" => "issues"}), do: "issue-batch"
+  defp default_mode_for_target(_target), do: "continuous"
+
+  defp summarize_target(%{"type" => "issues", "issue_ids" => issue_ids}) do
+    "Issues #{Enum.join(issue_ids || [], ", ")}"
+  end
+
+  defp summarize_target(%{"type" => "project", "name" => name, "project_id" => project_id})
+       when is_binary(name) and is_binary(project_id) do
+    "Linear project #{name} (#{project_id})"
+  end
+
+  defp summarize_target(%{"type" => "project", "project_id" => project_id}), do: "Linear project #{project_id}"
+  defp summarize_target(%{"type" => "project", "project_slug" => slug}), do: "Linear project #{slug}"
+  defp summarize_target(%{"type" => "project", "name" => name}), do: "Linear project #{name}"
+  defp summarize_target(%{"type" => "project"}), do: "Linear project"
+  defp summarize_target(%{"type" => "team", "team_key" => key}), do: "Linear team #{key}"
+  defp summarize_target(%{"type" => "query", "query_file" => path}), do: "Linear query filter file #{path}"
+  defp summarize_target(%{"type" => "query"}), do: "Linear query filter"
+  defp summarize_target(%{"type" => "query_file", "query_file" => path}), do: "Linear query file #{path}"
+  defp summarize_target(%{"type" => "query_manual"}), do: "Manual Linear query"
+  defp summarize_target(_target), do: "Unknown target"
+
+  defp map_value(map, key) do
+    case Map.get(map, key) do
+      value when is_map(value) -> value
+      _other -> %{}
+    end
+  end
+
   @spec repo_setup_valid?(Path.t()) :: boolean()
   def repo_setup_valid?(cwd) when is_binary(cwd) do
     repo_root = Path.expand(cwd)

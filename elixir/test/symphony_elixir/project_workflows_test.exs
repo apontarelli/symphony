@@ -108,6 +108,23 @@ defmodule SymphonyElixir.ProjectWorkflowsTest do
     assert Enum.map(workflows, & &1.target) == ["Linear project", "Linear project Named project"]
   end
 
+  test "derives missing modes and target summaries from canonical run setup rules", context do
+    write_setup!(context.config_root, "issues", %{
+      "repo" => %{"path" => context.repo},
+      "target" => %{"type" => "issues", "tracker" => %{"issue_ids" => ["SID-1"]}}
+    })
+
+    write_setup!(context.config_root, "query", %{
+      "repo" => %{"path" => context.repo},
+      "target" => %{"type" => "query_manual", "name" => "Named query"}
+    })
+
+    assert {:ok, workflows, []} = ProjectWorkflows.list(context.repo, config_root: context.config_root)
+    assert Enum.find(workflows, &(&1.name == "issues")).mode == "issue-batch"
+    assert Enum.find(workflows, &(&1.name == "query")).mode == "query"
+    assert Enum.find(workflows, &(&1.name == "query")).target == "Manual Linear query"
+  end
+
   test "requires a valid repo setup manifest", context do
     repo = Path.join(context.root, "not-configured")
     File.mkdir_p!(repo)

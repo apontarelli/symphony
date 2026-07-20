@@ -175,7 +175,7 @@ run_elixir() {
   exec mise exec -- ./bin/symphony "${args[@]}" "$@"
 }
 
-prepare_elixir_cli() {
+prepare_elixir_cli_environment() {
   local symphony_home="$1"
 
   [[ -d "$symphony_home" ]] || die "SYMPHONY_HOME does not exist: $symphony_home"
@@ -189,6 +189,12 @@ prepare_elixir_cli() {
   }
 
   cd "$symphony_home"
+}
+
+prepare_elixir_cli() {
+  local symphony_home="$1"
+
+  prepare_elixir_cli_environment "$symphony_home"
 
   if [[ "${SYMPHONY_SKIP_BUILD:-0}" != "1" ]]; then
     if [[ ! -d deps ]]; then
@@ -199,6 +205,18 @@ prepare_elixir_cli() {
   elif [[ ! -x ./bin/symphony ]]; then
     printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
     printf 'hint: rerun without SYMPHONY_SKIP_BUILD=1 so the launcher can build it\n' >&2
+    exit 127
+  fi
+}
+
+prepare_read_only_elixir_cli() {
+  local symphony_home="$1"
+
+  prepare_elixir_cli_environment "$symphony_home"
+
+  if [[ ! -x ./bin/symphony ]]; then
+    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
+    printf 'hint: build it explicitly with: cd %s && mise exec -- mix escript.build\n' "$symphony_home" >&2
     exit 127
   fi
 }
@@ -250,7 +268,7 @@ run_list_cli() {
   symphony_home="$(expand_path "$symphony_home")"
   symphony_home="$(absolute_path "$symphony_home")"
 
-  prepare_elixir_cli "$symphony_home"
+  prepare_read_only_elixir_cli "$symphony_home"
 
   exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- ./bin/symphony "${args[@]}"
 }

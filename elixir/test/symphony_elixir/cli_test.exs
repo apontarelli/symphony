@@ -1057,7 +1057,7 @@ defmodule SymphonyElixir.CLITest do
   end
 
   test "list help and invalid arguments use command-specific usage" do
-    assert {:ok, help} = CLI.evaluate(["list", "--help"], daemon_forbidden_deps())
+    assert {:ok, help} = CLI.evaluate(["list", "--help", "--no-env-file"], daemon_forbidden_deps())
     assert help =~ "symphony list [--repo <path>]"
     refute help =~ "symphony run [target...]"
 

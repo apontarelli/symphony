@@ -82,7 +82,7 @@ defmodule SymphonyElixir.LocalRun do
     [
       "Run preview",
       "Runtime setup: #{workflow_path}",
-      "Target: #{target_summary(target, tracker)}",
+      "Target: #{RunSetup.target_summary(%{"target" => Map.put(target, "tracker", tracker)})}",
       "Mode: #{Map.get(target, "mode", "continuous")}",
       "Workspace root: #{Map.get(workspace, "root", @default_workspace_root)}",
       "Capacity: #{capacity_name} (agents=#{max_agents}, startups=#{max_startups})",
@@ -161,7 +161,7 @@ defmodule SymphonyElixir.LocalRun do
   defp materialize_loaded_setup(run_setup, path, config_root, local_config) do
     case RunSetup.runtime_manifest(local_config, run_setup) do
       {:ok, runtime_manifest} ->
-        {:ok, put_run_target(runtime_manifest, run_target_from_run_setup(run_setup)), current_setup_path(config_root)}
+        {:ok, put_run_target(runtime_manifest, RunSetup.run_target(run_setup)), current_setup_path(config_root)}
 
       {:error, reason} ->
         {:error, "Invalid saved run setup #{path}: #{inspect(reason)}"}
@@ -217,23 +217,6 @@ defmodule SymphonyElixir.LocalRun do
       |> Map.put("target", run_target)
     end)
   end
-
-  defp run_target_from_run_setup(run_setup) do
-    run_setup = LocalConfig.normalize_keys(run_setup)
-    target = Map.get(run_setup, "target", %{})
-    tracker = Map.get(target, "tracker", %{})
-
-    target
-    |> Map.drop(["tracker"])
-    |> Map.merge(Map.take(tracker, @tracker_target_keys))
-    |> Map.put("mode", Map.get(run_setup, "mode", default_mode_for_run_setup_target(target)))
-    |> Map.put("capacity", RunSetup.capacity_label(run_setup))
-  end
-
-  defp default_mode_for_run_setup_target(%{"type" => "query_file"}), do: "query"
-  defp default_mode_for_run_setup_target(%{"type" => "query_manual"}), do: "query"
-  defp default_mode_for_run_setup_target(%{"type" => "issues"}), do: "issue-batch"
-  defp default_mode_for_run_setup_target(_target), do: "continuous"
 
   defp repo_root(opts) do
     opts
@@ -727,24 +710,6 @@ defmodule SymphonyElixir.LocalRun do
     |> Map.put("mode", mode)
     |> Map.put("capacity", capacity_name)
   end
-
-  defp target_summary(%{"type" => "issues", "issue_ids" => issue_ids}, _tracker) do
-    "Issues #{Enum.join(issue_ids || [], ", ")}"
-  end
-
-  defp target_summary(%{"type" => "project", "name" => name, "project_id" => project_id}, _tracker)
-       when is_binary(name) and is_binary(project_id) do
-    "Linear project #{name} (#{project_id})"
-  end
-
-  defp target_summary(%{"type" => "project", "project_id" => project_id}, _tracker), do: "Linear project #{project_id}"
-  defp target_summary(%{"type" => "project", "project_slug" => slug}, _tracker), do: "Linear project #{slug}"
-  defp target_summary(%{"type" => "team", "team_key" => key}, _tracker), do: "Linear team #{key}"
-  defp target_summary(%{"type" => "query", "query_file" => path}, _tracker), do: "Linear query filter file #{path}"
-  defp target_summary(%{"type" => "query"}, _tracker), do: "Linear query filter"
-  defp target_summary(%{"type" => "query_file", "query_file" => path}, _tracker), do: "Linear query file #{path}"
-  defp target_summary(%{"type" => "query_manual"}, _tracker), do: "Manual Linear query"
-  defp target_summary(_target, _tracker), do: "Unknown target"
 
   defp discovery_summary(%{"discovery" => discovery}) when is_binary(discovery), do: "Discovery: #{discovery}"
   defp discovery_summary(_target), do: nil
