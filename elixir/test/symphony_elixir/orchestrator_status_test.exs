@@ -1964,7 +1964,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       poll_interval_ms: 5_000
     )
 
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
     orchestrator_name = Module.concat(__MODULE__, :ImmediateStartupOrchestrator)
+    started_at_ms = System.monotonic_time(:millisecond)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     on_exit(fn ->
@@ -1973,18 +1976,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
-    assert %{polling: %{checking?: true}} =
-             wait_for_snapshot(
-               pid,
-               fn
-                 %{polling: %{checking?: true}} ->
-                   true
-
-                 _ ->
-                   false
-               end,
-               1_500
-             )
+    assert_receive {:memory_tracker_resolve_candidate_issues, nil}, 1_500
+    assert System.monotonic_time(:millisecond) - started_at_ms <= 1_500
 
     assert %{
              polling: %{
@@ -2725,21 +2718,6 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   test "status dashboard coalesces rapid updates to one render per interval" do
     dashboard_name = Module.concat(__MODULE__, :RenderDashboard)
     parent = self()
-    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
-
-    on_exit(fn ->
-      if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
-        case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-      end
-    end)
-
-    if is_pid(orchestrator_pid) do
-      assert :ok =
-               Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
-    end
 
     {:ok, pid} =
       StatusDashboard.start_link(

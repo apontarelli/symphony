@@ -29,6 +29,7 @@ defmodule SymphonyElixir.TestSupport do
           write_manifest_file!: 2,
           restore_env: 2,
           stop_default_http_server: 0,
+          stop_default_orchestrator: 0,
           read_pid: 1,
           os_pid_alive?: 1,
           eventually: 1,
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.TestSupport do
 
       setup do
         SymphonyElixir.TestSupport.ensure_application_started!()
+        stop_default_orchestrator()
 
         workflow_root =
           Path.join(
@@ -159,6 +161,31 @@ defmodule SymphonyElixir.TestSupport do
     case Application.ensure_all_started(:symphony_elixir) do
       {:ok, _started_apps} -> :ok
       {:error, reason} -> raise "failed to start symphony_elixir application: #{inspect(reason)}"
+    end
+  end
+
+  def stop_default_orchestrator do
+    children =
+      case Process.whereis(SymphonyElixir.Supervisor) do
+        pid when is_pid(pid) -> Supervisor.which_children(pid)
+        nil -> []
+      end
+
+    case Enum.find(children, fn
+           {SymphonyElixir.Orchestrator, _pid, _type, _modules} -> true
+           _child -> false
+         end) do
+      {SymphonyElixir.Orchestrator, _pid, _type, _modules} ->
+        case Supervisor.terminate_child(
+               SymphonyElixir.Supervisor,
+               SymphonyElixir.Orchestrator
+             ) do
+          :ok -> :ok
+          {:error, :not_found} -> :ok
+        end
+
+      nil ->
+        :ok
     end
   end
 

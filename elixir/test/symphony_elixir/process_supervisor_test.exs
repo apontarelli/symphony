@@ -40,7 +40,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
       port = ProcessSupervisor.port(process)
 
-      assert_receive {^port, {:data, {:eol, "ARGC:2"}}}
+      assert_receive {^port, {:data, {:eol, "ARGC:2"}}}, 1_000
       assert_receive {^port, {:data, {:eol, "ARG1:literal $SYMP_PROCESS_SUPERVISOR_ENV"}}}
       assert_receive {^port, {:data, {:eol, "ARG2:two words"}}}
       assert_receive {^port, {:data, {:eol, "PWD:" <> child_pwd}}}
@@ -98,6 +98,93 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     after
       Port.close(port)
     end
+  end
+
+  test "from_port transfers ownership from the caller and forwards commands and output" do
+    caller = self()
+
+    tracer =
+      spawn(fn ->
+        receive do
+          message -> send(caller, message)
+        end
+      end)
+
+    port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary, :exit_status])
+
+    :erlang.trace_pattern({:erlang, :port_connect, 2}, true, [])
+    :erlang.trace(caller, true, [:call, {:tracer, tracer}])
+
+    process =
+      try do
+        ProcessSupervisor.from_port(port)
+      after
+        :erlang.trace(caller, false, [:call])
+        :erlang.trace_pattern({:erlang, :port_connect, 2}, false, [])
+      end
+
+    owner = process.owner
+
+    try do
+      assert_receive {:trace, ^caller, :call, {:erlang, :port_connect, [^port, ^owner]}}
+      assert {:connected, ^owner} = Port.info(port, :connected)
+      assert Port.command(port, "adopted\n")
+      assert_receive {^port, {:data, "adopted\n"}}
+
+      owner_monitor = Process.monitor(owner)
+      assert :ok = ProcessSupervisor.stop(process)
+      assert_receive {:DOWN, ^owner_monitor, :process, ^owner, _reason}
+    after
+      ProcessSupervisor.kill(process)
+    end
+  end
+
+  test "forwards exit status and terminates lifecycle owner after normal exit" do
+    assert {:ok, process} = ProcessSupervisor.start(["/bin/sh", "-c", "exit 7"])
+    port = process.port
+    owner = process.owner
+    owner_monitor = Process.monitor(owner)
+    on_exit(fn -> Process.exit(owner, :kill) end)
+
+    assert_receive {^port, {:exit_status, 7}}
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, _reason}
+  end
+
+  test "from_port reports adoption failure for a closed port" do
+    port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary, :exit_status])
+    Port.close(port)
+
+    assert_raise ArgumentError, ~r/failed to adopt port:/, fn ->
+      ProcessSupervisor.from_port(port)
+    end
+
+    assert :undefined = :erlang.port_info(port)
+  end
+
+  test "from_port closes an adopted port when its caller exits" do
+    parent = self()
+
+    caller =
+      spawn(fn ->
+        port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary, :exit_status])
+        process = ProcessSupervisor.from_port(port, cleanup: :port_only)
+        send(parent, {:adopted, port, process.owner})
+
+        receive do
+          :never -> :ok
+        end
+      end)
+
+    on_exit(fn -> Process.exit(caller, :kill) end)
+    assert_receive {:adopted, port, owner}
+    on_exit(fn -> Process.exit(owner, :kill) end)
+    assert {:connected, ^owner} = Port.info(port, :connected)
+
+    Process.exit(caller, :kill)
+
+    assert eventually(fn ->
+             if :erlang.port_info(port) == :undefined and not Process.alive?(owner), do: :closed
+           end) == :closed
   end
 
   test "await_startup normalizes response timeout and stops launched process" do
@@ -193,6 +280,44 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     end
   end
 
+  test "stop escalates from TERM to KILL while the port remains live" do
+    test_root =
+      Path.join(System.tmp_dir!(), "symphony-process-supervisor-stop-escalation-#{System.unique_integer([:positive])}")
+
+    try do
+      fake_binary = Path.join(test_root, "term-resistant-runner")
+      pid_file = Path.join(test_root, "runner.pid")
+      term_file = Path.join(test_root, "runner.term")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(fake_binary, """
+      #!/bin/sh
+      trap 'printf "TERM\\n" > "#{term_file}"' TERM
+      printf '%s\\n' "$$" > "#{pid_file}"
+
+      remaining=30
+      while [ "$remaining" -gt 0 ]; do
+        sleep 1
+        remaining=$((remaining - 1))
+      done
+      """)
+
+      File.chmod!(fake_binary, 0o755)
+
+      assert {:ok, process} = ProcessSupervisor.start([fake_binary])
+      os_pid = eventually(fn -> read_pid(pid_file) end)
+      assert os_pid_alive?(os_pid)
+
+      assert :ok = ProcessSupervisor.stop(process)
+
+      assert eventually(fn -> if File.exists?(term_file), do: :term_received end) == :term_received
+      refute os_pid_alive?(os_pid)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "kill terminates launched process" do
     test_root = Path.join(System.tmp_dir!(), "symphony-process-supervisor-kill-#{System.unique_integer([:positive])}")
 
@@ -224,6 +349,141 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     end
   end
 
+  test "kill ignores cached OS PID after port and owner terminate" do
+    {stale_process, sentinel_port, sentinel_os_pid} = stale_process_with_sentinel()
+
+    try do
+      assert os_pid_alive?(sentinel_os_pid)
+
+      ProcessSupervisor.kill(stale_process)
+
+      assert os_pid_alive?(sentinel_os_pid)
+    after
+      close_live_port(sentinel_port)
+    end
+  end
+
+  test "repeated stop ignores cached OS PID after port and owner terminate" do
+    {stale_process, sentinel_port, sentinel_os_pid} = stale_process_with_sentinel()
+
+    try do
+      assert os_pid_alive?(sentinel_os_pid)
+
+      ProcessSupervisor.stop(stale_process)
+      assert os_pid_alive?(sentinel_os_pid)
+
+      ProcessSupervisor.stop(stale_process)
+      assert os_pid_alive?(sentinel_os_pid)
+    after
+      close_live_port(sentinel_port)
+    end
+  end
+
+  test "stops the root and descendants when the launching process exits" do
+    if ProcessSupervisor.descendant_cleanup_supported?() do
+      test_root =
+        Path.join(System.tmp_dir!(), "symphony-process-supervisor-owner-death-#{System.unique_integer([:positive])}")
+
+      child_pid_file = Path.join(test_root, "child.pid")
+      root_pid_file = Path.join(test_root, "root.pid")
+      {:ok, cleanup_agent} = Agent.start(fn -> %{} end)
+
+      on_exit(fn ->
+        cleanup_supervisor_test_processes(cleanup_agent)
+        Agent.stop(cleanup_agent)
+        File.rm_rf(test_root)
+      end)
+
+      fake_binary = Path.join(test_root, "fake-runner")
+      File.mkdir_p!(test_root)
+
+      File.write!(fake_binary, """
+      #!/bin/sh
+      printf '%s\\n' "$$" > "#{root_pid_file}"
+      sleep 60 &
+      printf '%s\\n' "$!" > "#{child_pid_file}"
+
+      while :; do
+        sleep 1
+      done
+      """)
+
+      File.chmod!(fake_binary, 0o755)
+      parent = self()
+
+      launcher =
+        spawn(fn ->
+          receive do
+            :launch ->
+              assert {:ok, process} = ProcessSupervisor.start([fake_binary])
+              Agent.update(cleanup_agent, &Map.put(&1, :process, process))
+              send(parent, {:launched, process})
+
+              receive do
+                :never -> :ok
+              end
+          end
+        end)
+
+      Agent.update(cleanup_agent, &Map.put(&1, :launcher, launcher))
+      send(launcher, :launch)
+
+      assert_receive {:launched, process}
+      root_pid = ProcessSupervisor.identity(process).os_pid
+      assert eventually(fn -> if read_pid(root_pid_file) == root_pid, do: root_pid, else: nil end) == root_pid
+      child_pid = eventually(fn -> read_pid(child_pid_file) end)
+      assert os_pid_alive?(root_pid)
+      assert os_pid_alive?(child_pid)
+
+      Process.exit(launcher, :kill)
+
+      assert eventually(fn -> if os_pid_alive?(root_pid), do: nil, else: :stopped end) == :stopped
+      assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+    else
+      assert ProcessSupervisor.descendant_cleanup_supported?() == false
+    end
+  end
+
+  defp stale_process_with_sentinel do
+    assert {:ok, process} = ProcessSupervisor.start(["/bin/cat"])
+    owner_monitor = Process.monitor(process.owner)
+
+    assert :ok = ProcessSupervisor.stop(process)
+    assert_receive {:DOWN, ^owner_monitor, :process, owner, :normal}
+    assert owner == process.owner
+    assert :erlang.port_info(process.port) == :undefined
+
+    sentinel_port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary])
+    on_exit(fn -> close_live_port(sentinel_port) end)
+    assert {:os_pid, sentinel_os_pid} = :erlang.port_info(sentinel_port, :os_pid)
+
+    {%{process | os_pid: sentinel_os_pid}, sentinel_port, sentinel_os_pid}
+  end
+
+  defp close_live_port(port) do
+    if :erlang.port_info(port) != :undefined do
+      Port.close(port)
+    end
+  end
+
+  defp cleanup_supervisor_test_processes(cleanup_agent) do
+    cleanup_state = Agent.get(cleanup_agent, & &1)
+
+    case cleanup_state do
+      %{process: %ProcessSupervisor{} = process} -> ProcessSupervisor.kill(process)
+      _ -> :ok
+    end
+
+    cleanup_state
+    |> Map.take([:launcher])
+    |> Map.values()
+    |> Enum.each(fn pid ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :kill)
+      end
+    end)
+  end
+
   defp do_descendant_cleanup_test do
     test_root =
       Path.join(System.tmp_dir!(), "symphony-process-supervisor-descendant-cleanup-#{System.unique_integer([:positive])}")
@@ -248,6 +508,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       File.chmod!(fake_binary, 0o755)
 
       assert {:ok, process} = ProcessSupervisor.start([fake_binary])
+      on_exit(fn -> ProcessSupervisor.kill(process) end)
       child_pid = eventually(fn -> read_pid(child_pid_file) end)
       assert os_pid_alive?(child_pid)
 
@@ -255,20 +516,6 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
       assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
     after
-      case File.read(child_pid_file) do
-        {:ok, pid_text} ->
-          pid_text
-          |> String.trim()
-          |> Integer.parse()
-          |> case do
-            {pid, ""} -> System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
-            _ -> :ok
-          end
-
-        _ ->
-          :ok
-      end
-
       File.rm_rf(test_root)
     end
   end

@@ -206,10 +206,20 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "workflow store start_link and poll callback cover missing-file error paths" do
-    ensure_workflow_store_running()
+    supervisor_pid = Process.whereis(SymphonyElixir.Supervisor)
     existing_path = Workflow.workflow_file_path()
     manual_path = Path.join(Path.dirname(existing_path), "manual-symphony.yml")
     missing_path = Path.join(Path.dirname(existing_path), "manual-missing-symphony.yml")
+
+    on_exit(fn ->
+      restore_workflow_store(existing_path)
+    end)
+
+    assert is_pid(supervisor_pid)
+    ensure_workflow_store_running()
+
+    assert Process.whereis(Orchestrator) == nil,
+           "shared Orchestrator must be stopped before selecting a missing workflow"
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
 
@@ -242,14 +252,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert removed_state.workflow.prompt == "Manual workflow prompt"
     assert_receive :poll, 1_500
 
-    Process.exit(manual_pid, :normal)
-    restart_result = Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
-
-    assert match?({:ok, _pid}, restart_result) or
-             match?({:error, {:already_started, _pid}}, restart_result)
-
     Workflow.set_workflow_file_path(existing_path)
-    WorkflowStore.force_reload()
+    assert :ok = GenServer.stop(manual_pid)
+    refute Process.alive?(manual_pid)
+
+    assert {:ok, supervised_workflow_store_pid} =
+             Supervisor.restart_child(SymphonyElixir.Supervisor, WorkflowStore)
+
+    assert Process.whereis(WorkflowStore) == supervised_workflow_store_pid
+    assert supervised_child_pid(WorkflowStore) == supervised_workflow_store_pid
+
+    assert Process.whereis(SymphonyElixir.Supervisor) == supervisor_pid
+    assert Process.alive?(supervisor_pid)
   end
 
   test "tracker delegates to memory and linear adapters" do
@@ -278,6 +292,19 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert Tracker.adapter() == Adapter
+  end
+
+  test "memory tracker resolves candidates without an API key" do
+    previous_linear_api_key = System.get_env("LINEAR_API_KEY")
+    on_exit(fn -> restore_env("LINEAR_API_KEY", previous_linear_api_key) end)
+    System.delete_env("LINEAR_API_KEY")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil
+    )
+
+    assert {:ok, []} = Tracker.fetch_candidate_issues()
   end
 
   test "linear adapter delegates reads and validates mutation responses" do
@@ -1341,6 +1368,29 @@ defmodule SymphonyElixir.ExtensionsTest do
         {:error, {:already_started, _pid}} -> :ok
       end
     end
+  end
+
+  defp restore_workflow_store(workflow_path) do
+    Workflow.set_workflow_file_path(workflow_path)
+
+    case Process.whereis(WorkflowStore) do
+      pid when is_pid(pid) ->
+        if supervised_child_pid(WorkflowStore) != pid do
+          GenServer.stop(pid)
+        end
+
+      nil ->
+        :ok
+    end
+
+    ensure_workflow_store_running()
+  end
+
+  defp supervised_child_pid(child_id) do
+    Enum.find_value(Supervisor.which_children(SymphonyElixir.Supervisor), fn
+      {^child_id, pid, _type, _modules} when is_pid(pid) -> pid
+      _child -> nil
+    end)
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

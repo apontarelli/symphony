@@ -16,6 +16,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     workspace = Path.join(test_root, "workspace")
     script = Path.join(test_root, "fake-opencode.py")
     trace = Path.join(test_root, "requests.trace")
+    contract_trace = Path.join(test_root, "contract.trace")
     child_pid_file = Path.join(test_root, "child.pid")
     python = System.find_executable("python3") || flunk("python3 is required for the fake OpenCode server")
 
@@ -34,6 +35,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     {:ok,
      context: %{
        child_pid_file: child_pid_file,
+       contract_trace: contract_trace,
        python: python,
        script: script,
        trace: trace,
@@ -180,6 +182,208 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
       assert %Event{event: :tool_result, payload: %{success: true, output: "contents"}} =
                Enum.at(events, 3)
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "applies the selected OpenCode profile command and model request shape", %{context: context} do
+    base_runner = runner_config(context, :failure)
+    profile_runner = runner_config(context, :success)
+
+    runner =
+      Map.merge(base_runner, %{
+        "agent" => "contract-agent",
+        "model" => "base/provider",
+        "execution_profiles" => %{
+          "implementation" => %{
+            "command" => profile_runner["command"],
+            "model" => "profile/model"
+          }
+        }
+      })
+
+    assert {:ok, session} =
+             OpenCodeServer.start(context.workspace, issue(),
+               runner_config: runner,
+               execution_profile: "implementation",
+               startup_timeout_ms: 1_000
+             )
+
+    try do
+      assert {:ok, _result} =
+               OpenCodeServer.send_turn(session, "Complete profile prompt", issue(), [])
+
+      [startup | requests] = contract_records(context)
+      assert Enum.at(startup["argv"], 0) == "success"
+
+      assert [
+               %{
+                 "body" => %{
+                   "agent" => "contract-agent",
+                   "model" => %{"modelID" => "model", "providerID" => "profile"},
+                   "parts" => [%{"text" => "Complete profile prompt", "type" => "text"}]
+                 },
+                 "method" => "POST",
+                 "path" => "/session/session-contract/message"
+               }
+             ] = requests
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "rejects malformed OpenCode profile command and model values", %{context: context} do
+    runner = runner_config(context, :success)
+
+    assert {:error, {:invalid_opencode_profile_command, "implementation", "not-an-argv"}} =
+             OpenCodeServer.start(context.workspace, issue(),
+               runner_config:
+                 Map.put(runner, "execution_profiles", %{
+                   "implementation" => %{"command" => "not-an-argv"}
+                 })
+             )
+
+    assert {:error, {:invalid_opencode_profile_model, "implementation", 42}} =
+             OpenCodeServer.start(context.workspace, issue(),
+               runner_config:
+                 Map.put(runner, "execution_profiles", %{
+                   "implementation" => %{"model" => 42}
+                 })
+             )
+  end
+
+  test "fails a blocking queue HTTP error after bounded retries", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :poll_http_500)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:error, {:blocking_poll_failed, "/question", {:http_error, 500, %{"error" => "queue unavailable"}}}} =
+               OpenCodeServer.send_turn(session, "Poll failure", issue(),
+                 on_event: on_event,
+                 turn_timeout_ms: 1_000
+               )
+
+      assert Enum.count(request_paths(context), &(&1 == "GET /question")) == 3
+
+      assert %Event{
+               event: :turn_failed,
+               payload: %{
+                 reason: {:blocking_poll_failed, "/question", {:http_error, 500, %{"error" => "queue unavailable"}}}
+               }
+             } = List.last(received_events())
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "drains a task result sent while aborting after a blocking poll failure", %{
+    context: context
+  } do
+    assert {:ok, session} = start_adapter(context, :abort_result_race)
+
+    test_pid = self()
+    unrelated_message = {make_ref(), :keep}
+    send(self(), unrelated_message)
+
+    on_result_sent = fn task_ref ->
+      send(test_pid, {:turn_task_result_sent, task_ref})
+      turn_task_result_ack(session).(task_ref)
+    end
+
+    try do
+      assert {:error, {:blocking_poll_failed, "/question", {:http_error, 500, %{"error" => "queue unavailable"}}}} =
+               OpenCodeServer.send_turn(session, "Abort completion race", issue(),
+                 on_turn_task_result_sent: on_result_sent,
+                 turn_timeout_ms: 1_000
+               )
+
+      assert "POST /test/turn-task-result-sent" in request_paths(context)
+      assert_receive {:turn_task_result_sent, task_ref}
+      refute_receive {^task_ref, {:ok, %{"info" => %{"id" => "message-success"}}}}
+      assert_receive ^unrelated_message
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "completed turn wins when the first blocking queue poll fails", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :completion_poll_race)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:ok, %{session_id: "session-contract-message-success"}} =
+               OpenCodeServer.send_turn(session, "Complete during queue poll", issue(),
+                 on_event: on_event,
+                 on_turn_task_result_sent: turn_task_result_ack(session),
+                 turn_timeout_ms: 1_000
+               )
+
+      assert %Event{event: :turn_completed} = List.last(received_events())
+
+      paths = request_paths(context)
+      assert Enum.count(paths, &(&1 == "GET /question")) == 1
+      assert "POST /test/turn-task-result-sent" in paths
+      refute "POST /session/session-contract/abort" in paths
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "completed turn wins when the permission poll reaches the turn deadline", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :completion_permission_deadline_race)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:ok, %{session_id: "session-contract-message-success"}} =
+               OpenCodeServer.send_turn(session, "Complete at permission deadline", issue(),
+                 on_event: on_event,
+                 on_turn_task_result_sent: turn_task_result_ack(session),
+                 turn_timeout_ms: 300
+               )
+
+      assert %Event{event: :turn_completed} = List.last(received_events())
+      refute "POST /session/session-contract/abort" in request_paths(context)
+      assert "POST /test/turn-task-result-sent" in request_paths(context)
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "fails a malformed blocking queue response without retrying", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :poll_malformed)
+
+    try do
+      assert {:error, {:blocking_poll_failed, "/question", {:invalid_blocking_queue_response, %{"not" => "a queue"}}}} =
+               OpenCodeServer.send_turn(session, "Malformed queue", issue(), turn_timeout_ms: 1_000)
+
+      assert Enum.count(request_paths(context), &(&1 == "GET /question")) == 1
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "retains failed-turn usage in the next successful cumulative total", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :failure_then_success)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:error, {:turn_failed, _error}} =
+               OpenCodeServer.send_turn(session, "First failed turn", issue(), on_event: on_event)
+
+      assert %Event{event: :turn_failed, usage: failed_usage} = List.last(received_events())
+      assert failed_usage["total_tokens"] == 18
+      assert failed_usage["cost"] == 0.01
+
+      assert {:ok, %{usage: cumulative_usage}} =
+               OpenCodeServer.send_turn(session, "Second successful turn", issue(), on_event: on_event)
+
+      assert cumulative_usage["total_tokens"] == 36
+      assert cumulative_usage["cost"] == 0.02
     after
       OpenCodeServer.stop(session)
     end
@@ -436,7 +640,8 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         context.script,
         Atom.to_string(scenario),
         context.trace,
-        context.child_pid_file
+        context.child_pid_file,
+        context.contract_trace
       ],
       "hostname" => "127.0.0.1",
       "port" => "auto",
@@ -470,6 +675,24 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     end
   end
 
+  defp contract_records(context) do
+    context.contract_trace
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+  end
+
+  defp turn_task_result_ack(session) do
+    fn _task_ref ->
+      assert {:ok, %Req.Response{status: 200}} =
+               Req.post(session.client.base_url <> "/test/turn-task-result-sent",
+                 retry: false,
+                 receive_timeout: session.client.read_timeout_ms,
+                 connect_options: [timeout: session.client.read_timeout_ms]
+               )
+    end
+  end
+
   defp read_child_pid(nil), do: nil
 
   defp read_child_pid(path) do
@@ -500,7 +723,14 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse
 
-    scenario, trace_path, child_pid_path = sys.argv[1:4]
+    scenario, trace_path, child_pid_path, contract_trace_path = sys.argv[1:5]
+
+    def contract(record):
+        with open(contract_trace_path, "a", encoding="utf-8") as file:
+            file.write(json.dumps(record) + "\n")
+            file.flush()
+
+    contract({"argv": sys.argv[1:]})
 
     def option(name, default):
         try:
@@ -522,14 +752,18 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
     if scenario == "startup_timeout":
         time.sleep(30)
-        raise SystemExit(0)
+
 
     if scenario == "descendant":
         child = subprocess.Popen(["sleep", "30"])
         with open(child_pid_path, "w", encoding="utf-8") as file:
             file.write(str(child.pid))
 
-    state = {"aborted": False, "pending_question": False, "pending_permission": False}
+    state = {"aborted": False, "pending_question": False, "pending_permission": False, "message_count": 0}
+    queue_request_held = threading.Event()
+    permission_request_held = threading.Event()
+    turn_task_result_sent = threading.Event()
+    abort_request_started = threading.Event()
 
     def trace(method, path):
         with open(trace_path, "a", encoding="utf-8") as file:
@@ -572,6 +806,17 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                     self.reply(401, {"error": "bad auth"})
                 else:
                     self.reply(200, {"healthy": True, "version": "fake"})
+            elif path == "/question" and scenario == "completion_poll_race":
+                queue_request_held.set()
+                turn_task_result_sent.wait()
+                self.reply(500, {"error": "queue unavailable"})
+                return
+            elif path == "/question" and scenario in ("poll_http_500", "abort_result_race"):
+                self.reply(500, {"error": "queue unavailable"})
+                return
+            elif path == "/question" and scenario == "poll_malformed":
+                self.reply(200, {"not": "a queue"})
+                return
             elif path == "/question":
                 if scenario == "slow_block_poll":
                     time.sleep(1)
@@ -584,6 +829,12 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                     })
                 self.reply(200, requests)
             elif path == "/permission":
+                if scenario == "completion_permission_deadline_race":
+                    permission_request_held.set()
+                    turn_task_result_sent.wait()
+                    time.sleep(1)
+                    self.reply(200, [])
+                    return
                 requests = []
                 if state["pending_permission"] and not state["aborted"]:
                     requests.append({
@@ -599,6 +850,13 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
             path = urlparse(self.path).path
             trace("POST", path)
             payload = self.body()
+            if path == "/session/session-contract/message":
+                contract({"method": "POST", "path": path, "body": payload})
+
+            if path == "/test/turn-task-result-sent":
+                turn_task_result_sent.set()
+                self.reply(200, True)
+                return
 
             if path == "/session":
                 self.reply(200, {
@@ -609,6 +867,9 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
             if path == "/session/session-contract/abort":
                 state["aborted"] = True
+                if scenario == "abort_result_race":
+                    abort_request_started.set()
+                    turn_task_result_sent.wait()
                 self.reply(200, True)
                 return
 
@@ -619,12 +880,17 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
             if path != "/session/session-contract/message":
                 self.reply(404, {"error": "not found"})
                 return
+            state["message_count"] += 1
 
             if scenario == "server_exit":
                 os._exit(7)
 
             if scenario == "timeout":
                 time.sleep(30)
+            if scenario in ("poll_http_500", "poll_malformed"):
+                time.sleep(30)
+            if scenario == "abort_result_race":
+                abort_request_started.wait()
 
             if scenario == "operator_input":
                 state["pending_question"] = True
@@ -652,6 +918,11 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
                 threading.Thread(target=flood_output, daemon=True).start()
 
+            if scenario == "completion_poll_race":
+                queue_request_held.wait()
+            if scenario == "completion_permission_deadline_race":
+                permission_request_held.wait()
+
             info = {
                 "id": "message-success",
                 "sessionID": "session-contract",
@@ -668,8 +939,9 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
             if scenario == "incomplete_response":
                 info.pop("id")
-
-            if scenario == "failure":
+            if scenario == "failure" or (
+                scenario == "failure_then_success" and state["message_count"] == 1
+            ):
                 info["error"] = {
                     "name": "UnknownError",
                     "data": {"message": "provider exploded"},
@@ -703,7 +975,8 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                     "text": "done",
                 }]
 
-            self.reply(200, {"info": info, "parts": parts})
+            response = {"info": info, "parts": parts}
+            self.reply(200, response)
 
         def do_DELETE(self):
             path = urlparse(self.path).path

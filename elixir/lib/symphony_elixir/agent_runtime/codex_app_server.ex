@@ -94,7 +94,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, runner["read_timeout_ms"])
     runtime_opts = opts |> Keyword.put(:runner_config, runner) |> Keyword.put(:runtime_settings, settings)
 
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host),
+    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host, settings),
          {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
       process = launch.process
       port = launch.port
@@ -254,9 +254,9 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     }
   end
 
-  defp validate_workspace_cwd(workspace, nil) when is_binary(workspace) do
+  defp validate_workspace_cwd(workspace, nil, settings) when is_binary(workspace) do
     expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(Config.settings!().workspace.root)
+    expanded_root = Path.expand(settings.workspace.root)
     expanded_root_prefix = expanded_root <> "/"
 
     with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
@@ -282,7 +282,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     end
   end
 
-  defp validate_workspace_cwd(workspace, worker_host)
+  defp validate_workspace_cwd(workspace, worker_host, _settings)
        when is_binary(workspace) and is_binary(worker_host) do
     cond do
       String.trim(workspace) == "" ->

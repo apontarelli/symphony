@@ -443,15 +443,10 @@ defmodule SymphonyElixir.LiveE2ETest do
     worker_setup = live_worker_setup!(backend, run_id, test_root)
     team_key = System.get_env("SYMPHONY_LIVE_LINEAR_TEAM_KEY") || @default_team_key
     original_workflow_path = Workflow.workflow_file_path()
-    orchestrator_pid = Process.whereis(SymphonyElixir.Orchestrator)
 
     File.mkdir_p!(workflow_root)
 
     try do
-      if is_pid(orchestrator_pid) do
-        assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator)
-      end
-
       Workflow.set_workflow_file_path(workflow_file)
 
       write_workflow_file!(workflow_file,
@@ -511,7 +506,6 @@ defmodule SymphonyElixir.LiveE2ETest do
 
       assert :ok = complete_project(project["id"], completed_project_status["id"])
     after
-      restart_orchestrator_if_needed()
       cleanup_live_worker_setup(worker_setup)
       Workflow.set_workflow_file_path(original_workflow_path)
       File.rm_rf(test_root)
@@ -542,15 +536,6 @@ defmodule SymphonyElixir.LiveE2ETest do
   end
 
   defp cleanup_live_worker_setup(_worker_setup), do: :ok
-
-  defp restart_orchestrator_if_needed do
-    if is_nil(Process.whereis(SymphonyElixir.Orchestrator)) do
-      case Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Orchestrator) do
-        {:ok, _pid} -> :ok
-        {:error, {:already_started, _pid}} -> :ok
-      end
-    end
-  end
 
   defp live_ssh_worker_setup!(run_id) when is_binary(run_id) do
     ssh_worker_hosts = live_ssh_worker_hosts()

@@ -7,9 +7,10 @@ defmodule SymphonyElixir.ProcessSupervisor do
   process tree. SSH-backed launches should wrap the local ssh port with
   `cleanup: :port_only`; remote process-group cleanup is intentionally outside
   this primitive's current guarantee.
+  The launch/adoption caller is monitored by a lifecycle owner, which cleans up the process tree when the caller goes down.
   """
 
-  defstruct [:port, :os_pid, cleanup: :descendants]
+  defstruct [:port, :os_pid, :owner, cleanup: :descendants]
 
   @type argv :: [String.t()]
   @type cleanup :: :descendants | :port_only
@@ -25,6 +26,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
   @type t :: %__MODULE__{
           port: port(),
           os_pid: non_neg_integer() | nil,
+          owner: pid() | nil,
           cleanup: cleanup()
         }
 
@@ -33,8 +35,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
     with {:ok, cleanup} <- normalize_cleanup(Keyword.get(opts, :cleanup, :descendants)),
          {:ok, {executable, args}} <- resolve_argv(argv, Keyword.get(opts, :cd)),
          {:ok, port_opts} <- port_options(args, opts) do
-      port = Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)
-      {:ok, from_port(port, cleanup: cleanup)}
+      start_owned(executable, port_opts, cleanup)
     end
   rescue
     error -> {:error, {:process_start_failed, Exception.message(error)}}
@@ -44,11 +45,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   @spec from_port(port(), keyword()) :: t()
   def from_port(port, opts \\ []) when is_port(port) do
-    %__MODULE__{
-      port: port,
-      os_pid: port_os_pid(port),
-      cleanup: normalize_cleanup!(Keyword.get(opts, :cleanup, :descendants))
-    }
+    adopt_port(port, normalize_cleanup!(Keyword.get(opts, :cleanup, :descendants)))
   end
 
   @spec port(t()) :: port()
@@ -98,19 +95,238 @@ defmodule SymphonyElixir.ProcessSupervisor do
   end
 
   @spec stop(t()) :: :ok
-  def stop(%__MODULE__{} = process) do
-    targets = termination_targets(process)
-    signal_os_pids(targets, "TERM")
-    close_port(process.port)
+  def stop(%__MODULE__{} = process), do: request_owner(process, :stop)
+
+  @spec kill(t()) :: :ok
+  def kill(%__MODULE__{} = process), do: request_owner(process, :kill)
+
+  defp start_owned(executable, port_opts, cleanup) do
+    caller = self()
+    {owner, owner_monitor} = spawn_monitor(fn -> lifecycle_owner_open(caller, executable, port_opts, cleanup) end)
+    await_owner_start(owner, owner_monitor, cleanup)
+  end
+
+  defp adopt_port(port, cleanup) do
+    caller = self()
+    adoption_ref = make_ref()
+
+    {owner, owner_monitor} =
+      spawn_monitor(fn -> lifecycle_owner_adopt(caller, port, cleanup, adoption_ref) end)
+
+    await_owner_adoption(owner, owner_monitor, port, cleanup, adoption_ref)
+  end
+
+  defp lifecycle_owner_open(caller, executable, port_opts, cleanup) do
+    caller_monitor = Process.monitor(caller)
+
+    try do
+      port = Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)
+      os_pid = port_os_pid(port)
+      send(caller, {:process_supervisor_started, self(), port, os_pid})
+
+      state = %{
+        caller: caller,
+        caller_monitor: caller_monitor,
+        port: port,
+        os_pid: os_pid,
+        cleanup: cleanup
+      }
+
+      lifecycle_owner_loop(state)
+    rescue
+      error ->
+        send(caller, {:process_supervisor_start_failed, self(), {:process_start_failed, Exception.message(error)}})
+        Process.demonitor(caller_monitor, [:flush])
+    catch
+      kind, reason ->
+        send(caller, {:process_supervisor_start_failed, self(), {:process_start_failed, {kind, reason}}})
+        Process.demonitor(caller_monitor, [:flush])
+    end
+  end
+
+  defp lifecycle_owner_adopt(caller, port, cleanup, adoption_ref) do
+    caller_monitor = Process.monitor(caller)
+
+    try do
+      send(caller, {:process_supervisor_adoption_ready, self(), adoption_ref})
+
+      receive do
+        {:process_supervisor_port_adopted, ^caller, ^adoption_ref} ->
+          os_pid = port_os_pid(port)
+          send(caller, {:process_supervisor_adopted, self(), adoption_ref, port, os_pid})
+
+          state = %{
+            caller: caller,
+            caller_monitor: caller_monitor,
+            port: port,
+            os_pid: os_pid,
+            cleanup: cleanup
+          }
+
+          lifecycle_owner_loop(state)
+
+        {:process_supervisor_adoption_aborted, ^caller, ^adoption_ref} ->
+          Process.demonitor(caller_monitor, [:flush])
+
+        {:DOWN, ^caller_monitor, :process, ^caller, _reason} ->
+          :ok
+      end
+    rescue
+      error ->
+        send(caller, {:process_supervisor_adopt_failed, self(), adoption_ref, Exception.message(error)})
+        Process.demonitor(caller_monitor, [:flush])
+    catch
+      kind, reason ->
+        send(caller, {:process_supervisor_adopt_failed, self(), adoption_ref, {kind, reason}})
+        Process.demonitor(caller_monitor, [:flush])
+    end
+  end
+
+  defp await_owner_start(owner, owner_monitor, cleanup) do
+    receive do
+      {:process_supervisor_started, ^owner, port, os_pid} ->
+        Process.demonitor(owner_monitor, [:flush])
+        {:ok, %__MODULE__{port: port, os_pid: os_pid, owner: owner, cleanup: cleanup}}
+
+      {:process_supervisor_start_failed, ^owner, reason} ->
+        Process.demonitor(owner_monitor, [:flush])
+        {:error, reason}
+
+      {:DOWN, ^owner_monitor, :process, ^owner, reason} ->
+        {:error, {:process_start_failed, {:owner_exit, reason}}}
+    end
+  end
+
+  defp await_owner_adoption(owner, owner_monitor, port, cleanup, adoption_ref) do
+    receive do
+      {:process_supervisor_adoption_ready, ^owner, ^adoption_ref} ->
+        transfer_port_to_owner(owner, owner_monitor, port, cleanup, adoption_ref)
+
+      {:process_supervisor_adopt_failed, ^owner, ^adoption_ref, reason} ->
+        close_port(port)
+        await_owner_exit(owner, owner_monitor)
+        raise_adoption_failure(reason)
+
+      {:DOWN, ^owner_monitor, :process, ^owner, reason} ->
+        close_port(port)
+        raise_adoption_failure({:owner_exit, reason})
+    end
+  end
+
+  defp transfer_port_to_owner(owner, owner_monitor, port, cleanup, adoption_ref) do
+    case connect_port(port, owner) do
+      :ok ->
+        send(owner, {:process_supervisor_port_adopted, self(), adoption_ref})
+        await_owner_adoption_complete(owner, owner_monitor, cleanup, adoption_ref)
+
+      {:error, reason} ->
+        send(owner, {:process_supervisor_adoption_aborted, self(), adoption_ref})
+        close_port(port)
+        await_owner_exit(owner, owner_monitor)
+        raise_adoption_failure(reason)
+    end
+  end
+
+  defp connect_port(port, owner) do
+    true = Port.connect(port, owner)
+    :ok
+  rescue
+    error -> {:error, Exception.message(error)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
+  end
+
+  defp await_owner_adoption_complete(owner, owner_monitor, cleanup, adoption_ref) do
+    receive do
+      {:process_supervisor_adopted, ^owner, ^adoption_ref, port, os_pid} ->
+        Process.demonitor(owner_monitor, [:flush])
+        %__MODULE__{port: port, os_pid: os_pid, owner: owner, cleanup: cleanup}
+
+      {:process_supervisor_adopt_failed, ^owner, ^adoption_ref, reason} ->
+        await_owner_exit(owner, owner_monitor)
+        raise_adoption_failure(reason)
+
+      {:DOWN, ^owner_monitor, :process, ^owner, reason} ->
+        raise_adoption_failure({:owner_exit, reason})
+    end
+  end
+
+  defp await_owner_exit(owner, owner_monitor) do
+    receive do
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} -> :ok
+    end
+  end
+
+  defp raise_adoption_failure(reason) do
+    raise ArgumentError, "failed to adopt port: #{inspect(reason)}"
+  end
+
+  defp lifecycle_owner_loop(%{port: port} = state) do
+    receive do
+      {^port, {:exit_status, status}} ->
+        send(state.caller, {port, {:exit_status, status}})
+
+      {^port, message} ->
+        send(state.caller, {port, message})
+        lifecycle_owner_loop(state)
+
+      {:process_supervisor_stop, requester, request_ref} ->
+        stop_owned_process(state_process(state))
+        send(requester, {:process_supervisor_reply, request_ref})
+
+      {:process_supervisor_kill, requester, request_ref} ->
+        kill_owned_process(state_process(state))
+        send(requester, {:process_supervisor_reply, request_ref})
+
+      {:DOWN, caller_monitor, :process, caller, _reason}
+      when caller_monitor == state.caller_monitor and caller == state.caller ->
+        stop_owned_process(state_process(state))
+    end
+  end
+
+  defp state_process(state) do
+    %__MODULE__{
+      port: state.port,
+      os_pid: state.os_pid,
+      owner: self(),
+      cleanup: state.cleanup
+    }
+  end
+
+  defp request_owner(%__MODULE__{owner: owner} = process, action) when is_pid(owner) do
+    request_ref = make_ref()
+    owner_monitor = Process.monitor(owner)
+    send(owner, {request_message(action), self(), request_ref})
+
+    receive do
+      {:process_supervisor_reply, ^request_ref} ->
+        Process.demonitor(owner_monitor, [:flush])
+        :ok
+
+      {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
+        fallback_request(process, action)
+    end
+  end
+
+  defp request_owner(process, action), do: fallback_request(process, action)
+
+  defp request_message(:stop), do: :process_supervisor_stop
+  defp request_message(:kill), do: :process_supervisor_kill
+
+  defp fallback_request(process, :stop), do: stop_owned_process(process)
+  defp fallback_request(process, :kill), do: kill_owned_process(process)
+
+  defp stop_owned_process(%__MODULE__{} = process) do
+    signal_os_pids(termination_targets(process), "TERM")
     Process.sleep(150)
-    kill_targets = refresh_termination_targets(process, targets)
+    kill_targets = termination_targets(process)
     signal_os_pids(kill_targets, "KILL")
+    close_port(process.port)
     wait_for_os_pids(kill_targets, 10)
     :ok
   end
 
-  @spec kill(t()) :: :ok
-  def kill(%__MODULE__{} = process) do
+  defp kill_owned_process(%__MODULE__{} = process) do
     signal_os_pids(termination_targets(process), "KILL")
     close_port(process.port)
     :ok
@@ -292,16 +508,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
     |> Enum.uniq()
   end
 
-  defp refresh_termination_targets(%__MODULE__{} = process, previous_targets) do
-    process
-    |> termination_targets()
-    |> Kernel.++(previous_targets)
-    |> Enum.uniq()
-  end
-
-  defp current_os_pid(%__MODULE__{port: port, os_pid: os_pid}) do
-    port_os_pid(port) || os_pid
-  end
+  defp current_os_pid(%__MODULE__{port: port}), do: port_os_pid(port)
 
   defp port_os_pid(port) when is_port(port) do
     case :erlang.port_info(port, :os_pid) do
