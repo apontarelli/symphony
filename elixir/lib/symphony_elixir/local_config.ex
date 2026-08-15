@@ -6,6 +6,8 @@ defmodule SymphonyElixir.LocalConfig do
 
   @config_file "config.yml"
   @runs_dir "runs"
+  @target_registry_file "targets.yml"
+  @target_plan_dir "target-plans"
   @default_config_root "~/.config/symphony"
   @default_workspace_root "~/dev/symphony-workspaces"
   @runtime_keys ~w(
@@ -40,6 +42,12 @@ defmodule SymphonyElixir.LocalConfig do
 
   @spec runs_dir(keyword()) :: Path.t()
   def runs_dir(opts \\ []), do: Path.join(root(opts), @runs_dir)
+
+  @spec target_registry_path(keyword()) :: Path.t()
+  def target_registry_path(opts \\ []), do: Path.join(root(opts), @target_registry_file)
+
+  @spec target_plan_dir(keyword()) :: Path.t()
+  def target_plan_dir(opts \\ []), do: Path.join(root(opts), @target_plan_dir)
 
   @spec default_config() :: config()
   def default_config do

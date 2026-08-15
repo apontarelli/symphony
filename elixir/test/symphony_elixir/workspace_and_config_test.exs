@@ -4,7 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{AutoLand, StringOrMap}
   alias SymphonyElixir.Linear.Client
-  alias SymphonyElixir.RunTarget
+  alias SymphonyElixir.{LocalConfig, RunTarget}
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -1346,6 +1346,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "local config target paths follow existing config-root conventions without creating files" do
+    config_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-local-config-paths-#{System.unique_integer([:positive])}"
+      )
+
+    on_exit(fn -> File.rm_rf(config_root) end)
+    File.rm_rf!(config_root)
+
+    opts = [config_root: config_root]
+
+    assert LocalConfig.path(opts) == Path.join(config_root, "config.yml")
+    assert LocalConfig.runs_dir(opts) == Path.join(config_root, "runs")
+    assert LocalConfig.target_registry_path(opts) == Path.join(config_root, "targets.yml")
+    assert LocalConfig.target_plan_dir(opts) == Path.join(config_root, "target-plans")
+    refute File.exists?(config_root)
   end
 
   test "config reads defaults for optional settings" do

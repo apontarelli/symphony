@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.CLITest do
   use ExUnit.Case
 
-  alias SymphonyElixir.CLI
+  alias SymphonyElixir.{CLI, LocalConfig}
   alias SymphonyElixir.Workflow.{Manifest, Renderer}
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
@@ -166,7 +166,20 @@ defmodule SymphonyElixir.CLITest do
     assert message =~ ":boom"
   end
 
-  test "returns ok when workflow exists and app starts" do
+  test "legacy manifest startup ignores target paths when workflow exists and app starts" do
+    home = tmp_repo!("symphony-elixir-legacy-manifest-home")
+    previous_home = System.get_env("HOME")
+
+    System.put_env("HOME", home)
+
+    on_exit(fn ->
+      if previous_home do
+        System.put_env("HOME", previous_home)
+      else
+        System.delete_env("HOME")
+      end
+    end)
+
     deps = %{
       file_regular?: fn _path -> true end,
       set_workflow_file_path: fn _path -> :ok end,
@@ -176,7 +189,65 @@ defmodule SymphonyElixir.CLITest do
       ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
     }
 
-    assert :ok = CLI.evaluate([@ack_flag, "symphony.yml"], deps)
+    assert :ok =
+             assert_no_target_path_access(LocalConfig.root(), fn ->
+               CLI.evaluate([@ack_flag, "symphony.yml"], deps)
+             end)
+  end
+
+  test "target path guard detects helper resolution" do
+    config_root = tmp_repo!("symphony-elixir-target-path-helper-guard")
+
+    assert_raise ExUnit.AssertionError,
+                 ~r/target path guard detected helper resolution/,
+                 fn ->
+                   assert_no_target_path_access(config_root, fn ->
+                     LocalConfig.target_plan_dir(config_root: config_root)
+                   end)
+                 end
+  end
+
+  test "target path guard detects exact-path File access" do
+    config_root = tmp_repo!("symphony-elixir-target-path-file-guard")
+    registry_path = LocalConfig.target_registry_path(config_root: config_root)
+
+    assert_raise ExUnit.AssertionError,
+                 ~r/target path guard detected exact-path File access/,
+                 fn ->
+                   assert_no_target_path_access(config_root, fn ->
+                     File.read(registry_path)
+                   end)
+                 end
+  end
+
+  test "target path guard detects descendant-path File access" do
+    config_root = tmp_repo!("symphony-elixir-target-descendant-guard")
+
+    descendant_path =
+      config_root
+      |> then(&LocalConfig.target_plan_dir(config_root: &1))
+      |> Path.join("SID-406.yml")
+
+    assert_raise ExUnit.AssertionError,
+                 ~r/target path guard detected descendant-path File access/,
+                 fn ->
+                   assert_no_target_path_access(config_root, fn ->
+                     File.read(descendant_path)
+                   end)
+                 end
+  end
+
+  test "target path guard detects absent-path creation by postcondition" do
+    config_root = tmp_repo!("symphony-elixir-target-path-creation-guard")
+    registry_path = LocalConfig.target_registry_path(config_root: config_root)
+
+    assert_raise ExUnit.AssertionError,
+                 ~r/target path guard detected absent-path creation/,
+                 fn ->
+                   assert_no_target_path_access(config_root, fn ->
+                     :file.make_dir(String.to_charlist(registry_path))
+                   end)
+                 end
   end
 
   test "accepts one-process profile override" do
@@ -215,12 +286,18 @@ defmodule SymphonyElixir.CLITest do
     }
 
     assert {:ok, output} =
-             CLI.evaluate(["run", "SID-374", "--repo", repo, "--config-root", config_root, "--preview"], deps)
+             assert_no_target_path_access(config_root, fn ->
+               CLI.evaluate(
+                 ["run", "SID-374", "--repo", repo, "--config-root", config_root, "--preview"],
+                 deps
+               )
+             end)
 
     assert output =~ "Run preview"
     assert output =~ "tracker: linear issues=SID-374"
     assert output =~ "mode: issue-batch"
-    refute File.exists?(config_root)
+    refute File.exists?(LocalConfig.path(config_root: config_root))
+    refute File.exists?(LocalConfig.runs_dir(config_root: config_root))
   end
 
   test "run command with only repo uses the interactive local setup builder" do
@@ -352,7 +429,14 @@ defmodule SymphonyElixir.CLITest do
       })
     )
 
-    assert {:ok, output} = CLI.evaluate(["run", "dogfood", "--config-root", root, "--preview"], daemon_forbidden_deps())
+    assert {:ok, output} =
+             assert_no_target_path_access(root, fn ->
+               CLI.evaluate(
+                 ["run", "dogfood", "--config-root", root, "--preview"],
+                 daemon_forbidden_deps()
+               )
+             end)
+
     assert output =~ "Run preview"
     assert output =~ "runtime setup: #{Path.join([root, "runs", "dogfood.yml"])}"
     assert output =~ "max agents: 1"
@@ -396,10 +480,12 @@ defmodule SymphonyElixir.CLITest do
       })
 
     assert :ok =
-             CLI.evaluate(
-               ["run", "dogfood", "--config-root", root, "--yes", @ack_flag],
-               deps
-             )
+             assert_no_target_path_access(root, fn ->
+               CLI.evaluate(
+                 ["run", "dogfood", "--config-root", root, "--yes", @ack_flag],
+                 deps
+               )
+             end)
 
     assert_received {:previewed, preview}
     assert preview =~ "Run preview"
@@ -591,9 +677,21 @@ defmodule SymphonyElixir.CLITest do
     assert_received :started
   end
 
-  test "interactive run requires a TTY confirmation after preview" do
+  test "direct workflow run ignores target paths while preserving confirmation behavior" do
     runtime_path = tmp_runtime_setup!("symphony-elixir-run-confirm")
+    home = tmp_repo!("symphony-elixir-run-confirm-home")
+    previous_home = System.get_env("HOME")
     parent = self()
+
+    System.put_env("HOME", home)
+
+    on_exit(fn ->
+      if previous_home do
+        System.put_env("HOME", previous_home)
+      else
+        System.delete_env("HOME")
+      end
+    end)
 
     deps =
       cli_deps(%{
@@ -608,7 +706,11 @@ defmodule SymphonyElixir.CLITest do
         end
       })
 
-    assert :ok = CLI.evaluate(["run", "--workflow", runtime_path], deps)
+    assert :ok =
+             assert_no_target_path_access(LocalConfig.root(), fn ->
+               CLI.evaluate(["run", "--workflow", runtime_path], deps)
+             end)
+
     assert_received {:previewed, preview}
     assert preview =~ "Run preview"
     assert_received :started
@@ -1224,6 +1326,162 @@ defmodule SymphonyElixir.CLITest do
     SymphonyElixir.TestSupport.write_manifest_file!(runtime_path, overrides)
     runtime_path
   end
+
+  defp assert_no_target_path_access(config_root, fun) do
+    target_paths = [
+      LocalConfig.target_registry_path(config_root: config_root),
+      LocalConfig.target_plan_dir(config_root: config_root)
+    ]
+
+    on_exit(fn -> Enum.each(target_paths, &File.rm_rf/1) end)
+    Enum.each(target_paths, &File.rm_rf!/1)
+
+    Enum.each(target_paths, fn path -> refute File.exists?(path) end)
+
+    {result, calls} = capture_target_path_calls(fun)
+
+    helper_resolutions = Enum.filter(calls, &target_path_helper_resolution?/1)
+
+    assert helper_resolutions == [],
+           "target path guard detected helper resolution: #{inspect(helper_resolutions, pretty: true)}"
+
+    exact_file_accesses =
+      Enum.filter(calls, &target_path_file_access?(&1, target_paths, :exact))
+
+    assert exact_file_accesses == [],
+           "target path guard detected exact-path File access: #{inspect(exact_file_accesses, pretty: true)}"
+
+    descendant_file_accesses =
+      Enum.filter(calls, &target_path_file_access?(&1, target_paths, :descendant))
+
+    assert descendant_file_accesses == [],
+           "target path guard detected descendant-path File access: #{inspect(descendant_file_accesses, pretty: true)}"
+
+    created_paths = Enum.filter(target_paths, &File.exists?/1)
+
+    assert created_paths == [],
+           "target path guard detected absent-path creation: #{inspect(created_paths, pretty: true)}"
+
+    result
+  end
+
+  defp capture_target_path_calls(fun) do
+    tracee = self()
+    {collector, monitor_ref} = spawn_monitor(fn -> collect_target_path_calls([]) end)
+
+    try do
+      session = :trace.session_create(:target_path_guard, collector, [])
+
+      try do
+        Enum.each(target_path_trace_patterns(), fn pattern ->
+          :trace.function(session, pattern, true, [])
+        end)
+
+        :trace.process(session, tracee, true, [:call])
+
+        result = fun.()
+        :trace.process(session, tracee, false, [:call])
+        send(collector, {:take_calls, self(), session, tracee})
+        assert_receive {:target_path_calls, ^collector, calls}, 1_000
+        {result, calls}
+      after
+        :trace.session_destroy(session)
+      end
+    after
+      stop_target_path_collector(collector, monitor_ref)
+    end
+  end
+
+  defp collect_target_path_calls(calls) do
+    receive do
+      {:take_calls, caller, session, tracee} ->
+        delivery_ref = :trace.delivered(session, tracee)
+        collect_target_path_calls_until_delivered(calls, caller, tracee, delivery_ref)
+
+      :stop ->
+        :ok
+
+      {:trace, _pid, :call, _mfa} = call ->
+        collect_target_path_calls([call | calls])
+
+      _message ->
+        collect_target_path_calls(calls)
+    end
+  end
+
+  defp collect_target_path_calls_until_delivered(calls, caller, tracee, delivery_ref) do
+    receive do
+      {:trace_delivered, ^tracee, ^delivery_ref} ->
+        send(caller, {:target_path_calls, self(), Enum.reverse(calls)})
+        collect_target_path_calls([])
+
+      :stop ->
+        :ok
+
+      {:trace, _pid, :call, _mfa} = call ->
+        collect_target_path_calls_until_delivered([call | calls], caller, tracee, delivery_ref)
+
+      _message ->
+        collect_target_path_calls_until_delivered(calls, caller, tracee, delivery_ref)
+    end
+  end
+
+  defp stop_target_path_collector(collector, monitor_ref) do
+    send(collector, :stop)
+
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^collector, reason} ->
+        assert reason == :normal
+    after
+      1_000 ->
+        Process.exit(collector, :kill)
+        assert_receive {:DOWN, ^monitor_ref, :process, ^collector, :killed}, 1_000
+        flunk("target path trace collector did not stop")
+    end
+
+    refute_received {:target_path_calls, ^collector, _calls}
+    refute_received {:DOWN, ^monitor_ref, :process, ^collector, _reason}
+  end
+
+  defp target_path_trace_patterns do
+    [
+      {File, :_, :_},
+      {LocalConfig, :target_registry_path, 0},
+      {LocalConfig, :target_registry_path, 1},
+      {LocalConfig, :target_plan_dir, 0},
+      {LocalConfig, :target_plan_dir, 1}
+    ]
+  end
+
+  defp target_path_helper_resolution?({:trace, _pid, :call, {LocalConfig, function, _args}})
+       when function in [:target_registry_path, :target_plan_dir],
+       do: true
+
+  defp target_path_helper_resolution?(_call), do: false
+
+  defp target_path_file_access?(
+         {:trace, _pid, :call, {File, _function, args}},
+         target_paths,
+         relation
+       ),
+       do: contains_target_path?(args, target_paths, relation)
+
+  defp target_path_file_access?(_call, _target_paths, _relation), do: false
+
+  defp contains_target_path?(value, target_paths, :exact) when is_binary(value),
+    do: value in target_paths
+
+  defp contains_target_path?(value, target_paths, :descendant) when is_binary(value) do
+    Enum.any?(target_paths, &String.starts_with?(value, &1 <> "/"))
+  end
+
+  defp contains_target_path?(value, target_paths, relation) when is_list(value),
+    do: Enum.any?(value, &contains_target_path?(&1, target_paths, relation))
+
+  defp contains_target_path?(value, target_paths, relation) when is_tuple(value),
+    do: value |> Tuple.to_list() |> contains_target_path?(target_paths, relation)
+
+  defp contains_target_path?(_value, _target_paths, _relation), do: false
 
   defp cli_deps(overrides) do
     Map.merge(
