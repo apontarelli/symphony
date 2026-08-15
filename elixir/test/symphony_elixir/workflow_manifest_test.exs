@@ -5,6 +5,88 @@ defmodule SymphonyElixir.WorkflowManifestTest do
   alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.ModuleRegistry
   alias SymphonyElixir.Workflow.PublishTarget
+  alias SymphonyElixir.Workflow.Renderer
+
+  test "renderer keeps the legacy YAML byte order" do
+    value = %{
+      "unknown_b" => "last",
+      "project" => %{"slug" => "demo", "name" => "Demo"},
+      "unknown_a" => "first",
+      "version" => 1
+    }
+
+    assert Renderer.to_yaml(value) ==
+             """
+             version: 1
+             project:
+               name: "Demo"
+               slug: "demo"
+             unknown_a: "first"
+             unknown_b: "last"
+             """
+  end
+
+  test "renderer keeps the legacy empty-map bytes" do
+    assert Renderer.to_yaml(%{}) == "\n"
+    assert Renderer.to_yaml(%{"empty" => %{}}) == "empty:\n\n"
+    assert Renderer.to_yaml(%{"items" => [%{}]}) == "items:\n  - \n"
+  end
+
+  test "renderer applies a supplied key order without changing values" do
+    value = %{
+      "first" => 1,
+      "second" => 2,
+      "nested" => %{"first" => true, "second" => nil}
+    }
+
+    assert Renderer.to_yaml(value, ["second", "first", "nested"]) ==
+             """
+             second: 2
+             first: 1
+             nested:
+               second: null
+               first: true
+             """
+  end
+
+  test "registry renderer rejects unsupported terms with deterministic paths" do
+    cases = [
+      {:unsupported, "$"},
+      {[:unsupported], "$[0]"},
+      {%{"tuple" => {:unsupported}}, "$.tuple"},
+      {%{"outer" => [%{"inner" => :unsupported}]}, "$.outer[0].inner"},
+      {%{"outer.key" => :unsupported}, "$[\"outer.key\"]"},
+      {<<255>>, "$"},
+      {[1 | 2], "$"}
+    ]
+
+    for {value, path} <- cases do
+      message =
+        "unsupported registry YAML value at #{path}: expected nil, a valid UTF-8 binary, an integer, a finite float, a boolean, a list, or a map"
+
+      assert_raise ArgumentError, message, fn ->
+        Renderer.to_yaml(value, [])
+      end
+    end
+
+    for key <- [:unsupported, <<255>>] do
+      assert_raise ArgumentError,
+                   "unsupported registry YAML map key at $[key:0]: expected a valid UTF-8 binary",
+                   fn ->
+                     Renderer.to_yaml(%{key => "value"}, [])
+                   end
+    end
+  end
+
+  test "registry renderer supports each root scalar type" do
+    assert Renderer.to_yaml(nil, []) == "null\n"
+    assert Renderer.to_yaml("value", []) == "\"value\"\n"
+    assert Renderer.to_yaml(42, []) == "42\n"
+    assert Renderer.to_yaml(1.5, []) == "1.5\n"
+    assert Renderer.to_yaml(true, []) == "true\n"
+    assert Renderer.to_yaml([], []) == "[]\n"
+    assert Renderer.to_yaml(%{}, []) == "{}\n"
+  end
 
   test "valid manifest resolves registry defaults into a runtime workflow" do
     assert Manifest.manifest_file_name() == "symphony.yml"

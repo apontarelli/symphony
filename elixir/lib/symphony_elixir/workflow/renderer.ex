@@ -61,7 +61,22 @@ defmodule SymphonyElixir.Workflow.Renderer do
   end
 
   @spec to_yaml(term()) :: String.t()
-  def to_yaml(value), do: render_yaml(value, 0) <> "\n"
+  def to_yaml(value) do
+    key_order = legacy_key_order()
+    render_yaml(value, 0, fn _path -> key_order end, [], :legacy) <> "\n"
+  end
+
+  @type yaml_path :: [String.t() | non_neg_integer()]
+  @type key_order :: [String.t()] | (yaml_path() -> [String.t()])
+
+  @spec to_yaml(term(), key_order()) :: String.t()
+  def to_yaml(value, key_order) when is_list(key_order) do
+    to_yaml(value, fn _path -> key_order end)
+  end
+
+  def to_yaml(value, key_order) when is_function(key_order, 1) do
+    render_yaml(value, 0, key_order, [], :registry) <> "\n"
+  end
 
   defp module_lines(modules) do
     Enum.map(modules, fn module_name ->
@@ -111,42 +126,184 @@ defmodule SymphonyElixir.Workflow.Renderer do
     "- #{path}: #{message}. #{remediation}"
   end
 
-  defp render_yaml(value, indent) when is_map(value) do
-    value
-    |> ordered_entries()
-    |> Enum.map_join("\n", fn {key, nested} ->
-      spaces = String.duplicate(" ", indent)
+  defp render_yaml(value, indent, _key_order, _path, :registry)
+       when is_map(value) and map_size(value) == 0 do
+    String.duplicate(" ", indent) <> "{}"
+  end
 
-      if scalar?(nested) do
-        "#{spaces}#{key}: #{render_scalar(nested)}"
+  defp render_yaml(value, indent, key_order, path, mode) when is_map(value) do
+    value
+    |> ordered_entries(key_order.(Enum.reverse(path)))
+    |> Enum.with_index()
+    |> Enum.map_join("\n", fn {{key, nested}, index} ->
+      spaces = String.duplicate(" ", indent)
+      rendered_key = render_key(key, mode, [{:key, index} | path])
+
+      if scalar?(nested, mode) do
+        "#{spaces}#{rendered_key}: #{render_scalar(nested, mode)}"
       else
-        "#{spaces}#{key}:\n#{render_yaml(nested, indent + 2)}"
+        "#{spaces}#{rendered_key}:\n#{render_yaml(nested, indent + 2, key_order, [key | path], mode)}"
       end
     end)
   end
 
-  defp render_yaml([], indent), do: String.duplicate(" ", indent) <> "[]"
+  defp render_yaml([], indent, _key_order, _path, _mode),
+    do: String.duplicate(" ", indent) <> "[]"
 
-  defp render_yaml(values, indent) when is_list(values) do
-    Enum.map_join(values, "\n", fn value ->
+  defp render_yaml(values, indent, key_order, path, mode) when is_list(values) do
+    if mode == :registry and not proper_list?(values) do
+      unsupported_registry_value!(values, path)
+    end
+
+    values
+    |> Enum.with_index()
+    |> Enum.map_join("\n", fn {value, index} ->
       spaces = String.duplicate(" ", indent)
 
       cond do
-        scalar?(value) ->
-          "#{spaces}- #{render_scalar(value)}"
+        scalar?(value, mode) ->
+          "#{spaces}- #{render_scalar(value, mode)}"
 
         is_map(value) ->
-          [first | rest] = String.split(render_yaml(value, indent + 2), "\n")
+          [first | rest] =
+            value
+            |> render_yaml(indent + 2, key_order, [index | path], mode)
+            |> String.split("\n")
+
           ([spaces <> "- " <> String.trim_leading(first)] ++ rest) |> Enum.join("\n")
 
+        mode == :registry and is_list(value) ->
+          "#{spaces}-\n#{render_yaml(value, indent + 2, key_order, [index | path], mode)}"
+
+        mode == :legacy ->
+          "#{spaces}- #{render_scalar(to_string(value), mode)}"
+
         true ->
-          "#{spaces}- #{render_scalar(to_string(value))}"
+          unsupported_registry_value!(value, [index | path])
       end
     end)
   end
 
-  defp ordered_entries(map) do
-    order = [
+  defp render_yaml(value, indent, _key_order, path, :registry) do
+    if scalar?(value, :registry) do
+      String.duplicate(" ", indent) <> render_scalar(value, :registry)
+    else
+      unsupported_registry_value!(value, path)
+    end
+  end
+
+  defp scalar?(value, :legacy),
+    do: is_nil(value) or is_binary(value) or is_integer(value) or is_boolean(value) or value == []
+
+  defp scalar?(value, :registry),
+    do:
+      is_nil(value) or (is_binary(value) and String.valid?(value)) or is_integer(value) or
+        is_boolean(value) or value == [] or is_float(value)
+
+  defp render_scalar(nil, _mode), do: "null"
+  defp render_scalar(true, _mode), do: "true"
+  defp render_scalar(false, _mode), do: "false"
+  defp render_scalar([], _mode), do: "[]"
+  defp render_scalar(value, _mode) when is_integer(value), do: Integer.to_string(value)
+  defp render_scalar(value, :registry) when is_float(value), do: Float.to_string(value)
+
+  defp render_scalar(value, :legacy) when is_binary(value) do
+    escaped =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
+    "\"" <> escaped <> "\""
+  end
+
+  defp render_scalar(value, :registry) when is_binary(value), do: quote_yaml_string(value)
+
+  defp render_key(key, :legacy, _path), do: key
+
+  defp render_key(key, :registry, path) when is_binary(key) do
+    if String.valid?(key) do
+      if plain_registry_key?(key), do: key, else: quote_yaml_string(key)
+    else
+      unsupported_registry_key!(key, path)
+    end
+  end
+
+  defp render_key(key, :registry, path), do: unsupported_registry_key!(key, path)
+
+  defp proper_list?([]), do: true
+  defp proper_list?([_value | rest]), do: proper_list?(rest)
+  defp proper_list?(_value), do: false
+
+  defp unsupported_registry_value!(_value, path) do
+    raise ArgumentError,
+          "unsupported registry YAML value at #{registry_yaml_path(path)}: expected nil, a valid UTF-8 binary, an integer, a finite float, a boolean, a list, or a map"
+  end
+
+  defp unsupported_registry_key!(_key, path) do
+    raise ArgumentError,
+          "unsupported registry YAML map key at #{registry_yaml_path(path)}: expected a valid UTF-8 binary"
+  end
+
+  defp registry_yaml_path(path) do
+    path
+    |> Enum.reverse()
+    |> Enum.reduce("$", fn
+      index, rendered when is_integer(index) ->
+        "#{rendered}[#{index}]"
+
+      {:key, index}, rendered ->
+        "#{rendered}[key:#{index}]"
+
+      key, rendered ->
+        if Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_-]*$/, key) do
+          "#{rendered}.#{key}"
+        else
+          "#{rendered}[#{inspect(key)}]"
+        end
+    end)
+  end
+
+  defp plain_registry_key?(key) do
+    Regex.match?(~r/^[A-Za-z_][A-Za-z0-9_-]*$/, key) and
+      key |> String.downcase() |> then(&(&1 not in ["null", "true", "false", "yes", "no", "on", "off", "y", "n"]))
+  end
+
+  @yaml_escapes %{
+    ?\\ => "\\\\",
+    ?" => "\\\"",
+    0x00 => "\\0",
+    0x07 => "\\a",
+    0x08 => "\\b",
+    0x09 => "\\t",
+    0x0A => "\\n",
+    0x0B => "\\v",
+    0x0C => "\\f",
+    0x0D => "\\r",
+    0x1B => "\\e"
+  }
+
+  defp quote_yaml_string(value) do
+    escaped =
+      value
+      |> String.to_charlist()
+      |> Enum.map_join(fn codepoint ->
+        case Map.fetch(@yaml_escapes, codepoint) do
+          {:ok, escape} ->
+            escape
+
+          :error when codepoint < 0x20 or codepoint in 0x7F..0x9F ->
+            "\\x" <> (codepoint |> Integer.to_string(16) |> String.pad_leading(2, "0"))
+
+          :error ->
+            <<codepoint::utf8>>
+        end
+      end)
+
+    "\"" <> escaped <> "\""
+  end
+
+  defp legacy_key_order do
+    [
       "version",
       "project",
       "name",
@@ -206,29 +363,22 @@ defmodule SymphonyElixir.Workflow.Renderer do
       "discovery",
       "networkAccess"
     ]
-
-    Enum.sort_by(map, fn {key, _value} ->
-      case Enum.find_index(order, &(&1 == key)) do
-        nil -> {1, key}
-        index -> {0, index}
-      end
-    end)
   end
 
-  defp scalar?(value), do: is_nil(value) or is_binary(value) or is_integer(value) or is_boolean(value) or value == []
+  defp key_order_index(key_order) do
+    key_order
+    |> Enum.with_index()
+    |> Enum.reduce(%{}, fn {key, index}, indexes -> Map.put_new(indexes, key, index) end)
+  end
 
-  defp render_scalar(nil), do: "null"
-  defp render_scalar(true), do: "true"
-  defp render_scalar(false), do: "false"
-  defp render_scalar([]), do: "[]"
-  defp render_scalar(value) when is_integer(value), do: Integer.to_string(value)
+  defp ordered_entries(map, key_order) do
+    key_order = key_order_index(key_order)
 
-  defp render_scalar(value) when is_binary(value) do
-    escaped =
-      value
-      |> String.replace("\\", "\\\\")
-      |> String.replace("\"", "\\\"")
-
-    "\"" <> escaped <> "\""
+    Enum.sort_by(map, fn {key, _value} ->
+      case Map.fetch(key_order, key) do
+        :error -> {1, key}
+        {:ok, index} -> {0, index}
+      end
+    end)
   end
 end
