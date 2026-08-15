@@ -1800,6 +1800,141 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert SymphonyElixir.Shell.split("'unterminated") == {:error, {:unterminated_quote, "'"}}
   end
 
+  test "runner catalog validation reuses parse normalization and exact errors" do
+    catalog = %{
+      codex: %{
+        kind: " codex_app_server ",
+        command: ["codex", "app-server"],
+        approval_policy: %{"custom" => %{"sandbox_approval" => true}},
+        thread_sandbox: "workspace-write",
+        turn_sandbox_policy: %{type: "workspaceWrite", networkAccess: false},
+        execution_profiles: %{review: %{sandbox: "read-only"}},
+        turn_timeout_ms: 1,
+        read_timeout_ms: 2,
+        stall_timeout_ms: 0,
+        max_concurrent_startups: 3
+      },
+      open: %{
+        kind: "opencode_server",
+        command: ["opencode", "serve"],
+        model: "anthropic/claude-sonnet-4-5",
+        execution_profiles: %{review: %{permissions: %{bash: "deny"}}},
+        startup_timeout_ms: 4
+      }
+    }
+
+    assert {:ok, normalized} = Schema.validate_runner_catalog(catalog)
+    assert normalized["codex"]["kind"] == "codex_app_server"
+
+    assert normalized["codex"]["turn_sandbox_policy"] == %{
+             "type" => "workspaceWrite",
+             "networkAccess" => false
+           }
+
+    assert normalized["open"]["kind"] == "opencode_server"
+    assert normalized["open"]["startup_timeout_ms"] == 4
+
+    config = %{
+      runners: catalog,
+      profiles: %{default: %{delivery: %{pr_target: "main"}}}
+    }
+
+    assert {:ok, settings} = Schema.parse(config)
+    assert settings.runners == normalized
+
+    null_catalog = %{
+      codex: %{
+        command: nil,
+        approval_policy: %{"custom" => %{"sandbox_approval" => nil}},
+        turn_sandbox_policy: %{"type" => nil, "networkAccess" => false}
+      },
+      discarded: nil
+    }
+
+    assert {:ok, null_normalized} = Schema.validate_runner_catalog(null_catalog)
+    assert Map.keys(null_normalized) == ["codex"]
+    assert null_normalized["codex"]["command"] == ["codex", "app-server"]
+    assert null_normalized["codex"]["approval_policy"] == %{"custom" => %{}}
+    assert null_normalized["codex"]["turn_sandbox_policy"] == %{"networkAccess" => false}
+
+    assert {:ok, null_settings} =
+             Schema.parse(%{
+               runners: null_catalog,
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    assert null_settings.runners == null_normalized
+
+    null_auth_catalog = %{
+      open: %{
+        kind: "opencode_server",
+        command: ["opencode", "serve"],
+        config_content: nil,
+        server_auth: %{username: "runner", password: nil}
+      },
+      discarded: nil
+    }
+
+    null_auth_errors = [
+      "runtime.runners.open.server_auth.password is required when server_auth is configured"
+    ]
+
+    assert {:error, ^null_auth_errors} = Schema.validate_runner_catalog(null_auth_catalog)
+
+    assert {:error,
+            [
+              %Schema.RunnerCatalogError{
+                path: "runtime.runners.open.server_auth.password",
+                code: :missing_required_field,
+                detail: "is required when server_auth is configured",
+                message: "runtime.runners.open.server_auth.password is required when server_auth is configured"
+              }
+            ]} = Schema.validate_runner_catalog_detailed(null_auth_catalog)
+
+    assert Schema.parse(%{
+             agent: %{default_runner: "open"},
+             runners: null_auth_catalog,
+             profiles: %{default: %{delivery: %{pr_target: "main"}}}
+           }) ==
+             {:error, {:invalid_workflow_config, "runners runtime.runners.open.server_auth.password is required when server_auth is configured"}}
+
+    invalid_catalogs = [
+      {%{codex: %{kind: "other", command: ["runner"]}},
+       [
+         "runtime.runners.codex.kind \"other\" is not supported; supported kinds: codex_app_server, opencode_server",
+         "runtime.runners.codex.stall_timeout_ms must be a non-negative integer"
+       ]},
+      {%{codex: %{command: ["codex", " "]}}, ["runtime.runners.codex.command[1] must be a non-empty string"]},
+      {%{codex: %{approval_policy: "on-request"}}, ["runtime.runners.codex.approval_policy on-request is not supported; Symphony agents are unattended"]},
+      {%{codex: %{thread_sandbox: %{}}}, ["runtime.runners.codex.thread_sandbox must be a string"]},
+      {%{codex: %{turn_sandbox_policy: []}}, ["runtime.runners.codex.turn_sandbox_policy must be a map"]},
+      {%{codex: %{execution_profiles: []}}, ["runtime.runners.codex.execution_profiles must be a map"]},
+      {%{codex: %{unexpected: true}}, ["runtime.runners.codex.unexpected is not supported in v1"]},
+      {%{codex: %{turn_timeout_ms: 0}}, ["runtime.runners.codex.turn_timeout_ms must be a positive integer"]},
+      {%{codex: %{max_concurrent_startups: 0}}, ["runtime.runners.codex.max_concurrent_startups must be a positive integer"]}
+    ]
+
+    for {invalid_catalog, expected_errors} <- invalid_catalogs do
+      assert {:error, ^expected_errors} = Schema.validate_runner_catalog(invalid_catalog)
+
+      assert {:error, detailed_errors} = Schema.validate_runner_catalog_detailed(invalid_catalog)
+      assert Enum.map(detailed_errors, & &1.message) == expected_errors
+
+      invalid_config = %{
+        runners: invalid_catalog,
+        profiles: %{default: %{delivery: %{pr_target: "main"}}}
+      }
+
+      expected_parse_error =
+        expected_errors
+        |> Enum.reverse()
+        |> Enum.map_join(", ", &"runners #{&1}")
+
+      assert Schema.parse(invalid_config) ==
+               {:error, {:invalid_workflow_config, expected_parse_error}}
+    end
+  end
+
   test "schema validates runner defaults, references, and malformed runner fields" do
     assert {:ok, settings} =
              Schema.parse(%{

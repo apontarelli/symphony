@@ -243,6 +243,148 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     end
   end
 
+  test "host runner catalog accepts the supported Config.Schema runner fields" do
+    codex =
+      valid_host()
+      |> get_in(["runners", "codex"])
+      |> Map.merge(%{
+        "command" => nil,
+        "approval_policy" => %{"custom" => %{"sandbox_approval" => nil}},
+        "thread_sandbox" => "workspace-write",
+        "turn_sandbox_policy" => %{"type" => nil, "networkAccess" => false},
+        "execution_profiles" => %{"review" => nil},
+        "turn_timeout_ms" => 1,
+        "read_timeout_ms" => 2,
+        "stall_timeout_ms" => 0
+      })
+
+    open = %{
+      "kind" => "opencode_server",
+      "command" => ["opencode", "serve"],
+      "model" => "anthropic/claude-sonnet-4-5",
+      "execution_profiles" => %{"review" => %{"permissions" => %{"bash" => "deny"}}},
+      "startup_timeout_ms" => 4,
+      "max_concurrent_agents" => 2,
+      "max_concurrent_startups" => 1
+    }
+
+    document = put_in(valid_document(), ["host", "runners"], %{"codex" => codex, "open" => open})
+
+    assert {:ok, %Snapshot{globally_valid?: true, diagnostics: []}} =
+             Schema.validate(document, home: "/tmp/schema-home")
+  end
+
+  test "host runner errors retain exact Config.Schema semantics at registry paths" do
+    cases = [
+      {%{"command" => ["codex", " "]}, "command[1]", :invalid_type, "must be a non-empty string"},
+      {%{"approval_policy" => "on-request"}, "approval_policy", :invalid_value, "on-request is not supported; Symphony agents are unattended"},
+      {%{"thread_sandbox" => %{}}, "thread_sandbox", :invalid_type, "must be a string"},
+      {%{"turn_sandbox_policy" => []}, "turn_sandbox_policy", :invalid_type, "must be a map"},
+      {%{"execution_profiles" => []}, "execution_profiles", :invalid_type, "must be a map"},
+      {%{"unexpected" => true}, "unexpected", :unknown_key, "is not supported in v1"},
+      {%{"unsupported field" => true}, "unsupported field", :unknown_key, "is not supported in v1"},
+      {%{"kind" => "opencode_server", "approval_policy" => "never"}, "approval_policy", :unknown_key, "is not supported for opencode_server"},
+      {%{"kind" => "opencode_server", "server_auth" => %{"username" => "runner"}}, "server_auth.password", :missing_required_field, "is required when server_auth is configured"},
+      {%{"turn_timeout_ms" => 0}, "turn_timeout_ms", :invalid_type, "must be a positive integer"}
+    ]
+
+    for {overrides, suffix, code, detail} <- cases do
+      runner =
+        valid_host()
+        |> get_in(["runners", "codex"])
+        |> Map.merge(overrides)
+
+      document = put_in(valid_document(), ["host", "runners", "codex"], runner)
+      path = "$.host.runners.codex.#{suffix}"
+
+      assert {:ok, %Snapshot{globally_valid?: false, diagnostics: diagnostics}} =
+               Schema.validate(document, home: "/tmp/schema-home")
+
+      assert diagnostic_values(diagnostics) == [{:host, path, code, "#{path} #{detail}"}]
+    end
+  end
+
+  test "invalid runner IDs retain exact nested shared diagnostics" do
+    runner =
+      valid_host()
+      |> get_in(["runners", "codex"])
+      |> Map.merge(%{"command" => [], "unsupported field" => true})
+
+    cases = [
+      {"Bad ID", "$.host.runners.Bad ID", :invalid_id, "$.host.runners.Bad ID must match ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$"},
+      {42, "$.host.runners[key:0:integer]", :invalid_type, "$.host.runners[key:0:integer] must be a string"}
+    ]
+
+    for {id, path, id_code, id_message} <- cases do
+      document = put_in(valid_document(), ["host", "runners"], %{id => runner})
+
+      assert {:ok, %Snapshot{globally_valid?: false, diagnostics: diagnostics}} =
+               Schema.validate(document, home: "/tmp/schema-home")
+
+      assert diagnostic_values(diagnostics) == [
+               {:host, path, id_code, id_message},
+               {:host, "#{path}.command", :missing_required_field, "#{path}.command is required"},
+               {:host, "#{path}.unsupported field", :unknown_key, "#{path}.unsupported field is not supported in v1"}
+             ]
+    end
+  end
+
+  test "runner map keys receive exact recursive bounded diagnostics without crashes" do
+    codex =
+      valid_host()
+      |> get_in(["runners", "codex"])
+      |> Map.merge(%{
+        "approval_policy" => %{42 => "never"},
+        "execution_profiles" => %{"review" => %{"permissions" => %{[] => "deny"}}},
+        "turn_sandbox_policy" => %{"nested" => %{{:bad} => true}}
+      })
+
+    open = %{
+      "kind" => "opencode_server",
+      "command" => ["opencode", "serve"],
+      "server_auth" => %{%{} => "bad", "password" => "secret"},
+      "max_concurrent_agents" => 2,
+      "max_concurrent_startups" => 1
+    }
+
+    document = put_in(valid_document(), ["host", "runners"], %{"codex" => codex, "open" => open})
+
+    assert {:ok, %Snapshot{globally_valid?: false, diagnostics: diagnostics}} =
+             Schema.validate(document, home: "/tmp/schema-home")
+
+    assert diagnostic_values(diagnostics) == [
+             {:host, "$.host.runners.codex.approval_policy[key:0:integer]", :invalid_type, "$.host.runners.codex.approval_policy[key:0:integer] map keys must be strings"},
+             {:host, "$.host.runners.codex.execution_profiles.review.permissions[key:0:list]", :invalid_type,
+              "$.host.runners.codex.execution_profiles.review.permissions[key:0:list] map keys must be strings"},
+             {:host, "$.host.runners.codex.turn_sandbox_policy.nested[key:0:tuple]", :invalid_type, "$.host.runners.codex.turn_sandbox_policy.nested[key:0:tuple] map keys must be strings"},
+             {:host, "$.host.runners.open.server_auth[key:0:map]", :invalid_type, "$.host.runners.open.server_auth[key:0:map] map keys must be strings"}
+           ]
+  end
+
+  test "multiple host runner failures produce the exact complete ordered diagnostics" do
+    runner =
+      valid_host()
+      |> get_in(["runners", "codex"])
+      |> Map.merge(%{
+        "command" => [],
+        "max_concurrent_agents" => 0,
+        "thread_sandbox" => %{},
+        "unsupported field" => true
+      })
+
+    document = put_in(valid_document(), ["host", "runners", "codex"], runner)
+
+    assert {:ok, %Snapshot{globally_valid?: false, diagnostics: diagnostics}} =
+             Schema.validate(document, home: "/tmp/schema-home")
+
+    assert diagnostic_values(diagnostics) == [
+             {:host, "$.host.runners.codex.command", :missing_required_field, "$.host.runners.codex.command is required"},
+             {:host, "$.host.runners.codex.max_concurrent_agents", :invalid_type, "$.host.runners.codex.max_concurrent_agents must be a positive integer"},
+             {:host, "$.host.runners.codex.thread_sandbox", :invalid_type, "$.host.runners.codex.thread_sandbox must be a string"},
+             {:host, "$.host.runners.codex.unsupported field", :unknown_key, "$.host.runners.codex.unsupported field is not supported in v1"}
+           ]
+  end
+
   test "host enums, IDs, endpoints, secret references, and non-empty catalogs are strict" do
     invalid_values = [
       {["host", "id"], " Local-Host ", :invalid_id},
@@ -944,6 +1086,10 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     assert Enum.any?(snapshot.diagnostics, &(&1.scope == scope and &1.path == path and &1.code == code))
   end
 
+  defp diagnostic_values(diagnostics) do
+    Enum.map(diagnostics, &{&1.scope, &1.path, &1.code, &1.message})
+  end
+
   defp path_for(keys), do: "$." <> Enum.join(keys, ".")
   defp scope_for([field]) when field in ["host", "targets"], do: :registry
   defp scope_for(["host" | _rest]), do: :host
@@ -1019,7 +1165,7 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
       },
       "runners" => %{
         "codex" => %{
-          "kind" => "codex",
+          "kind" => "codex_app_server",
           "command" => ["codex", "app-server"],
           "max_concurrent_agents" => 4,
           "max_concurrent_startups" => 2

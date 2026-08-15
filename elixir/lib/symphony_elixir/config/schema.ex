@@ -73,6 +73,21 @@ defmodule SymphonyElixir.Config.Schema do
 
   @type t :: %__MODULE__{}
 
+  defmodule RunnerCatalogError do
+    @moduledoc false
+
+    @enforce_keys [:path, :code, :detail, :message]
+    defstruct [:path, :code, :detail, :message]
+
+    @type code :: :invalid_id | :invalid_type | :invalid_value | :missing_required_field | :unknown_key
+    @type t :: %__MODULE__{
+            path: String.t(),
+            code: code(),
+            detail: String.t(),
+            message: String.t()
+          }
+  end
+
   defmodule StringOrMap do
     @moduledoc false
     @behaviour Ecto.Type
@@ -801,6 +816,31 @@ defmodule SymphonyElixir.Config.Schema do
   def default_runners, do: @default_runners
 
   @doc false
+  @spec validate_runner_catalog(map()) :: {:ok, map()} | {:error, [String.t()]}
+  def validate_runner_catalog(runners) when is_map(runners) do
+    case validate_runner_catalog_detailed(runners) do
+      {:ok, normalized_runners} -> {:ok, normalized_runners}
+      {:error, errors} -> {:error, Enum.map(errors, & &1.message)}
+    end
+  end
+
+  @doc false
+  @spec validate_runner_catalog_detailed(map()) ::
+          {:ok, map()} | {:error, [RunnerCatalogError.t()]}
+  def validate_runner_catalog_detailed(runners) when is_map(runners) do
+    normalized_runners =
+      runners
+      |> normalize_keys()
+      |> drop_nil_values()
+      |> normalize_runner_map()
+
+    case runner_catalog_errors(normalized_runners) do
+      [] -> {:ok, normalized_runners}
+      errors -> {:error, errors}
+    end
+  end
+
+  @doc false
   @spec codex_action_approval_policy_error(term()) :: :on_request | :invalid_type | nil
   def codex_action_approval_policy_error(value) when is_binary(value) do
     case String.trim(value) do
@@ -882,10 +922,13 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_runners(%{valid?: false} = changeset), do: changeset
 
   defp validate_runners(changeset) do
-    changeset
-    |> get_field(:runners)
-    |> runner_validation_errors()
-    |> Enum.reduce(changeset, fn message, acc -> add_error(acc, :runners, message) end)
+    case validate_runner_catalog(get_field(changeset, :runners)) do
+      {:ok, _normalized_runners} ->
+        changeset
+
+      {:error, errors} ->
+        Enum.reduce(errors, changeset, fn message, acc -> add_error(acc, :runners, message) end)
+    end
   end
 
   defp validate_default_runner(%{valid?: false} = changeset), do: changeset
@@ -906,9 +949,102 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp runner_validation_errors(runners) when is_map(runners) do
-    runners
-    |> Enum.flat_map(fn {name, runner} -> runner_validation_errors(to_string(name), runner) end)
+  defp runner_catalog_errors(runners) when is_map(runners) do
+    Enum.flat_map(runners, fn {name, runner} ->
+      name = to_string(name)
+
+      name
+      |> runner_validation_errors(runner)
+      |> Enum.map(&runner_catalog_error(&1, name))
+    end)
+  end
+
+  defp runner_catalog_error(message, name) do
+    source_path = if name == "", do: "runtime.runners", else: "runtime.runners.#{name}"
+    relative = String.replace_prefix(message, source_path, "")
+    {path_suffix, code, detail} = runner_catalog_error_parts(relative)
+    path = source_path <> path_suffix
+
+    %RunnerCatalogError{path: path, code: code, detail: detail, message: message}
+  end
+
+  defp runner_catalog_error_parts(" runner names must not be blank") do
+    {"", :invalid_id, "runner names must not be blank"}
+  end
+
+  defp runner_catalog_error_parts(relative) do
+    unknown_suffixes = [
+      " is not supported in v1",
+      " is not supported"
+    ]
+
+    Enum.find_value(unknown_suffixes, fn suffix ->
+      split_runner_error_suffix(relative, suffix, :unknown_key)
+    end) ||
+      split_runner_error_at_last(relative, " is not supported for ", :unknown_key) ||
+      split_runner_error_suffix(
+        relative,
+        " is required when server_auth is configured",
+        :missing_required_field
+      ) ||
+      split_runner_error_suffix(relative, " is required", :missing_required_field) ||
+      split_known_runner_error(relative)
+  end
+
+  defp split_runner_error_suffix(relative, suffix, code) do
+    if String.ends_with?(relative, suffix) do
+      path_size = byte_size(relative) - byte_size(suffix)
+      {binary_part(relative, 0, path_size), code, String.trim_leading(suffix)}
+    end
+  end
+
+  defp split_runner_error_at_last(relative, delimiter, code) do
+    case :binary.matches(relative, delimiter) do
+      [] ->
+        nil
+
+      matches ->
+        {index, _length} = List.last(matches)
+        detail_offset = index + 1
+
+        {
+          binary_part(relative, 0, index),
+          code,
+          binary_part(relative, detail_offset, byte_size(relative) - detail_offset)
+        }
+    end
+  end
+
+  defp split_known_runner_error(".kind " <> detail) do
+    {".kind", runner_catalog_error_code(detail), detail}
+  end
+
+  defp split_known_runner_error(".approval_policy " <> detail) do
+    {".approval_policy", runner_catalog_error_code(detail), detail}
+  end
+
+  defp split_known_runner_error(relative) do
+    {index, _length} = relative |> :binary.matches(" must ") |> List.last()
+    detail_offset = index + 1
+    detail = binary_part(relative, detail_offset, byte_size(relative) - detail_offset)
+
+    {
+      binary_part(relative, 0, index),
+      runner_catalog_error_code(detail),
+      detail
+    }
+  end
+
+  defp runner_catalog_error_code("on-request is not supported;" <> _context), do: :invalid_value
+
+  defp runner_catalog_error_code(detail) do
+    cond do
+      String.contains?(detail, " is not supported;") -> :invalid_value
+      String.starts_with?(detail, "must use ") -> :invalid_value
+      String.starts_with?(detail, "must be a loopback hostname ") -> :invalid_value
+      String.starts_with?(detail, "must be \"auto\" or ") -> :invalid_value
+      true -> :invalid_type
+    end
   end
 
   defp runner_validation_errors("", _runner), do: ["runtime.runners runner names must not be blank"]

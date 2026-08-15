@@ -1,12 +1,15 @@
 defmodule SymphonyElixir.TargetRegistry.Schema do
   @moduledoc false
 
+  alias SymphonyElixir.Config.Schema, as: ConfigSchema
+  alias SymphonyElixir.Config.Schema.RunnerCatalogError
   alias SymphonyElixir.TargetRegistry.Diagnostic
   alias SymphonyElixir.TargetRegistry.Error
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
 
   @id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
+  @runner_validation_catalog_id "registry-runner-validation"
   @root_keys ~w(version host targets)
   @host_keys ~w(id state_root polling capacity scheduling tracker_connections runners)
   @polling_keys ~w(interval_ms max_concurrent_target_polls)
@@ -22,6 +25,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   @scope_keys ~w(type project_id project_slug team_key query_file issue_ids)
   @runner_target_keys ~w(allowed default settings)
   @runner_setting_keys ~w(model reasoning_effort max_turns execution_profiles)
+  @host_runner_limit_keys ~w(max_concurrent_agents max_concurrent_startups)
   @concurrency_keys ~w(max_concurrent_agents max_concurrent_startups max_concurrent_reviewers by_linear_state)
   @budget_periods ~w(per_run daily weekly)
   @check_phases ~w(pre_dispatch pre_handoff pre_publish pre_merge)
@@ -1054,24 +1058,96 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
        |> Enum.flat_map(fn {{id, runner}, index} ->
          path = dynamic_key_path("$.host.runners", id, index)
 
-         validate_dynamic_id(id, :host, path) ++ validate_host_runner(runner, path)
+         validate_dynamic_id(id, :host, path) ++ validate_host_runner(id, runner, path)
        end))
   end
 
   defp validate_host_runners(_runners), do: []
 
-  defp validate_host_runner(runner, path) when is_map(runner) do
-    fields = ["max_concurrent_agents", "max_concurrent_startups"]
-
-    required_field_diagnostics(runner, fields, :host, path) ++
-      Enum.flat_map(fields, fn field ->
+  defp validate_host_runner(id, runner, path) when is_map(runner) do
+    required_field_diagnostics(runner, @host_runner_limit_keys, :host, path) ++
+      Enum.flat_map(@host_runner_limit_keys, fn field ->
         validate_positive_integer_field(runner, field, :host, "#{path}.#{field}")
-      end)
+      end) ++
+      config_runner_diagnostics(id, runner, path)
   end
 
-  defp validate_host_runner(_runner, path) do
+  defp validate_host_runner(_id, _runner, path) do
     [diagnostic(:error, :host, path, :invalid_type, "#{path} must be a map")]
   end
+
+  defp config_runner_diagnostics(id, runner, path) do
+    {safe_runner, key_diagnostics} = sanitize_runner_map_keys(runner, path)
+
+    catalog_id =
+      if is_binary(id) and Regex.match?(@id_regex, id),
+        do: id,
+        else: @runner_validation_catalog_id
+
+    config_runner = Map.drop(safe_runner, @host_runner_limit_keys)
+
+    config_diagnostics =
+      case ConfigSchema.validate_runner_catalog_detailed(%{catalog_id => config_runner}) do
+        {:ok, _normalized_catalog} ->
+          []
+
+        {:error, errors} ->
+          Enum.map(errors, &translate_config_runner_error(&1, catalog_id, path))
+      end
+
+    key_diagnostics ++ config_diagnostics
+  end
+
+  defp translate_config_runner_error(%RunnerCatalogError{} = error, catalog_id, path) do
+    source_prefix = "runtime.runners.#{catalog_id}"
+    path_suffix = String.replace_prefix(error.path, source_prefix, "")
+    registry_path = path <> path_suffix
+
+    diagnostic(
+      :error,
+      :host,
+      registry_path,
+      error.code,
+      "#{registry_path} #{error.detail}"
+    )
+  end
+
+  defp sanitize_runner_map_keys(value, path) when is_map(value) do
+    value
+    |> ordered_map_entries()
+    |> Enum.with_index()
+    |> Enum.reduce({%{}, []}, fn {{key, nested}, index}, {safe_map, diagnostics} ->
+      key_path = dynamic_key_path(path, key, index)
+      {safe_nested, nested_diagnostics} = sanitize_runner_map_keys(nested, key_path)
+
+      if is_binary(key) do
+        {Map.put(safe_map, key, safe_nested), nested_diagnostics ++ diagnostics}
+      else
+        key_diagnostic =
+          diagnostic(
+            :error,
+            :host,
+            key_path,
+            :invalid_type,
+            "#{key_path} map keys must be strings"
+          )
+
+        {safe_map, [key_diagnostic | nested_diagnostics] ++ diagnostics}
+      end
+    end)
+  end
+
+  defp sanitize_runner_map_keys(value, path) when is_list(value) do
+    value
+    |> Enum.with_index()
+    |> Enum.reduce({[], []}, fn {nested, index}, {safe_values, diagnostics} ->
+      {safe_nested, nested_diagnostics} = sanitize_runner_map_keys(nested, "#{path}[#{index}]")
+      {[safe_nested | safe_values], nested_diagnostics ++ diagnostics}
+    end)
+    |> then(fn {safe_values, diagnostics} -> {Enum.reverse(safe_values), diagnostics} end)
+  end
+
+  defp sanitize_runner_map_keys(value, _path), do: {value, []}
 
   defp validate_positive_integer_map(map, fields, scope, path) when is_map(map) do
     unknown_key_diagnostics(map, fields, scope, path) ++
