@@ -10,6 +10,15 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
     @type t :: %__MODULE__{target_id: String.t(), target: map()}
   end
 
+  defmodule Patch do
+    @moduledoc false
+
+    @enforce_keys [:target_id, :changes]
+    defstruct [:target_id, :changes]
+
+    @type t :: %__MODULE__{target_id: String.t(), changes: map()}
+  end
+
   defmodule Import do
     @moduledoc false
 
@@ -25,5 +34,5 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
           }
   end
 
-  @type t :: Add.t() | Import.t()
+  @type t :: Add.t() | Import.t() | Patch.t()
 end

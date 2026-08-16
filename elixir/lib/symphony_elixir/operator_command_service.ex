@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.OperatorCommandService do
   @moduledoc false
+  alias Jason.OrderedObject
   alias SymphonyElixir.LocalConfig
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
@@ -12,6 +13,125 @@ defmodule SymphonyElixir.OperatorCommandService do
   alias SymphonyElixir.TargetRegistry.Validation
   alias SymphonyElixir.TargetRegistry.Yaml
   alias SymphonyElixir.Workflow.Manifest
+
+  @patch_schema %{
+    "display_name" => :value,
+    "repo" => %{
+      "path" => :value,
+      "manifest" => :value,
+      "expected_repository" => :value
+    },
+    "worktree" => %{
+      "root" => :value,
+      "strategy" => :value,
+      "hooks" => %{
+        "after_create" => :value,
+        "before_run" => :value,
+        "after_run" => :value,
+        "before_remove" => :value,
+        "timeout_ms" => :value
+      }
+    },
+    "linear" => %{
+      "connection" => :value,
+      "scope" => %{
+        "type" => :value,
+        "project_id" => :value,
+        "project_slug" => :value,
+        "team_key" => :value,
+        "query_file" => :value,
+        "issue_ids" => :value
+      },
+      "active_states" => :value,
+      "terminal_states" => :value,
+      "required_labels" => :value
+    },
+    "runners" => %{
+      "allowed" => :value,
+      "default" => :value,
+      "settings" =>
+        {:named,
+         %{
+           "model" => :value,
+           "reasoning_effort" => :value,
+           "max_turns" => :value,
+           "execution_profiles" =>
+             {:named,
+              %{
+                "model" => :value,
+                "reasoning_effort" => :value,
+                "budget" => :value,
+                "timeout_ms" => :value,
+                "max_retries" => :value,
+                "command" => :value
+              }}
+         }}
+    },
+    "concurrency" => %{
+      "max_concurrent_agents" => :value,
+      "max_concurrent_startups" => :value,
+      "max_concurrent_reviewers" => :value,
+      "by_linear_state" => {:named, :value}
+    },
+    "budgets" => %{
+      "per_run" => %{"max_total_tokens" => :value},
+      "daily" => %{"max_total_tokens" => :value},
+      "weekly" => %{"max_total_tokens" => :value}
+    },
+    "checks" => %{
+      "pre_dispatch" => :value,
+      "pre_handoff" => :value,
+      "pre_publish" => :value,
+      "pre_merge" => :value
+    },
+    "external_side_effects" => %{
+      "tracker_write" => :value,
+      "vcs_publish" => :value,
+      "pull_request_write" => :value,
+      "merge" => :value,
+      "deployment" => :value,
+      "production_data" => :value
+    },
+    "scheduling" => %{"weight" => :value}
+  }
+
+  @required_patch_paths [
+    ["repo"],
+    ["repo", "path"],
+    ["worktree"],
+    ["worktree", "root"],
+    ["worktree", "strategy"],
+    ["linear"],
+    ["linear", "connection"],
+    ["linear", "scope"],
+    ["linear", "scope", "type"],
+    ["linear", "active_states"],
+    ["linear", "terminal_states"],
+    ["runners"],
+    ["runners", "allowed"],
+    ["runners", "default"],
+    ["concurrency"],
+    ["concurrency", "max_concurrent_agents"],
+    ["concurrency", "max_concurrent_startups"],
+    ["concurrency", "max_concurrent_reviewers"],
+    ["budgets"],
+    ["budgets", "per_run"],
+    ["budgets", "per_run", "max_total_tokens"],
+    ["budgets", "daily"],
+    ["budgets", "daily", "max_total_tokens"],
+    ["budgets", "weekly"],
+    ["budgets", "weekly", "max_total_tokens"],
+    ["checks"],
+    ["external_side_effects"],
+    ["scheduling"],
+    ["scheduling", "weight"]
+  ]
+
+  @sensitive_patch_keys ~w(apikey authorization bearer bearertoken clientsecret connectionstring credential credentials password passwords passwd privatekey refreshtoken secret secrets token tokens accesstoken)
+  @raw_secret_value_regex ~r/(?:-----BEGIN [^-]*PRIVATE KEY-----|\b(?:bearer|basic)\s+[A-Za-z0-9._~+\/=-]+|\b(?:sk-(?:proj-)?|gh[pousr]_)[A-Za-z0-9_-]{12,})/i
+  @secret_reference_regex ~r/^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
+  @plan_envelope_keys ~w(envelope_version plan_id action target_id command registry_path expected_generation proposed_generation source_hashes created_at)
+  @plan_identity_keys ~w(action command envelope_version expected_generation proposed_generation registry_path source_hashes target_id)
 
   defmodule Error do
     @moduledoc false
@@ -78,7 +198,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             id: String.t() | nil,
-            action: :add | :import,
+            action: :add | :import | :patch,
             target_id: String.t(),
             registry_path: Path.t(),
             expected_generation: String.t(),
@@ -126,7 +246,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             plan_id: String.t(),
-            action: :add | :import,
+            action: :add | :import | :patch,
             target_id: String.t(),
             registry_path: Path.t(),
             old_generation: String.t(),
@@ -189,6 +309,25 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  def plan(%Command.Patch{} = command, opts) do
+    with :ok <- validate_patch(command),
+         {:ok, registry_path} <- registry_path(opts),
+         plan_dir <- plan_dir(opts, registry_path),
+         {:ok, current_file} <- read_registry(registry_path),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, registry_path) do
+      plan_patch(
+        command,
+        registry_path,
+        plan_dir,
+        current_file,
+        current_document,
+        current_snapshot,
+        opts
+      )
+    end
+  end
+
   def plan(_command, _opts),
     do: error(:invalid_command, "command must be a typed operator command", "$.command")
 
@@ -218,12 +357,16 @@ defmodule SymphonyElixir.OperatorCommandService do
   end
 
   defp validate_confirm_envelope(envelope, target_id, plan_id, registry_path) do
-    if envelope["plan_id"] == plan_id and envelope["target_id"] == target_id and
-         envelope["registry_path"] == registry_path and envelope["action"] in ["add", "import"] and
-         valid_envelope_command?(envelope["action"], target_id, envelope["command"]) do
+    with true <-
+           envelope["plan_id"] == plan_id and envelope["target_id"] == target_id and
+             envelope["registry_path"] == registry_path and
+             envelope["action"] in ["add", "import", "patch"] and
+             valid_envelope_command?(envelope["action"], target_id, envelope["command"]),
+         :ok <- validate_envelope_sources(envelope) do
       :ok
     else
-      error(:plan_mismatch, "plan envelope does not match confirmation binding", "$.plan")
+      false -> error(:plan_mismatch, "plan envelope does not match confirmation binding", "$.plan")
+      {:error, %Error{}} = error -> error
     end
   end
 
@@ -231,22 +374,70 @@ defmodule SymphonyElixir.OperatorCommandService do
     plan_dir = plan_dir(opts, registry_path)
 
     with {:ok, envelope} <- read_envelope(plan_dir, plan_id, opts),
-         :ok <- validate_apply_envelope(envelope, plan_id, expected_generation, registry_path),
-         {:ok, replacement} <- replace_from_envelope(envelope, opts),
-         consume_result <- consume_envelope(plan_dir, plan_id, opts) do
-      apply_result(envelope, replacement, consume_result)
+         :ok <- validate_apply_envelope(envelope, plan_id, expected_generation, registry_path) do
+      finish_replacement(envelope, replace_from_envelope(envelope, opts), plan_dir, plan_id, opts)
     end
   end
 
+  defp finish_replacement(envelope, {:ok, replacement}, plan_dir, plan_id, opts) do
+    apply_result(envelope, replacement, consume_envelope(plan_dir, plan_id, opts))
+  end
+
+  defp finish_replacement(
+         _envelope,
+         {:error, %Error{committed?: true} = committed_error},
+         plan_dir,
+         plan_id,
+         opts
+       ) do
+    case consume_envelope(plan_dir, plan_id, opts) do
+      {:ok, _consumed} ->
+        {:error, committed_error}
+
+      {:error, %Error{} = consume_error} ->
+        {:error,
+         %Error{
+           consume_error
+           | committed?: true,
+             expected_generation: committed_error.expected_generation,
+             observed_generation: committed_error.observed_generation
+         }}
+    end
+  end
+
+  defp finish_replacement(_envelope, {:error, %Error{}} = error, _plan_dir, _plan_id, _opts),
+    do: error
+
   defp read_envelope(plan_dir, plan_id, opts) do
     reader = Keyword.get(opts, :read_plan, &PlanStore.read/2)
-    normalize_plan_result(invoke(fn -> reader.(plan_dir, plan_id) end))
+
+    with {:ok, envelope} <- normalize_plan_result(invoke(fn -> reader.(plan_dir, plan_id) end)),
+         :ok <- validate_plan_envelope(envelope) do
+      {:ok, envelope}
+    end
   end
 
   defp consume_envelope(plan_dir, plan_id, opts) do
     consumer = Keyword.get(opts, :consume_plan, &PlanStore.consume/2)
-    normalize_plan_result(invoke(fn -> consumer.(plan_dir, plan_id) end))
+    normalize_consume_result(invoke(fn -> consumer.(plan_dir, plan_id) end), plan_id)
   end
+
+  defp normalize_consume_result({:ok, {:ok, envelope}}, plan_id) when is_map(envelope) do
+    with :ok <- validate_plan_envelope(envelope),
+         true <- envelope["plan_id"] == plan_id do
+      {:ok, envelope}
+    else
+      _invalid -> error(:plan_consume_failed, "plan envelope could not be consumed", "$.plan")
+    end
+  end
+
+  defp normalize_consume_result({:ok, {:error, %TargetRegistry.Error{} = source}}, _plan_id),
+    do: registry_error(source)
+
+  defp normalize_consume_result({:ok, {:error, %Error{}} = error}, _plan_id), do: error
+
+  defp normalize_consume_result(_result, _plan_id),
+    do: error(:plan_consume_failed, "plan envelope could not be consumed", "$.plan")
 
   defp normalize_plan_result({:ok, {:ok, envelope}}) when is_map(envelope), do: {:ok, envelope}
 
@@ -256,15 +447,58 @@ defmodule SymphonyElixir.OperatorCommandService do
   defp normalize_plan_result({:ok, {:error, %Error{}} = error}), do: error
   defp normalize_plan_result(_result), do: error(:plan_corrupt, "plan envelope is unavailable or corrupt", "$.plan")
 
+  defp validate_plan_envelope(envelope) do
+    with true <- Enum.sort(Map.keys(envelope)) == Enum.sort(@plan_envelope_keys),
+         true <- envelope["envelope_version"] == 1,
+         :ok <- validate_plan_id(envelope["plan_id"]),
+         :ok <- validate_generation(envelope["expected_generation"]),
+         :ok <- validate_generation(envelope["proposed_generation"]),
+         true <- envelope["action"] in ["add", "import", "patch"],
+         true <- valid_id?(envelope["target_id"]),
+         true <- valid_path?(envelope["registry_path"]),
+         true <- strict_json_map?(envelope["command"]),
+         true <- valid_source_hashes?(envelope["source_hashes"]),
+         true <- valid_created_at?(envelope["created_at"]),
+         true <- plan_identity(envelope) == envelope["plan_id"] do
+      :ok
+    else
+      _invalid -> error(:plan_corrupt, "plan envelope is unavailable or corrupt", "$.plan")
+    end
+  end
+
+  defp valid_source_hashes?(source_hashes) when is_map(source_hashes) do
+    map_size(source_hashes) <= 256 and
+      Enum.all?(source_hashes, fn {path, hash} ->
+        valid_path?(path) and match?(:ok, validate_generation(hash))
+      end)
+  end
+
+  defp valid_source_hashes?(_source_hashes), do: false
+
+  defp valid_created_at?(value) when is_binary(value),
+    do: String.ends_with?(value, "Z") and match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
+
+  defp valid_created_at?(_value), do: false
+
+  defp plan_identity(envelope) do
+    envelope
+    |> Map.take(@plan_identity_keys)
+    |> canonical_json()
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
   defp validate_apply_envelope(envelope, plan_id, expected_generation, registry_path) do
     with true <- envelope["plan_id"] == plan_id,
          true <- envelope["expected_generation"] == expected_generation,
          true <- envelope["registry_path"] == registry_path,
-         true <- envelope["action"] in ["add", "import"],
+         true <- envelope["action"] in ["add", "import", "patch"],
          true <- valid_id?(envelope["target_id"]),
          :ok <- validate_generation(envelope["proposed_generation"]),
          true <- is_map(envelope["source_hashes"]),
-         true <- valid_envelope_command?(envelope["action"], envelope["target_id"], envelope["command"]) do
+         true <- valid_envelope_command?(envelope["action"], envelope["target_id"], envelope["command"]),
+         :ok <- validate_envelope_sources(envelope) do
       :ok
     else
       false -> error(:plan_mismatch, "plan envelope binding does not match apply arguments", "$.plan")
@@ -278,7 +512,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          %{"target_id" => target_id, "target" => target} = command
        )
        when map_size(command) == 2,
-       do: strict_json_map?(target)
+       do: strict_json_map?(target) and patch_source_safe?(target)
 
   defp valid_envelope_command?(
          "import",
@@ -297,7 +531,41 @@ defmodule SymphonyElixir.OperatorCommandService do
       valid_id?(connection_id) and valid_runner_ids?(runner_ids)
   end
 
+  defp valid_envelope_command?(
+         "patch",
+         target_id,
+         %{"target_id" => target_id, "changes" => patch_input} = command
+       )
+       when map_size(command) == 2 and is_binary(patch_input) do
+    match?({:ok, patch} when is_map(patch), decode_patch_input(patch_input)) and
+      patch_input == canonical_patch_input(elem(decode_patch_input(patch_input), 1)) and
+      valid_patch_map?(elem(decode_patch_input(patch_input), 1))
+  end
+
   defp valid_envelope_command?(_action, _target_id, _command), do: false
+
+  defp validate_envelope_sources(%{
+         "action" => "patch",
+         "registry_path" => registry_path,
+         "command" => %{"changes" => patch_input},
+         "source_hashes" => source_hashes
+       }) do
+    with {:ok, patch} <- decode_patch_input(patch_input),
+         true <- patch_input == canonical_patch_input(patch),
+         true <- source_hashes == %{registry_path => Preview.generation(patch_input)} do
+      :ok
+    else
+      _changed -> error(:patch_source_changed, "patch source checksum changed", "$.plan.source_hashes")
+    end
+  end
+
+  defp validate_envelope_sources(%{"action" => "add", "source_hashes" => source_hashes}) do
+    if source_hashes == %{},
+      do: :ok,
+      else: error(:plan_mismatch, "add source bindings are invalid", "$.plan.source_hashes")
+  end
+
+  defp validate_envelope_sources(%{"action" => "import"}), do: :ok
 
   defp replace_from_envelope(envelope, opts) do
     replacer =
@@ -434,6 +702,48 @@ defmodule SymphonyElixir.OperatorCommandService do
       {:ok, proposed_bytes}
     else
       true -> error(:duplicate_target_id, "target ID now exists", "$.targets.#{envelope["target_id"]}")
+      {:error, %Error{}} = error -> error
+    end
+  end
+
+  defp rebuild_envelope(%{"action" => "patch"} = envelope, current_bytes, _opts) do
+    command = envelope["command"]
+    target_id = envelope["target_id"]
+
+    with :ok <- validate_envelope_sources(envelope),
+         {:ok, patch} <- decode_patch_input(command["changes"]),
+         {:ok, current_file} <- current_file(current_bytes),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, envelope["registry_path"]),
+         %TargetRegistry.Target{} = current_target <- current_snapshot.targets[target_id],
+         false <- current_target.configured_state == :retired,
+         {:ok, proposed_target} <-
+           merge_patch(
+             current_document["targets"][target_id],
+             patch,
+             @patch_schema,
+             "$.command.changes"
+           ),
+         proposed_document <-
+           put_in(current_document, ["targets", target_id], proposed_target),
+         proposed_bytes <- Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <-
+           snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
+         proposed_snapshot <- Composition.compose(proposed_snapshot),
+         true <-
+           current_snapshot.globally_valid? and
+             patch_applicable?(proposed_snapshot, target_id, patch),
+         :ok <-
+           verify_proposed_generation(
+             proposed_bytes,
+             envelope["proposed_generation"],
+             envelope["registry_path"]
+           ) do
+      {:ok, proposed_bytes}
+    else
+      nil -> error(:target_not_found, "target ID no longer exists", "$.targets.#{target_id}")
+      true -> error(:target_retired, "retired target cannot be patched", "$.targets.#{target_id}")
+      false -> error(:plan_not_applicable, "rebuilt patch proposal is not applicable", "$.plan")
       {:error, %Error{}} = error -> error
     end
   end
@@ -603,12 +913,95 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp validate_add(command) do
     if Map.keys(command) |> Enum.sort() == [:__struct__, :target, :target_id] and
-         valid_id?(command.target_id) and strict_json_map?(command.target) do
+         valid_id?(command.target_id) and strict_json_map?(command.target) and
+         patch_source_safe?(command.target) do
       :ok
     else
       error(:invalid_command, "add command is invalid", "$.command")
     end
   end
+
+  defp validate_patch(command) do
+    if Map.keys(command) |> Enum.sort() == [:__struct__, :changes, :target_id] and
+         valid_id?(command.target_id) and strict_json_map?(command.changes) and
+         patch_source_safe?(command.changes) do
+      reject_unreachable_patch_keys(command.changes, "$.command.changes")
+    else
+      error(:invalid_command, "patch command is invalid", "$.command")
+    end
+  end
+
+  defp patch_source_safe?(value) when is_map(value) do
+    Enum.all?(value, fn {key, nested} ->
+      if sensitive_patch_key?(key) do
+        secret_reference?(nested)
+      else
+        patch_source_safe?(nested)
+      end
+    end)
+  end
+
+  defp patch_source_safe?(value) when is_list(value), do: Enum.all?(value, &patch_source_safe?/1)
+
+  defp patch_source_safe?(value) when is_binary(value),
+    do: not Regex.match?(@raw_secret_value_regex, value)
+
+  defp patch_source_safe?(_scalar), do: true
+
+  defp sensitive_patch_key?("max_total_tokens"), do: false
+
+  defp sensitive_patch_key?(key) do
+    normalized = key |> String.downcase() |> String.replace(~r/[^a-z0-9]/, "")
+    normalized in @sensitive_patch_keys
+  end
+
+  defp secret_reference?(nil), do: true
+
+  defp secret_reference?(value) when is_binary(value),
+    do: Regex.match?(@secret_reference_regex, value)
+
+  defp secret_reference?(values) when is_list(values),
+    do: Enum.all?(values, &secret_reference?/1)
+
+  defp secret_reference?(values) when is_map(values),
+    do: Enum.all?(values, fn {_key, nested} -> secret_reference?(nested) end)
+
+  defp secret_reference?(_value), do: false
+
+  defp valid_patch_map?(patch) do
+    strict_json_map?(patch) and patch_source_safe?(patch) and
+      reject_unreachable_patch_keys(patch, "$.command.changes") == :ok
+  end
+
+  defp reject_unreachable_patch_keys(value, path) when is_map(value) do
+    value
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while(:ok, fn {key, nested}, :ok ->
+      nested_path = path <> "." <> key
+
+      if key in ["state", "dispatch_mode"] do
+        {:halt, error(:unknown_key, "#{key} is unreachable in Phase 1", nested_path)}
+      else
+        nested
+        |> reject_unreachable_patch_keys(nested_path)
+        |> reduce_patch_validation()
+      end
+    end)
+  end
+
+  defp reject_unreachable_patch_keys(value, path) when is_list(value) do
+    value
+    |> Enum.with_index()
+    |> Enum.reduce_while(:ok, fn {nested, index}, :ok ->
+      nested
+      |> reject_unreachable_patch_keys("#{path}[#{index}]")
+      |> reduce_patch_validation()
+    end)
+  end
+
+  defp reject_unreachable_patch_keys(_value, _path), do: :ok
+  defp reduce_patch_validation(:ok), do: {:cont, :ok}
+  defp reduce_patch_validation({:error, %Error{}} = error), do: {:halt, error}
 
   defp strict_json_map?(value) when is_map(value) and not is_struct(value),
     do: match?({:ok, _remaining}, strict_json(value, 16, 4_096))
@@ -704,6 +1097,303 @@ defmodule SymphonyElixir.OperatorCommandService do
         is_function(value, 4)
     end)
   end
+
+  defp plan_patch(
+         command,
+         registry_path,
+         plan_dir,
+         current_file,
+         current_document,
+         current_snapshot,
+         opts
+       ) do
+    target = current_snapshot.targets[command.target_id]
+
+    cond do
+      not current_snapshot.globally_valid? ->
+        error(:plan_not_applicable, "patch requires a globally valid registry", "$.registry")
+
+      is_nil(target) ->
+        error(:target_not_found, "target ID does not exist", "$.targets.#{command.target_id}")
+
+      target.configured_state == :retired ->
+        error(:target_retired, "retired target cannot be patched", "$.targets.#{command.target_id}")
+
+      true ->
+        build_patch_plan(
+          command,
+          registry_path,
+          plan_dir,
+          current_file,
+          current_document,
+          current_snapshot,
+          opts
+        )
+    end
+  end
+
+  defp build_patch_plan(
+         command,
+         registry_path,
+         plan_dir,
+         current_file,
+         current_document,
+         current_snapshot,
+         opts
+       ) do
+    current_target = current_document["targets"][command.target_id]
+
+    with {:ok, proposed_target} <-
+           merge_patch(current_target, command.changes, @patch_schema, "$.command.changes"),
+         proposed_document <-
+           put_in(current_document, ["targets", command.target_id], proposed_target),
+         proposed_bytes <- Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <-
+           snapshot_for(proposed_document, proposed_bytes, registry_path) do
+      proposed_snapshot = Composition.compose(proposed_snapshot)
+
+      registry_preview =
+        current_snapshot
+        |> Preview.preview(proposed_snapshot, proposed_bytes)
+        |> normalize_patch_preview()
+
+      persist_patch_plan(%{
+        command: command,
+        registry_path: registry_path,
+        plan_dir: plan_dir,
+        current_file: current_file,
+        proposed_snapshot: proposed_snapshot,
+        proposed_bytes: proposed_bytes,
+        registry_preview: registry_preview,
+        opts: opts
+      })
+    end
+  end
+
+  defp normalize_patch_preview(%Preview{impact: impact} = preview) do
+    scope_changes =
+      Enum.reject(impact.scope.changes, fn change ->
+        String.ends_with?(change.path, ".policy_hash")
+      end)
+
+    impact =
+      impact
+      |> put_in([:scope], %{
+        classification: aggregate_patch_classifications(scope_changes),
+        changes: scope_changes
+      })
+      |> then(fn normalized ->
+        categories =
+          normalized
+          |> Map.drop([:overall, :runtime])
+          |> Map.values()
+          |> Enum.map(& &1.classification)
+
+        Map.put(normalized, :overall, aggregate_patch_classifications(categories))
+      end)
+
+    %{preview | impact: impact}
+  end
+
+  defp aggregate_patch_classifications(changes) when is_list(changes) do
+    classifications =
+      changes
+      |> Enum.map(fn
+        %{classification: classification} -> classification
+        classification -> classification
+      end)
+      |> Enum.reject(&(&1 in [:unchanged, :source_difference]))
+      |> MapSet.new()
+
+    cond do
+      MapSet.size(classifications) == 0 -> :unchanged
+      MapSet.member?(classifications, :forced_paused) -> :forced_paused
+      Enum.any?(classifications, &(&1 not in [:restricted, :broadened, :mixed])) -> :unknown
+      MapSet.size(classifications) > 1 -> :mixed
+      true -> classifications |> MapSet.to_list() |> hd()
+    end
+  end
+
+  defp persist_patch_plan(%{
+         command: command,
+         registry_path: registry_path,
+         plan_dir: plan_dir,
+         current_file: current_file,
+         proposed_snapshot: proposed_snapshot,
+         proposed_bytes: proposed_bytes,
+         registry_preview: registry_preview,
+         opts: opts
+       }) do
+    if patch_applicable?(proposed_snapshot, command.target_id, command.changes) do
+      created_at = now(opts)
+      patch_input = canonical_patch_input(command.changes)
+      source_hashes = %{registry_path => Preview.generation(patch_input)}
+      command_data = %{"target_id" => command.target_id, "changes" => patch_input}
+
+      with {:ok, envelope} <-
+             build_envelope(
+               "patch",
+               command.target_id,
+               command_data,
+               registry_path,
+               current_file.generation,
+               source_hashes,
+               created_at,
+               proposed_bytes
+             ),
+           {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
+        {:ok,
+         public_plan(
+           stored,
+           :patch,
+           command.target_id,
+           registry_path,
+           true,
+           %{"registry" => json_value(registry_preview)}
+         )}
+      end
+    else
+      {:ok,
+       %Plan{
+         id: nil,
+         action: :patch,
+         target_id: command.target_id,
+         registry_path: registry_path,
+         expected_generation: current_file.generation,
+         proposed_generation: registry_preview.proposed_generation,
+         applicable?: false,
+         preview: %{"registry" => json_value(registry_preview)},
+         created_at: now(opts)
+       }}
+    end
+  end
+
+  defp patch_applicable?(snapshot, target_id, patch) do
+    case snapshot.targets[target_id] do
+      %TargetRegistry.Target{valid?: true} ->
+        snapshot.globally_valid?
+
+      %TargetRegistry.Target{effective_state: :paused, diagnostics: diagnostics} ->
+        snapshot.globally_valid? and required_patch_removal?(patch) and
+          Enum.all?(diagnostics, fn
+            %TargetRegistry.Diagnostic{severity: :error, code: code}
+            when code in [:missing_required_field, :incomplete_policy] ->
+              true
+
+            %TargetRegistry.Diagnostic{severity: :error} ->
+              false
+
+            _warning ->
+              true
+          end)
+    end
+  end
+
+  defp required_patch_removal?(patch),
+    do: Enum.any?(@required_patch_paths, &patch_path_null?(patch, &1))
+
+  defp patch_path_null?(patch, [key]), do: Map.fetch(patch, key) == {:ok, nil}
+
+  defp patch_path_null?(patch, [key | rest]) do
+    case Map.fetch(patch, key) do
+      {:ok, nested} when is_map(nested) -> patch_path_null?(nested, rest)
+      _absent_or_replaced -> false
+    end
+  end
+
+  defp merge_patch(current, patch, schema, path)
+       when is_map(current) and is_map(patch) and is_map(schema) do
+    patch
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, current}, fn {key, value}, {:ok, merged} ->
+      nested_path = path <> "." <> key
+
+      case Map.fetch(schema, key) do
+        {:ok, node} ->
+          merged
+          |> Map.get(key)
+          |> merge_patch_value(value, node, nested_path)
+          |> reduce_patch_merge(merged, key)
+
+        :error ->
+          {:halt, error(:unknown_key, "patch path is not supported", nested_path)}
+      end
+    end)
+  end
+
+  defp reduce_patch_merge({:ok, :remove}, merged, key),
+    do: {:cont, {:ok, Map.delete(merged, key)}}
+
+  defp reduce_patch_merge({:ok, nested}, merged, key),
+    do: {:cont, {:ok, Map.put(merged, key, nested)}}
+
+  defp reduce_patch_merge({:error, %Error{}} = error, _merged, _key), do: {:halt, error}
+
+  defp merge_patch_value(_current, nil, _schema, _path), do: {:ok, :remove}
+  defp merge_patch_value(_current, value, :value, _path), do: {:ok, value}
+
+  defp merge_patch_value(current, value, schema, path)
+       when is_map(schema) and is_map(value) do
+    merge_patch(if(is_map(current), do: current, else: %{}), value, schema, path)
+  end
+
+  defp merge_patch_value(_current, value, schema, _path) when is_map(schema),
+    do: {:ok, value}
+
+  defp merge_patch_value(current, value, {:named, entry_schema}, path) when is_map(value) do
+    merge_named_patch(if(is_map(current), do: current, else: %{}), value, entry_schema, path)
+  end
+
+  defp merge_patch_value(_current, value, {:named, _entry_schema}, _path), do: {:ok, value}
+
+  defp merge_named_patch(current, patch, entry_schema, path) do
+    patch
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, current}, fn {id, value}, {:ok, merged} ->
+      merge_named_patch_entry(merged, id, value, entry_schema, path <> "." <> id)
+    end)
+  end
+
+  defp merge_named_patch_entry(merged, id, nil, _entry_schema, _path),
+    do: {:cont, {:ok, Map.delete(merged, id)}}
+
+  defp merge_named_patch_entry(merged, id, value, entry_schema, path)
+       when is_map(entry_schema) and is_map(value) do
+    merged
+    |> Map.get(id, %{})
+    |> merge_patch(value, entry_schema, path)
+    |> reduce_patch_merge(merged, id)
+  end
+
+  defp merge_named_patch_entry(merged, id, value, entry_schema, path) do
+    merged
+    |> Map.get(id)
+    |> merge_patch_value(value, entry_schema, path)
+    |> reduce_patch_merge(merged, id)
+  end
+
+  defp canonical_patch_input(patch) do
+    patch
+    |> canonical_json()
+    |> Jason.encode!()
+  end
+
+  defp decode_patch_input(patch_input) when is_binary(patch_input) do
+    case Jason.decode(patch_input) do
+      {:ok, patch} when is_map(patch) -> {:ok, patch}
+      _invalid -> :error
+    end
+  end
+
+  defp canonical_json(value) when is_map(value) do
+    value
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {key, nested} -> {key, canonical_json(nested)} end)
+    |> OrderedObject.new()
+  end
+
+  defp canonical_json(value) when is_list(value), do: Enum.map(value, &canonical_json/1)
+  defp canonical_json(value), do: value
 
   defp plan_import(
          command,
@@ -927,7 +1617,13 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp preview_import(source, preview_opts, opts) do
     previewer = Keyword.get(opts, :preview_import, &RegistryImport.preview/2)
-    previewer.(source, preview_opts)
+
+    case invoke(fn -> previewer.(source, preview_opts) end) do
+      {:ok, {:ok, _preview} = result} -> result
+      {:ok, {:error, %TargetRegistry.Error{}} = result} -> result
+      {:ok, {:error, %Error{}} = result} -> result
+      _failure -> error(:import_preview_failed, "import preview dependency failed", "$.command.workflow")
+    end
   end
 
   defp map_import_source(source_bytes, runner_ids) when map_size(runner_ids) == 0,
@@ -981,7 +1677,14 @@ defmodule SymphonyElixir.OperatorCommandService do
   defp public_import(result, opts) do
     encoder = Keyword.get(opts, :encode_import_preview, &RegistryImport.encode_preview/1)
 
-    case result |> encoder.() |> Jason.decode() do
+    case invoke(fn -> encoder.(result) end) do
+      {:ok, encoded} when is_binary(encoded) -> decode_public_import(encoded)
+      _invalid -> %{"applicable?" => false, "import_diagnostics" => [%{"code" => "preview_encoding_failed"}]}
+    end
+  end
+
+  defp decode_public_import(encoded) do
+    case Jason.decode(encoded) do
       {:ok, value} when is_map(value) -> value
       _invalid -> %{"applicable?" => false, "import_diagnostics" => [%{"code" => "preview_encoding_failed"}]}
     end
