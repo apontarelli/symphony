@@ -1,0 +1,16 @@
+version: 1
+runtime:
+  tracker:
+    kind: linear
+    endpoint: https://linear.example.test/graphql
+    api_key: $LINEAR_API_KEY
+    project_id: project-ambiguous-001
+    team_key: AMB
+    active_states:
+      - Todo
+    terminal_states:
+      - Done
+  polling:
+    interval_ms: 30000
+  workspace:
+    root: /fixtures/ambiguous-worktrees

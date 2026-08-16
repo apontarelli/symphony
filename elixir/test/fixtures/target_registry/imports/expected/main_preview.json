@@ -1,0 +1,1283 @@
+{
+  "applicable?": true,
+  "effective_preview_target": {
+    "budgets": {},
+    "checks": {
+      "pre_dispatch": [],
+      "pre_handoff": [
+        "[REDACTED]"
+      ],
+      "pre_merge": [],
+      "pre_publish": []
+    },
+    "concurrency": {
+      "by_linear_state": {
+        "<key:0:string>": "[REDACTED]"
+      },
+      "max_concurrent_agents": 3,
+      "max_concurrent_reviewers": 2,
+      "max_concurrent_startups": 2
+    },
+    "display_name": "[REDACTED]",
+    "linear": {
+      "active_states": [
+        "[REDACTED]",
+        "[REDACTED]",
+        "[REDACTED]"
+      ],
+      "connection": "[REDACTED]",
+      "required_labels": [
+        "[REDACTED]",
+        "[REDACTED]",
+        "repo:symphony"
+      ],
+      "scope": {
+        "project_id": "[REDACTED]",
+        "type": "[REDACTED]"
+      },
+      "terminal_states": [
+        "[REDACTED]",
+        "[REDACTED]"
+      ]
+    },
+    "repo": {
+      "manifest": "[REDACTED]",
+      "path": "[REDACTED]"
+    },
+    "runners": {
+      "allowed": [
+        "[REDACTED]"
+      ],
+      "default": "[REDACTED]",
+      "settings": {
+        "<key:0:string>": {
+          "execution_profiles": {},
+          "max_turns": "[REDACTED]",
+          "model": "[REDACTED]"
+        }
+      }
+    },
+    "scheduling": {},
+    "state": "[REDACTED]",
+    "worktree": {
+      "hooks": {},
+      "root": "[REDACTED]",
+      "strategy": "[REDACTED]"
+    }
+  },
+  "field_dispositions": [
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "matched",
+      "destination_path": "$.host.polling.interval_ms",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "compared",
+      "destination_path": "$.host.capacity.max_concurrent_agents",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "compared",
+      "destination_path": "$.host.capacity.max_concurrent_startups",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped_with_target_isolation",
+      "destination_path": "$.targets.main.worktree.root",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "$.targets.main.concurrency",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "$.targets.main.concurrency",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "$.targets.main.concurrency",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "$.targets.main.checks.pre_handoff",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "mapped",
+      "destination_path": "$.targets.main.concurrency.max_concurrent_reviewers",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "reapplied_from_current_repo",
+      "destination_path": "[REDACTED]",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "ignored_host_only",
+      "destination_path": null,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "ignored_host_only",
+      "destination_path": null,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "ignored_legacy_posture",
+      "destination_path": null,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "not_mapped",
+      "destination_path": null,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "action": "not_mapped",
+      "destination_path": null,
+      "source_path": "[REDACTED]"
+    }
+  ],
+  "import_diagnostics": [],
+  "proposal": {
+    "host": {
+      "capacity": {
+        "max_concurrent_agents": 20,
+        "max_concurrent_reviewers": 4,
+        "max_concurrent_startups": 4
+      },
+      "id": "fixture-host",
+      "polling": {
+        "interval_ms": 30000,
+        "max_concurrent_target_polls": 1
+      },
+      "runners": {
+        "<key:0:string>": {
+          "<key:2:string>": "[REDACTED]",
+          "<key:3:string>": "[REDACTED]",
+          "<key:4:string>": "[REDACTED]",
+          "<key:5:string>": "[REDACTED]",
+          "<key:6:string>": "[REDACTED]",
+          "<key:8:string>": "[REDACTED]",
+          "command": "[REDACTED]",
+          "execution_profiles": {},
+          "kind": "[REDACTED]",
+          "max_concurrent_agents": "[REDACTED]",
+          "max_concurrent_startups": "[REDACTED]"
+        }
+      },
+      "scheduling": {
+        "algorithm": "weighted_deficit_round_robin",
+        "max_credit_rounds": 4
+      },
+      "state_root": "/fixtures/state",
+      "tracker_connections": {
+        "linear": {
+          "api_key": "[REDACTED]",
+          "endpoint": "https://REDACTED/graphql",
+          "kind": "[REDACTED]"
+        }
+      }
+    },
+    "targets": {
+      "<key:0:string>": {
+        "budgets": {},
+        "checks": {
+          "pre_dispatch": [],
+          "pre_handoff": [
+            "[REDACTED]"
+          ],
+          "pre_merge": [],
+          "pre_publish": []
+        },
+        "concurrency": {
+          "by_linear_state": {
+            "<key:0:string>": "[REDACTED]"
+          },
+          "max_concurrent_agents": "[REDACTED]",
+          "max_concurrent_reviewers": "[REDACTED]",
+          "max_concurrent_startups": "[REDACTED]"
+        },
+        "display_name": "[REDACTED]",
+        "linear": {
+          "active_states": [
+            "[REDACTED]",
+            "[REDACTED]",
+            "[REDACTED]"
+          ],
+          "connection": "[REDACTED]",
+          "required_labels": [
+            "[REDACTED]",
+            "[REDACTED]"
+          ],
+          "scope": {
+            "project_id": "[REDACTED]",
+            "type": "[REDACTED]"
+          },
+          "terminal_states": [
+            "[REDACTED]",
+            "[REDACTED]"
+          ]
+        },
+        "repo": {
+          "manifest": "[REDACTED]",
+          "path": "[REDACTED]"
+        },
+        "runners": {
+          "allowed": [
+            "[REDACTED]"
+          ],
+          "default": "[REDACTED]",
+          "settings": {
+            "<key:0:string>": {
+              "execution_profiles": {},
+              "max_turns": "[REDACTED]",
+              "model": "[REDACTED]"
+            }
+          }
+        },
+        "scheduling": {},
+        "state": "[REDACTED]",
+        "worktree": {
+          "hooks": {},
+          "root": "[REDACTED]",
+          "strategy": "[REDACTED]"
+        }
+      }
+    },
+    "version": 1
+  },
+  "registry_preview": {
+    "diagnostics": [
+      {
+        "code": "missing_required_field",
+        "message": "$.targets.main.budgets.daily is required",
+        "path": "$.targets.main.budgets.daily",
+        "scope": {
+          "target": "main"
+        },
+        "severity": "error"
+      },
+      {
+        "code": "missing_required_field",
+        "message": "$.targets.main.budgets.per_run is required",
+        "path": "$.targets.main.budgets.per_run",
+        "scope": {
+          "target": "main"
+        },
+        "severity": "error"
+      },
+      {
+        "code": "missing_required_field",
+        "message": "$.targets.main.budgets.weekly is required",
+        "path": "$.targets.main.budgets.weekly",
+        "scope": {
+          "target": "main"
+        },
+        "severity": "error"
+      },
+      {
+        "code": "incomplete_policy",
+        "message": "$.targets.main.external_side_effects is required; omitted operations default to deny",
+        "path": "$.targets.main.external_side_effects",
+        "scope": {
+          "target": "main"
+        },
+        "severity": "error"
+      },
+      {
+        "code": "missing_required_field",
+        "message": "$.targets.main.scheduling.weight is required",
+        "path": "$.targets.main.scheduling.weight",
+        "scope": {
+          "target": "main"
+        },
+        "severity": "error"
+      }
+    ],
+    "diff": [
+      {
+        "after": true,
+        "before": null,
+        "classification": "added",
+        "path": "$.globally_valid"
+      },
+      {
+        "after": 20,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.capacity.max_concurrent_agents"
+      },
+      {
+        "after": 4,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.capacity.max_concurrent_reviewers"
+      },
+      {
+        "after": 4,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.capacity.max_concurrent_startups"
+      },
+      {
+        "after": "fixture-host",
+        "before": null,
+        "classification": "added",
+        "path": "$.host.id"
+      },
+      {
+        "after": 30000,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.polling.interval_ms"
+      },
+      {
+        "after": 1,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.polling.max_concurrent_target_polls"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": "[REDACTED]",
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": {},
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": 3,
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": 2,
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "weighted_deficit_round_robin",
+        "before": null,
+        "classification": "added",
+        "path": "$.host.scheduling.algorithm"
+      },
+      {
+        "after": 4,
+        "before": null,
+        "classification": "added",
+        "path": "$.host.scheduling.max_credit_rounds"
+      },
+      {
+        "after": "/fixtures/state",
+        "before": null,
+        "classification": "added",
+        "path": "$.host.state_root"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "https://REDACTED/graphql",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": {},
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.budgets"
+      },
+      {
+        "after": [],
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.checks.pre_dispatch"
+      },
+      {
+        "after": [
+          "[REDACTED]"
+        ],
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.checks.pre_handoff"
+      },
+      {
+        "after": [],
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.checks.pre_merge"
+      },
+      {
+        "after": [],
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.checks.pre_publish"
+      },
+      {
+        "after": 2,
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": 3,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.concurrency.max_concurrent_agents"
+      },
+      {
+        "after": 2,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.concurrency.max_concurrent_reviewers"
+      },
+      {
+        "after": 2,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.concurrency.max_concurrent_startups"
+      },
+      {
+        "after": null,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.dispatch_mode"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.display_name"
+      },
+      {
+        "after": "paused",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.effective_state"
+      },
+      {
+        "after": [
+          "[REDACTED]",
+          "[REDACTED]",
+          "[REDACTED]"
+        ],
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": [
+          "[REDACTED]",
+          "[REDACTED]"
+        ],
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": [
+          "[REDACTED]",
+          "[REDACTED]"
+        ],
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": null,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.policy_hash"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.repo.manifest"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.repo.path"
+      },
+      {
+        "after": [
+          "[REDACTED]"
+        ],
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.runners.allowed"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.runners.default"
+      },
+      {
+        "after": {},
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": 20,
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "[REDACTED]"
+      },
+      {
+        "after": {},
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.scheduling"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.state"
+      },
+      {
+        "after": false,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.valid"
+      },
+      {
+        "after": {},
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.hooks"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.root"
+      },
+      {
+        "after": "[REDACTED]",
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.strategy"
+      },
+      {
+        "after": 1,
+        "before": null,
+        "classification": "added",
+        "path": "$.version"
+      }
+    ],
+    "expected_generation": null,
+    "globally_valid?": true,
+    "impact": {
+      "budgets": {
+        "changes": [],
+        "classification": "unchanged"
+      },
+      "capacity": {
+        "changes": [
+          {
+            "after": 20,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.capacity.max_concurrent_agents"
+          },
+          {
+            "after": 4,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.capacity.max_concurrent_reviewers"
+          },
+          {
+            "after": 4,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.capacity.max_concurrent_startups"
+          },
+          {
+            "after": 3,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.concurrency.max_concurrent_agents"
+          },
+          {
+            "after": 2,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.concurrency.max_concurrent_reviewers"
+          },
+          {
+            "after": 2,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.concurrency.max_concurrent_startups"
+          }
+        ],
+        "classification": "unknown"
+      },
+      "checks": {
+        "changes": [
+          {
+            "after": [],
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.checks.pre_dispatch"
+          },
+          {
+            "after": [
+              "[REDACTED]"
+            ],
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.checks.pre_handoff"
+          },
+          {
+            "after": [],
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.checks.pre_merge"
+          },
+          {
+            "after": [],
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.checks.pre_publish"
+          }
+        ],
+        "classification": "unknown"
+      },
+      "dispatch_mode": {
+        "changes": [
+          {
+            "after": null,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.dispatch_mode"
+          }
+        ],
+        "classification": "unknown"
+      },
+      "external_side_effects": {
+        "changes": [],
+        "classification": "unchanged"
+      },
+      "overall": "unknown",
+      "runners": {
+        "changes": [
+          {
+            "after": "[REDACTED]",
+            "before": "[REDACTED]",
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": {},
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": 3,
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": 2,
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": [
+              "[REDACTED]"
+            ],
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.runners.allowed"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.runners.default"
+          },
+          {
+            "after": {},
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": 20,
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          }
+        ],
+        "classification": "unknown"
+      },
+      "runtime": {
+        "host_dispatch": "unavailable_in_phase_1",
+        "legacy_single_target": "unchanged"
+      },
+      "scope": {
+        "changes": [
+          {
+            "after": true,
+            "before": null,
+            "classification": "added",
+            "path": "$.globally_valid"
+          },
+          {
+            "after": "fixture-host",
+            "before": null,
+            "classification": "added",
+            "path": "$.host.id"
+          },
+          {
+            "after": 30000,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.polling.interval_ms"
+          },
+          {
+            "after": 1,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.polling.max_concurrent_target_polls"
+          },
+          {
+            "after": "weighted_deficit_round_robin",
+            "before": null,
+            "classification": "added",
+            "path": "$.host.scheduling.algorithm"
+          },
+          {
+            "after": 4,
+            "before": null,
+            "classification": "added",
+            "path": "$.host.scheduling.max_credit_rounds"
+          },
+          {
+            "after": "/fixtures/state",
+            "before": null,
+            "classification": "added",
+            "path": "$.host.state_root"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "https://REDACTED/graphql",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": {},
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.budgets"
+          },
+          {
+            "after": 2,
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.display_name"
+          },
+          {
+            "after": [
+              "[REDACTED]",
+              "[REDACTED]",
+              "[REDACTED]"
+            ],
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": [
+              "[REDACTED]",
+              "[REDACTED]"
+            ],
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": [
+              "[REDACTED]",
+              "[REDACTED]"
+            ],
+            "before": null,
+            "classification": "added",
+            "path": "[REDACTED]"
+          },
+          {
+            "after": null,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.policy_hash"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.repo.manifest"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.repo.path"
+          },
+          {
+            "after": {},
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.scheduling"
+          },
+          {
+            "after": {},
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.hooks"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.root"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.strategy"
+          },
+          {
+            "after": 1,
+            "before": null,
+            "classification": "added",
+            "path": "$.version"
+          }
+        ],
+        "classification": "unknown"
+      },
+      "state": {
+        "changes": [
+          {
+            "after": "paused",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.effective_state"
+          },
+          {
+            "after": "[REDACTED]",
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.state"
+          },
+          {
+            "after": false,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.valid"
+          }
+        ],
+        "classification": "unknown"
+      }
+    },
+    "proposed_generation": "sha256:b06d6d6278a7961866efc62997fa7ef9f7cea42ba233c30b65a4fdf029449328",
+    "source_changed?": true,
+    "targets": [
+      {
+        "configured_state": "paused",
+        "dispatch_mode": null,
+        "effective_state": "paused",
+        "id": "main",
+        "policy_hash": null,
+        "valid?": false
+      }
+    ]
+  },
+  "source": {
+    "checksum": "sha256:85b3ef94e54d6d0d2b8b86b0fc1301c99a00d859cd3f59405e2aaf9aad2b42a9",
+    "path": "[REDACTED]"
+  },
+  "source_differences": [
+    {
+      "classification": "source_difference",
+      "destination_path": "$.host.capacity.max_concurrent_agents",
+      "effective": 20,
+      "reason": "existing host capacity remains unchanged",
+      "source": 3,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": "$.host.capacity.max_concurrent_startups",
+      "effective": 4,
+      "reason": "existing host capacity remains unchanged",
+      "source": 2,
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": "[REDACTED]",
+      "effective": [
+        "repo:symphony"
+      ],
+      "reason": "current committed repository issue markers remain authoritative",
+      "source": [
+        "repo:stale-main"
+      ],
+      "source_path": "$.issue_markers.labels"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": null,
+      "effective": null,
+      "reason": "host-only runtime field is reported and not copied into the target",
+      "source": "present",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": null,
+      "effective": null,
+      "reason": "host-only runtime field is reported and not copied into the target",
+      "source": "present",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": null,
+      "effective": null,
+      "reason": "legacy posture is ignored; imported targets are always [REDACTED] without a dispatch mode",
+      "source": "present",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": null,
+      "effective": null,
+      "reason": "implementation-specific quality setting remains under current repository policy",
+      "source": "present",
+      "source_path": "[REDACTED]"
+    },
+    {
+      "classification": "source_difference",
+      "destination_path": null,
+      "effective": null,
+      "reason": "implementation-specific quality setting remains under current repository policy",
+      "source": "present",
+      "source_path": "[REDACTED]"
+    }
+  ]
+}

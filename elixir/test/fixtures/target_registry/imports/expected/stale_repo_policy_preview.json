@@ -1,0 +1,29 @@
+{
+  "current_repo_manifest": {
+    "issue_markers": {
+      "labels": [
+        "repo:symphony"
+      ]
+    }
+  },
+  "effective_required_labels": [
+    "main-only",
+    "ready",
+    "repo:symphony"
+  ],
+  "policy_hash": null,
+  "source_differences": [
+    {
+      "classification": "source_difference",
+      "destination_path": "[REDACTED]",
+      "effective": [
+        "repo:symphony"
+      ],
+      "reason": "current committed repository issue markers remain authoritative",
+      "source": [
+        "repo:stale-main"
+      ],
+      "source_path": "$.issue_markers.labels"
+    }
+  ]
+}

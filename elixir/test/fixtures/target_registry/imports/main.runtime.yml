@@ -1,0 +1,84 @@
+version: 1
+project:
+  slug: stale-main-project
+workflow:
+  preset: legacy
+  modules: []
+docs:
+  entrypoints:
+    - STALE.md
+validation:
+  commands: []
+vcs:
+  mode: git
+delivery:
+  pr_target: legacy
+automation:
+  posture: legacy
+capabilities:
+  required: []
+issue_markers:
+  labels:
+    - repo:stale-main
+harness:
+  codex_home: /synthetic/stale-harness
+runtime:
+  target:
+    type: project
+    project_id: project-main-001
+    display_name: Main imported runtime
+    mode: watch
+    required_labels:
+      - main-only
+  tracker:
+    kind: linear
+    endpoint: https://linear.example.test/graphql
+    api_key: $LINEAR_API_KEY
+    project_id: project-main-001
+    active_states:
+      - Todo
+      - In Progress
+      - Merging
+    terminal_states:
+      - Done
+      - Canceled
+    required_labels:
+      - ready
+  polling:
+    interval_ms: 30000
+  workspace:
+    root: /fixtures/main-worktrees
+  agent:
+    default_runner: codex
+    max_concurrent_agents: 3
+    max_concurrent_startups: 2
+    max_turns: 20
+    max_concurrent_agents_by_state:
+      Todo: 2
+  worker:
+    max_concurrent_agents_per_host: 3
+    max_concurrent_startups_per_host: 2
+  runners:
+    codex:
+      kind: codex_app_server
+      command:
+        - codex
+        - app-server
+      model: gpt-5.5
+      approval_policy: never
+      thread_sandbox: workspace-write
+      turn_timeout_ms: 600000
+      read_timeout_ms: 30000
+      stall_timeout_ms: 120000
+      max_concurrent_startups: 2
+      execution_profiles: {}
+  quality_gate:
+    enabled: true
+    source_max_concurrency: 2
+    max_repair_passes: 1
+    runtime_isolation: serialized
+  server:
+    host: 127.0.0.1
+    port: 4010
+  observability:
+    dashboard_enabled: true

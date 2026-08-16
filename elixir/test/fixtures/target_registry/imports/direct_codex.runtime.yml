@@ -1,0 +1,119 @@
+version: 1
+project:
+  slug: stale-direct-project
+workflow:
+  preset: legacy-direct
+docs:
+  entrypoints:
+    - OLD.md
+validation:
+  commands: []
+vcs:
+  mode: git
+delivery:
+  pr_target: legacy
+automation:
+  posture: legacy
+capabilities:
+  required: []
+issue_markers:
+  labels:
+    - repo:stale-direct
+harness:
+  codex_home: /synthetic/stale-direct-harness
+runtime:
+  target:
+    type: project
+    project_slug: direct-project
+    display_name: Direct Codex runtime
+    mode: unattended
+    required_labels:
+      - direct-only
+  tracker:
+    kind: linear
+    endpoint: https://linear.example.test/graphql
+    api_key: $LINEAR_API_KEY
+    project_slug: direct-project
+    active_states:
+      - Todo
+      - In Progress
+      - Rework
+    terminal_states:
+      - Done
+      - Canceled
+    required_labels:
+      - ready
+  polling:
+    interval_ms: 12000
+  workspace:
+    root: /fixtures/direct-worktrees
+  hooks:
+    after_create: jj git clone https://git.example.test/symphony.git .
+    before_run: mise exec -- jj status
+    after_run: jj status
+    before_remove: mise exec -- make clean
+    timeout_ms: 90000
+  agent:
+    default_runner: codex
+    max_concurrent_agents: 10
+    max_concurrent_startups: 2
+    max_turns: 24
+    max_concurrent_agents_by_state:
+      Todo: 4
+      In Progress: 8
+  worker:
+    max_concurrent_agents_per_host: 10
+    max_concurrent_startups_per_host: 2
+  runners:
+    codex:
+      kind: codex_app_server
+      command:
+        - /opt/synthetic/bin/codex
+        - --fixture-flag
+        - direct
+        - -c
+        - 'model_reasoning_effort="xhigh"'
+        - app-server
+      model: gpt-5.6-sol
+      approval_policy: never
+      thread_sandbox: workspace-write
+      turn_sandbox_policy:
+        type: workspaceWrite
+        writableRoots:
+          - <fixture-root>/direct-worktrees
+        readOnlyAccess:
+          type: fullAccess
+        networkAccess: true
+        excludeTmpdirEnvVar: false
+        excludeSlashTmp: false
+      turn_timeout_ms: 900000
+      read_timeout_ms: 30000
+      stall_timeout_ms: 180000
+      max_concurrent_startups: 2
+      execution_profiles:
+        source_reviewer:
+          model: gpt-5.6-sol
+          reasoning_effort: high
+          timeout_ms: 180000
+          max_retries: 1
+        test_reviewer:
+          model: gpt-5.6-terra
+          reasoning_effort: xhigh
+          timeout_ms: 240000
+          max_retries: 0
+  quality_gate:
+    enabled: true
+    source_max_concurrency: 3
+    max_repair_passes: 2
+    runtime_isolation: serialized
+    reviewer_timeout_ms: 1200000
+    reviewer_max_retries: 1
+    path_classification:
+      security:
+        - auth/**
+  server:
+    host: 127.0.0.1
+    port: 4020
+  observability:
+    dashboard_enabled: true
+    refresh_ms: 1000
