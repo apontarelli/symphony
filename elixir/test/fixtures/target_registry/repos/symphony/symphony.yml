@@ -1,0 +1,53 @@
+version: 1
+project:
+  slug: symphony-fixture
+  name: Symphony Fixture
+  repository: https://github.com/example/symphony-fixture
+  kind: elixir
+  app_kind: web
+workflow:
+  preset: default
+  modules:
+    - product_visual_review
+  config:
+    product_visual_review:
+      enabled: true
+      project_kind: web
+      route_policy: auto
+docs:
+  entrypoints:
+    - README.md
+validation:
+  commands:
+    - name: focused
+      command: mix test
+vcs:
+  mode: git
+  default_branch: main
+delivery:
+  pr_target: main
+automation:
+  posture: unattended
+  profile: default
+  completion_requirements:
+    - Run repository validation.
+auto_land:
+  posture: permissive
+  required_checks:
+    - fixture-ci
+  force_human_review_labels:
+    - human-review
+  blocked_state: Human Review
+  dry_run: true
+capabilities:
+  required:
+    - github_pr
+    - browser
+issue_markers:
+  labels:
+    - repo:symphony-fixture
+    - needs-review
+  allowed_projects:
+    - fixture-project
+harness:
+  codex_home: null

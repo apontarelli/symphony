@@ -1,0 +1,29 @@
+version: 1
+project:
+  slug: other-fixture
+  name: Other Fixture
+  repository: https://github.com/example/other-fixture
+workflow:
+  preset: default
+  modules: []
+docs:
+  entrypoints:
+    - README.md
+validation:
+  commands: []
+vcs:
+  mode: git
+  default_branch: main
+delivery:
+  pr_target: main
+automation:
+  posture: unattended
+  profile: default
+  completion_requirements: []
+capabilities:
+  required: []
+issue_markers:
+  labels:
+    - repo:other-fixture
+harness:
+  codex_home: null
