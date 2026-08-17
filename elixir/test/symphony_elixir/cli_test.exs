@@ -531,9 +531,89 @@ defmodule SymphonyElixir.CLITest do
     assert usage =~ "symphony run [ISSUE-ID ...]"
     assert usage =~ "symphony run --workflow <path>"
     assert usage =~ "symphony setup migrate --repo <path>"
+    assert usage =~ "symphony host target <add|import|plan|patch> [options]"
     refute usage =~ @ack_flag
     refute usage =~ "--dry-run"
     refute usage =~ "--setup"
+  end
+
+  test "bare host delegation returns host usage without daemon dependencies" do
+    assert {:error, usage} = CLI.evaluate(["host"], daemon_forbidden_deps())
+    assert usage =~ "symphony host target"
+    refute usage =~ @ack_flag
+  end
+
+  test "host --help returns success without daemon dependencies" do
+    assert {:ok, usage} = CLI.evaluate(["host", "--help"], daemon_forbidden_deps())
+    assert usage =~ "symphony host target"
+    refute usage =~ @ack_flag
+  end
+
+  test "host target action delegates to HostCLI without daemon dependencies" do
+    assert {:error, usage} =
+             CLI.evaluate(["host", "target", "add"], daemon_forbidden_deps())
+
+    assert usage =~ "symphony host target add"
+  end
+
+  test "injected host_evaluate receives host args and result passes through" do
+    parent = self()
+
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn host_args ->
+          send(parent, {:host_evaluate, host_args})
+          {:ok, "injected host output"}
+        end
+      })
+
+    assert {:ok, "injected host output"} = CLI.evaluate(["host", "target", "add", "my-id"], deps)
+    assert_received {:host_evaluate, ["target", "add", "my-id"]}
+  end
+
+  test "injected host_evaluate error passes through without daemon dependencies" do
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn _host_args -> {:error, "injected host error"} end
+      })
+
+    assert {:error, "injected host error"} = CLI.evaluate(["host", "target", "add"], deps)
+  end
+
+  test "host evaluate raise is totalized to fixed host_dependency_error without leak" do
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn _host_args -> raise "secret_boom=sk-abc123" end
+      })
+
+    assert {:error, error} = CLI.evaluate(["host", "target", "add"], deps)
+    assert error == "host_dependency_error"
+    refute error =~ "secret_boom"
+    refute error =~ "sk-abc123"
+    refute error =~ "raise"
+    refute error =~ "%RuntimeError"
+  end
+
+  test "host evaluate throw is totalized to fixed host_dependency_error without leak" do
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn _host_args -> throw({:bad, "secret"}) end
+      })
+
+    assert {:error, error} = CLI.evaluate(["host", "target", "add"], deps)
+    assert error == "host_dependency_error"
+    refute error =~ "secret"
+    refute error =~ "throw"
+  end
+
+  test "host evaluate malformed return is totalized to fixed host_dependency_error" do
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn _host_args -> :ok end
+      })
+
+    assert {:error, error} = CLI.evaluate(["host", "target", "add"], deps)
+    assert error == "host_dependency_error"
   end
 
   test "setup migrate requires an explicit repo" do

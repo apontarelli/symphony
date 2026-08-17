@@ -63,7 +63,8 @@ defmodule SymphonyElixir.CLI do
           optional(:tty?) => (-> boolean()),
           optional(:confirm) => (String.t() -> boolean()),
           optional(:prompt) => (String.t() -> String.t() | nil | :eof),
-          optional(:puts) => (String.t() -> term())
+          optional(:puts) => (String.t() -> term()),
+          optional(:host_evaluate) => ([String.t()] -> {:ok, String.t()} | {:error, String.t()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -120,6 +121,20 @@ defmodule SymphonyElixir.CLI do
 
   def evaluate(["review-records" | review_record_args], _deps) do
     ReviewRecordsCommand.evaluate(review_record_args)
+  end
+
+  def evaluate(["host" | host_args], deps) do
+    host_evaluate = Map.get(deps, :host_evaluate, &SymphonyElixir.HostCLI.evaluate/1)
+
+    case host_evaluate.(host_args) do
+      {:ok, output} when is_binary(output) -> {:ok, output}
+      {:error, message} when is_binary(message) -> {:error, message}
+      _other -> {:error, "host_dependency_error"}
+    end
+  rescue
+    _exception -> {:error, "host_dependency_error"}
+  catch
+    _kind, _reason -> {:error, "host_dependency_error"}
   end
 
   def evaluate([], deps) do
@@ -294,6 +309,7 @@ defmodule SymphonyElixir.CLI do
       symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
       symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
       symphony run --workflow <path> [--mode watch|drain|issue_batch] [options]
+      symphony host target <add|import|plan|patch> [options]
     """
     |> String.trim()
   end
