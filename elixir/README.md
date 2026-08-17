@@ -188,6 +188,41 @@ cp ../symphony.env.example ~/.config/symphony/.env
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
 symlink `../bin/symphony` into a directory already on `PATH`.
 
+## Target registry authoring (Phase 1)
+
+Operators can author local host target registry entries with these commands:
+
+```text
+symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
+symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
+symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target plan <id> --patch <target-patch.yml> [--registry <path>] [--json]
+symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
+```
+
+The default registry is `~/.config/symphony/targets.yml`, with private plan envelopes in the
+sibling `target-plans/` directory. `--registry` selects another local registry and its sibling plan
+directory. Preview commands do not mutate the registry and emit deterministic, redacted text;
+`--json` emits machine-readable output and errors.
+
+Confirmation requires the exact generated plan ID. It rebinds the action, target, and registry and
+validates bound sources and the registry generation before replacement. Stale, corrupt, or
+mismatched plans, and a locked registry, do not write. Registry replacement is atomic and writes
+deterministic YAML; plan consumption happens afterward. If post-commit verification or plan
+consumption fails, confirmation can report an error after the registry has changed, so inspect the
+registry before retrying.
+
+Add and import always create paused targets with no dispatch. Import reads the source runtime and
+repository without modifying either; the current committed repository manifest remains
+authoritative. Patch input is a target-only recursive schema patch, not JSON Patch or JSON Merge
+Patch, and Phase 1 rejects state or dispatch changes.
+
+Phase 1 is registry authoring only: it does not provide polling, queues, dispatch, active host runs,
+scheduler integration, or automatic host-policy bootstrap. Existing `symphony run` paths are
+unchanged and do not consume this registry. Initial host policy/bootstrap remains a direct, fully
+validated YAML operation.
+
 ## Configuration
 
 Target repos can use a committed `symphony.yml` manifest for setup and audit:
