@@ -2,8 +2,10 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   @moduledoc false
 
   alias SymphonyElixir.TargetRegistry.Diagnostic
+  alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
+  alias SymphonyElixir.TargetRegistry.Validation
   alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.PublishTarget
 
@@ -44,6 +46,134 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   end
 
   def compose(%Snapshot{} = snapshot, _opts), do: snapshot
+
+  @spec canonical_hash(term()) ::
+          {:ok, SymphonyElixir.TargetRegistry.generation()} | {:error, :not_json_safe}
+  def canonical_hash(term) do
+    if json_safe_string_map?(term) do
+      encoded = canonical_json(term)
+      digest = :crypto.hash(:sha256, encoded)
+      {:ok, "sha256:" <> Base.encode16(digest, case: :lower)}
+    else
+      {:error, :not_json_safe}
+    end
+  end
+
+  @spec verify_composed_target(Snapshot.t(), String.t()) ::
+          :ok | {:error, :invalid_composed_target}
+  def verify_composed_target(snapshot, target_id) do
+    case verify_composed_target_authority(snapshot, target_id) do
+      :ok -> :ok
+      _invalid -> {:error, :invalid_composed_target}
+    end
+  rescue
+    _exception -> {:error, :invalid_composed_target}
+  catch
+    _kind, _reason -> {:error, :invalid_composed_target}
+  end
+
+  defp verify_composed_target_authority(
+         %Snapshot{
+           version: 1,
+           globally_valid?: true,
+           host: host,
+           targets: targets,
+           diagnostics: diagnostics
+         } = snapshot,
+         target_id
+       )
+       when is_binary(target_id) and is_map(host) and is_map(targets) do
+    with true <- diagnostic_list_valid?(diagnostics),
+         {:ok, configured_targets} <- configured_targets(targets),
+         true <- target_diagnostic_lists_valid?(targets),
+         {:ok, %Target{} = target} <- Map.fetch(targets, target_id),
+         true <- selected_target_valid?(target),
+         {:ok, structured} <-
+           Schema.validate(
+             %{"version" => 1, "host" => host, "targets" => configured_targets},
+             home: "/"
+           ),
+         validated = Validation.validate(structured, registry_path: snapshot.path),
+         true <- validated.globally_valid?,
+         true <- validated.host == host,
+         {:ok, %Target{} = validated_target} <- Map.fetch(validated.targets, target_id),
+         true <- selected_target_parity?(target, validated_target),
+         true <- selected_diagnostics_coherent?(diagnostics, target_id, target.diagnostics),
+         true <- global_diagnostics_coherent?(diagnostics, validated.diagnostics),
+         :ok <- validate_compiled_manifest(target.repo_manifest),
+         {:ok, resolution} <- selected_module_resolution(target.effective_policy),
+         {:ok, projected_resolution} <- project_module_resolution(resolution),
+         true <- projected_resolution == resolution,
+         {:ok, expected_policy} <-
+           effective_policy(validated_target, host, target.repo_manifest, projected_resolution),
+         true <- expected_policy == target.effective_policy,
+         {:ok, expected_hash} <- policy_hash(expected_policy),
+         true <- expected_hash == target.policy_hash do
+      :ok
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp verify_composed_target_authority(_snapshot, _target_id), do: :error
+
+  defp configured_targets(targets) do
+    Enum.reduce_while(targets, {:ok, %{}}, fn
+      {id, %Target{configured: configured}}, {:ok, document} when is_map(configured) ->
+        {:cont, {:ok, Map.put(document, id, configured)}}
+
+      _entry, _accumulator ->
+        {:halt, :error}
+    end)
+  end
+
+  defp target_diagnostic_lists_valid?(targets) do
+    Enum.all?(targets, fn {_id, %Target{diagnostics: diagnostics}} ->
+      diagnostic_list_valid?(diagnostics)
+    end)
+  end
+
+  defp diagnostic_list_valid?([]), do: true
+
+  defp diagnostic_list_valid?([%Diagnostic{} | rest]),
+    do: diagnostic_list_valid?(rest)
+
+  defp diagnostic_list_valid?(_diagnostics), do: false
+
+  defp selected_target_valid?(%Target{valid?: valid?, diagnostics: diagnostics}) do
+    valid? == true and not Enum.any?(diagnostics, &(&1.severity == :error))
+  end
+
+  defp selected_target_parity?(target, validated_target) do
+    fields = [
+      :id,
+      :configured,
+      :configured_state,
+      :effective_state,
+      :dispatch_mode,
+      :valid?,
+      :diagnostics
+    ]
+
+    Map.take(target, fields) == Map.take(validated_target, fields)
+  end
+
+  defp selected_diagnostics_coherent?(snapshot_diagnostics, target_id, target_diagnostics) do
+    Enum.filter(snapshot_diagnostics, &(&1.scope == {:target, target_id})) == target_diagnostics
+  end
+
+  defp global_diagnostics_coherent?(snapshot_diagnostics, validated_diagnostics) do
+    global = fn diagnostics -> Enum.filter(diagnostics, &(&1.scope in [:registry, :host])) end
+    global.(snapshot_diagnostics) == global.(validated_diagnostics)
+  end
+
+  defp selected_module_resolution(%{
+         "repo_policy" => %{"workflow_module_resolution" => resolution}
+       })
+       when is_map(resolution),
+       do: {:ok, resolution}
+
+  defp selected_module_resolution(_policy), do: :error
 
   defp compose_target_entry({id, %Target{} = target}, host, manifest_adapter) do
     case prepare_target(target) do
@@ -572,46 +702,32 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   end
 
   defp policy_hash(policy) do
-    case canonical_json(policy) do
-      {:ok, encoded} ->
-        digest = :crypto.hash(:sha256, encoded)
-        {:ok, "sha256:" <> Base.encode16(digest, case: :lower)}
+    case canonical_hash(policy) do
+      {:ok, hash} ->
+        {:ok, hash}
 
-      _encoding_failure ->
+      {:error, :not_json_safe} ->
         {:manifest_invalid, "composed effective policy is not JSON-safe"}
     end
   end
 
   defp canonical_json(value) when is_map(value) do
-    with {:ok, entries} <- json_key_entries(value),
-         {:ok, encoded} <- canonical_map_entries(entries) do
-      {:ok, [?{, Enum.intersperse(encoded, ?,), ?}]}
-    end
+    encoded =
+      value
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.map(fn {key, nested} ->
+        [Jason.encode_to_iodata!(key), ?:, canonical_json(nested)]
+      end)
+
+    [?{, Enum.intersperse(encoded, ?,), ?}]
   end
 
-  defp canonical_json([]), do: {:ok, "[]"}
-
-  defp canonical_json([value | rest]) do
-    with {:ok, first} <- canonical_json(value),
-         {:ok, remaining} <- canonical_json_list(rest, []) do
-      {:ok, [?[, Enum.intersperse([first | remaining], ?,), ?]]}
-    end
+  defp canonical_json(value) when is_list(value) do
+    encoded = Enum.map(value, &canonical_json/1)
+    [?[, Enum.intersperse(encoded, ?,), ?]]
   end
 
-  defp canonical_json(value) do
-    if json_scalar?(value), do: Jason.encode_to_iodata(value), else: :error
-  end
-
-  defp canonical_json_list([], encoded), do: {:ok, Enum.reverse(encoded)}
-
-  defp canonical_json_list([value | rest], encoded) do
-    case canonical_json(value) do
-      {:ok, nested_json} -> canonical_json_list(rest, [nested_json | encoded])
-      _encoding_failure -> :error
-    end
-  end
-
-  defp canonical_json_list(_improper_tail, _encoded), do: :error
+  defp canonical_json(value), do: Jason.encode_to_iodata!(value)
 
   defp json_key_entries(map) do
     map
@@ -625,22 +741,6 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     end)
     |> case do
       {:ok, _seen, entries} -> {:ok, Enum.sort_by(entries, &elem(&1, 0))}
-      :error -> :error
-    end
-  end
-
-  defp canonical_map_entries(entries) do
-    Enum.reduce_while(entries, {:ok, []}, fn {key, nested}, {:ok, encoded} ->
-      with {:ok, nested_json} <- canonical_json(nested),
-           {:ok, encoded_key} <- Jason.encode_to_iodata(key) do
-        entry = [encoded_key, ?:, nested_json]
-        {:cont, {:ok, [entry | encoded]}}
-      else
-        _encoding_failure -> {:halt, :error}
-      end
-    end)
-    |> case do
-      {:ok, encoded} -> {:ok, Enum.reverse(encoded)}
       :error -> :error
     end
   end

@@ -863,6 +863,265 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
   end
 
   @tag :tmp_dir
+  test "exposes the existing canonical JSON hash as a total public helper" do
+    ordered = %{"a" => 1, "b" => [true, nil]}
+    reordered = Map.new([{"b", [true, nil]}, {"a", 1}])
+
+    nested = %{
+      "nested" => [%{"float" => 1.5, "integer" => -2}, "value"],
+      "zero" => 0.0
+    }
+
+    expected = "sha256:1cc69c7fa23616ca2ec3ee70d24390a6225c8832db8a4c814c7e0e7f942f8668"
+    assert {:ok, ^expected} = Composition.canonical_hash(ordered)
+    assert {:ok, ^expected} = Composition.canonical_hash(reordered)
+
+    nested_expected =
+      "sha256:c4badfa82403976214f10cc73bb8fd3c6ddcefbe7dd85ced8c8b241adda7bc76"
+
+    assert {:ok, ^nested_expected} = Composition.canonical_hash(nested)
+
+    for unsafe <- [
+          fn -> :private end,
+          ["valid" | :invalid],
+          %{1 => "invalid"},
+          %{key: "invalid"},
+          %{"key" => 1, key: 2},
+          %{<<0xFF>> => "invalid UTF-8 key"},
+          %{"value" => <<0xFF>>}
+        ] do
+      assert {:error, :not_json_safe} = Composition.canonical_hash(unsafe)
+    end
+  end
+
+  @tag :tmp_dir
+  test "verifies a selected composed target against Phase 1 schema and composition authority", %{paths: paths} do
+    composed = validated_composed_snapshot(paths)
+
+    assert :ok = Composition.verify_composed_target(composed, "alpha")
+
+    for policy_path <- [
+          ["runner_policy", "default"],
+          ["capacity_limits", "max_concurrent_agents"],
+          ["tracker_connection", "policy", "endpoint"],
+          ["external_side_effect_gates", "merge"]
+        ] do
+      forged = forge_selected_policy(composed, policy_path, "forged")
+
+      assert {:error, :invalid_composed_target} =
+               Composition.verify_composed_target(forged, "alpha")
+    end
+  end
+
+  @tag :tmp_dir
+  test "rejects composed targets that fail Phase 1 cross-field validation", %{paths: paths} do
+    composed = validated_composed_snapshot(paths)
+    target = composed.targets["alpha"]
+
+    excessive_capacity =
+      forge_configured_policy(
+        composed,
+        ["concurrency", "max_concurrent_agents"],
+        5,
+        ["capacity_limits", "max_concurrent_agents"],
+        5
+      )
+
+    contradictory_budget =
+      forge_configured_policy(
+        composed,
+        ["budgets", "daily", "max_total_tokens"],
+        500,
+        ["budget_limits", "daily", "max_total_tokens"],
+        500
+      )
+
+    unknown_tracker =
+      forge_configured_policy(
+        composed,
+        ["linear", "connection"],
+        "missing-tracker",
+        ["tracker_connection"],
+        %{"id" => "missing-tracker", "policy" => nil}
+      )
+
+    unknown_runner =
+      put_selected_target(composed, %{
+        target
+        | configured:
+            put_in(
+              target.configured,
+              ["runners", "settings", "missing-runner"],
+              %{"model" => "private-runner-model"}
+            )
+      })
+
+    unsafe_repo =
+      put_selected_target(composed, %{
+        target
+        | configured:
+            put_in(
+              target.configured,
+              ["repo", "path"],
+              Path.join(paths.worktree, "missing-repository")
+            )
+      })
+
+    overlapping_roots =
+      forge_configured_policy(
+        composed,
+        ["worktree", "root"],
+        paths.symphony,
+        ["worktree_policy", "root"],
+        paths.symphony
+      )
+
+    for forged <- [
+          excessive_capacity,
+          contradictory_budget,
+          unknown_tracker,
+          unknown_runner,
+          unsafe_repo,
+          overlapping_roots
+        ] do
+      result = Composition.verify_composed_target(forged, "alpha")
+      assert result == {:error, :invalid_composed_target}
+      refute inspect(result) =~ "private-runner-model"
+    end
+  end
+
+  @tag :tmp_dir
+  test "rejects a selected target overlapped by an unselected target root", %{paths: paths} do
+    composed = validated_two_target_composed_snapshot(paths)
+    beta = composed.targets["beta"]
+    alpha_root = get_in(composed.targets["alpha"].configured, ["worktree", "root"])
+
+    forged =
+      put_in(
+        composed.targets["beta"],
+        %{beta | configured: put_in(beta.configured, ["worktree", "root"], alpha_root)}
+      )
+
+    assert {:error, :invalid_composed_target} =
+             Composition.verify_composed_target(forged, "alpha")
+  end
+
+  @tag :tmp_dir
+  test "accepts a valid selected target beside an unrelated composition quarantine", %{paths: paths} do
+    beta = target("beta", paths.other, paths.worktree)
+
+    composed =
+      validated_composed_snapshot(paths, %{
+        "alpha" => target("alpha", paths.symphony, paths.worktree).configured,
+        "beta" => beta.configured
+      })
+
+    assert %Target{valid?: false, effective_state: :paused} = composed.targets["beta"]
+    assert :ok = Composition.verify_composed_target(composed, "alpha")
+  end
+
+  @tag :tmp_dir
+  test "contains hostile target enumerables without disclosing their reasons", %{paths: paths} do
+    composed = validated_composed_snapshot(paths)
+    private_reason = "private-enumerable-reason"
+
+    hostile_streams = [
+      Stream.map([:trigger], fn _value -> throw(private_reason) end),
+      Stream.map([:trigger], fn _value -> exit(private_reason) end)
+    ]
+
+    for hostile <- hostile_streams do
+      snapshot = %{composed | targets: hostile}
+      result = Composition.verify_composed_target(snapshot, "alpha")
+
+      assert result == {:error, :invalid_composed_target}
+      refute inspect(result) =~ private_reason
+    end
+  end
+
+  @tag :tmp_dir
+  test "rejects forged snapshot provenance and diagnostic seams without disclosure", %{paths: paths} do
+    composed = validated_composed_snapshot(paths)
+    target = composed.targets["alpha"]
+
+    coherent_diagnostic =
+      %Diagnostic{
+        severity: :info,
+        scope: {:target, "alpha"},
+        path: "$.targets.alpha",
+        code: :forged,
+        message: "attacker-private-value"
+      }
+
+    cases = [
+      %{composed | host: put_in(composed.host, ["runners", "codex", "command"], ["forged-runner"])},
+      put_in(composed.targets["alpha"].configured["scheduling"]["weight"], 99),
+      put_in(composed.targets["alpha"].diagnostics, [coherent_diagnostic]),
+      %{composed | diagnostics: [coherent_diagnostic]},
+      %{
+        composed
+        | targets: %{"alpha" => %{target | diagnostics: [coherent_diagnostic]}},
+          diagnostics: [coherent_diagnostic]
+      },
+      %{composed | diagnostics: [%{"message" => "attacker-private-value"}]},
+      %{composed | targets: %{"alpha" => %{target | diagnostics: [:malformed]}}},
+      %{composed | targets: %{"alpha" => %{target | valid?: false}}},
+      %{composed | targets: %{"alpha" => :malformed}}
+    ]
+
+    for forged <- cases do
+      result = Composition.verify_composed_target(forged, "alpha")
+      assert result == {:error, :invalid_composed_target}
+      refute inspect(result) =~ "attacker-private-value"
+    end
+  end
+
+  @tag :tmp_dir
+  test "rejects malformed manifest, module resolution, and normalized Phase 1 inputs", %{paths: paths} do
+    composed = validated_composed_snapshot(paths)
+    target = composed.targets["alpha"]
+    resolution_path = ["repo_policy", "workflow_module_resolution"]
+
+    malformed_resolutions = [
+      Map.put(get_in(target.effective_policy, resolution_path), "extra", true),
+      Map.put(get_in(target.effective_policy, resolution_path), :rendered, "duplicate"),
+      Map.delete(get_in(target.effective_policy, resolution_path), "module_refs")
+    ]
+
+    cases =
+      Enum.map(malformed_resolutions, fn resolution ->
+        policy = put_in(target.effective_policy, resolution_path, resolution)
+
+        policy_hash =
+          case Composition.canonical_hash(policy) do
+            {:ok, hash} -> hash
+            {:error, :not_json_safe} -> target.policy_hash
+          end
+
+        put_selected_target(composed, %{target | effective_policy: policy, policy_hash: policy_hash})
+      end) ++
+        [
+          invalid_manifest_snapshot(composed),
+          put_selected_target(composed, %{target | effective_policy: %{}}),
+          put_in(composed.targets["alpha"].configured["repo"]["path"], "~/forged-repo"),
+          put_in(composed.host["state_root"], "~/forged-state"),
+          put_in(composed.host["runners"]["codex"]["command"], ["codex" | :malformed]),
+          %{composed | targets: Map.put(composed.targets, "unexpected", %{})}
+        ]
+
+    for forged <- cases do
+      assert {:error, :invalid_composed_target} =
+               Composition.verify_composed_target(forged, "alpha")
+    end
+
+    assert {:error, :invalid_composed_target} =
+             Composition.verify_composed_target(composed, :alpha)
+
+    assert {:error, :invalid_composed_target} =
+             Composition.verify_composed_target(%{}, "alpha")
+  end
+
+  @tag :tmp_dir
   test "projects only effective module resolution fields into policy and hash", %{paths: paths} do
     compose_fault = fn fault ->
       write_fault_manifest!(paths.symphony, fault)
@@ -1642,6 +1901,91 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
     }
 
     struct!(base, overrides)
+  end
+
+  defp validated_composed_snapshot(paths) do
+    validated_composed_snapshot(paths, %{
+      "alpha" => target("alpha", paths.symphony, paths.worktree).configured
+    })
+  end
+
+  defp validated_composed_snapshot(paths, targets) do
+    document = %{
+      "version" => 1,
+      "host" => schema_host(paths.worktree),
+      "targets" => targets
+    }
+
+    assert {:ok, structured} = Schema.validate(document, home: "/deterministic-home")
+    assert structured.globally_valid?
+    assert structured.targets["alpha"].valid?
+
+    composed = Composition.compose(structured)
+    assert composed.targets["alpha"].valid?, inspect(composed.targets["alpha"].diagnostics)
+    composed
+  end
+
+  defp validated_two_target_composed_snapshot(paths) do
+    beta =
+      target("beta", paths.other, paths.worktree, %{
+        configured: %{
+          "repo" => %{"expected_repository" => "https://github.com/example/other-fixture"}
+        }
+      })
+
+    validated_composed_snapshot(paths, %{
+      "alpha" => target("alpha", paths.symphony, paths.worktree).configured,
+      "beta" => beta.configured
+    })
+  end
+
+  defp forge_selected_policy(snapshot, path, value) do
+    target = snapshot.targets["alpha"]
+    policy = put_in(target.effective_policy, path, value)
+    put_selected_target(snapshot, %{target | effective_policy: policy, policy_hash: canonical_hash(policy)})
+  end
+
+  defp forge_configured_policy(
+         snapshot,
+         configured_path,
+         configured_value,
+         policy_path,
+         policy_value
+       ) do
+    target = snapshot.targets["alpha"]
+    configured = put_in(target.configured, configured_path, configured_value)
+    policy = put_in(target.effective_policy, policy_path, policy_value)
+
+    put_selected_target(snapshot, %{
+      target
+      | configured: configured,
+        effective_policy: policy,
+        policy_hash: canonical_hash(policy)
+    })
+  end
+
+  defp invalid_manifest_snapshot(snapshot) do
+    target = snapshot.targets["alpha"]
+    manifest = Map.delete(target.repo_manifest, "version")
+
+    policy =
+      put_in(target.effective_policy, ["repo_policy", "manifest"], manifest)
+
+    put_selected_target(snapshot, %{
+      target
+      | repo_manifest: manifest,
+        effective_policy: policy,
+        policy_hash: canonical_hash(policy)
+    })
+  end
+
+  defp put_selected_target(snapshot, target) do
+    %{snapshot | targets: Map.put(snapshot.targets, "alpha", target)}
+  end
+
+  defp canonical_hash(term) do
+    {:ok, hash} = Composition.canonical_hash(term)
+    hash
   end
 
   defp target(id, repo_path, worktree_root, overrides \\ %{}) do
