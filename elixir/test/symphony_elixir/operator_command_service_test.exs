@@ -866,7 +866,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     end
 
     winner = Task.async(confirm)
-    assert_receive {:patch_lock_acquired, winner_pid}
+    assert_receive {:patch_lock_acquired, winner_pid}, 1_000
     loser = Task.async(confirm)
 
     assert {:error, loser_error} = Task.await(loser)

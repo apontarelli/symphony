@@ -1666,28 +1666,31 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         stop_orchestrator_and_workers(pid)
       end)
 
-      assert %{running: [snapshot_entry]} =
-               wait_for_snapshot(
-                 pid,
-                 fn
-                   %{running: [%{issue_id: "issue-policy-running"}]} -> true
-                   _ -> false
-                 end,
-                 1_000
-               )
+      running_entry =
+        wait_for_running_entry(
+          pid,
+          issue.id,
+          fn running_entry ->
+            running_entry.session_id == "thread-policy-running-turn-policy-running" and
+              running_entry.profile == "strict" and
+              running_entry.target == "project/old" and
+              running_entry.policy["checks"] == ["old-policy"]
+          end,
+          1_000
+        )
 
-      state = :sys.get_state(pid)
-      running_entry = state.running[issue.id]
+      pinned_policy = running_entry.policy
+      assert %{running: [snapshot_entry]} = GenServer.call(pid, :snapshot)
 
       assert running_entry.profile == "strict"
       assert running_entry.target == "project/old"
-      assert running_entry.policy_ref == running_entry.policy["policy_ref"]
-      assert running_entry.policy["checks"] == ["old-policy"]
+      assert running_entry.policy_ref == pinned_policy["policy_ref"]
+      assert pinned_policy["checks"] == ["old-policy"]
 
       assert snapshot_entry.profile == "strict"
       assert snapshot_entry.target == "project/old"
-      assert snapshot_entry.policy_ref == running_entry.policy_ref
-      assert snapshot_entry.policy == running_entry.policy
+      assert snapshot_entry.policy_ref == pinned_policy["policy_ref"]
+      assert snapshot_entry.policy == pinned_policy
 
       write_policy_workflow!(workspace_root, codex_binary,
         target: "project/new",
@@ -1698,11 +1701,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert {:ok, future_policy} = Config.issue_policy(%{issue | id: "issue-future"})
       assert future_policy["delivery"]["pr_target"] == "project/new"
       assert future_policy["checks"] == ["new-policy"]
-      refute future_policy["policy_ref"] == running_entry.policy_ref
+      refute future_policy["policy_ref"] == pinned_policy["policy_ref"]
 
       reloaded_state = :sys.get_state(pid)
-      assert reloaded_state.running[issue.id].policy_ref == running_entry.policy_ref
-      assert reloaded_state.running[issue.id].policy == running_entry.policy
+      assert reloaded_state.running[issue.id].policy_ref == pinned_policy["policy_ref"]
+      assert reloaded_state.running[issue.id].policy == pinned_policy
     after
       File.rm_rf(test_root)
     end
