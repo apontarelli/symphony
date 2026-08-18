@@ -791,7 +791,41 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   end
 
   defp normalize_worktree(configured) do
-    normalize_nested_map(configured, "worktree", @worktree_keys, %{"hooks" => %{}})
+    case configured["worktree"] do
+      worktree when is_map(worktree) ->
+        normalized =
+          worktree
+          |> Map.take(@worktree_keys)
+          |> normalize_hooks()
+
+        Map.put(configured, "worktree", normalized)
+
+      _missing_or_invalid ->
+        configured
+    end
+  end
+
+  defp normalize_hooks(worktree) do
+    hooks =
+      case Map.fetch(worktree, "hooks") do
+        :error -> default_hooks()
+        {:ok, configured} when is_map(configured) -> Map.merge(default_hooks(), Map.take(configured, @hook_keys))
+        {:ok, invalid} -> invalid
+      end
+
+    Map.put(worktree, "hooks", hooks)
+  end
+
+  defp default_hooks do
+    defaults = %ConfigSchema.Hooks{}
+
+    %{
+      "after_create" => defaults.after_create,
+      "before_run" => defaults.before_run,
+      "after_run" => defaults.after_run,
+      "before_remove" => defaults.before_remove,
+      "timeout_ms" => defaults.timeout_ms
+    }
   end
 
   defp normalize_linear(configured) do

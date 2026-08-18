@@ -621,7 +621,15 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
              Schema.validate(target_document(target), home: "/tmp/schema-home")
 
     assert configured["repo"]["manifest"] == "symphony.yml"
-    assert configured["worktree"]["hooks"] == %{}
+
+    assert configured["worktree"]["hooks"] == %{
+             "after_create" => nil,
+             "before_run" => nil,
+             "after_run" => nil,
+             "before_remove" => nil,
+             "timeout_ms" => 60_000
+           }
+
     assert configured["linear"]["scope"]["issue_ids"] == ["ENG-1", "ENG-2"]
     assert configured["linear"]["active_states"] == ["Todo", "In Progress"]
     assert configured["linear"]["terminal_states"] == ["Done"]
@@ -649,6 +657,23 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
              "deployment" => "deny",
              "production_data" => "deny"
            }
+  end
+
+  test "worktree hook normalization preserves commands and explicit timeout" do
+    hooks = %{
+      "after_create" => "printf 'token=sk-test-after-create'",
+      "before_run" => "printf 'before'\nprintf 'run'",
+      "after_run" => nil,
+      "before_remove" => "printf 'remove'",
+      "timeout_ms" => 12_345
+    }
+
+    target = put_in(valid_target(), ["worktree", "hooks"], hooks)
+
+    assert {:ok, %Snapshot{targets: %{"main" => %Target{valid?: true, configured: configured}}}} =
+             Schema.validate(target_document(target), home: "/tmp/schema-home")
+
+    assert configured["worktree"]["hooks"] == hooks
   end
 
   test "repository, worktree, Linear, and runner fields enforce local types and enums" do

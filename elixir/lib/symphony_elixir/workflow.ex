@@ -39,7 +39,8 @@ defmodule SymphonyElixir.Workflow do
           config: map(),
           prompt: String.t(),
           prompt_template: String.t(),
-          workflow_module_resolution: ModuleRegistry.prompt_module_resolution()
+          workflow_module_resolution: ModuleRegistry.prompt_module_resolution(),
+          manifest_source_dir: Path.t() | nil
         }
 
   @spec current() :: {:ok, loaded_workflow()} | {:error, term()}

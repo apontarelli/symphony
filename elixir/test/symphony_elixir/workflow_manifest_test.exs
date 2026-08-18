@@ -208,6 +208,69 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     refute prompt =~ "skill/flow"
   end
 
+  test "file and directory loads carry source provenance while map compilation is source-less" do
+    path =
+      write_manifest!("""
+      version: 1
+      project:
+        slug: provenance-repo
+        name: Provenance Repo
+        repository: github.com/example/provenance-repo
+      delivery:
+        pr_target: main
+      """)
+
+    source_dir = Path.dirname(Path.expand(path))
+    relative_path = Path.relative_to(path, File.cwd!())
+    relative_dir = Path.relative_to(source_dir, File.cwd!())
+
+    assert {:ok, file_workflow} = Manifest.load(relative_path)
+    assert file_workflow.manifest_source_dir == source_dir
+
+    assert {:ok, directory_workflow} = Manifest.load(relative_dir)
+    assert directory_workflow.manifest_source_dir == source_dir
+
+    assert {:ok, manifest} = Manifest.read(path)
+    assert {:ok, map_workflow} = Manifest.load_map(manifest, repo_setup?: false)
+    assert map_workflow.manifest_source_dir == nil
+    assert Manifest.compile(manifest).manifest_source_dir == nil
+  end
+
+  test "map loading accepts null runtime and reports runtime input errors" do
+    manifest = %{
+      "project" => %{
+        "slug" => "target",
+        "repository" => "github.com/example/target"
+      },
+      "delivery" => %{"pr_target" => "main"}
+    }
+
+    assert {:ok, %{config: config}} =
+             manifest
+             |> Map.put("runtime", nil)
+             |> Manifest.load_map(repo_setup?: false)
+
+    refute Map.has_key?(config, "runtime")
+
+    assert {:error, {:invalid_manifest, [%{path: "runtime", message: "must be a map"}]}} =
+             manifest
+             |> Map.put("runtime", "invalid")
+             |> Manifest.load_map(repo_setup?: false)
+
+    assert {:error,
+            {:invalid_manifest,
+             [
+               %{
+                 path: "runtime",
+                 message: "polling.interval_ms is invalid",
+                 remediation: "Fix runtime config in symphony.yml."
+               }
+             ]}} =
+             manifest
+             |> Map.put("runtime", %{"polling" => %{"interval_ms" => "invalid"}})
+             |> Manifest.load_map(repo_setup?: false)
+  end
+
   test "product visual review module compiles through registry-backed workflow modules" do
     path =
       write_manifest!("""
@@ -647,6 +710,31 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.auto_land.dry_run == false
   end
 
+  test "auto-land dry-run null uses the default and other non-booleans are rejected" do
+    manifest = %{
+      "project" => %{
+        "slug" => "target",
+        "repository" => "github.com/example/target"
+      },
+      "delivery" => %{"pr_target" => "main"}
+    }
+
+    assert {:ok, %{config: config}} =
+             Manifest.load_map(Map.put(manifest, "auto_land", %{"dry_run" => nil}))
+
+    assert config["auto_land"]["dry_run"]
+
+    assert {:error,
+            {:invalid_manifest,
+             [
+               %{
+                 path: "auto_land.dry_run",
+                 message: "must be a boolean"
+               }
+             ]}} =
+             Manifest.load_map(Map.put(manifest, "auto_land", %{"dry_run" => "yes"}))
+  end
+
   test "legacy manifest vocabulary is rejected instead of translated" do
     path =
       write_manifest!("""
@@ -740,6 +828,29 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert %{path: "workflow", message: "must be a map"} in diagnostics
     assert_runtime_setup_diagnostic!(diagnostics, "runtime")
     assert %{path: "harness", message: "must be a map"} in diagnostics
+  end
+
+  test "policy sections reject unsupported shapes and capability fields" do
+    assert {:error, {:invalid_manifest, diagnostics}} =
+             Manifest.load_map(%{
+               "auto_land" => "unattended",
+               "capabilities" => "all",
+               "issue_markers" => "all"
+             })
+
+    assert %{path: "auto_land", message: "must be a map"} in diagnostics
+    assert %{path: "capabilities", message: "must be a map"} in diagnostics
+    assert %{path: "issue_markers", message: "must be a map"} in diagnostics
+
+    assert {:error,
+            {:invalid_manifest,
+             [
+               %{
+                 path: "capabilities.provided",
+                 message: "is not supported; repo capabilities declare required capability names only"
+               }
+             ]}} =
+             Manifest.load_map(%{"capabilities" => %{"provided" => ["browser"]}})
   end
 
   test "invalid nested field types return field-level diagnostics" do
@@ -980,6 +1091,17 @@ defmodule SymphonyElixir.WorkflowManifestTest do
            }
   end
 
+  test "manifest publish target resolves supported inputs and rejects unsupported repositories" do
+    assert Manifest.publish_target("https://github.com/example/target.git", "main") == %{
+             "repository" => "https://github.com/example/target.git",
+             "pr_target" => "main",
+             "github_repository" => "example/target",
+             "display" => "example/target:main"
+           }
+
+    assert Manifest.publish_target("https://gitlab.com/example/target", "main") == nil
+  end
+
   test "publish target accepts supported GitHub URL forms and rejects defensive invalids" do
     assert PublishTarget.build("ssh://git@github.com/example/target-repo.git", "main") == %{
              "repository" => "ssh://git@github.com/example/target-repo.git",
@@ -1063,6 +1185,33 @@ defmodule SymphonyElixir.WorkflowManifestTest do
 
     assert config["manifest"]["project"]["app_kind"] == "local"
     assert config["delivery"]["pr_target"] == "main"
+  end
+
+  test "defaults detect jj and harness validation requires AGENTS.md" do
+    repo_root = Path.join(System.tmp_dir!(), "symphony-default-test-#{System.unique_integer([:positive])}")
+    codex_home = Path.join(repo_root, "codex-home")
+    File.mkdir_p!(Path.join(repo_root, ".jj"))
+    File.mkdir_p!(codex_home)
+
+    manifest =
+      repo_root
+      |> Manifest.default([])
+      |> put_in(["workflow", "modules"], ["repo.docs", "validation.commands"])
+      |> put_in(["harness", "codex_home"], "codex-home")
+
+    assert manifest["vcs"]["mode"] == "jj"
+
+    assert [
+             %{
+               path: "harness.codex_home",
+               message: "missing AGENTS.md in \"codex-home\"",
+               remediation: "Add a thin harness AGENTS.md."
+             }
+           ] = Manifest.validate(repo_root, manifest).errors
+
+    File.write!(Path.join(codex_home, "AGENTS.md"), "# Harness\n")
+
+    assert Manifest.validate(repo_root, manifest).errors == []
   end
 
   test "publish validation is skipped when GitHub PR delivery is not enabled" do

@@ -464,6 +464,7 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
        %{
          "repo_policy" => %{
            "manifest" => repo_manifest,
+           "manifest_source_dir" => manifest_source_dir(configured),
            "workflow_module_resolution" => module_resolution
          },
          "tracker_connection" => %{
@@ -491,6 +492,14 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
          "scheduling" => configured["scheduling"]
        }}
     end
+  end
+
+  defp manifest_source_dir(configured) do
+    configured
+    |> get_in(["repo", "path"])
+    |> Path.join(get_in(configured, ["repo", "manifest"]))
+    |> Path.expand()
+    |> Path.dirname()
   end
 
   defp runner_policy(target_runners, host_runners) do

@@ -465,7 +465,13 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
     manifest = repo_policy["manifest"]
     module_resolution = repo_policy["workflow_module_resolution"]
 
-    assert Map.keys(repo_policy) |> Enum.sort() == ["manifest", "workflow_module_resolution"]
+    assert Map.keys(repo_policy) |> Enum.sort() == [
+             "manifest",
+             "manifest_source_dir",
+             "workflow_module_resolution"
+           ]
+
+    assert repo_policy["manifest_source_dir"] == paths.symphony
     assert manifest == composed.repo_manifest
     assert manifest["workflow"]["config"]["product_visual_review"]["enabled"]
     assert manifest["validation"]["commands"] == [%{"name" => "focused", "command" => "mix test"}]
@@ -499,6 +505,9 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
              },
              "target" => target("alpha", paths.symphony, paths.worktree).configured["checks"]
            }
+
+    assert composed.effective_policy["worktree_policy"] ==
+             target("alpha", paths.symphony, paths.worktree).configured["worktree"]
 
     assert composed.effective_policy["worktree_policy"]["strategy"] == "per_issue"
     assert composed.effective_policy["runner_policy"]["allowed"] == ["codex"]
@@ -863,6 +872,47 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
   end
 
   @tag :tmp_dir
+  test "manifest source, hooks, and timeout rotate the policy hash", %{paths: paths} do
+    base_target = target("alpha", paths.symphony, paths.worktree)
+    base = Composition.compose(snapshot(%{"alpha" => base_target})).targets["alpha"]
+
+    nested_dir = Path.join(paths.symphony, "policy")
+    File.mkdir_p!(nested_dir)
+    File.cp!(Path.join(paths.symphony, "symphony.yml"), Path.join(nested_dir, "current.yml"))
+
+    nested_target =
+      target("alpha", paths.symphony, paths.worktree, %{
+        configured: %{"repo" => %{"manifest" => "policy/current.yml"}}
+      })
+
+    nested = Composition.compose(snapshot(%{"alpha" => nested_target})).targets["alpha"]
+
+    command_target =
+      target("alpha", paths.symphony, paths.worktree, %{
+        configured: %{
+          "worktree" => %{
+            "hooks" => %{"before_run" => "printf 'token=sk-test-composition-hook'"}
+          }
+        }
+      })
+
+    command = Composition.compose(snapshot(%{"alpha" => command_target})).targets["alpha"]
+
+    timeout_target =
+      target("alpha", paths.symphony, paths.worktree, %{
+        configured: %{"worktree" => %{"hooks" => %{"timeout_ms" => 12_345}}}
+      })
+
+    timeout = Composition.compose(snapshot(%{"alpha" => timeout_target})).targets["alpha"]
+
+    assert nested.repo_manifest == base.repo_manifest
+    assert get_in(nested.effective_policy, ["repo_policy", "manifest_source_dir"]) == nested_dir
+    refute nested.policy_hash == base.policy_hash
+    refute command.policy_hash == base.policy_hash
+    refute timeout.policy_hash == base.policy_hash
+  end
+
+  @tag :tmp_dir
   test "exposes the existing canonical JSON hash as a total public helper" do
     ordered = %{"a" => 1, "b" => [true, nil]}
     reordered = Map.new([{"b", [true, nil]}, {"a", 1}])
@@ -901,6 +951,9 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
     assert :ok = Composition.verify_composed_target(composed, "alpha")
 
     for policy_path <- [
+          ["repo_policy", "manifest_source_dir"],
+          ["worktree_policy", "hooks", "before_run"],
+          ["worktree_policy", "hooks", "timeout_ms"],
           ["runner_policy", "default"],
           ["capacity_limits", "max_concurrent_agents"],
           ["tracker_connection", "policy", "endpoint"],
@@ -1998,7 +2051,17 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
         "manifest" => "symphony.yml",
         "expected_repository" => "git@github.com:example/symphony-fixture.git"
       },
-      "worktree" => %{"root" => Path.join(worktree_root, id), "strategy" => "per_issue", "hooks" => %{}},
+      "worktree" => %{
+        "root" => Path.join(worktree_root, id),
+        "strategy" => "per_issue",
+        "hooks" => %{
+          "after_create" => nil,
+          "before_run" => nil,
+          "after_run" => nil,
+          "before_remove" => nil,
+          "timeout_ms" => 60_000
+        }
+      },
       "linear" => %{
         "connection" => "linear-primary",
         "scope" => %{"type" => "project", "project_slug" => id},

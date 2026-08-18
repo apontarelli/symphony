@@ -46,13 +46,33 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     assert context.target_id == "saved-run"
     assert context.state == :active
     assert context.dispatch_mode == :explicit
-    assert context.worktree_policy == %{"root" => workspace_root, "strategy" => "per_issue"}
+
+    assert context.worktree_policy == %{
+             "root" => workspace_root,
+             "strategy" => "per_issue",
+             "hooks" => %{
+               "after_create" => nil,
+               "before_run" => nil,
+               "after_run" => nil,
+               "before_remove" => nil,
+               "timeout_ms" => 60_000
+             }
+           }
+
     assert context.capacity_limits["max_concurrent_agents"] == 4
     assert context.tracker_connection["policy"]["api_key"] == "resolved-secret-one"
     assert Regex.match?(@hash_regex, context.registry_generation)
     assert Regex.match?(@hash_regex, context.policy_hash)
     assert Regex.match?(@hash_regex, context.repo_manifest_hash)
-    assert Map.keys(context.repo_policy) |> Enum.sort() == ["manifest", "workflow_module_resolution"]
+
+    assert Map.keys(context.repo_policy) |> Enum.sort() == [
+             "manifest",
+             "manifest_source_dir",
+             "workflow_module_resolution"
+           ]
+
+    assert context.repo_policy["manifest_source_dir"] ==
+             Path.dirname(Path.expand(Workflow.workflow_file_path()))
 
     module_resolution = context.repo_policy["workflow_module_resolution"]
 
@@ -96,6 +116,71 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     assert context.worktree_policy["root"] == workspace_root
     assert context.capacity_limits["max_concurrent_agents"] == 4
     refute inspect(context) =~ "poisoned-secret"
+  end
+
+  test "legacy authority preserves hooks, expands worktree root, and tracks manifest source" do
+    relative_root = "tmp/legacy-context-relative-workspaces"
+    hook_sentinel = "printf 'token=sk-test-legacy-hook'\nprintf done"
+    source_path = Workflow.workflow_file_path()
+
+    write_workflow_file!(source_path,
+      workspace_root: relative_root,
+      hook_after_create: "",
+      hook_before_run: hook_sentinel,
+      hook_after_run: " ",
+      hook_before_remove: nil,
+      hook_timeout_ms: 12_345
+    )
+
+    assert {:ok, first} = Legacy.build_at_process_start([])
+
+    assert first.worktree_policy == %{
+             "root" => Path.expand(relative_root),
+             "strategy" => "per_issue",
+             "hooks" => %{
+               "after_create" => "",
+               "before_run" => hook_sentinel <> "\n",
+               "after_run" => "",
+               "before_remove" => nil,
+               "timeout_ms" => 12_345
+             }
+           }
+
+    first_source_dir = Path.dirname(Path.expand(source_path))
+    assert first.repo_policy["manifest_source_dir"] == first_source_dir
+    refute inspect(first) =~ hook_sentinel
+    refute inspect(first) =~ first_source_dir
+
+    nested_dir = Path.join(first_source_dir, "nested")
+    nested_path = Path.join(nested_dir, "symphony.yml")
+    File.mkdir_p!(nested_dir)
+    File.cp!(source_path, nested_path)
+    Workflow.set_workflow_file_path(nested_path)
+
+    assert {:ok, moved} = Legacy.build_at_process_start([])
+    assert moved.repo_policy["manifest_source_dir"] == Path.expand(nested_dir)
+    assert moved.repo_manifest_hash == first.repo_manifest_hash
+    refute moved.policy_hash == first.policy_hash
+    refute moved.registry_generation == first.registry_generation
+  end
+
+  test "legacy construction rejects source-less loaded workflow authority" do
+    write_workflow_file!(Workflow.workflow_file_path())
+    workflow_store = Process.whereis(WorkflowStore)
+    assert is_pid(workflow_store)
+    original_state = :sys.get_state(workflow_store)
+
+    try do
+      :sys.replace_state(workflow_store, fn state ->
+        %{state | workflow: Map.delete(state.workflow, :manifest_source_dir)}
+      end)
+
+      assert Legacy.build_at_process_start([]) == {:error, :invalid_manifest_source_dir}
+    after
+      if Process.alive?(workflow_store) do
+        :sys.replace_state(workflow_store, fn _state -> original_state end)
+      end
+    end
   end
 
   test "saved strict profile remains authoritative after global mutation" do
@@ -142,7 +227,12 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     assert actual["delivery"]["pr_target"] == "human-review"
     assert actual["checks"] == ["mix test"]
     assert actual["policy_metadata"]["profile"] == "strict"
-    assert Map.keys(context.repo_policy) |> Enum.sort() == ["manifest", "workflow_module_resolution"]
+
+    assert Map.keys(context.repo_policy) |> Enum.sort() == [
+             "manifest",
+             "manifest_source_dir",
+             "workflow_module_resolution"
+           ]
   end
 
   test "saved profile runner restrictions remain authoritative after global mutation" do

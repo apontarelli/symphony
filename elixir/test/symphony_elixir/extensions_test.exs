@@ -104,7 +104,14 @@ defmodule SymphonyElixir.ExtensionsTest do
 
   test "workflow store reloads changes, keeps last good workflow, and falls back when stopped" do
     ensure_workflow_store_running()
-    assert {:ok, %{prompt: "You are an agent for this repository."}} = Workflow.current()
+
+    assert {:ok,
+            %{
+              prompt: "You are an agent for this repository.",
+              manifest_source_dir: initial_source_dir
+            }} = Workflow.current()
+
+    assert initial_source_dir == Path.dirname(Path.expand(Workflow.workflow_file_path()))
 
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "Second prompt")
     workflow_store = Process.whereis(WorkflowStore)
@@ -115,14 +122,28 @@ defmodule SymphonyElixir.ExtensionsTest do
       match?({:ok, %{prompt: "Second prompt"}}, Workflow.current())
     end)
 
+    assert {:ok, %{prompt: "Second prompt", manifest_source_dir: second_source_dir}} =
+             Workflow.current()
+
     File.write!(Workflow.workflow_file_path(), "project: [\n")
     assert {:error, _reason} = WorkflowStore.force_reload()
-    assert {:ok, %{prompt: "Second prompt"}} = Workflow.current()
 
-    third_workflow = Path.join(Path.dirname(Workflow.workflow_file_path()), "third-symphony.yml")
+    failed_path = Path.join(Path.dirname(Workflow.workflow_file_path()), "missing/selected.yml")
+    Workflow.set_workflow_file_path(failed_path)
+
+    assert {:ok, %{prompt: "Second prompt", manifest_source_dir: ^second_source_dir}} =
+             Workflow.current()
+
+    third_dir = Path.join(Path.dirname(Workflow.workflow_file_path()), "third")
+    File.mkdir_p!(third_dir)
+    third_workflow = Path.join(third_dir, "third-symphony.yml")
     write_workflow_file!(third_workflow, prompt: "Third prompt")
     Workflow.set_workflow_file_path(third_workflow)
-    assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
+
+    assert {:ok, %{prompt: "Third prompt", manifest_source_dir: third_source_dir}} =
+             Workflow.current()
+
+    assert third_source_dir == Path.expand(third_dir)
 
     assert :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, WorkflowStore)
     assert {:ok, %{prompt: "Third prompt"}} = Workflow.current()
@@ -142,14 +163,18 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Workflow.set_workflow_file_path(manifest_path)
 
-    assert {:ok, %{config: config}} = Workflow.current()
+    assert {:ok, %{config: config, manifest_source_dir: source_dir}} = Workflow.current()
+    assert source_dir == Path.dirname(Path.expand(manifest_path))
     assert config["tracker"]["project_slug"] == nil
     assert config["manifest"]["project"]["slug"] == "manifest-repo"
 
     File.write!(manifest_path, "project: [\n")
 
     assert {:error, _reason} = WorkflowStore.force_reload()
-    assert {:ok, %{config: last_good_config}} = Workflow.current()
+
+    assert {:ok, %{config: last_good_config, manifest_source_dir: ^source_dir}} =
+             Workflow.current()
+
     assert last_good_config["tracker"]["project_slug"] == nil
     assert last_good_config["manifest"]["project"]["slug"] == "manifest-repo"
   end
@@ -185,6 +210,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         assert state.path == expected_manifest_path
         assert state.workflow.config["tracker"]["project_slug"] == nil
         assert state.workflow.config["manifest"]["project"]["slug"] == "manifest-repo"
+        assert state.workflow.manifest_source_dir == Path.dirname(expected_manifest_path)
 
         File.rm!(manifest_path)
 
@@ -192,6 +218,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         assert reloaded_state.path == expected_manifest_path
         assert reloaded_state.workflow.config["tracker"]["project_slug"] == nil
         assert reloaded_state.workflow.config["manifest"]["project"]["slug"] == "manifest-repo"
+        assert reloaded_state.workflow.manifest_source_dir == Path.dirname(expected_manifest_path)
       end)
     after
       File.rm_rf(workflow_root)
