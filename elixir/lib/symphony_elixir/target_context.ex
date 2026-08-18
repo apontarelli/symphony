@@ -197,11 +197,14 @@ defmodule SymphonyElixir.TargetContext do
          repo_policy:
            %{
              "manifest" => manifest,
+             "manifest_source_dir" => source_dir,
              "workflow_module_resolution" => module_resolution
            } = repo_policy
        })
        when is_map(manifest) and is_map(module_resolution) do
-    if Enum.sort(Map.keys(repo_policy)) == ["manifest", "workflow_module_resolution"] do
+    if Enum.sort(Map.keys(repo_policy)) ==
+         ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+         valid_manifest_source_dir?(source_dir) do
       {:ok, manifest}
     else
       {:error, :malformed_composed_policy}
@@ -928,7 +931,10 @@ defmodule SymphonyElixir.TargetContext do
   defp validate_linked_policy(repo_policy, repo_manifest) do
     case Map.fetch(repo_policy, "manifest") do
       {:ok, ^repo_manifest} ->
-        if is_map(repo_policy["workflow_module_resolution"]) do
+        if Enum.sort(Map.keys(repo_policy)) ==
+             ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+             is_map(repo_policy["workflow_module_resolution"]) and
+             valid_manifest_source_dir?(repo_policy["manifest_source_dir"]) do
           :ok
         else
           {:error, :invalid_policy_projection}
@@ -941,6 +947,11 @@ defmodule SymphonyElixir.TargetContext do
         {:error, :invalid_policy_projection}
     end
   end
+
+  defp valid_manifest_source_dir?(source_dir) when is_binary(source_dir),
+    do: String.valid?(source_dir) and Path.type(source_dir) == :absolute
+
+  defp valid_manifest_source_dir?(_source_dir), do: false
 
   defp validate_tracker_secret_reference(%{
          "tracker_connection" => %{"policy" => %{"api_key" => reference}}

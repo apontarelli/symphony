@@ -307,9 +307,10 @@ defmodule SymphonyElixir.ExecutionContext do
         _invalid -> false
       end
 
-    if valid_dispatch_mode? and Enum.all?(maps, &(is_map(&1) and json_safe?(&1))),
-      do: :ok,
-      else: {:error, :invalid_target}
+    if valid_dispatch_mode? and Enum.all?(maps, &(is_map(&1) and json_safe?(&1))) and
+         valid_repo_policy?(target.repo_policy),
+       do: :ok,
+       else: {:error, :invalid_target}
   end
 
   defp validate_target_identity(target) do
@@ -363,12 +364,11 @@ defmodule SymphonyElixir.ExecutionContext do
   defp validate_worktree_policy(
          %{
            "root" => root,
-           "strategy" => "per_issue"
+           "strategy" => "per_issue",
+           "hooks" => hooks
          } = worktree_policy
        ) do
-    hooks = Map.get(worktree_policy, "hooks", %{})
-
-    if Enum.sort(Map.keys(worktree_policy)) in [~w(root strategy), ~w(hooks root strategy)] and
+    if Enum.sort(Map.keys(worktree_policy)) == ~w(hooks root strategy) and
          valid_workspace_root?(root) and valid_hooks?(hooks),
        do: :ok,
        else: {:error, :invalid_worktree_policy}
@@ -381,19 +381,33 @@ defmodule SymphonyElixir.ExecutionContext do
   end
 
   defp valid_hooks?(hooks) when is_map(hooks) do
-    allowed = ~w(after_create after_run before_remove before_run timeout_ms)
+    command_keys = ~w(after_create after_run before_remove before_run)
 
-    Enum.all?(Map.keys(hooks), &(&1 in allowed)) and
-      Enum.all?(~w(after_create after_run before_remove before_run), fn key ->
-        case Map.fetch(hooks, key) do
-          :error -> true
-          {:ok, nil} -> true
-          {:ok, value} -> safe_identity?(value)
+    Enum.sort(Map.keys(hooks)) == ~w(after_create after_run before_remove before_run timeout_ms) and
+      Enum.all?(command_keys, fn key ->
+        case Map.fetch!(hooks, key) do
+          nil -> true
+          value -> is_binary(value) and String.valid?(value)
         end
-      end) and optional_integer_field?(hooks, "timeout_ms", fn value -> value > 0 end)
+      end) and is_integer(hooks["timeout_ms"]) and hooks["timeout_ms"] > 0
   end
 
   defp valid_hooks?(_hooks), do: false
+
+  defp valid_repo_policy?(
+         %{
+           "manifest" => manifest,
+           "manifest_source_dir" => source_dir,
+           "workflow_module_resolution" => module_resolution
+         } = repo_policy
+       ) do
+    Enum.sort(Map.keys(repo_policy)) ==
+      ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+      is_map(manifest) and is_map(module_resolution) and is_binary(source_dir) and
+      String.valid?(source_dir) and Path.type(source_dir) == :absolute
+  end
+
+  defp valid_repo_policy?(_repo_policy), do: false
 
   defp json_safe?(value) when is_struct(value), do: false
 
@@ -499,13 +513,6 @@ defmodule SymphonyElixir.ExecutionContext do
   defp valid_runner_entry?(runners, runner_name) do
     runner = Map.fetch!(runners, runner_name)
     match?({:ok, _profile}, resolve_profile(runner, "implementation"))
-  end
-
-  defp optional_integer_field?(map, key, predicate) do
-    case Map.fetch(map, key) do
-      :error -> true
-      {:ok, value} -> is_integer(value) and predicate.(value)
-    end
   end
 
   defp resolve_profile(runner, name) when is_map(runner) and not is_struct(runner) do

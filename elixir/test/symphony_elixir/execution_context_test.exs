@@ -292,14 +292,19 @@ defmodule SymphonyElixir.ExecutionContextTest do
 
     assert context.workspace_path == Path.join(target_root, "SID-407")
 
-    assert {:ok, _context_without_hooks} =
-             ExecutionContext.new(
-               %{target | worktree_policy: Map.delete(target.worktree_policy, "hooks")},
-               issue,
-               opts
-             )
+    assert ExecutionContext.new(
+             %{target | worktree_policy: Map.delete(target.worktree_policy, "hooks")},
+             issue,
+             opts
+           ) == {:error, :invalid_worktree_policy}
 
-    hooks = %{"after_run" => "mix test", "before_run" => nil, "timeout_ms" => 1_000}
+    hooks = %{
+      "after_create" => "",
+      "before_run" => "printf 'token=sk-test-execution-hook'\nprintf done",
+      "after_run" => " ",
+      "before_remove" => nil,
+      "timeout_ms" => 1_000
+    }
 
     assert {:ok, _context_with_hooks} =
              ExecutionContext.new(
@@ -308,14 +313,19 @@ defmodule SymphonyElixir.ExecutionContextTest do
                opts
              )
 
-    assert ExecutionContext.new(
-             %{
-               target
-               | worktree_policy: %{target.worktree_policy | "hooks" => Map.put(hooks, "unknown", "value")}
-             },
-             issue,
-             opts
-           ) == {:error, :invalid_worktree_policy}
+    for invalid_hooks <- [
+          Map.delete(hooks, "after_create"),
+          Map.put(hooks, "unknown", "value"),
+          Map.put(hooks, "before_run", 42),
+          Map.put(hooks, "before_run", <<0xFF>>),
+          Map.put(hooks, "timeout_ms", 0)
+        ] do
+      assert ExecutionContext.new(
+               %{target | worktree_policy: %{target.worktree_policy | "hooks" => invalid_hooks}},
+               issue,
+               opts
+             ) == {:error, :invalid_worktree_policy}
+    end
 
     for worktree_policy <- [
           nil,
@@ -332,6 +342,29 @@ defmodule SymphonyElixir.ExecutionContextTest do
     for identifier <- [".", "..", "SID/407", "SID\\407", "SID-../407", "SID\0-407", "SID\t407"] do
       assert ExecutionContext.new(target, %{issue | identifier: identifier}, opts) ==
                {:error, :invalid_issue}
+    end
+  end
+
+  @tag :tmp_dir
+  test "requires exact repository policy keys and absolute source provenance", %{tmp_dir: tmp_dir} do
+    target = target_context!(tmp_dir)
+    issue = %Issue{id: "issue-407", identifier: "SID-407"}
+    opts = [policy: %{"sandbox" => "restricted"}]
+    repo_policy = target.repo_policy
+
+    malformed_repo_policies = [
+      Map.delete(repo_policy, "manifest_source_dir"),
+      Map.delete(repo_policy, "workflow_module_resolution"),
+      Map.put(repo_policy, "unknown", "forged"),
+      Map.put(repo_policy, "manifest_source_dir", "relative/source"),
+      Map.put(repo_policy, "manifest_source_dir", <<0xFF>>),
+      Map.put(repo_policy, "manifest", []),
+      Map.put(repo_policy, "workflow_module_resolution", [])
+    ]
+
+    for malformed_repo_policy <- malformed_repo_policies do
+      assert ExecutionContext.new(%{target | repo_policy: malformed_repo_policy}, issue, opts) ==
+               {:error, :invalid_target}
     end
   end
 
@@ -871,7 +904,21 @@ defmodule SymphonyElixir.ExecutionContextTest do
       %{parent | worker_host: :local},
       %{parent | issue_id: nil},
       %{parent | issue_identifier: "../SID-407"},
-      %{parent | target: %{parent.target | runner_policy: stale_target}}
+      %{parent | target: %{parent.target | runner_policy: stale_target}},
+      %{
+        parent
+        | target: %{
+            parent.target
+            | repo_policy: Map.put(parent.target.repo_policy, "unknown", "forged")
+          }
+      },
+      %{
+        parent
+        | target: %{
+            parent.target
+            | worktree_policy: Map.delete(parent.target.worktree_policy, "hooks")
+          }
+      }
     ]
 
     for hostile_parent <- hostile_parents do
@@ -961,22 +1008,33 @@ defmodule SymphonyElixir.ExecutionContextTest do
     target = target_context!(tmp_dir)
     issue = %Issue{id: "issue-407", identifier: "SID-407"}
     opts = [policy: %{"sandbox" => "restricted"}]
-    backing = String.duplicate("x", 100_000) <> "owned-target-value"
+    source_value = Path.join(tmp_dir, "owned-target-value")
+    backing = String.duplicate("x", 100_000) <> source_value
 
     subbinary =
       binary_part(
         backing,
-        byte_size(backing) - byte_size("owned-target-value"),
-        byte_size("owned-target-value")
+        byte_size(backing) - byte_size(source_value),
+        byte_size(source_value)
       )
 
     nested = %{subbinary => %{"map" => subbinary, "list" => [subbinary, %{"deep" => subbinary}]}}
-    owned_target = %{target | repo_policy: Map.put(target.repo_policy, "nested", nested)}
+
+    owned_target = %{
+      target
+      | repo_policy:
+          target.repo_policy
+          |> put_in(["manifest", "owned"], nested)
+          |> Map.put("manifest_source_dir", subbinary),
+        worktree_policy: put_in(target.worktree_policy, ["hooks", "before_run"], subbinary)
+    }
 
     assert {:ok, context} = ExecutionContext.new(owned_target, issue, opts)
-    [{owned_key, owned_value}] = Map.to_list(context.target.repo_policy["nested"])
+    [{owned_key, owned_value}] = Map.to_list(context.target.repo_policy["manifest"]["owned"])
 
     for owned_binary <- [
+          context.target.repo_policy["manifest_source_dir"],
+          context.target.worktree_policy["hooks"]["before_run"],
           owned_key,
           owned_value["map"],
           hd(owned_value["list"]),

@@ -772,10 +772,34 @@
         "path": "$.targets.main.valid"
       },
       {
-        "after": {},
+        "after": null,
         "before": null,
         "classification": "added",
-        "path": "$.targets.main.worktree.hooks"
+        "path": "$.targets.main.worktree.hooks.after_create"
+      },
+      {
+        "after": null,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.hooks.after_run"
+      },
+      {
+        "after": null,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.hooks.before_remove"
+      },
+      {
+        "after": null,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.hooks.before_run"
+      },
+      {
+        "after": 60000,
+        "before": null,
+        "classification": "added",
+        "path": "$.targets.main.worktree.hooks.timeout_ms"
       },
       {
         "after": "[REDACTED]",
@@ -1143,10 +1167,34 @@
             "path": "$.targets.main.scheduling"
           },
           {
-            "after": {},
+            "after": null,
             "before": null,
             "classification": "added",
-            "path": "$.targets.main.worktree.hooks"
+            "path": "$.targets.main.worktree.hooks.after_create"
+          },
+          {
+            "after": null,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.hooks.after_run"
+          },
+          {
+            "after": null,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.hooks.before_remove"
+          },
+          {
+            "after": null,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.hooks.before_run"
+          },
+          {
+            "after": 60000,
+            "before": null,
+            "classification": "added",
+            "path": "$.targets.main.worktree.hooks.timeout_ms"
           },
           {
             "after": "[REDACTED]",

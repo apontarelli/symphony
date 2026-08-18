@@ -118,10 +118,20 @@ defmodule SymphonyElixir.TargetContext.Legacy do
          {:ok, target_id} <- target_id(opts, run_setup),
          repo_manifest = normalize_json(Map.fetch!(config, "manifest")),
          module_resolution = module_resolution(loaded_workflow),
+         {:ok, manifest_source_dir} <- manifest_source_dir(loaded_workflow),
          {:ok, effective_policy} <- Config.effective_policy(settings, profile),
          effective_policy = RunSetup.apply_restrictive_policy(effective_policy, run_setup),
          {:ok, context} <-
-           build_context(target_id, settings, run_setup, profile, repo_manifest, module_resolution, effective_policy) do
+           build_context(
+             target_id,
+             settings,
+             run_setup,
+             profile,
+             repo_manifest,
+             module_resolution,
+             manifest_source_dir,
+             effective_policy
+           ) do
       {:ok, context}
     else
       {:error, reason} -> {:error, reason}
@@ -130,15 +140,25 @@ defmodule SymphonyElixir.TargetContext.Legacy do
 
   def build_at_process_start(_opts), do: {:error, :invalid_options}
 
-  defp build_context(target_id, settings, run_setup, profile, repo_manifest, module_resolution, effective_policy) do
+  defp build_context(
+         target_id,
+         settings,
+         run_setup,
+         profile,
+         repo_manifest,
+         module_resolution,
+         manifest_source_dir,
+         effective_policy
+       ) do
     repo_policy = %{
       "manifest" => repo_manifest,
+      "manifest_source_dir" => manifest_source_dir,
       "workflow_module_resolution" => module_resolution
     }
 
     tracker_connection = tracker_connection(settings)
     run_target = run_target(settings)
-    worktree_policy = %{"root" => settings.workspace.root, "strategy" => "per_issue"}
+    worktree_policy = worktree_policy(settings)
     runner_policy = runner_policy(settings)
     capacity_limits = capacity_limits(settings, run_setup)
     budget_limits = budget_limits(effective_policy)
@@ -191,6 +211,31 @@ defmodule SymphonyElixir.TargetContext.Legacy do
          budget_limits: budget_limits
        )}
     end
+  end
+
+  defp manifest_source_dir(%{manifest_source_dir: source_dir})
+       when is_binary(source_dir) do
+    if String.valid?(source_dir) and Path.type(source_dir) == :absolute,
+      do: {:ok, source_dir},
+      else: {:error, :invalid_manifest_source_dir}
+  end
+
+  defp manifest_source_dir(_loaded_workflow), do: {:error, :invalid_manifest_source_dir}
+
+  defp worktree_policy(settings) do
+    hooks = settings.hooks
+
+    %{
+      "root" => Path.expand(settings.workspace.root),
+      "strategy" => "per_issue",
+      "hooks" => %{
+        "after_create" => hooks.after_create,
+        "before_run" => hooks.before_run,
+        "after_run" => hooks.after_run,
+        "before_remove" => hooks.before_remove,
+        "timeout_ms" => hooks.timeout_ms
+      }
+    }
   end
 
   defp validate_options(opts) do

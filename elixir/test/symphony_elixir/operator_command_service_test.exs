@@ -144,10 +144,9 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                  &1["after"] == "project-2")
            )
 
-    assert Enum.any?(
+    refute Enum.any?(
              plan.preview["registry"]["diff"],
-             &(&1["path"] == "$.targets.alpha.worktree.hooks.timeout_ms" and
-                 &1["after"] == 60_000)
+             &(&1["path"] == "$.targets.alpha.worktree.hooks.timeout_ms")
            )
 
     assert File.read!(registry_path) == registry_before

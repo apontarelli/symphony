@@ -55,10 +55,23 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   @spec load(Path.t(), keyword()) :: {:ok, Workflow.loaded_workflow()} | {:error, manifest_error()}
   def load(path, opts \\ []) when is_binary(path) do
-    with {:ok, manifest} <- read(path, opts) do
+    source_path =
+      path
+      |> manifest_source_path()
+      |> Path.expand()
+
+    with {:ok, manifest} <- read(source_path, opts) do
       case compile_diagnostics(manifest) do
-        [] -> {:ok, compile(manifest)}
-        diagnostics -> {:error, {:invalid_manifest, diagnostics}}
+        [] ->
+          workflow =
+            manifest
+            |> compile()
+            |> Map.put(:manifest_source_dir, Path.dirname(source_path))
+
+          {:ok, workflow}
+
+        diagnostics ->
+          {:error, {:invalid_manifest, diagnostics}}
       end
     end
   end
@@ -94,7 +107,8 @@ defmodule SymphonyElixir.Workflow.Manifest do
       config: config,
       prompt: prompt,
       prompt_template: prompt,
-      workflow_module_resolution: workflow_module_resolution
+      workflow_module_resolution: workflow_module_resolution,
+      manifest_source_dir: nil
     }
   end
 
@@ -633,10 +647,9 @@ defmodule SymphonyElixir.Workflow.Manifest do
   end
 
   defp config_schema_diagnostics(manifest) do
-    case compiled_config(manifest) do
-      config when is_map(config) -> config_schema_diagnostics_from_config(config)
-      _config -> []
-    end
+    manifest
+    |> compiled_config()
+    |> config_schema_diagnostics_from_config()
   end
 
   defp config_schema_diagnostics_from_config(config) do

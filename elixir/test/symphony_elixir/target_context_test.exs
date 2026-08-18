@@ -498,11 +498,20 @@ defmodule SymphonyElixir.TargetContextTest do
     end
   end
 
-  test "requires composed repository policy linkage and module resolution" do
-    missing_resolution =
-      update_in(effective_policy(), ["repo_policy"], &Map.delete(&1, "workflow_module_resolution"))
+  test "requires exact composed repository policy linkage and provenance" do
+    repo_policy = effective_policy()["repo_policy"]
 
-    for policy <- [missing_resolution] do
+    malformed_repo_policies = [
+      Map.delete(repo_policy, "workflow_module_resolution"),
+      Map.delete(repo_policy, "manifest_source_dir"),
+      Map.put(repo_policy, "unknown", "forged"),
+      Map.put(repo_policy, "manifest_source_dir", "relative/source"),
+      Map.put(repo_policy, "manifest_source_dir", <<0xFF>>),
+      Map.put(repo_policy, "manifest_source_dir", 42)
+    ]
+
+    for malformed_repo_policy <- malformed_repo_policies do
+      policy = put_in(effective_policy(), ["repo_policy"], malformed_repo_policy)
       target = %{valid_target() | effective_policy: policy}
 
       assert {:error, :invalid_policy_projection} =
@@ -1357,6 +1366,38 @@ defmodule SymphonyElixir.TargetContextTest do
              "require_validation",
              "require_review"
            ]
+  end
+
+  test "issue_policy requires exact repository authority provenance" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    assert {:ok, _policy} = TargetContext.issue_policy(context, issue, [])
+
+    repo_policy = context.repo_policy
+
+    malformed_repo_policies = [
+      Map.delete(repo_policy, "manifest_source_dir"),
+      Map.delete(repo_policy, "workflow_module_resolution"),
+      Map.put(repo_policy, "unknown", "forged"),
+      Map.put(repo_policy, "manifest_source_dir", "relative/source"),
+      Map.put(repo_policy, "manifest_source_dir", <<0xFF>>),
+      Map.put(repo_policy, "manifest_source_dir", 42),
+      Map.put(repo_policy, "manifest", []),
+      Map.put(repo_policy, "workflow_module_resolution", [])
+    ]
+
+    for malformed_repo_policy <- malformed_repo_policies do
+      result =
+        TargetContext.issue_policy(
+          %{context | repo_policy: malformed_repo_policy},
+          issue,
+          []
+        )
+
+      assert result == {:error, :malformed_composed_policy}
+      refute inspect(result) =~ "forged"
+    end
   end
 
   test "issue_policy accepts only the pinned authority profile and exact authority shape" do

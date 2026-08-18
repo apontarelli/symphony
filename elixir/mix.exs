@@ -20,7 +20,6 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Config,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,
-          SymphonyElixir.Workflow.Manifest,
           SymphonyElixir.Workflow.Renderer,
           SymphonyElixir.Linear.Client,
           SymphonyElixir.LocalConfig,
