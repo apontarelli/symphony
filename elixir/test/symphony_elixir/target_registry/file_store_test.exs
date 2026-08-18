@@ -511,13 +511,16 @@ defmodule SymphonyElixir.TargetRegistry.FileStoreTest do
     assert File.ls!(tmp_dir) == ["targets.yml"]
 
     replacement_path = Path.join(tmp_dir, ".targets.yml.partial-replaced")
+    foreign_replacement_path = replacement_path <> ".foreign"
 
     replace_then_fail = fn ^replacement_path, modes ->
       {:ok, device} = :file.open(replacement_path, modes)
       :ok = :file.close(device)
       owned_stat = File.lstat!(replacement_path)
-      File.rm!(replacement_path)
-      File.write!(replacement_path, "foreign replacement")
+      File.write!(foreign_replacement_path, "foreign replacement")
+      assert File.exists?(replacement_path)
+      assert File.exists?(foreign_replacement_path)
+      File.rename!(foreign_replacement_path, replacement_path)
       {:error, :eio, {:created, owned_stat}}
     end
 
@@ -1179,9 +1182,12 @@ defmodule SymphonyElixir.TargetRegistry.FileStoreTest do
     replace_before_capture = fn token_path, modes ->
       {:ok, device} = :file.open(token_path, modes)
       owned_stat = File.lstat!(token_path)
-      File.rm!(token_path)
-      File.write!(token_path, "replacement token")
-      File.chmod!(token_path, 0o600)
+      foreign_token_path = token_path <> ".foreign"
+      File.write!(foreign_token_path, "replacement token")
+      File.chmod!(foreign_token_path, 0o600)
+      assert File.exists?(token_path)
+      assert File.exists?(foreign_token_path)
+      File.rename!(foreign_token_path, token_path)
       replacement_stat = File.lstat!(token_path)
       send(descriptor_parent, {:descriptor_token_replaced, token_path, owned_stat, replacement_stat})
       {:ok, device}
@@ -1209,9 +1215,12 @@ defmodule SymphonyElixir.TargetRegistry.FileStoreTest do
     replace_before_bare_error = fn token_path, token ->
       File.write!(token_path, token, [:write, :binary, :exclusive])
       owned_stat = File.lstat!(token_path)
-      File.rm!(token_path)
-      File.write!(token_path, token)
-      File.chmod!(token_path, 0o600)
+      foreign_token_path = token_path <> ".foreign"
+      File.write!(foreign_token_path, token)
+      File.chmod!(foreign_token_path, 0o600)
+      assert File.exists?(token_path)
+      assert File.exists?(foreign_token_path)
+      File.rename!(foreign_token_path, token_path)
       replacement_stat = File.lstat!(token_path)
       send(descriptor_parent, {:override_token_replaced, token_path, token, owned_stat, replacement_stat})
       {:error, :eio}
@@ -1549,6 +1558,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
 
     File.rm!(plan_path)
     File.rename!(target_path, plan_path)
+    replacement_path = plan_path <> ".replacement"
     parent = self()
 
     read =
@@ -1565,9 +1575,11 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
       end)
 
     assert_receive {:plan_lstat_complete, read_pid}
-    File.rm!(plan_path)
-    File.write!(plan_path, plan_bytes)
-    File.chmod!(plan_path, 0o600)
+    File.write!(replacement_path, plan_bytes)
+    File.chmod!(replacement_path, 0o600)
+    assert File.exists?(plan_path)
+    assert File.exists?(replacement_path)
+    File.rename!(replacement_path, plan_path)
     send(read_pid, :continue_plan_read)
 
     assert {:error, %Error{code: :plan_corrupt}} = Task.await(read)
@@ -2446,14 +2458,17 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
     assert {:ok, ^envelope} = PlanStore.store(plan_dir, envelope)
 
     plan_path = Path.join(plan_dir, envelope["plan_id"] <> ".json")
+    replacement_path = plan_path <> ".replacement"
     exact_bytes = File.read!(plan_path)
     original_inode = File.lstat!(plan_path).inode
     parent = self()
 
     replace_existing = fn ->
-      File.rm!(plan_path)
-      File.write!(plan_path, exact_bytes)
-      File.chmod!(plan_path, 0o600)
+      File.write!(replacement_path, exact_bytes)
+      File.chmod!(replacement_path, 0o600)
+      assert File.exists?(plan_path)
+      assert File.exists?(replacement_path)
+      File.rename!(replacement_path, plan_path)
       send(parent, :existing_plan_replaced)
       :ok
     end
