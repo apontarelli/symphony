@@ -551,7 +551,7 @@ defmodule SymphonyElixir.CLI do
          {:ok, setup, setup_path} <- read_saved_workflow(name, selected_path, config_opts),
          {:ok, runtime_manifest} <- RunSetup.runtime_manifest(config, setup),
          {:ok, resolved_setup} <-
-           resolve_saved_run_setup(runtime_manifest, setup, setup_path, opts, deps) do
+           resolve_saved_run_setup(name, runtime_manifest, setup, setup_path, opts, deps) do
       context = %{
         name: name,
         opts: opts,
@@ -589,7 +589,7 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  defp resolve_saved_run_setup(runtime_manifest, setup, setup_path, opts, deps) do
+  defp resolve_saved_run_setup(name, runtime_manifest, setup, setup_path, opts, deps) do
     cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
     repo = get_in(setup, ["repo", "path"]) || Keyword.get(opts, :repo, cwd)
 
@@ -600,6 +600,7 @@ defmodule SymphonyElixir.CLI do
       |> Keyword.put(:repo_setup_source, "repo symphony.yml")
       |> Keyword.put(:runtime_setup_path, setup_path)
       |> Keyword.put(:runtime_setup_source, "saved workflow")
+      |> Keyword.put(:saved_run_name, name)
     )
   end
 

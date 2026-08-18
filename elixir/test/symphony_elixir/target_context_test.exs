@@ -147,6 +147,7 @@ defmodule SymphonyElixir.TargetContextTest do
              registry_generation: generation,
              policy_hash: target.policy_hash,
              repo_manifest_hash: repo_manifest_hash,
+             issue_policy_authority: nil,
              repo_policy: target.effective_policy["repo_policy"],
              tracker_connection: expected_tracker,
              run_target: target.effective_policy["run_target"],
@@ -793,6 +794,686 @@ defmodule SymphonyElixir.TargetContextTest do
     refute rendered =~ reference
     refute rendered =~ credential
     refute rendered =~ "tracker_connection"
+  end
+
+  test "issue_policy derives a restrictive issue policy only from the pinned context" do
+    assert {:ok, context} = context_for(valid_target())
+
+    manifest = %{
+      "version" => 1,
+      "project" => %{
+        "repository" => "https://github.com/example/repo",
+        "slug" => "alpha",
+        "criticality" => "production",
+        "deployment_coupling" => "production"
+      },
+      "workflow" => %{"modules" => []},
+      "docs" => %{},
+      "validation" => %{"commands" => [%{"name" => "test", "command" => "mix test"}]},
+      "vcs" => %{},
+      "delivery" => %{"pr_target" => "main"},
+      "automation" => %{
+        "profile" => "strict",
+        "completion_requirements" => ["tests-green"],
+        "review" => %{"mode" => "required"}
+      },
+      "auto_land" => %{"posture" => "strict", "dry_run" => false, "required_checks" => ["ci"]},
+      "harness" => %{},
+      "capabilities" => %{"required" => ["github_pr"]},
+      "issue_markers" => %{"labels" => ["repo:required"], "allowed_projects" => []}
+    }
+
+    context = put_in(context.repo_policy["manifest"], manifest)
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "issue-policy",
+      identifier: "SID-POLICY",
+      title: "Pinned policy",
+      state: "Todo",
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :workflow_profile_override)
+      Application.delete_env(:symphony_elixir, :run_setup)
+      Application.delete_env(:symphony_elixir, :workflow_file_path)
+    end)
+
+    Application.put_env(:symphony_elixir, :workflow_profile_override, "poisoned")
+    Application.put_env(:symphony_elixir, :run_setup, %{restrictive_flags: [:human_review_only]})
+    Application.put_env(:symphony_elixir, :workflow_file_path, "/private/poisoned-workflow.yml")
+
+    assert {:ok, policy} =
+             TargetContext.issue_policy(context, issue,
+               profile: "strict",
+               restrictive_flags: [:no_land, :require_review]
+             )
+
+    assert policy["delivery"] == %{"pr_target" => "main"}
+    assert policy["checks"] == [%{"name" => "test", "command" => "mix test"}]
+    assert policy["completion_requirements"] == ["tests-green"]
+    assert policy["auto_land"]["posture"] == "off"
+    assert policy["auto_land"]["dry_run"]
+    assert policy["review_requirements"] == ["Run setup requires review evidence before handoff."]
+    assert policy["run_setup"]["restrictive_flags"] == ["no_land", "require_review"]
+    assert policy["target_restrictions"]["run_target"] == context.run_target
+    assert policy["target_restrictions"]["external_side_effect_gates"] == context.external_side_effect_gates
+    assert get_in(policy, ["policy_metadata", "profile"]) == "strict"
+    assert get_in(policy, ["policy_metadata", "project_slug"]) == "alpha"
+    assert get_in(policy, ["policy_metadata", "labels"]) == ["repo:required", "target:required"]
+    assert get_in(policy, ["policy_metadata", "state"]) == "todo"
+    assert policy["policy_ref"] =~ ~r/^[0-9a-f]{12}$/
+  end
+
+  test "issue_policy enforces repository labels independently of target labels" do
+    context = issue_policy_context()
+    context = put_in(context.repo_policy["manifest"]["issue_markers"]["labels"], ["manifest:required"])
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "repo-label-policy",
+      identifier: "SID-REPO-LABEL",
+      title: "Repository label policy",
+      state: "Todo",
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(context, issue, [])
+  end
+
+  test "issue_policy normalizes repository allowed projects before enforcing them" do
+    context = issue_policy_context()
+    context = put_in(context.repo_policy["manifest"]["issue_markers"]["allowed_projects"], [" alpha "])
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "repo-project-policy",
+      identifier: "SID-REPO-PROJECT",
+      title: "Repository project policy",
+      state: "Todo",
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    assert {:ok, _policy} = TargetContext.issue_policy(context, issue, [])
+
+    outside_context =
+      put_in(context.repo_policy["manifest"]["issue_markers"]["allowed_projects"], [" outside "])
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(outside_context, issue, [])
+  end
+
+  test "issue_policy enforces the pinned issue identifier scope" do
+    context = issue_policy_context()
+
+    context =
+      put_in(
+        context.run_target["scope"],
+        %{"type" => "issues", "issue_ids" => ["SID-POLICY-COVERAGE", "SID-OTHER"]}
+      )
+
+    assert {:ok, _policy} = TargetContext.issue_policy(context, issue_policy_issue(), [])
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(
+               context,
+               issue_policy_issue(%{identifier: "SID-OUTSIDE"}),
+               []
+             )
+  end
+
+  test "issue_policy enforces the pinned team scope" do
+    context = issue_policy_context()
+    context = put_in(context.run_target["scope"], %{"type" => "team", "team_key" => "SID"})
+
+    assert {:ok, _policy} =
+             TargetContext.issue_policy(context, issue_policy_issue(%{team_key: "sid"}), [])
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(
+               context,
+               issue_policy_issue(%{team_key: "OTHER"}),
+               []
+             )
+  end
+
+  test "issue_policy enforces the pinned project scope" do
+    context = issue_policy_context()
+
+    assert {:ok, _policy} = TargetContext.issue_policy(context, issue_policy_issue(), [])
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(
+               context,
+               issue_policy_issue(%{project_slug: "outside"}),
+               []
+             )
+  end
+
+  test "issue_policy accepts explicit legacy issue, team, and project scopes" do
+    context = issue_policy_context()
+    issue = issue_policy_issue(%{team_key: "sid"})
+
+    for scope <- [
+          %{"type" => "issues", "issue_ids" => ["SID-POLICY-COVERAGE"]},
+          %{"type" => "team", "team_key" => "SID"},
+          %{"type" => "project", "project_slug" => "alpha"}
+        ] do
+      legacy_run_target =
+        context.run_target
+        |> Map.delete("scope")
+        |> Map.merge(scope)
+
+      assert {:ok, _policy} =
+               TargetContext.issue_policy(%{context | run_target: legacy_run_target}, issue, [])
+    end
+  end
+
+  test "issue_policy infers legacy issue, team, and project scopes" do
+    context = issue_policy_context()
+    issue = issue_policy_issue(%{team_key: "sid"})
+
+    for scope <- [
+          %{"issue_ids" => ["SID-POLICY-COVERAGE"]},
+          %{"team_key" => "SID"},
+          %{"project_slug" => "alpha"}
+        ] do
+      legacy_run_target =
+        context.run_target
+        |> Map.delete("scope")
+        |> Map.merge(scope)
+
+      assert {:ok, _policy} =
+               TargetContext.issue_policy(%{context | run_target: legacy_run_target}, issue, [])
+    end
+  end
+
+  test "issue_policy rejects malformed or unverifiable target scopes" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    for scope <- [
+          %{},
+          %{"type" => "project"},
+          %{"type" => "team"},
+          %{"type" => "issues", "issue_ids" => []},
+          %{"type" => "issues", "issue_ids" => "SID-POLICY-COVERAGE"},
+          %{"type" => "query", "query_file" => "private-query.graphql"},
+          %{"type" => "unsupported", "team_key" => "SID"},
+          %{"type" => "team", "team_key" => "SID", "project_slug" => "alpha"}
+        ] do
+      assert TargetContext.issue_policy(put_in(context.run_target["scope"], scope), issue, []) ==
+               {:error, :malformed_composed_policy}
+    end
+
+    assert TargetContext.issue_policy(put_in(context.run_target["scope"], "team"), issue, []) ==
+             {:error, :malformed_composed_policy}
+  end
+
+  test "issue_policy rejects malformed legacy scopes with typed secret-safe errors" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+    private_scope_type = "private-unsupported-scope"
+    private_scope_field = "private-unrecognized-scope-field"
+    private_run_target = "private-non-map-run-target"
+
+    malformed_run_targets = [
+      {context.run_target
+       |> Map.delete("scope")
+       |> Map.put("type", private_scope_type), private_scope_type},
+      {context.run_target
+       |> Map.delete("scope")
+       |> Map.put("private", private_scope_field), private_scope_field},
+      {private_run_target, private_run_target}
+    ]
+
+    for {run_target, private_value} <- malformed_run_targets do
+      result = TargetContext.issue_policy(%{context | run_target: run_target}, issue, [])
+
+      assert result == {:error, :malformed_composed_policy}
+      refute inspect(result) =~ private_value
+    end
+  end
+
+  test "issue_policy requires canonical repository issue marker fields" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    for markers <- [
+          %{"labels" => []},
+          %{"allowed_projects" => []},
+          %{"labels" => "repo:required", "allowed_projects" => []},
+          %{"labels" => [], "allowed_projects" => "alpha"},
+          %{"labels" => [], "allowed_projects" => [], "unsupported" => []}
+        ] do
+      malformed = put_in(context.repo_policy["manifest"]["issue_markers"], markers)
+
+      assert TargetContext.issue_policy(malformed, issue, []) ==
+               {:error, :malformed_composed_policy}
+    end
+  end
+
+  test "issue_policy accepts absent issue state only without an active-state constraint" do
+    context = issue_policy_context()
+    unconstrained_context = put_in(context.run_target["active_states"], [])
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "nil-state-policy",
+      identifier: "SID-NIL-STATE",
+      title: "Absent issue state",
+      state: nil,
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    assert {:ok, policy} = TargetContext.issue_policy(unconstrained_context, issue, [])
+    assert get_in(policy, ["policy_metadata", "state"]) == nil
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(context, issue, [])
+  end
+
+  test "issue_policy emits deterministic normalized policy metadata" do
+    context = issue_policy_context()
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "normalized-metadata-policy",
+      identifier: "SID-NORMALIZED-METADATA",
+      title: "Normalized policy metadata",
+      state: " TODO ",
+      project_id: " project-id ",
+      project_slug: " ALPHA ",
+      labels: [" Target:Required ", "repo:REQUIRED", " extra ", "EXTRA"]
+    }
+
+    canonical = %{
+      issue
+      | state: "todo",
+        project_id: "project-id",
+        project_slug: "alpha",
+        labels: ["extra", "repo:required", "target:required"]
+    }
+
+    assert {:ok, normalized_policy} =
+             TargetContext.issue_policy(context, issue, profile: " strict ")
+
+    assert {:ok, canonical_policy} =
+             TargetContext.issue_policy(context, canonical, profile: "strict")
+
+    assert normalized_policy == canonical_policy
+
+    assert normalized_policy["policy_metadata"] == %{
+             "labels" => ["extra", "repo:required", "target:required"],
+             "profile" => "strict",
+             "project_id" => "project-id",
+             "project_slug" => "alpha",
+             "source" => "target_context",
+             "state" => "todo"
+           }
+  end
+
+  test "issue_policy rejects invalid profile and label source values with typed errors" do
+    context = issue_policy_context()
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "invalid-metadata-policy",
+      identifier: "SID-INVALID-METADATA",
+      title: "Invalid policy metadata",
+      state: "Todo",
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    for invalid_profile <- [nil, "", "   ", "private-profile\nvalue", <<255>>] do
+      result = TargetContext.issue_policy(context, issue, profile: invalid_profile)
+      assert result == {:error, :invalid_issue_policy_options}
+      refute inspect(result) =~ "private-profile"
+    end
+
+    for invalid_label <- [nil, "", "   ", "private-label\tvalue", <<255>>] do
+      result = TargetContext.issue_policy(context, %{issue | labels: issue.labels ++ [invalid_label]}, [])
+      assert result == {:error, :malformed_issue_metadata}
+      refute inspect(result) =~ "private-label"
+    end
+  end
+
+  test "issue_policy distinguishes a missing automation profile from malformed pinned values" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    missing =
+      update_in(
+        context.repo_policy["manifest"]["automation"],
+        &Map.delete(&1, "profile")
+      )
+
+    assert {:ok, _policy} = TargetContext.issue_policy(missing, issue, [])
+
+    for malformed <- [nil, "", "   ", <<255>>, 42] do
+      malformed_context =
+        put_in(
+          context.repo_policy["manifest"]["automation"]["profile"],
+          malformed
+        )
+
+      assert TargetContext.issue_policy(malformed_context, issue, []) ==
+               {:error, :malformed_composed_policy}
+    end
+  end
+
+  test "issue_policy rejects broadening and returns typed secret-safe errors" do
+    context = issue_policy_context()
+
+    issue = %SymphonyElixir.Linear.Issue{
+      id: "issue-policy-errors",
+      identifier: "SID-POLICY-ERRORS",
+      title: "Reject broadening",
+      state: "Todo",
+      project_slug: "alpha",
+      labels: ["repo:required", "target:required"]
+    }
+
+    assert {:ok, intersected_policy} = TargetContext.issue_policy(context, issue, [])
+
+    assert intersected_policy["auto_land"] == %{
+             "posture" => "off",
+             "dry_run" => true,
+             "required_checks" => ["ci"]
+           }
+
+    assert {:error, :unknown_profile} =
+             TargetContext.issue_policy(context, issue, profile: "missing")
+
+    assert {:error, :forbidden_policy_broadening} =
+             TargetContext.issue_policy(context, issue, restrictive_flags: [:auto_land])
+
+    for outside_issue <- [
+          %{issue | project_slug: "outside"},
+          %{issue | labels: ["repo:required"]},
+          %{issue | state: "Done"}
+        ] do
+      assert {:error, :forbidden_policy_broadening} =
+               TargetContext.issue_policy(context, outside_issue, [])
+    end
+
+    private_issue_value = "private-issue-value"
+    malformed_issue = %{issue | labels: [private_issue_value | :malformed]}
+    malformed_issue_result = TargetContext.issue_policy(context, malformed_issue, [])
+    assert malformed_issue_result == {:error, :malformed_issue_metadata}
+    refute inspect(malformed_issue_result) =~ private_issue_value
+
+    private_policy_value = "private-policy-value"
+
+    malformed_context =
+      put_in(
+        context.repo_policy,
+        Map.put(context.repo_policy, "private", private_policy_value)
+      )
+
+    malformed_policy_result = TargetContext.issue_policy(malformed_context, issue, [])
+    assert malformed_policy_result == {:error, :malformed_composed_policy}
+    refute inspect(malformed_policy_result) =~ private_policy_value
+
+    private_state_value = "private-state-value"
+    malformed_state_context = put_in(context.run_target["active_states"], private_state_value)
+    malformed_state_result = TargetContext.issue_policy(malformed_state_context, issue, [])
+    assert malformed_state_result == {:error, :malformed_composed_policy}
+    refute inspect(malformed_state_result) =~ private_state_value
+  end
+
+  test "issue_policy rejects malformed public arguments and restrictive options" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    assert TargetContext.issue_policy(context, :not_an_issue, []) ==
+             {:error, :malformed_issue_metadata}
+
+    assert TargetContext.issue_policy(:not_a_context, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    assert TargetContext.issue_policy(context, issue, %{}) ==
+             {:error, :invalid_issue_policy_options}
+
+    assert TargetContext.issue_policy(
+             context,
+             issue,
+             restrictive_flags: [:no_land | :invalid_tail]
+           ) == {:error, :invalid_issue_policy_options}
+
+    assert TargetContext.issue_policy(context, issue, restrictive_flags: [:future_restriction]) ==
+             {:error, :invalid_issue_policy_options}
+
+    assert TargetContext.issue_policy(context, issue, restrictive_flags: "no_land") ==
+             {:error, :invalid_issue_policy_options}
+
+    assert TargetContext.issue_policy(context, %{issue | labels: "repo:required"}, []) ==
+             {:error, :malformed_issue_metadata}
+  end
+
+  test "issue_policy rejects malformed composed scope fields through typed errors" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    assert TargetContext.issue_policy(%{context | repo_policy: %{}}, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    missing_markers =
+      update_in(context.repo_policy["manifest"], &Map.delete(&1, "issue_markers"))
+
+    assert TargetContext.issue_policy(missing_markers, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    invalid_projects =
+      put_in(
+        context.repo_policy["manifest"]["issue_markers"]["allowed_projects"],
+        "alpha"
+      )
+
+    assert TargetContext.issue_policy(invalid_projects, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    invalid_automation = put_in(context.repo_policy["manifest"]["automation"], nil)
+
+    assert TargetContext.issue_policy(invalid_automation, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    invalid_required_labels = put_in(context.run_target["required_labels"], "target:required")
+
+    assert TargetContext.issue_policy(invalid_required_labels, issue, []) ==
+             {:error, :malformed_composed_policy}
+
+    invalid_project_scope = put_in(context.run_target["scope"]["project_slug"], 42)
+
+    assert TargetContext.issue_policy(invalid_project_scope, issue, []) ==
+             {:error, :malformed_composed_policy}
+  end
+
+  test "issue_policy rejects nil or blank project constraints" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    for invalid_value <- [nil, "   "] do
+      invalid_scope = put_in(context.run_target["scope"]["project_slug"], invalid_value)
+
+      assert TargetContext.issue_policy(invalid_scope, issue, []) ==
+               {:error, :malformed_composed_policy}
+    end
+  end
+
+  test "issue_policy rejects malformed auto-land for no-land without exposing its value" do
+    private_value = "tracker-api-key=private-no-land-value"
+    context = put_in(issue_policy_context().repo_policy["manifest"]["auto_land"], private_value)
+
+    result =
+      TargetContext.issue_policy(context, issue_policy_issue(), restrictive_flags: [:no_land])
+
+    assert result == {:error, :malformed_composed_policy}
+    refute inspect(result) =~ private_value
+  end
+
+  test "issue_policy rejects malformed auto-land for human-review-only without exposing its value" do
+    private_value = "tracker-api-key=private-human-review-value"
+    context = put_in(issue_policy_context().repo_policy["manifest"]["auto_land"], private_value)
+
+    result =
+      TargetContext.issue_policy(context, issue_policy_issue(), restrictive_flags: [:human_review_only])
+
+    assert result == {:error, :malformed_composed_policy}
+    refute inspect(result) =~ private_value
+  end
+
+  test "issue_policy treats explicit null auto-land as absent" do
+    context = put_in(issue_policy_context().repo_policy["manifest"]["auto_land"], nil)
+
+    assert {:ok, policy} = TargetContext.issue_policy(context, issue_policy_issue(), [])
+    refute Map.has_key?(policy, "auto_land")
+  end
+
+  test "issue_policy applies every restrictive evidence requirement without requiring auto-land" do
+    context = issue_policy_context()
+    context = update_in(context.repo_policy["manifest"], &Map.delete(&1, "auto_land"))
+    issue = issue_policy_issue()
+    restrictive_flags = [:human_review_only, :require_validation, :require_review]
+
+    assert {:ok, policy} =
+             TargetContext.issue_policy(context, issue, restrictive_flags: restrictive_flags)
+
+    assert policy["auto_land"] == %{"posture" => "off", "dry_run" => true}
+    assert policy["handoff_route"] == "human_review"
+
+    assert policy["completion_requirements"] == [
+             "tests-green",
+             "Run setup requires validation evidence before handoff."
+           ]
+
+    assert policy["review_requirements"] == [
+             "Run setup requires review evidence before handoff."
+           ]
+
+    assert policy["run_setup"]["restrictive_flags"] == [
+             "human_review_only",
+             "require_validation",
+             "require_review"
+           ]
+  end
+
+  test "issue_policy accepts only the pinned authority profile and exact authority shape" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    authority = %{
+      "profile" => "strict",
+      "policy" => %{"handoff_route" => "human_review"}
+    }
+
+    assert {:ok, policy} =
+             TargetContext.issue_policy(
+               %{context | issue_policy_authority: authority},
+               issue,
+               profile: "strict"
+             )
+
+    assert policy["handoff_route"] == "human_review"
+
+    assert TargetContext.issue_policy(
+             %{context | issue_policy_authority: authority},
+             issue,
+             profile: "default"
+           ) == {:error, :unknown_profile}
+
+    for malformed_authority <- [
+          Map.put(authority, "private", "must-not-expand-authority"),
+          %{},
+          "must-not-be-an-authority"
+        ] do
+      result =
+        TargetContext.issue_policy(
+          %{context | issue_policy_authority: malformed_authority},
+          issue,
+          profile: "strict"
+        )
+
+      assert result == {:error, :malformed_composed_policy}
+      refute inspect(result) =~ "must-not"
+    end
+  end
+
+  test "issue_policy rejects malformed authority fields before every restrictive flag path" do
+    context = issue_policy_context()
+    issue = issue_policy_issue()
+
+    for {flag, field} <- [
+          {:no_land, "auto_land"},
+          {:human_review_only, "auto_land"},
+          {:require_validation, "completion_requirements"},
+          {:require_review, "review_requirements"}
+        ] do
+      private_value = "private-#{flag}-authority-value"
+
+      authority = %{
+        "profile" => "strict",
+        "policy" => %{field => private_value}
+      }
+
+      result =
+        TargetContext.issue_policy(
+          %{context | issue_policy_authority: authority},
+          issue,
+          profile: "strict",
+          restrictive_flags: [flag]
+        )
+
+      assert result == {:error, :malformed_composed_policy}
+      refute inspect(result) =~ private_value
+    end
+  end
+
+  defp issue_policy_issue(overrides \\ %{}) do
+    struct!(
+      SymphonyElixir.Linear.Issue,
+      Map.merge(
+        %{
+          id: "issue-policy-coverage",
+          identifier: "SID-POLICY-COVERAGE",
+          title: "Policy coverage",
+          state: "Todo",
+          project_slug: "alpha",
+          labels: ["repo:required", "target:required"]
+        },
+        overrides
+      )
+    )
+  end
+
+  defp issue_policy_context do
+    assert {:ok, context} = context_for(valid_target())
+
+    manifest = %{
+      "version" => 1,
+      "project" => %{
+        "repository" => "https://github.com/example/repo",
+        "slug" => "alpha",
+        "criticality" => "production",
+        "deployment_coupling" => "production"
+      },
+      "workflow" => %{"modules" => []},
+      "docs" => %{},
+      "validation" => %{"commands" => [%{"name" => "test", "command" => "mix test"}]},
+      "vcs" => %{},
+      "delivery" => %{"pr_target" => "main"},
+      "automation" => %{
+        "profile" => "strict",
+        "completion_requirements" => ["tests-green"]
+      },
+      "auto_land" => %{"posture" => "strict", "dry_run" => false, "required_checks" => ["ci"]},
+      "harness" => %{},
+      "capabilities" => %{"required" => ["github_pr"]},
+      "issue_markers" => %{"labels" => ["repo:required"], "allowed_projects" => []}
+    }
+
+    put_in(context.repo_policy["manifest"], manifest)
   end
 
   defp valid_snapshot(target \\ nil) do
