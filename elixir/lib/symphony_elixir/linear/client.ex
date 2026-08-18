@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, RunTarget}
+  alias SymphonyElixir.{Config, RunTarget, TargetContext}
   alias SymphonyElixir.Linear.{Filter, Issue}
 
   @issue_page_size 50
@@ -362,11 +362,55 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @spec fetch_issues_by_states(TargetContext.t(), [String.t()]) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(%TargetContext{} = context, state_names),
+    do: fetch_issues_by_states(context, state_names, [])
+
+  @doc false
+  @spec fetch_issues_by_states(TargetContext.t(), [String.t()], keyword()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_by_states(%TargetContext{} = context, state_names, opts)
+      when is_list(state_names) and is_list(opts) do
+    with {:ok, normalized_states} <- context_string_list(state_names) do
+      fetch_context_issues_by_states(context, normalized_states, opts)
+    end
+  end
+
+  def fetch_issues_by_states(%TargetContext{}, _state_names, _opts),
+    do: {:error, :invalid_tracker_context}
+
+  defp fetch_context_issues_by_states(_context, [], _opts), do: {:ok, []}
+
+  defp fetch_context_issues_by_states(context, states, opts) do
+    with {:ok, target} <- context_configured_target(context),
+         {:ok, _active_states, required_labels, assignee} <- context_routing(context),
+         {:ok, %RunTarget.Resolution{issues: issues}} <-
+           resolve_context_target(
+             context,
+             target,
+             states,
+             required_labels,
+             assignee,
+             opts
+           ) do
+      {:ok, issues}
+    end
+  end
+
   @spec resolve_run_target(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_run_target(target \\ nil) do
     settings = Config.settings!()
     resolve_run_target(target, settings.tracker.active_states)
   end
+
+  @spec resolve_run_target(TargetContext.t(), RunTarget.t()) ::
+          {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_run_target(%TargetContext{} = context, %RunTarget{} = target),
+    do: resolve_run_target(context, target, [])
+
+  def resolve_run_target(%TargetContext{}, _target),
+    do: {:error, :invalid_tracker_context}
 
   @spec resolve_run_target(RunTarget.t() | nil, [String.t()]) ::
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
@@ -388,6 +432,26 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc false
+  @spec resolve_run_target(TargetContext.t(), RunTarget.t(), keyword()) ::
+          {:ok, RunTarget.Resolution.t()} | {:error, term()}
+  def resolve_run_target(%TargetContext{} = context, %RunTarget{} = target, opts)
+      when is_list(opts) do
+    with {:ok, state_names, required_labels, assignee} <- context_routing(context) do
+      resolve_context_target(
+        context,
+        target,
+        state_names,
+        required_labels,
+        assignee,
+        opts
+      )
+    end
+  end
+
+  def resolve_run_target(%TargetContext{}, %RunTarget{}, _opts),
+    do: {:error, :invalid_tracker_context}
+
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
@@ -400,6 +464,35 @@ defmodule SymphonyElixir.Linear.Client do
         with {:ok, assignee_filter} <- routing_assignee_filter() do
           do_fetch_issue_states(ids, assignee_filter)
         end
+    end
+  end
+
+  @spec fetch_issue_states_by_ids(TargetContext.t(), [String.t()]) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(%TargetContext{} = context, issue_ids),
+    do: fetch_issue_states_by_ids(context, issue_ids, [])
+
+  @doc false
+  @spec fetch_issue_states_by_ids(TargetContext.t(), [String.t()], keyword()) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issue_states_by_ids(%TargetContext{} = context, issue_ids, opts)
+      when is_list(issue_ids) and is_list(opts) do
+    with {:ok, ids} <- context_string_list(issue_ids) do
+      fetch_context_issue_states(context, ids, opts)
+    end
+  end
+
+  def fetch_issue_states_by_ids(%TargetContext{}, _issue_ids, _opts),
+    do: {:error, :invalid_tracker_context}
+
+  defp fetch_context_issue_states(_context, [], _opts), do: {:ok, []}
+
+  defp fetch_context_issue_states(context, ids, opts) do
+    graphql_fun = fn query, variables -> graphql(context, query, variables, opts) end
+
+    with {:ok, _states, _required_labels, assignee} <- context_routing(context),
+         {:ok, assignee_filter} <- context_assignee_filter(assignee, graphql_fun) do
+      do_fetch_issue_states(ids, assignee_filter, graphql_fun)
     end
   end
 
@@ -426,6 +519,26 @@ defmodule SymphonyElixir.Linear.Client do
         {:error, {:linear_api_request, reason}}
     end
   end
+
+  @spec graphql(TargetContext.t(), String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, atom() | {:linear_rate_limited, map()}}
+  def graphql(%TargetContext{} = context, query, variables, opts)
+      when is_binary(query) and is_map(variables) and is_list(opts) do
+    case context_request_options(opts) do
+      {:ok, request_fun, operation_name} ->
+        payload = build_graphql_payload(query, variables, operation_name)
+
+        with {:ok, endpoint, headers} <- context_graphql_transport(context) do
+          context_graphql_request(request_fun, endpoint, payload, headers)
+        end
+
+      :error ->
+        {:error, :invalid_linear_request_result}
+    end
+  end
+
+  def graphql(%TargetContext{}, _query, _variables, _opts),
+    do: {:error, :invalid_linear_request_result}
 
   @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
@@ -506,6 +619,142 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, RunTarget.apply_marker_safety(target, issues, markers)}
     end
   end
+
+  defp context_routing(%TargetContext{run_target: run_target}) when is_map(run_target) do
+    with {:ok, state_names} <- context_string_list(Map.get(run_target, "active_states", [])),
+         {:ok, required_labels} <-
+           context_string_list(Map.get(run_target, "required_labels", [])),
+         {:ok, assignee} <- context_optional_string(Map.get(run_target, "assignee")) do
+      {:ok, state_names, Enum.map(required_labels, &String.downcase/1), assignee}
+    end
+  end
+
+  defp context_routing(%TargetContext{}), do: {:error, :invalid_tracker_context}
+
+  defp context_string_list(values) when is_list(values) do
+    if List.improper?(values) do
+      {:error, :invalid_tracker_context}
+    else
+      normalized = Enum.map(values, &context_optional_string/1)
+
+      if Enum.all?(normalized, &match?({:ok, value} when is_binary(value), &1)) do
+        {:ok, normalized |> Enum.map(fn {:ok, value} -> value end) |> Enum.uniq()}
+      else
+        {:error, :invalid_tracker_context}
+      end
+    end
+  end
+
+  defp context_string_list(_values), do: {:error, :invalid_tracker_context}
+
+  defp context_optional_string(nil), do: {:ok, nil}
+
+  defp context_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> {:error, :invalid_tracker_context}
+      normalized -> {:ok, normalized}
+    end
+  end
+
+  defp context_optional_string(_value), do: {:error, :invalid_tracker_context}
+
+  defp context_assignee_filter(nil, _graphql_fun), do: {:ok, nil}
+
+  defp context_assignee_filter(assignee, graphql_fun),
+    do: build_assignee_filter(assignee, graphql_fun)
+
+  defp context_target_issues(
+         _target,
+         [],
+         _markers,
+         _assignee_filter,
+         _graphql_fun
+       ),
+       do: {:ok, []}
+
+  defp context_target_issues(target, state_names, markers, assignee_filter, graphql_fun),
+    do: do_resolve_run_target(target, state_names, markers, assignee_filter, graphql_fun)
+
+  defp resolve_context_target(
+         context,
+         target,
+         state_names,
+         required_labels,
+         assignee,
+         opts
+       ) do
+    graphql_fun = fn query, variables -> graphql(context, query, variables, opts) end
+    markers = %RunTarget.RepoMarkers{labels: required_labels}
+
+    with :ok <- validate_linear_target(target),
+         :ok <- RunTarget.validate_marker_safety(target, markers),
+         {:ok, assignee_filter} <- context_assignee_filter(assignee, graphql_fun),
+         {:ok, issues} <-
+           context_target_issues(
+             target,
+             state_names,
+             markers,
+             assignee_filter,
+             graphql_fun
+           ) do
+      resolution = RunTarget.apply_marker_safety(target, issues, markers)
+
+      {:ok,
+       %{
+         resolution
+         | issues:
+             Enum.filter(
+               resolution.issues,
+               &Issue.routable?(&1, required_labels)
+             )
+       }}
+    end
+  end
+
+  defp context_configured_target(%TargetContext{
+         tracker_connection: %{"policy" => %{"kind" => kind}},
+         run_target: run_target
+       })
+       when is_binary(kind) and is_map(run_target) do
+    scope = Map.get(run_target, "scope", run_target)
+
+    cond do
+      String.downcase(String.trim(kind)) != "linear" ->
+        {:error, :invalid_tracker_adapter}
+
+      context_query_file_only?(scope) ->
+        {:error, :query_file_not_materialized}
+
+      true ->
+        RunTarget.parse(scope, default_tracker: "linear")
+    end
+  end
+
+  defp context_configured_target(%TargetContext{}),
+    do: {:error, :invalid_tracker_context}
+
+  defp context_query_file_only?(scope) when is_map(scope) do
+    type =
+      context_scope_value(scope, "type", :type) ||
+        context_scope_value(scope, "kind", :kind)
+
+    query = context_scope_value(scope, "query", :query)
+    filter = context_scope_value(scope, "filter", :filter)
+    query_file = context_scope_value(scope, "query_file", :query_file)
+
+    normalized_type =
+      if is_binary(type),
+        do: String.downcase(String.trim(type)),
+        else: nil
+
+    normalized_type == "query" and not is_map(query) and not is_map(filter) and
+      is_binary(query_file) and String.trim(query_file) != ""
+  end
+
+  defp context_query_file_only?(_scope), do: false
+
+  defp context_scope_value(scope, string_key, atom_key),
+    do: Map.get(scope, string_key) || Map.get(scope, atom_key)
 
   defp configured_run_target(%RunTarget{} = target, _settings), do: {:ok, target}
   defp configured_run_target(nil, settings), do: RunTarget.from_settings(settings)
@@ -992,6 +1241,210 @@ defmodule SymphonyElixir.Linear.Client do
     )
   end
 
+  defp non_empty_context_string?(value) when is_binary(value) do
+    String.trim(value) != ""
+  catch
+    _kind, _reason -> false
+  end
+
+  defp context_graphql_transport(%TargetContext{
+         tracker_connection: %{
+           "id" => connection_id,
+           "policy" => %{
+             "kind" => "linear",
+             "endpoint" => endpoint,
+             "api_key" => token
+           }
+         }
+       })
+       when is_binary(connection_id) and is_binary(endpoint) and is_binary(token) do
+    if non_empty_context_string?(connection_id) and
+         non_empty_context_string?(endpoint) and
+         non_empty_context_string?(token) do
+      {:ok, endpoint,
+       [
+         {"Authorization", token},
+         {"Content-Type", "application/json"}
+       ]}
+    else
+      {:error, :invalid_tracker_context}
+    end
+  end
+
+  defp context_graphql_transport(%TargetContext{}), do: {:error, :invalid_tracker_context}
+
+  defp context_request_options(opts) do
+    request_fun = Keyword.get(opts, :request_fun, &post_context_graphql_request/3)
+    operation_name = Keyword.get(opts, :operation_name)
+
+    if is_function(request_fun, 3) do
+      {:ok, request_fun, operation_name}
+    else
+      :error
+    end
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp context_graphql_request(request_fun, endpoint, payload, headers) do
+    result =
+      try do
+        {:returned, request_fun.(endpoint, payload, headers)}
+      catch
+        _kind, _reason -> :failed
+      end
+
+    case result do
+      {:returned, {:ok, response}} ->
+        normalize_context_response(response)
+
+      {:returned, {:error, _reason}} ->
+        {:error, :linear_request_failed}
+
+      {:returned, _malformed} ->
+        {:error, :invalid_linear_request_result}
+
+      :failed ->
+        {:error, :linear_request_failed}
+    end
+  end
+
+  defp normalize_context_response(response) do
+    do_normalize_context_response(response)
+  catch
+    _kind, _reason -> {:error, :invalid_linear_request_result}
+  end
+
+  defp do_normalize_context_response(response) when is_map(response) do
+    if valid_context_response?(response),
+      do: normalize_valid_context_response(response),
+      else: {:error, :invalid_linear_request_result}
+  end
+
+  defp do_normalize_context_response(_response),
+    do: {:error, :invalid_linear_request_result}
+
+  defp normalize_valid_context_response(%{
+         status: 200,
+         body: %{"data" => data} = body
+       })
+       when is_map(data) and map_size(body) == 1,
+       do: {:ok, body}
+
+  defp normalize_valid_context_response(%{status: 200}),
+    do: {:error, :invalid_linear_request_result}
+
+  defp normalize_valid_context_response(response), do: context_response_error(response)
+
+  defp valid_context_response?(response) when is_map(response) do
+    safe_response_keys? =
+      response
+      |> Map.keys()
+      |> Enum.all?(&is_atom/1)
+
+    with true <- safe_response_keys?,
+         {:ok, status} when is_integer(status) and status >= 100 and status <= 599 <-
+           Map.fetch(response, :status),
+         {:ok, body} when is_map(body) <- Map.fetch(response, :body),
+         true <- valid_context_json?(body),
+         true <- valid_context_headers_field?(response) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_context_headers_field?(response) do
+    case Map.fetch(response, :headers) do
+      :error -> true
+      {:ok, headers} -> valid_context_headers?(headers)
+    end
+  end
+
+  defp valid_context_headers?(headers) when is_list(headers) do
+    Enum.all?(headers, &valid_context_header?/1)
+  end
+
+  defp valid_context_headers?(headers) when is_map(headers) do
+    Enum.all?(headers, fn {key, value} ->
+      is_binary(key) and valid_context_header_value?(value)
+    end)
+  end
+
+  defp valid_context_headers?(_headers), do: false
+
+  defp valid_context_header?({key, value}) when is_binary(key),
+    do: valid_context_header_value?(value)
+
+  defp valid_context_header?(_header), do: false
+  defp valid_context_header_value?(value) when is_binary(value), do: true
+  defp valid_context_header_value?(value) when is_integer(value), do: true
+
+  defp valid_context_header_value?(value) when is_list(value) do
+    Enum.all?(value, &is_binary/1)
+  end
+
+  defp valid_context_header_value?(_value), do: false
+
+  defp valid_context_json?(value) when is_map(value) do
+    Enum.all?(value, fn {key, nested_value} ->
+      is_binary(key) and valid_context_json?(nested_value)
+    end)
+  end
+
+  defp valid_context_json?(value) when is_list(value),
+    do: Enum.all?(value, &valid_context_json?/1)
+
+  defp valid_context_json?(value) when is_binary(value), do: true
+  defp valid_context_json?(value) when is_integer(value), do: true
+  defp valid_context_json?(value) when is_float(value), do: true
+  defp valid_context_json?(value) when is_boolean(value), do: true
+  defp valid_context_json?(nil), do: true
+  defp valid_context_json?(_value), do: false
+
+  defp context_response_error(%{body: body} = response) do
+    response = context_rate_limit_response(response)
+
+    case linear_rate_limit_details(response, graphql_error_messages(body)) do
+      nil ->
+        {:error, :linear_request_failed}
+
+      details ->
+        {:error,
+         {:linear_rate_limited,
+          Map.take(details, [
+            :status,
+            :retry_after_ms,
+            :reset_at
+          ])}}
+    end
+  end
+
+  defp context_response_error(_response), do: {:error, :linear_request_failed}
+
+  defp context_rate_limit_response(%{headers: headers} = response) when is_map(headers) do
+    normalized_headers =
+      Map.new(headers, fn {key, value} ->
+        {key, context_rate_header_value(value)}
+      end)
+
+    %{response | headers: normalized_headers}
+  end
+
+  defp context_rate_limit_response(response), do: response
+
+  defp context_rate_header_value([value | _rest]) when is_binary(value), do: value
+  defp context_rate_header_value([]), do: nil
+  defp context_rate_header_value(value), do: value
+
+  defp post_context_graphql_request(endpoint, payload, headers) do
+    Req.post(endpoint,
+      headers: headers,
+      json: payload,
+      connect_options: [timeout: 30_000]
+    )
+  end
+
   defp decode_linear_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, assignee_filter) do
     issues =
       nodes
@@ -1104,21 +1557,25 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  defp build_assignee_filter(assignee) when is_binary(assignee) do
+  defp build_assignee_filter(assignee) when is_binary(assignee),
+    do: build_assignee_filter(assignee, &graphql/2)
+
+  defp build_assignee_filter(assignee, graphql_fun)
+       when is_binary(assignee) and is_function(graphql_fun, 2) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
       "me" ->
-        resolve_viewer_assignee_filter()
+        resolve_viewer_assignee_filter(graphql_fun)
 
       normalized ->
         {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
     end
   end
 
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
+  defp resolve_viewer_assignee_filter(graphql_fun) when is_function(graphql_fun, 2) do
+    case graphql_fun.(@viewer_query, %{}) do
       {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
         case assignee_id(viewer) do
           nil ->
