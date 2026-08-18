@@ -491,6 +491,7 @@ defmodule SymphonyElixir.CLITest do
     assert preview =~ "Run preview"
     assert preview =~ "runtime setup: #{Path.join([root, "runs", "dogfood.yml"])}"
     assert_received :started
+    assert SymphonyElixir.RunSetup.current().saved_run_name == "dogfood"
   after
     SymphonyElixir.RunSetup.clear_current()
   end

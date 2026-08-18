@@ -1747,7 +1747,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
         )
       end)
 
-    assert_receive {:plan_linked, store_pid}
+    assert_receive {:plan_linked, store_pid}, 1_000
     File.rm!(temp_path)
     File.write!(temp_path, "foreign reuse")
     send(store_pid, :continue_link_cleanup)
@@ -1992,7 +1992,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
         )
       end)
 
-    assert_receive :consume_ready
+    assert_receive :consume_ready, 1_000
 
     assert {:error, %Error{code: :atomic_replace_failed}} =
              PlanStore.store(plan_dir, envelope)

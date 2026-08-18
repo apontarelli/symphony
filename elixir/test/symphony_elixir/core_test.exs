@@ -3488,6 +3488,94 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "explicit config helpers use only supplied settings and loaded workflow" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "workspace" => %{"root" => "/tmp/explicit-workspaces"},
+               "agent" => %{
+                 "default_runner" => "explicit",
+                 "max_concurrent_agents" => 7,
+                 "max_concurrent_startups" => 5,
+                 "max_concurrent_agents_by_state" => %{"In Progress" => 3}
+               },
+               "runners" => %{
+                 "explicit" => %{
+                   "kind" => "codex_app_server",
+                   "command" => ["explicit-codex", "app-server"],
+                   "approval_policy" => "never",
+                   "thread_sandbox" => "workspace-write",
+                   "turn_timeout_ms" => 111,
+                   "read_timeout_ms" => 222,
+                   "stall_timeout_ms" => 0,
+                   "max_concurrent_startups" => 2
+                 }
+               },
+               "profiles" => %{
+                 "default" => %{"delivery" => %{"pr_target" => "main"}},
+                 "strict" => %{
+                   "delivery" => %{"pr_target" => "human-review"},
+                   "checks" => ["mix test"]
+                 }
+               }
+             })
+
+    loaded = %{
+      prompt_template: "Pinned prompt",
+      workflow_module_resolution: %{
+        module_names: ["base"],
+        module_refs: [%{name: "base", version: 1}],
+        policy_hash: "modules-hash",
+        rendered: "Pinned prompt"
+      }
+    }
+
+    issue = %Issue{
+      id: "issue-explicit-config",
+      identifier: "SID-EXPLICIT",
+      title: "Use explicit config",
+      state: "In Progress",
+      project_id: "project-id",
+      project_slug: "project-slug",
+      labels: []
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/tmp/poisoned-workspaces",
+      profiles: %{default: %{delivery: %{pr_target: "poisoned"}}}
+    )
+
+    Config.set_profile_override("poisoned")
+
+    assert {:ok, explicit_policy} = Config.effective_policy(settings, "strict")
+    assert explicit_policy["checks"] == ["mix test"]
+
+    assert {:ok, issue_policy} =
+             Config.issue_policy(settings, issue, profile_override: "strict")
+
+    assert issue_policy["delivery"] == %{"pr_target" => "human-review"}
+    assert get_in(issue_policy, ["policy_metadata", "profile"]) == "strict"
+    assert Config.max_concurrent_agents_for_state(settings, "In Progress") == 3
+    assert Config.max_concurrent_agents_for_state(settings, "Closed") == 7
+    assert Config.default_runner_name(settings) == "explicit"
+    assert Config.runner_turn_timeout_ms(settings) == 111
+    assert Config.runner_read_timeout_ms(settings) == 222
+    assert Config.runner_stall_timeout_ms(settings) == 0
+    assert Config.max_concurrent_startups(settings) == 2
+
+    assert [sandbox_root] =
+             Config.codex_turn_sandbox_policy(settings, "/tmp/explicit-workspace")["writableRoots"]
+
+    assert Path.basename(sandbox_root) == "explicit-workspace"
+
+    assert {:ok, runtime} =
+             Config.codex_runtime_settings(settings, "/tmp/explicit-workspace", [])
+
+    assert runtime.approval_policy == "never"
+    assert runtime.thread_sandbox == "workspace-write"
+    assert Config.workflow_prompt(loaded) == "Pinned prompt"
+    assert Config.workflow_module_resolution(loaded) == loaded.workflow_module_resolution
+  end
+
   defp auto_land_checks do
     ~w(tests quality_gates automated_review route_classification sync)
     |> Enum.map(&%{name: &1, status: :passed})

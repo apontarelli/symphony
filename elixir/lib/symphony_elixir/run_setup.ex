@@ -19,6 +19,7 @@ defmodule SymphonyElixir.RunSetup do
     :repo_setup_source,
     :runtime_setup_path,
     :runtime_setup_source,
+    :saved_run_name,
     :manifest,
     :repo_manifest,
     :settings,
@@ -44,6 +45,7 @@ defmodule SymphonyElixir.RunSetup do
           repo_setup_source: String.t(),
           runtime_setup_path: Path.t(),
           runtime_setup_source: String.t(),
+          saved_run_name: String.t() | nil,
           manifest: map(),
           repo_manifest: map() | nil,
           settings: Schema.t(),
@@ -120,7 +122,8 @@ defmodule SymphonyElixir.RunSetup do
          mode,
          issue_batch_limit
        ) do
-    with {:ok, settings} <- Schema.parse(config),
+    with {:ok, saved_run_name} <- saved_run_name(opts),
+         {:ok, settings} <- Schema.parse(config),
          {:ok, repo_setup_path, repo_source, repo_manifest} <-
            resolve_repo_setup(opts, cwd, runtime_setup_path),
          {:ok, capacity} <- resolve_capacity(settings, opts) do
@@ -133,6 +136,7 @@ defmodule SymphonyElixir.RunSetup do
          repo_setup_source: repo_source,
          runtime_setup_path: runtime_setup_path,
          runtime_setup_source: runtime_source,
+         saved_run_name: saved_run_name,
          manifest: manifest,
          repo_manifest: repo_manifest,
          settings: settings,
@@ -152,6 +156,24 @@ defmodule SymphonyElixir.RunSetup do
     get_in(manifest, ["runtime", "target", "mode"]) ||
       get_in(manifest, ["runtime", "run_target", "mode"]) ||
       "watch"
+  end
+
+  defp saved_run_name(opts) do
+    case Keyword.fetch(opts, :saved_run_name) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, name} when is_binary(name) ->
+        if valid_name?(name),
+          do: {:ok, name},
+          else: {:error, {:invalid_run_setup_name, name}}
+
+      {:ok, name} ->
+        {:error, {:invalid_run_setup_name, name}}
+    end
   end
 
   @spec validate_name(String.t()) :: :ok | {:error, {:invalid_run_setup_name, String.t()}}
@@ -379,8 +401,11 @@ defmodule SymphonyElixir.RunSetup do
   def current, do: Application.get_env(@app, @current_key)
 
   @spec capacity(Schema.t()) :: capacity()
-  def capacity(%Schema{} = settings) do
-    case current() do
+  def capacity(%Schema{} = settings), do: capacity(settings, current())
+
+  @spec capacity(Schema.t(), t() | map() | nil) :: capacity()
+  def capacity(%Schema{} = settings, setup) do
+    case setup do
       %{capacity: %{} = capacity} -> normalize_capacity(capacity, settings)
       %{"capacity" => %{} = capacity} -> normalize_capacity(capacity, settings)
       _ -> default_capacity(settings)
@@ -388,8 +413,11 @@ defmodule SymphonyElixir.RunSetup do
   end
 
   @spec mode() :: mode()
-  def mode do
-    case current() do
+  def mode, do: mode(current())
+
+  @spec mode(t() | map() | nil) :: mode()
+  def mode(setup) do
+    case setup do
       %{mode: mode} -> normalize_mode_value(mode) || :watch
       %{"mode" => mode} -> normalize_mode_value(mode) || :watch
       _ -> :watch
@@ -397,29 +425,54 @@ defmodule SymphonyElixir.RunSetup do
   end
 
   @spec issue_batch_limit() :: pos_integer() | nil
-  def issue_batch_limit do
-    case current() do
+  def issue_batch_limit, do: issue_batch_limit(current())
+
+  @spec issue_batch_limit(t() | map() | nil) :: pos_integer() | nil
+  def issue_batch_limit(setup) do
+    case setup do
       %{issue_batch_limit: limit} when is_integer(limit) and limit > 0 -> limit
       %{"issue_batch_limit" => limit} when is_integer(limit) and limit > 0 -> limit
       _ -> nil
     end
   end
 
-  @spec apply_restrictive_policy(map()) :: map()
-  def apply_restrictive_policy(policy) when is_map(policy) do
-    current_flags()
-    |> Enum.reduce(policy, &apply_restrictive_flag/2)
+  @spec profile() :: String.t()
+  def profile, do: profile(current())
+
+  @spec profile(t() | map() | nil) :: String.t()
+  def profile(setup) do
+    case setup do
+      %{profile: profile} -> normalized_string(profile) || "default"
+      %{"profile" => profile} -> normalized_string(profile) || "default"
+      _ -> "default"
+    end
   end
 
-  def apply_restrictive_policy(policy), do: policy
+  @spec restrictive_flags() :: [atom()]
+  def restrictive_flags, do: restrictive_flags(current())
 
-  defp current_flags do
-    case current() do
+  @spec restrictive_flags(t() | map() | [atom()] | nil) :: [atom()]
+  def restrictive_flags(flags) when is_list(flags), do: flags
+
+  def restrictive_flags(setup) do
+    case setup do
       %{restrictive_flags: flags} when is_list(flags) -> flags
       %{"restrictive_flags" => flags} when is_list(flags) -> flags
       _ -> []
     end
   end
+
+  @spec apply_restrictive_policy(term()) :: term()
+  def apply_restrictive_policy(policy), do: apply_restrictive_policy(policy, current())
+
+  @spec apply_restrictive_policy(term(), t() | map() | [atom()] | nil) :: term()
+  def apply_restrictive_policy(policy, setup) when is_map(policy) do
+    setup
+    |> restrictive_flags()
+    |> Enum.reduce(policy, &apply_restrictive_flag/2)
+  end
+
+  def apply_restrictive_policy(policy, _setup), do: policy
 
   defp apply_restrictive_flag(:no_land, policy) do
     policy

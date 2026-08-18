@@ -49,21 +49,28 @@ defmodule SymphonyElixir.Config do
   end
 
   @spec max_concurrent_agents_for_state(term()) :: pos_integer()
-  def max_concurrent_agents_for_state(state_name) when is_binary(state_name) do
-    config = settings!()
+  def max_concurrent_agents_for_state(state_name),
+    do: max_concurrent_agents_for_state(settings!(), state_name)
 
+  @spec max_concurrent_agents_for_state(Schema.t(), term()) :: pos_integer()
+  def max_concurrent_agents_for_state(%Schema{} = settings, state_name) when is_binary(state_name) do
     Map.get(
-      config.agent.max_concurrent_agents_by_state,
+      settings.agent.max_concurrent_agents_by_state,
       Schema.normalize_issue_state(state_name),
-      config.agent.max_concurrent_agents
+      settings.agent.max_concurrent_agents
     )
   end
 
-  def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
+  def max_concurrent_agents_for_state(%Schema{} = settings, _state_name),
+    do: settings.agent.max_concurrent_agents
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
-  def codex_turn_sandbox_policy(workspace \\ nil) do
-    case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do
+  def codex_turn_sandbox_policy(workspace \\ nil),
+    do: codex_turn_sandbox_policy(settings!(), workspace)
+
+  @spec codex_turn_sandbox_policy(Schema.t(), Path.t() | nil) :: map()
+  def codex_turn_sandbox_policy(%Schema{} = settings, workspace) do
+    case Schema.resolve_runtime_turn_sandbox_policy(settings, workspace) do
       {:ok, policy} ->
         policy
 
@@ -82,6 +89,26 @@ defmodule SymphonyElixir.Config do
         default_prompt_template()
     end
   end
+
+  @spec workflow_prompt(Workflow.loaded_workflow()) :: String.t()
+  def workflow_prompt(%{prompt_template: prompt}) when is_binary(prompt) do
+    if String.trim(prompt) == "", do: default_prompt_template(), else: prompt
+  end
+
+  def workflow_prompt(%{"prompt_template" => prompt}) when is_binary(prompt) do
+    if String.trim(prompt) == "", do: default_prompt_template(), else: prompt
+  end
+
+  def workflow_prompt(_loaded_workflow), do: default_prompt_template()
+
+  @spec workflow_module_resolution(Workflow.loaded_workflow()) :: map()
+  def workflow_module_resolution(%{workflow_module_resolution: resolution}) when is_map(resolution),
+    do: resolution
+
+  def workflow_module_resolution(%{"workflow_module_resolution" => resolution}) when is_map(resolution),
+    do: resolution
+
+  def workflow_module_resolution(_loaded_workflow), do: %{}
 
   @spec server_port() :: non_neg_integer() | nil
   def server_port do
@@ -108,24 +135,35 @@ defmodule SymphonyElixir.Config do
   @spec effective_policy(String.t() | atom() | nil) :: {:ok, map()} | {:error, term()}
   def effective_policy(profile_ref \\ "default") do
     with {:ok, settings} <- settings() do
-      Schema.resolve_effective_policy(settings, profile_ref)
+      effective_policy(settings, profile_ref)
     end
   end
+
+  @spec effective_policy(Schema.t(), String.t() | atom() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def effective_policy(%Schema{} = settings, profile_ref),
+    do: Schema.resolve_effective_policy(settings, profile_ref)
 
   @spec issue_policy(Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def issue_policy(%Issue{} = issue, opts \\ []) do
     with {:ok, settings} <- settings() do
       profile = normalized_string(Keyword.get(opts, :profile_override) || profile_override()) || "default"
-
-      Schema.resolve_effective_policy(settings, profile, [],
-        metadata: %{
-          source: policy_source(profile),
-          profile: profile,
-          project_id: issue.project_id,
-          project_slug: issue.project_slug
-        }
-      )
+      issue_policy(settings, issue, Keyword.put(opts, :profile_override, profile))
     end
+  end
+
+  @spec issue_policy(Schema.t(), Issue.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def issue_policy(%Schema{} = settings, %Issue{} = issue, opts) when is_list(opts) do
+    profile = normalized_string(Keyword.get(opts, :profile_override)) || "default"
+
+    Schema.resolve_effective_policy(settings, profile, [],
+      metadata: %{
+        source: policy_source(profile),
+        profile: profile,
+        project_id: issue.project_id,
+        project_slug: issue.project_slug
+      }
+    )
   end
 
   @spec set_profile_override(String.t() | nil) :: :ok
@@ -152,26 +190,32 @@ defmodule SymphonyElixir.Config do
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
     with {:ok, settings} <- selected_runtime_settings(opts) do
-      runner_name = Keyword.get(opts, :runner_name, Schema.default_runner_name(settings))
+      codex_runtime_settings(settings, workspace, opts)
+    end
+  end
 
-      runner =
-        case Keyword.get(opts, :runner_config) do
-          %{} = selected_runner -> selected_runner
-          _no_selected_runner -> Schema.default_runner_config!(settings)
-        end
+  @spec codex_runtime_settings(Schema.t(), Path.t() | nil, keyword()) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
+  def codex_runtime_settings(%Schema{} = settings, workspace, opts) when is_list(opts) do
+    runner_name = Keyword.get(opts, :runner_name, Schema.default_runner_name(settings))
 
-      with {:ok, runner_policy_overrides} <- policy_runner_overrides(Keyword.get(opts, :policy), runner_name),
-           {:ok, turn_sandbox_policy} <-
-             runtime_turn_sandbox_policy(settings, workspace, opts, runner_policy_overrides),
-           {:ok, approval_policy} <- runtime_approval_policy(runner["approval_policy"], runner_policy_overrides),
-           {:ok, thread_sandbox} <- runtime_thread_sandbox(runner["thread_sandbox"], runner_policy_overrides) do
-        {:ok,
-         %{
-           approval_policy: approval_policy,
-           thread_sandbox: thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
-         }}
+    runner =
+      case Keyword.get(opts, :runner_config) do
+        %{} = selected_runner -> selected_runner
+        _no_selected_runner -> Schema.default_runner_config!(settings)
       end
+
+    with {:ok, runner_policy_overrides} <- policy_runner_overrides(Keyword.get(opts, :policy), runner_name),
+         {:ok, turn_sandbox_policy} <-
+           runtime_turn_sandbox_policy(settings, workspace, opts, runner_policy_overrides),
+         {:ok, approval_policy} <- runtime_approval_policy(runner["approval_policy"], runner_policy_overrides),
+         {:ok, thread_sandbox} <- runtime_thread_sandbox(runner["thread_sandbox"], runner_policy_overrides) do
+      {:ok,
+       %{
+         approval_policy: approval_policy,
+         thread_sandbox: thread_sandbox,
+         turn_sandbox_policy: turn_sandbox_policy
+       }}
     end
   end
 
@@ -183,41 +227,55 @@ defmodule SymphonyElixir.Config do
   end
 
   @spec default_runner!() :: map()
-  def default_runner!, do: settings!() |> Schema.default_runner_config!()
+  def default_runner!, do: default_runner!(settings!())
 
   @spec default_runner!(Schema.t()) :: map()
   def default_runner!(%Schema{} = settings), do: Schema.default_runner_config!(settings)
 
   @spec default_runner_name() :: String.t()
-  def default_runner_name, do: settings!() |> Schema.default_runner_name()
+  def default_runner_name, do: default_runner_name(settings!())
+
+  @spec default_runner_name(Schema.t()) :: String.t()
+  def default_runner_name(%Schema{} = settings), do: Schema.default_runner_name(settings)
 
   @spec runner_turn_timeout_ms() :: pos_integer()
-  def runner_turn_timeout_ms do
-    case default_runner!()["turn_timeout_ms"] do
+  def runner_turn_timeout_ms, do: runner_turn_timeout_ms(settings!())
+
+  @spec runner_turn_timeout_ms(Schema.t()) :: pos_integer()
+  def runner_turn_timeout_ms(%Schema{} = settings) do
+    case default_runner!(settings)["turn_timeout_ms"] do
       timeout when is_integer(timeout) and timeout > 0 -> timeout
       _timeout -> 3_600_000
     end
   end
 
   @spec runner_read_timeout_ms() :: pos_integer()
-  def runner_read_timeout_ms do
-    case default_runner!()["read_timeout_ms"] do
+  def runner_read_timeout_ms, do: runner_read_timeout_ms(settings!())
+
+  @spec runner_read_timeout_ms(Schema.t()) :: pos_integer()
+  def runner_read_timeout_ms(%Schema{} = settings) do
+    case default_runner!(settings)["read_timeout_ms"] do
       timeout when is_integer(timeout) and timeout > 0 -> timeout
       _timeout -> 30_000
     end
   end
 
   @spec runner_stall_timeout_ms() :: non_neg_integer()
-  def runner_stall_timeout_ms do
-    case default_runner!()["stall_timeout_ms"] do
+  def runner_stall_timeout_ms, do: runner_stall_timeout_ms(settings!())
+
+  @spec runner_stall_timeout_ms(Schema.t()) :: non_neg_integer()
+  def runner_stall_timeout_ms(%Schema{} = settings) do
+    case default_runner!(settings)["stall_timeout_ms"] do
       timeout when is_integer(timeout) and timeout >= 0 -> timeout
       _timeout -> 300_000
     end
   end
 
   @spec max_concurrent_startups() :: pos_integer()
-  def max_concurrent_startups do
-    settings = settings!()
+  def max_concurrent_startups, do: max_concurrent_startups(settings!())
+
+  @spec max_concurrent_startups(Schema.t()) :: pos_integer()
+  def max_concurrent_startups(%Schema{} = settings) do
     runner = Schema.default_runner_config!(settings)
 
     [

@@ -230,6 +230,32 @@ defmodule SymphonyElixir.RunSetupTest do
     assert non_string_mode_error =~ "unsupported run mode"
   end
 
+  test "resolved setup retains only an explicitly supplied valid saved-run name" do
+    runtime_path = runtime_setup!("symphony-run-setup-saved-name")
+    assert {:ok, manifest} = Manifest.read(runtime_path)
+
+    assert {:ok, setup} =
+             RunSetup.resolve_manifest(manifest,
+               runtime_setup_path: runtime_path,
+               saved_run_name: "daily-local"
+             )
+
+    assert Map.get(setup, :saved_run_name) == "daily-local"
+
+    assert {:error, error} =
+             RunSetup.resolve_manifest(manifest,
+               runtime_setup_path: runtime_path,
+               saved_run_name: "../daily"
+             )
+
+    assert error =~ "invalid_run_setup_name"
+
+    assert {:ok, unnamed} =
+             RunSetup.resolve_manifest(manifest, runtime_setup_path: runtime_path)
+
+    assert Map.get(unnamed, :saved_run_name) == nil
+  end
+
   test "capacity validation enforces positive values and deployment startup ceilings" do
     runtime_path =
       runtime_setup!("symphony-run-setup-capacity",
@@ -290,6 +316,46 @@ defmodule SymphonyElixir.RunSetupTest do
     RunSetup.put_current(nil)
     assert RunSetup.current() == nil
     assert RunSetup.mode() == :watch
+  end
+
+  test "explicit run setup accessors ignore the current setup" do
+    runtime_path = runtime_setup!("symphony-run-setup-explicit-accessors")
+    assert {:ok, setup} = RunSetup.resolve(workflow: runtime_path)
+
+    explicit_setup = %{
+      capacity: %{
+        max_concurrent_agents: 2,
+        max_concurrent_agents_ceiling: 6,
+        max_concurrent_startups: 1,
+        max_concurrent_startups_ceiling: 3
+      },
+      mode: :issue_batch,
+      issue_batch_limit: 4,
+      profile: "strict",
+      restrictive_flags: [:no_land, :require_review]
+    }
+
+    RunSetup.put_current(%{
+      mode: :drain,
+      issue_batch_limit: 99,
+      profile: "poisoned",
+      restrictive_flags: [:human_review_only]
+    })
+
+    assert RunSetup.capacity(setup.settings, explicit_setup) == explicit_setup.capacity
+    assert RunSetup.mode(explicit_setup) == :issue_batch
+    assert RunSetup.issue_batch_limit(explicit_setup) == 4
+    assert RunSetup.profile(explicit_setup) == "strict"
+    assert RunSetup.restrictive_flags(explicit_setup) == [:no_land, :require_review]
+
+    assert RunSetup.apply_restrictive_policy(
+             %{"auto_land" => %{"posture" => "candidate", "dry_run" => false}},
+             explicit_setup
+           ) == %{
+             "auto_land" => %{"posture" => "off", "dry_run" => true},
+             "review_requirements" => ["Run setup requires review evidence before handoff."],
+             "run_setup" => %{"restrictive_flags" => ["no_land", "require_review"]}
+           }
   end
 
   test "default capacity handles runner-only and missing startup ceilings" do

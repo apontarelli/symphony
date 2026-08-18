@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.TargetContext do
   @moduledoc false
 
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetRegistry
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.Snapshot
@@ -20,6 +21,8 @@ defmodule SymphonyElixir.TargetContext do
     tracker_connection
     worktree_policy
   )
+  @issue_restrictive_flags [:human_review_only, :no_land, :require_review, :require_validation]
+  @issue_weakening_flags [:allow_missing_capabilities, :auto_land, :ignore_markers, :skip_review, :skip_validation]
 
   @enforce_keys [
     :target_id,
@@ -38,7 +41,7 @@ defmodule SymphonyElixir.TargetContext do
     :capacity_limits,
     :budget_limits
   ]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [issue_policy_authority: nil]
 
   @type state :: :paused | :active | :draining | :retired
   @type dispatch_mode :: :explicit | :watch | nil
@@ -49,6 +52,7 @@ defmodule SymphonyElixir.TargetContext do
           registry_generation: TargetRegistry.generation(),
           policy_hash: TargetRegistry.generation(),
           repo_manifest_hash: TargetRegistry.generation(),
+          issue_policy_authority: map() | nil,
           repo_policy: map(),
           tracker_connection: map(),
           run_target: map(),
@@ -63,6 +67,679 @@ defmodule SymphonyElixir.TargetContext do
   @spec from_registry(Snapshot.t(), String.t(), keyword()) ::
           {:ok, t()} | {:error, atom()}
   def from_registry(snapshot, target_id, opts \\ []), do: build_context(snapshot, target_id, opts)
+
+  @type issue_policy_error ::
+          :forbidden_policy_broadening
+          | :invalid_issue_policy_options
+          | :malformed_composed_policy
+          | :malformed_issue_metadata
+          | :unknown_profile
+
+  @spec issue_policy(t(), Issue.t(), keyword()) ::
+          {:ok, map()} | {:error, issue_policy_error()}
+  def issue_policy(%__MODULE__{} = context, %Issue{} = issue, opts) do
+    with {:ok, profile, restrictive_flags} <- issue_policy_options(opts),
+         {:ok, issue} <- normalize_issue_metadata(issue),
+         {:ok, manifest} <- issue_policy_manifest(context),
+         :ok <- validate_issue_policy_context(context),
+         :ok <- validate_issue_scope(manifest, context.run_target, issue),
+         {:ok, policy} <- issue_policy_base(context, manifest, profile),
+         :ok <- validate_issue_restriction_fields(policy),
+         policy <- apply_issue_restrictions(policy, context, restrictive_flags),
+         {:ok, policy_ref} <- issue_policy_ref(policy) do
+      {:ok,
+       policy
+       |> Map.put("policy_ref", policy_ref)
+       |> Map.put("policy_metadata", issue_policy_metadata(issue, profile))}
+    end
+  end
+
+  def issue_policy(%__MODULE__{}, _issue, _opts), do: {:error, :malformed_issue_metadata}
+  def issue_policy(_context, _issue, _opts), do: {:error, :malformed_composed_policy}
+
+  defp issue_policy_options(opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      keys = Keyword.keys(opts)
+      profile = Keyword.get(opts, :profile, "default")
+      flags = Keyword.get(opts, :restrictive_flags, [])
+
+      with :ok <- validate_issue_policy_option_keys(keys),
+           {:ok, profile} <- normalize_issue_policy_profile(profile),
+           :ok <- validate_issue_policy_flags(flags) do
+        {:ok, profile, flags}
+      end
+    else
+      {:error, :invalid_issue_policy_options}
+    end
+  end
+
+  defp issue_policy_options(_opts), do: {:error, :invalid_issue_policy_options}
+
+  defp validate_issue_policy_option_keys(keys) do
+    if Enum.any?(keys, &(&1 not in [:profile, :restrictive_flags])) or
+         length(keys) != length(Enum.uniq(keys)),
+       do: {:error, :invalid_issue_policy_options},
+       else: :ok
+  end
+
+  defp normalize_issue_policy_profile(profile) do
+    if nonblank_string?(profile),
+      do: {:ok, String.trim(profile)},
+      else: {:error, :invalid_issue_policy_options}
+  end
+
+  defp validate_issue_policy_flags(flags) when is_list(flags) do
+    cond do
+      not proper_list?(flags) ->
+        {:error, :invalid_issue_policy_options}
+
+      Enum.any?(flags, &(&1 in @issue_weakening_flags)) ->
+        {:error, :forbidden_policy_broadening}
+
+      length(flags) != length(Enum.uniq(flags)) ->
+        {:error, :invalid_issue_policy_options}
+
+      Enum.all?(flags, &(&1 in @issue_restrictive_flags)) ->
+        :ok
+
+      true ->
+        {:error, :invalid_issue_policy_options}
+    end
+  end
+
+  defp validate_issue_policy_flags(_flags), do: {:error, :invalid_issue_policy_options}
+
+  defp normalize_issue_metadata(
+         %Issue{
+           identifier: identifier,
+           project_id: project_id,
+           project_slug: project_slug,
+           team_key: team_key,
+           labels: labels,
+           state: state
+         } = issue
+       ) do
+    with true <-
+           optional_nonblank_string?(identifier) and optional_nonblank_string?(project_id) and
+             optional_nonblank_string?(project_slug) and optional_nonblank_string?(team_key) and
+             optional_nonblank_string?(state),
+         {:ok, labels} <- normalize_issue_labels(labels) do
+      {:ok,
+       %{
+         issue
+         | identifier: normalized_optional_string(identifier),
+           project_id: normalized_optional_string(project_id),
+           project_slug: normalized_optional_downcase(project_slug),
+           team_key: normalized_optional_downcase(team_key),
+           labels: labels,
+           state: normalized_optional_downcase(state)
+       }}
+    else
+      _invalid -> {:error, :malformed_issue_metadata}
+    end
+  end
+
+  defp normalize_issue_labels(labels) when is_list(labels) do
+    if proper_list?(labels) and Enum.all?(labels, &nonblank_string?/1) do
+      {:ok,
+       labels
+       |> Enum.map(&(String.trim(&1) |> String.downcase()))
+       |> Enum.uniq()
+       |> Enum.sort()}
+    else
+      {:error, :malformed_issue_metadata}
+    end
+  end
+
+  defp normalize_issue_labels(_labels), do: {:error, :malformed_issue_metadata}
+
+  defp issue_policy_manifest(%__MODULE__{
+         repo_policy:
+           %{
+             "manifest" => manifest,
+             "workflow_module_resolution" => module_resolution
+           } = repo_policy
+       })
+       when is_map(manifest) and is_map(module_resolution) do
+    if Enum.sort(Map.keys(repo_policy)) == ["manifest", "workflow_module_resolution"] do
+      {:ok, manifest}
+    else
+      {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp issue_policy_manifest(_context), do: {:error, :malformed_composed_policy}
+
+  defp validate_issue_policy_context(context) do
+    values = [
+      context.repo_policy,
+      context.run_target,
+      context.worktree_policy,
+      context.runner_policy,
+      context.effective_checks,
+      context.external_side_effect_gates,
+      context.capacity_limits,
+      context.budget_limits
+    ]
+
+    if Enum.all?(values, &(is_map(&1) and json_safe_policy_value?(&1))),
+      do: :ok,
+      else: {:error, :malformed_composed_policy}
+  end
+
+  defp validate_issue_scope(manifest, run_target, issue) do
+    with :ok <- validate_target_scope(run_target, issue),
+         :ok <- validate_required_labels(run_target, issue.labels),
+         :ok <- validate_repository_issue_markers(manifest, issue) do
+      validate_active_state(run_target, issue.state)
+    end
+  end
+
+  defp validate_target_scope(%{"scope" => scope}, issue) when is_map(scope) do
+    case Map.get(scope, "type") do
+      "issues" -> validate_issue_identity(scope, issue)
+      "team" -> validate_team_identity(scope, issue)
+      "project" -> validate_project_identity(scope, issue)
+      _unsupported_or_missing -> {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_target_scope(%{"scope" => _invalid_scope}, _issue),
+    do: {:error, :malformed_composed_policy}
+
+  defp validate_target_scope(run_target, issue) when is_map(run_target) do
+    scope =
+      run_target
+      |> Map.take(["type", "project_id", "project_slug", "team_key", "issue_ids"])
+      |> then(fn scope ->
+        if Map.get(scope, "issue_ids") == [], do: Map.delete(scope, "issue_ids"), else: scope
+      end)
+
+    case Map.get(scope, "type") do
+      "issues" -> validate_issue_identity(scope, issue)
+      "team" -> validate_team_identity(scope, issue)
+      "project" -> validate_project_identity(scope, issue)
+      nil -> validate_inferred_target_scope(scope, issue)
+      _unsupported -> {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_project_identity(scope, issue) do
+    keys = Enum.sort(Map.keys(scope))
+
+    with true <-
+           keys in [
+             ["project_id", "type"],
+             ["project_slug", "type"],
+             ["project_id", "project_slug", "type"]
+           ],
+         {:ok, expected_id} <- composed_optional_string(scope, "project_id"),
+         {:ok, expected_slug} <- composed_optional_string(scope, "project_slug"),
+         true <- not is_nil(expected_id) or not is_nil(expected_slug) do
+      cond do
+        expected_id && expected_id != normalized_optional_string(issue.project_id) ->
+          {:error, :forbidden_policy_broadening}
+
+        expected_slug && String.downcase(expected_slug) != normalized_downcase(issue.project_slug) ->
+          {:error, :forbidden_policy_broadening}
+
+        true ->
+          :ok
+      end
+    else
+      false -> {:error, :malformed_composed_policy}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_issue_identity(scope, issue) do
+    issue_ids = Map.get(scope, "issue_ids")
+
+    cond do
+      Enum.sort(Map.keys(scope)) != ["issue_ids", "type"] or issue_ids == [] or
+          not string_list?(issue_ids) ->
+        {:error, :malformed_composed_policy}
+
+      not nonblank_string?(issue.identifier) ->
+        {:error, :malformed_issue_metadata}
+
+      normalized_optional_string(issue.identifier) in Enum.map(issue_ids, &String.trim/1) ->
+        :ok
+
+      true ->
+        {:error, :forbidden_policy_broadening}
+    end
+  end
+
+  defp validate_team_identity(scope, issue) do
+    expected_team = Map.get(scope, "team_key")
+
+    cond do
+      Enum.sort(Map.keys(scope)) != ["team_key", "type"] or
+          not nonblank_string?(expected_team) ->
+        {:error, :malformed_composed_policy}
+
+      not nonblank_string?(issue.team_key) ->
+        {:error, :malformed_issue_metadata}
+
+      normalized_downcase(expected_team) == normalized_downcase(issue.team_key) ->
+        :ok
+
+      true ->
+        {:error, :forbidden_policy_broadening}
+    end
+  end
+
+  defp validate_inferred_target_scope(scope, issue) do
+    cond do
+      Map.has_key?(scope, "issue_ids") ->
+        scope |> Map.put("type", "issues") |> validate_issue_identity(issue)
+
+      Map.has_key?(scope, "project_id") or Map.has_key?(scope, "project_slug") ->
+        scope |> Map.put("type", "project") |> validate_project_identity(issue)
+
+      Map.has_key?(scope, "team_key") ->
+        scope |> Map.put("type", "team") |> validate_team_identity(issue)
+
+      true ->
+        {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_required_labels(run_target, issue_labels) do
+    validate_required_label_values(Map.get(run_target, "required_labels", []), issue_labels)
+  end
+
+  defp validate_repository_issue_markers(%{"issue_markers" => markers}, issue) when is_map(markers) do
+    if Enum.sort(Map.keys(markers)) == ["allowed_projects", "labels"] do
+      with :ok <- validate_required_label_values(markers["labels"], issue.labels) do
+        validate_allowed_projects(markers["allowed_projects"], issue)
+      end
+    else
+      {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_repository_issue_markers(_manifest, _issue),
+    do: {:error, :malformed_composed_policy}
+
+  defp validate_required_label_values(required, issue_labels) do
+    if string_list?(required) and proper_list?(required) do
+      issue_label_set = MapSet.new(issue_labels)
+
+      if Enum.all?(required, &MapSet.member?(issue_label_set, normalized_downcase(&1))),
+        do: :ok,
+        else: {:error, :forbidden_policy_broadening}
+    else
+      {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_allowed_projects([], _issue), do: :ok
+
+  defp validate_allowed_projects(allowed_projects, issue) when is_list(allowed_projects) do
+    if string_list?(allowed_projects) and proper_list?(allowed_projects) do
+      issue_projects =
+        [issue.project_id, issue.project_slug]
+        |> Enum.map(&normalized_optional_string/1)
+        |> Enum.reject(&is_nil/1)
+        |> MapSet.new()
+
+      if Enum.any?(allowed_projects, &MapSet.member?(issue_projects, normalized_optional_string(&1))),
+        do: :ok,
+        else: {:error, :forbidden_policy_broadening}
+    else
+      {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_allowed_projects(_allowed_projects, _issue),
+    do: {:error, :malformed_composed_policy}
+
+  defp validate_active_state(run_target, issue_state) do
+    case Map.get(run_target, "active_states", []) do
+      [] ->
+        :ok
+
+      states when is_list(states) ->
+        validate_configured_active_states(states, issue_state)
+
+      _invalid ->
+        {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_configured_active_states(states, issue_state) do
+    cond do
+      not string_list?(states) or not proper_list?(states) ->
+        {:error, :malformed_composed_policy}
+
+      Enum.any?(states, &(normalized_downcase(&1) == normalized_downcase(issue_state))) ->
+        :ok
+
+      true ->
+        {:error, :forbidden_policy_broadening}
+    end
+  end
+
+  defp issue_policy_base(%__MODULE__{issue_policy_authority: nil}, manifest, profile) do
+    with :ok <- validate_issue_profile(manifest, profile) do
+      manifest_issue_policy(manifest)
+    end
+  end
+
+  defp issue_policy_base(
+         %__MODULE__{
+           issue_policy_authority: %{"profile" => configured, "policy" => policy} = authority
+         },
+         manifest,
+         profile
+       ) do
+    cond do
+      Enum.sort(Map.keys(authority)) != ["policy", "profile"] ->
+        {:error, :malformed_composed_policy}
+
+      not nonblank_string?(configured) or not is_map(policy) or
+          not json_safe_policy_value?(policy) ->
+        {:error, :malformed_composed_policy}
+
+      profile == configured ->
+        with {:ok, manifest_policy} <- manifest_issue_policy(manifest) do
+          {:ok, Map.merge(manifest_policy, policy)}
+        end
+
+      true ->
+        {:error, :unknown_profile}
+    end
+  end
+
+  defp issue_policy_base(%__MODULE__{}, _manifest, _profile),
+    do: {:error, :malformed_composed_policy}
+
+  defp validate_issue_profile(manifest, profile) do
+    case Map.get(manifest, "automation") do
+      automation when is_map(automation) ->
+        validate_pinned_automation_profile(automation, profile)
+
+      _invalid ->
+        {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_pinned_automation_profile(automation, profile) do
+    case Map.fetch(automation, "profile") do
+      :error ->
+        if profile == "default", do: :ok, else: {:error, :unknown_profile}
+
+      {:ok, configured} ->
+        validate_present_pinned_profile(configured, profile)
+    end
+  end
+
+  defp validate_present_pinned_profile(configured, profile) do
+    cond do
+      not nonblank_string?(configured) -> {:error, :malformed_composed_policy}
+      profile in ["default", String.trim(configured)] -> :ok
+      true -> {:error, :unknown_profile}
+    end
+  end
+
+  defp manifest_issue_policy(manifest) do
+    with %{} = project <- Map.get(manifest, "project"),
+         %{} <- Map.get(manifest, "workflow"),
+         %{} = validation <- Map.get(manifest, "validation"),
+         commands when is_list(commands) <- Map.get(validation, "commands"),
+         %{} = delivery <- Map.get(manifest, "delivery"),
+         pr_target when is_binary(pr_target) <- Map.get(delivery, "pr_target"),
+         %{} = automation <- Map.get(manifest, "automation"),
+         requirements when is_list(requirements) <- Map.get(automation, "completion_requirements"),
+         %{} = capabilities <- Map.get(manifest, "capabilities"),
+         %{} = issue_markers <- Map.get(manifest, "issue_markers"),
+         :ok <- validate_optional_auto_land(manifest),
+         true <- json_safe_policy_value?(manifest) do
+      manifest_projection =
+        Map.take(manifest, [
+          "project",
+          "docs",
+          "vcs",
+          "delivery",
+          "validation",
+          "automation",
+          "workflow",
+          "auto_land",
+          "review_routing",
+          "harness",
+          "capabilities",
+          "issue_markers"
+        ])
+
+      policy = %{
+        "capabilities" => capabilities,
+        "checks" => commands,
+        "completion_requirements" => requirements,
+        "delivery" => delivery,
+        "issue_markers" => issue_markers,
+        "manifest" => manifest_projection,
+        "project" => Map.take(project, ["criticality", "deployment_coupling"])
+      }
+
+      {:ok,
+       policy
+       |> maybe_put_policy("auto_land", Map.get(manifest, "auto_land"))
+       |> maybe_put_policy("review", Map.get(automation, "review"))
+       |> maybe_put_policy("review_routing", Map.get(manifest, "review_routing"))}
+    else
+      _invalid -> {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_optional_auto_land(manifest) do
+    case Map.fetch(manifest, "auto_land") do
+      :error -> :ok
+      {:ok, nil} -> :ok
+      {:ok, auto_land} when is_map(auto_land) -> :ok
+      {:ok, _invalid} -> {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_issue_restriction_fields(policy) when is_map(policy) do
+    with :ok <- validate_auto_land_policy_field(policy),
+         :ok <- validate_requirement_policy_field(policy, "completion_requirements", required?: true) do
+      validate_requirement_policy_field(policy, "review_requirements", required?: false)
+    end
+  end
+
+  defp validate_auto_land_policy_field(policy) do
+    case Map.fetch(policy, "auto_land") do
+      :error ->
+        :ok
+
+      {:ok, auto_land} when is_map(auto_land) ->
+        validate_auto_land_policy_values(auto_land)
+
+      {:ok, _invalid} ->
+        {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp validate_auto_land_policy_values(auto_land) do
+    validators = %{
+      "blocked_state" => &nonblank_string?/1,
+      "dry_run" => &is_boolean/1,
+      "force_human_review_labels" => &string_list?/1,
+      "posture" => &nonblank_string?/1,
+      "required_checks" => &string_list?/1
+    }
+
+    if Enum.all?(validators, fn {field, validator} ->
+         valid_optional_policy_value?(auto_land, field, validator)
+       end),
+       do: :ok,
+       else: {:error, :malformed_composed_policy}
+  end
+
+  defp valid_optional_policy_value?(policy, field, validator) do
+    case Map.fetch(policy, field) do
+      :error -> true
+      {:ok, value} -> validator.(value)
+    end
+  end
+
+  defp validate_requirement_policy_field(policy, field, opts) do
+    case Map.fetch(policy, field) do
+      {:ok, requirements} ->
+        if string_list?(requirements),
+          do: :ok,
+          else: {:error, :malformed_composed_policy}
+
+      :error ->
+        if Keyword.fetch!(opts, :required?),
+          do: {:error, :malformed_composed_policy},
+          else: :ok
+    end
+  end
+
+  defp apply_issue_restrictions(policy, context, restrictive_flags) do
+    restrictions = %{
+      "budget_limits" => context.budget_limits,
+      "capacity_limits" => context.capacity_limits,
+      "effective_checks" => context.effective_checks,
+      "external_side_effect_gates" => context.external_side_effect_gates,
+      "run_target" => context.run_target,
+      "worktree_policy" => context.worktree_policy
+    }
+
+    policy
+    |> intersect_external_side_effect_gates(context.external_side_effect_gates)
+    |> Map.put("target_restrictions", restrictions)
+    |> then(fn restricted ->
+      Enum.reduce(restrictive_flags, restricted, &apply_issue_restrictive_flag/2)
+    end)
+  end
+
+  defp intersect_external_side_effect_gates(policy, gates) do
+    automatic_side_effects = ~w(vcs_publish pull_request_write merge)
+
+    if Enum.all?(automatic_side_effects, &(Map.get(gates, &1) == "allow")) do
+      policy
+    else
+      case Map.get(policy, "auto_land") do
+        auto_land when is_map(auto_land) ->
+          Map.put(policy, "auto_land", Map.merge(auto_land, %{"posture" => "off", "dry_run" => true}))
+
+        _no_auto_land ->
+          policy
+      end
+    end
+  end
+
+  defp apply_issue_restrictive_flag(:no_land, policy) do
+    policy
+    |> put_issue_restrictive_flag(:no_land)
+    |> put_in(["auto_land"], Map.merge(Map.get(policy, "auto_land", %{}), %{"posture" => "off", "dry_run" => true}))
+  end
+
+  defp apply_issue_restrictive_flag(:human_review_only, policy) do
+    policy
+    |> put_issue_restrictive_flag(:human_review_only)
+    |> put_in(["auto_land"], Map.merge(Map.get(policy, "auto_land", %{}), %{"posture" => "off", "dry_run" => true}))
+    |> Map.put("handoff_route", "human_review")
+  end
+
+  defp apply_issue_restrictive_flag(:require_validation, policy) do
+    append_issue_requirement(policy, "completion_requirements", "Run setup requires validation evidence before handoff.")
+    |> put_issue_restrictive_flag(:require_validation)
+  end
+
+  defp apply_issue_restrictive_flag(:require_review, policy) do
+    append_issue_requirement(policy, "review_requirements", "Run setup requires review evidence before handoff.")
+    |> put_issue_restrictive_flag(:require_review)
+  end
+
+  defp put_issue_restrictive_flag(policy, flag) do
+    update_in(policy, ["run_setup"], fn
+      value when is_map(value) ->
+        flags = value |> Map.get("restrictive_flags", []) |> List.wrap()
+        Map.put(value, "restrictive_flags", Enum.uniq(flags ++ [to_string(flag)]))
+
+      _ ->
+        %{"restrictive_flags" => [to_string(flag)]}
+    end)
+  end
+
+  defp append_issue_requirement(policy, key, value) do
+    Map.update(policy, key, [value], &Enum.uniq(&1 ++ [value]))
+  end
+
+  defp issue_policy_ref(policy) do
+    {:ok, "sha256:" <> digest} = Composition.canonical_hash(policy)
+    {:ok, binary_part(digest, 0, 12)}
+  end
+
+  defp issue_policy_metadata(issue, profile) do
+    %{
+      "labels" => issue.labels,
+      "profile" => profile,
+      "project_id" => issue.project_id,
+      "project_slug" => issue.project_slug,
+      "source" => "target_context",
+      "state" => issue.state
+    }
+  end
+
+  defp maybe_put_policy(policy, _key, nil), do: policy
+  defp maybe_put_policy(policy, key, value), do: Map.put(policy, key, value)
+
+  defp json_safe_policy_value?(value) do
+    match?({:ok, _hash}, Composition.canonical_hash(value))
+  end
+
+  defp optional_nonblank_string?(nil), do: true
+  defp optional_nonblank_string?(value), do: nonblank_string?(value)
+
+  defp nonblank_string?(value),
+    do: is_binary(value) and String.valid?(value) and String.trim(value) != "" and not Regex.match?(~r/\p{Cc}/u, value)
+
+  defp normalized_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  defp normalized_optional_string(_value), do: nil
+
+  defp normalized_optional_downcase(nil), do: nil
+  defp normalized_optional_downcase(value), do: normalized_downcase(value)
+
+  defp normalized_downcase(value) when is_binary(value),
+    do: value |> String.trim() |> String.downcase()
+
+  defp normalized_downcase(_value), do: ""
+
+  defp composed_optional_string(map, key) do
+    case Map.fetch(map, key) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, value} when is_binary(value) ->
+        case normalized_optional_string(value) do
+          nil -> {:error, :malformed_composed_policy}
+          normalized -> {:ok, normalized}
+        end
+
+      {:ok, _invalid} ->
+        {:error, :malformed_composed_policy}
+    end
+  end
+
+  defp string_list?(values) when is_list(values),
+    do: proper_list?(values) and Enum.all?(values, &nonblank_string?/1)
+
+  defp string_list?(_values), do: false
 
   defp build_context(%Snapshot{} = snapshot, target_id, opts)
        when is_binary(target_id) and is_list(opts) do
