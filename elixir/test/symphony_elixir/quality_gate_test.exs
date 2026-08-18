@@ -426,6 +426,323 @@ defmodule SymphonyElixir.QualityGateTest do
     assert %{reasoning_effort: "max"} = ExecutionProfile.resolve(overridden_settings, "security_reviewer")
   end
 
+  test "pure execution profile resolution accepts absent and partial composed profiles" do
+    partial_runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{"model" => "gpt-review"}
+      }
+    }
+
+    assert {:ok,
+            %{
+              name: "source_reviewer",
+              reasoning_effort: "medium",
+              budget: "standard",
+              timeout_ms: 45_000,
+              max_retries: 2,
+              command: nil,
+              model: "gpt-review"
+            }} =
+             ExecutionProfile.resolve_pinned(
+               partial_runner,
+               "source_reviewer",
+               45_000,
+               2
+             )
+
+    assert {:ok, %{name: "source_reviewer", model: "gpt-review"}} =
+             ExecutionProfile.resolve_pinned(partial_runner, :source_reviewer, 45_000, 2)
+
+    assert {:ok, %{name: "source_reviewer"}} =
+             ExecutionProfile.resolve_pinned(
+               %{"execution_profiles" => %{}},
+               "source_reviewer",
+               45_000,
+               2
+             )
+
+    assert {:ok, %{name: "implementation"}} =
+             ExecutionProfile.resolve_pinned(%{}, "", 45_000, 2)
+
+    assert ExecutionProfile.resolve_pinned(%{}, <<0xFF>>, 45_000, 2) ==
+             {:error, :invalid_profile}
+
+    numeric_runner =
+      put_in(partial_runner, ["execution_profiles", "source_reviewer", "model"], 407)
+
+    assert {:ok, %{model: "407"}} =
+             ExecutionProfile.resolve_pinned(numeric_runner, "source_reviewer", 45_000, 2)
+
+    scalar_command_runner =
+      put_in(partial_runner, ["execution_profiles", "source_reviewer", "command"], 407)
+
+    assert {:ok, %{command: nil, model: "gpt-review"}} =
+             ExecutionProfile.resolve_pinned(scalar_command_runner, "source_reviewer", 45_000, 2)
+
+    assert {:ok,
+            %{
+              name: "implementation",
+              reasoning_effort: nil,
+              budget: "standard",
+              timeout_ms: 60_000,
+              max_retries: 0,
+              command: nil,
+              model: nil
+            }} = ExecutionProfile.resolve_pinned(%{}, nil, 60_000, 0)
+  end
+
+  test "pure execution profile resolution rejects present scalar named profiles" do
+    for scalar <- ["invalid", 407, [], true, nil] do
+      runner = %{"execution_profiles" => %{"source_reviewer" => scalar}}
+
+      assert ExecutionProfile.resolve_pinned(runner, "source_reviewer", 45_000, 0) ==
+               {:error, :invalid_runner}
+    end
+  end
+
+  test "pure execution profile resolution rejects hostile terms with fixed errors" do
+    secret = "profile-secret-407"
+
+    hostile_runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{"model" => fn -> secret end}
+      }
+    }
+
+    result = ExecutionProfile.resolve_pinned(hostile_runner, "source_reviewer", 45_000, 0)
+    assert result == {:error, :invalid_runner}
+    refute inspect(result) =~ secret
+
+    assert ExecutionProfile.resolve_pinned(nil, "source_reviewer", 45_000, 0) ==
+             {:error, :invalid_runner}
+
+    nested_struct = %{"extension" => %URI{host: secret}}
+
+    assert ExecutionProfile.resolve_pinned(nested_struct, "source_reviewer", 45_000, 0) ==
+             {:error, :invalid_runner}
+
+    assert ExecutionProfile.resolve_pinned(
+             %{"extension" => [1 | 2]},
+             "source_reviewer",
+             45_000,
+             0
+           ) == {:error, :invalid_runner}
+
+    assert ExecutionProfile.resolve_pinned(%{}, %URI{host: secret}, 45_000, 0) ==
+             {:error, :invalid_profile}
+
+    assert ExecutionProfile.resolve_pinned(%{}, "source_reviewer", 0, 0) ==
+             {:error, :invalid_fallbacks}
+
+    normalizable_runner = %{
+      "extension" => 1.5,
+      "execution_profiles" => %{
+        "source_reviewer" => %{
+          "reasoning_effort" => " ",
+          "model" => %{"ignored" => "value"}
+        }
+      }
+    }
+
+    assert {:ok, %{reasoning_effort: nil, model: nil}} =
+             ExecutionProfile.resolve_pinned(
+               normalizable_runner,
+               "source_reviewer",
+               45_000,
+               0
+             )
+
+    for runner <- [
+          %{~c"execution_profiles" => %{}},
+          %{"execution_profiles" => %{~c"source-reviewer" => %{}}},
+          %{"execution_profiles" => %{"source_reviewer" => %{~c"model" => ~c"legacy-model"}}}
+        ] do
+      assert ExecutionProfile.resolve_pinned(runner, "source_reviewer", 45_000, 0) ==
+               {:error, :invalid_runner}
+    end
+
+    assert ExecutionProfile.resolve_pinned(%{}, ~c"source-reviewer", 45_000, 0) ==
+             {:error, :invalid_profile}
+  end
+
+  test "legacy execution profile resolve/3 preserves non-UTF-8 binary commands" do
+    settings = Config.settings!()
+
+    runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{"command" => <<0xFF>>}
+      }
+    }
+
+    assert ExecutionProfile.resolve_pinned(runner, "source_reviewer", 45_000, 0) ==
+             {:error, :invalid_runner}
+
+    assert %{command: [<<0xFF>>]} =
+             ExecutionProfile.resolve(settings, runner, "source_reviewer")
+  end
+
+  test "legacy execution profile resolve/3 normalizes nested charlist references, keys, and values" do
+    settings = Config.settings!()
+
+    charlist_top_level_runner = %{
+      ~c"execution_profiles" => %{
+        ~c"source-reviewer" => %{
+          ~c"model" => ~c"legacy-model"
+        }
+      }
+    }
+
+    assert ExecutionProfile.resolve(settings, charlist_top_level_runner, ~c"source-reviewer") == %{
+             name: "source_reviewer",
+             reasoning_effort: "medium",
+             budget: "standard",
+             timeout_ms: settings.quality_gate.reviewer_timeout_ms,
+             max_retries: settings.quality_gate.reviewer_max_retries,
+             command: nil,
+             model: nil
+           }
+
+    exact_string_top_level_runner = %{
+      "execution_profiles" => %{
+        ~c"source-reviewer" => %{
+          ~c"model" => ~c"legacy-model"
+        }
+      }
+    }
+
+    assert ExecutionProfile.resolve(settings, exact_string_top_level_runner, ~c"source-reviewer") == %{
+             name: "source_reviewer",
+             reasoning_effort: "medium",
+             budget: "standard",
+             timeout_ms: settings.quality_gate.reviewer_timeout_ms,
+             max_retries: settings.quality_gate.reviewer_max_retries,
+             command: nil,
+             model: "legacy-model"
+           }
+  end
+
+  test "legacy execution profile resolve/3 coerces integer refs and rejects unsupported refs" do
+    settings = Config.settings!()
+    runner = %{"execution_profiles" => %{}}
+
+    assert ExecutionProfile.resolve_pinned(runner, 407, 45_000, 2) ==
+             {:error, :invalid_profile}
+
+    assert %{name: "407"} = ExecutionProfile.resolve(settings, runner, 407)
+
+    assert_raise Protocol.UndefinedError, fn ->
+      ExecutionProfile.resolve(settings, runner, {:source_reviewer, :extra})
+    end
+
+    assert_raise Protocol.UndefinedError, fn ->
+      ExecutionProfile.resolve(settings, runner, %{name: "source_reviewer"})
+    end
+  end
+
+  test "legacy execution profile resolve/3 preserves nested coercion errors" do
+    settings = Config.settings!()
+
+    for runner <- [
+          %{"execution_profiles" => %{{:source, :reviewer} => %{}}},
+          %{"execution_profiles" => %{"source_reviewer" => %{{:model, :key} => "ignored"}}}
+        ] do
+      assert_raise Protocol.UndefinedError, fn ->
+        ExecutionProfile.resolve(settings, runner, "source_reviewer")
+      end
+    end
+
+    for value <- [{:invalid, :value}, %{}, fn -> :invalid end] do
+      runner = %{"execution_profiles" => %{"source_reviewer" => %{"model" => value}}}
+
+      assert_raise Protocol.UndefinedError, fn ->
+        ExecutionProfile.resolve(settings, runner, "source_reviewer")
+      end
+    end
+  end
+
+  test "legacy execution profile resolve/3 accepts exact string execution_profiles key" do
+    settings = Config.settings!()
+
+    runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{"model" => "gpt-review"}
+      }
+    }
+
+    assert %{name: "source_reviewer", model: "gpt-review"} =
+             ExecutionProfile.resolve(settings, runner, "source_reviewer")
+  end
+
+  test "legacy execution profile resolve/3 ignores invalid fallback overrides" do
+    settings = Config.settings!()
+
+    runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{
+          "model" => "gpt-review",
+          "timeout_ms" => :invalid,
+          "max_retries" => :invalid,
+          "command" => 407
+        }
+      }
+    }
+
+    profile = ExecutionProfile.resolve(settings, runner, "source_reviewer")
+
+    assert profile.model == "gpt-review"
+    assert profile.timeout_ms == settings.quality_gate.reviewer_timeout_ms
+    assert profile.max_retries == settings.quality_gate.reviewer_max_retries
+    assert profile.command == nil
+  end
+
+  test "legacy execution profile resolve/3 discards unknown profile fields" do
+    settings = Config.settings!()
+
+    runner = %{
+      "execution_profiles" => %{
+        "source_reviewer" => %{"legacy_extension" => :atom}
+      }
+    }
+
+    assert ExecutionProfile.resolve(settings, runner, :source_reviewer) == %{
+             name: "source_reviewer",
+             reasoning_effort: "medium",
+             budget: "standard",
+             timeout_ms: settings.quality_gate.reviewer_timeout_ms,
+             max_retries: settings.quality_gate.reviewer_max_retries,
+             command: nil,
+             model: nil
+           }
+  end
+
+  test "legacy execution profile wrappers delegate with settings fallbacks" do
+    settings = Config.settings!()
+    runner = Schema.default_runner_config!(settings)
+
+    assert {:ok, pure_profile} =
+             ExecutionProfile.resolve_pinned(
+               runner,
+               "test_reviewer",
+               settings.quality_gate.reviewer_timeout_ms,
+               settings.quality_gate.reviewer_max_retries
+             )
+
+    assert ExecutionProfile.resolve(settings, runner, "test_reviewer") == pure_profile
+    assert ExecutionProfile.resolve(settings, "test_reviewer") == pure_profile
+
+    runner_with_extension = Map.put(runner, :extension, true)
+
+    assert ExecutionProfile.resolve(settings, runner_with_extension, "test_reviewer") == pure_profile
+
+    legacy_runner =
+      Map.put(runner, "execution_profiles", %{
+        :source_reviewer => %{model: 123}
+      })
+
+    assert %{model: "123"} =
+             ExecutionProfile.resolve(settings, legacy_runner, :source_reviewer)
+  end
+
   test "handoff routing consumes quality gate evidence" do
     workspace = Path.join(System.tmp_dir!(), "symphony-quality-gate-route-#{System.unique_integer([:positive])}")
     File.mkdir_p!(workspace)
