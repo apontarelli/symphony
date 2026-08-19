@@ -1,6 +1,25 @@
+defmodule SymphonyElixir.PromptBuilderAccessFailure do
+  @behaviour Access
+
+  defstruct [:mode, :secret]
+
+  @impl Access
+  def fetch(%__MODULE__{mode: :raise, secret: secret}, _key), do: raise(secret)
+  def fetch(%__MODULE__{mode: :throw, secret: secret}, _key), do: throw(secret)
+  def fetch(%__MODULE__{mode: :exit, secret: secret}, _key), do: exit(secret)
+
+  @impl Access
+  def get_and_update(_data, _key, _function), do: raise("not supported")
+
+  @impl Access
+  def pop(_data, _key), do: raise("not supported")
+end
+
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{ExecutionContext, TargetContext}
+  alias SymphonyElixir.Workflow.Manifest
 
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -2233,6 +2252,269 @@ defmodule SymphonyElixir.CoreTest do
     refute bundle.prompt =~ ~r/symphony-(linear|commit|pull|quality-gates|review|push|land|debug|project-closeout)/
   end
 
+  test "context prompt bundle renders only pinned template policy and module resolution" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410", title: "Pinned prompt"}
+
+    context =
+      prompt_execution_context(
+        issue,
+        "pinned={{ policy.profile }} issue={{ issue.identifier }} attempt={{ attempt }} modules={{ workflow.module_names }}",
+        %{"profile" => "strict"}
+      )
+
+    pinned_resolution = context.target.repo_policy["workflow_module_resolution"]
+
+    assert {:ok, bundle} = PromptBuilder.build_prompt_bundle(context, issue, attempt: 2)
+
+    assert bundle.prompt =~
+             "pinned=strict issue=SID-410 attempt=2 modules=#{Enum.join(pinned_resolution["module_names"], ", ")}"
+
+    assert bundle.workflow_module_resolution == %{
+             module_names: pinned_resolution["module_names"],
+             module_refs:
+               Enum.map(pinned_resolution["module_refs"], fn ref ->
+                 %{name: ref["name"], version: ref["version"]}
+               end),
+             policy_hash: pinned_resolution["policy_hash"],
+             rendered: pinned_resolution["rendered"]
+           }
+  end
+
+  test "context prompt bundle rejects policy overrides duplicate attempts and mismatched issues" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+    context = prompt_execution_context(issue, "attempt={{ attempt }}", %{"profile" => "strict"})
+
+    assert {:error, :prompt_policy_override_forbidden} =
+             PromptBuilder.build_prompt_bundle(context, issue, policy: %{"profile" => "forged"})
+
+    assert {:error, :duplicate_prompt_option} =
+             PromptBuilder.build_prompt_bundle(context, issue,
+               attempt: 1,
+               attempt: 2
+             )
+
+    assert {:error, :unknown_prompt_option} =
+             PromptBuilder.build_prompt_bundle(context, issue, unknown: true)
+
+    assert {:error, :invalid_prompt_issue} =
+             PromptBuilder.build_prompt_bundle(
+               context,
+               %{issue | identifier: "SID-OTHER"},
+               []
+             )
+  end
+
+  test "context prompt bundle returns fixed parse and render errors without secret content" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+    secret = "secret-sentinel-prompt"
+
+    parse_context =
+      prompt_execution_context(issue, "{% if", %{"profile" => "strict"})
+
+    assert {:error, :prompt_template_parse_failed} =
+             PromptBuilder.build_prompt_bundle(parse_context, issue, [])
+
+    render_context =
+      prompt_execution_context(
+        issue,
+        "pinned",
+        %{"profile" => "strict", "hostile" => fn -> secret end}
+      )
+
+    assert {:error, :prompt_render_failed} =
+             PromptBuilder.build_prompt_bundle(render_context, issue, [])
+  end
+
+  test "context prompt bundle compiles only a pinned manifest and rejects resolution drift" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410", title: "Generated prompt"}
+    assert {:ok, manifest} = Manifest.read(repo_manifest_path(), repo_setup?: false)
+    compiled = Manifest.compile(manifest)
+    resolution = prompt_resolution_projection(compiled.workflow_module_resolution)
+
+    context =
+      prompt_execution_context(issue, nil, %{"profile" => "strict"},
+        manifest: manifest,
+        resolution: resolution
+      )
+
+    assert {:ok, bundle} = PromptBuilder.build_prompt_bundle(context, issue, [])
+    assert bundle.prompt =~ "SID-410"
+    assert bundle.workflow_module_resolution.policy_hash == resolution["policy_hash"]
+
+    mismatched_resolution =
+      Map.put(resolution, "policy_hash", "sha256:" <> String.duplicate("f", 64))
+
+    mismatched_context =
+      prompt_execution_context(issue, nil, %{"profile" => "strict"},
+        manifest: manifest,
+        resolution: mismatched_resolution
+      )
+
+    assert {:error, :invalid_prompt_context} =
+             PromptBuilder.build_prompt_bundle(mismatched_context, issue, [])
+  end
+
+  test "context prompt bundle rejects malformed public inputs before rendering" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+    context = prompt_execution_context(issue, "attempt={{ attempt }}", %{"profile" => "strict"})
+
+    for invalid_opts <- [:invalid_options, %{}, [{:attempt, 1} | :invalid_tail]] do
+      assert {:error, :invalid_prompt_options} =
+               PromptBuilder.build_prompt_bundle(context, issue, invalid_opts)
+    end
+
+    assert {:error, :invalid_prompt_options} =
+             PromptBuilder.build_prompt_bundle(context, issue, attempt: -1)
+
+    assert {:error, :invalid_prompt_context} =
+             PromptBuilder.build_prompt_bundle(:invalid_context, issue, [])
+
+    assert {:error, :invalid_prompt_context} =
+             PromptBuilder.build_prompt_bundle(
+               %{context | target: %{context.target | repo_policy: nil}},
+               issue,
+               []
+             )
+
+    malformed_manifest =
+      context.target.repo_policy["manifest"]
+      |> Map.put("workflow", :malformed)
+
+    malformed_context =
+      prompt_execution_context(issue, nil, %{"profile" => "strict"},
+        manifest: malformed_manifest,
+        resolution: context.target.repo_policy["workflow_module_resolution"]
+      )
+
+    assert {:error, :invalid_prompt_context} =
+             PromptBuilder.build_prompt_bundle(malformed_context, issue, [])
+  end
+
+  test "context prompt bundle validates every pinned module resolution field" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+
+    invalid_resolutions = [
+      nil,
+      %{
+        "module_names" => ["linear-operation"],
+        "module_refs" => "linear-operation@v1",
+        "policy_hash" => "sha256:" <> String.duplicate("b", 64),
+        "rendered" => "pinned module text"
+      },
+      %{
+        "module_names" => ["linear-operation"],
+        "module_refs" => ["linear-operation@v1"],
+        "policy_hash" => "sha256:" <> String.duplicate("b", 64),
+        "rendered" => "pinned module text"
+      }
+    ]
+
+    for resolution <- invalid_resolutions do
+      context =
+        prompt_execution_context(issue, "pinned", %{"profile" => "strict"}, resolution: resolution)
+
+      assert {:error, :invalid_prompt_context} =
+               PromptBuilder.build_prompt_bundle(context, issue, [])
+    end
+  end
+
+  test "context prompt rejects stale or forged resolution before parsing a pinned template" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+    context = prompt_execution_context(issue, "{% if", %{"profile" => "strict"})
+    resolution = context.target.repo_policy["workflow_module_resolution"]
+
+    hostile_resolutions = [
+      Map.put(resolution, "policy_hash", "sha256:" <> String.duplicate("f", 64)),
+      Map.put(resolution, "rendered", "forged module text"),
+      update_in(resolution, ["module_refs"], fn [first | rest] ->
+        [Map.put(first, "forged", "secret-sentinel-resolution") | rest]
+      end)
+    ]
+
+    for hostile_resolution <- hostile_resolutions do
+      hostile_context =
+        put_in(
+          context.target.repo_policy["workflow_module_resolution"],
+          hostile_resolution
+        )
+
+      assert {:error, :invalid_prompt_context} =
+               PromptBuilder.build_prompt_bundle(hostile_context, issue, [])
+    end
+  end
+
+  test "context prompt compilation maps manifest raise throw and exit to one fixed error" do
+    issue = %Issue{id: "issue-410", identifier: "SID-410"}
+    assert {:ok, manifest} = Manifest.read(repo_manifest_path(), repo_setup?: false)
+    secret = "secret-sentinel-prompt-compile"
+
+    valid_resolution =
+      issue
+      |> prompt_execution_context("pinned prompt", %{"profile" => "strict"})
+      |> then(& &1.target.repo_policy["workflow_module_resolution"])
+
+    for mode <- [:raise, :throw, :exit] do
+      failing_manifest =
+        Map.put(
+          manifest,
+          "validation",
+          %SymphonyElixir.PromptBuilderAccessFailure{mode: mode, secret: secret}
+        )
+
+      context =
+        prompt_execution_context(issue, "pinned prompt", %{"profile" => "strict"},
+          manifest: failing_manifest,
+          resolution: valid_resolution
+        )
+
+      assert {:error, :invalid_prompt_context} =
+               PromptBuilder.build_prompt_bundle(context, issue, [])
+    end
+  end
+
+  test "concurrent context prompt bundles remain isolated after workflow globals change" do
+    issue_a = %Issue{id: "issue-a", identifier: "SID-A"}
+    issue_b = %Issue{id: "issue-b", identifier: "SID-B"}
+    context_a = prompt_execution_context(issue_a, "A={{ policy.profile }}", %{"profile" => "alpha"})
+    context_b = prompt_execution_context(issue_b, "B={{ policy.profile }}", %{"profile" => "beta"})
+    previous_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    previous_profile = Application.get_env(:symphony_elixir, :workflow_profile_override)
+
+    on_exit(fn ->
+      restore_application_env(:workflow_file_path, previous_path)
+      restore_application_env(:workflow_profile_override, previous_profile)
+    end)
+
+    parent = self()
+
+    task_a =
+      Task.async(fn ->
+        send(parent, {:prompt_ready, self()})
+        receive do: (:continue -> PromptBuilder.build_prompt_bundle(context_a, issue_a, []))
+      end)
+
+    task_b =
+      Task.async(fn ->
+        send(parent, {:prompt_ready, self()})
+        receive do: (:continue -> PromptBuilder.build_prompt_bundle(context_b, issue_b, []))
+      end)
+
+    assert_receive {:prompt_ready, task_a_pid}
+    assert_receive {:prompt_ready, task_b_pid}
+
+    Application.put_env(:symphony_elixir, :workflow_file_path, "/poisoned/manifest")
+    Config.set_profile_override("poisoned")
+    send(task_a_pid, :continue)
+    send(task_b_pid, :continue)
+
+    assert {:ok, %{prompt: prompt_a}} = Task.await(task_a)
+    assert {:ok, %{prompt: prompt_b}} = Task.await(task_b)
+    assert prompt_a =~ "A=alpha"
+    assert prompt_b =~ "B=beta"
+    refute prompt_a =~ "beta"
+    refute prompt_b =~ "alpha"
+  end
+
   test "prompt builder default template handles missing issue body" do
     write_workflow_file!(Workflow.workflow_file_path(), prompt: "")
 
@@ -3572,6 +3854,86 @@ defmodule SymphonyElixir.CoreTest do
     assert Config.workflow_prompt(loaded) == "Pinned prompt"
     assert Config.workflow_module_resolution(loaded) == loaded.workflow_module_resolution
   end
+
+  defp prompt_execution_context(issue, prompt_template, policy, opts \\ []) do
+    hash = "sha256:" <> String.duplicate("a", 64)
+    {:ok, base_manifest} = Manifest.read(repo_manifest_path(), repo_setup?: false)
+
+    manifest =
+      Keyword.get_lazy(opts, :manifest, fn ->
+        Map.put(base_manifest, "prompt_template", prompt_template)
+      end)
+
+    resolution =
+      Keyword.get_lazy(opts, :resolution, fn ->
+        manifest
+        |> Manifest.compile()
+        |> Map.fetch!(:workflow_module_resolution)
+        |> prompt_resolution_projection()
+      end)
+
+    target = %TargetContext{
+      target_id: Keyword.get(opts, :target_id, "alpha"),
+      state: :active,
+      dispatch_mode: :explicit,
+      registry_generation: hash,
+      policy_hash: hash,
+      repo_manifest_hash: hash,
+      repo_policy: %{
+        "manifest" => manifest,
+        "manifest_source_dir" => Path.expand("context-manifest"),
+        "workflow_module_resolution" => resolution
+      },
+      tracker_connection: %{},
+      run_target: %{},
+      worktree_policy: %{
+        "root" => Path.expand("context-worktrees"),
+        "strategy" => "per_issue",
+        "hooks" => %{
+          "after_create" => nil,
+          "after_run" => nil,
+          "before_remove" => nil,
+          "before_run" => nil,
+          "timeout_ms" => 1_000
+        }
+      },
+      runner_policy: %{},
+      effective_checks: %{},
+      external_side_effect_gates: %{},
+      capacity_limits: %{},
+      budget_limits: %{}
+    }
+
+    %ExecutionContext{
+      target: target,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      workspace_path: Path.join([Path.expand("context-worktrees"), target.target_id, issue.identifier]),
+      runner_name: "codex",
+      runner_config: %{},
+      policy: policy,
+      role: :implementation,
+      execution_profile: %{},
+      timeout_ms: 1_000,
+      max_retries: 0,
+      worker_host: nil
+    }
+  end
+
+  defp prompt_resolution_projection(resolution) do
+    %{
+      "module_names" => resolution.module_names,
+      "module_refs" =>
+        Enum.map(resolution.module_refs, fn ref ->
+          %{"name" => ref.name, "version" => ref.version}
+        end),
+      "policy_hash" => resolution.policy_hash,
+      "rendered" => resolution.rendered
+    }
+  end
+
+  defp restore_application_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
+  defp restore_application_env(key, value), do: Application.put_env(:symphony_elixir, key, value)
 
   defp auto_land_checks do
     ~w(tests quality_gates automated_review route_classification sync)

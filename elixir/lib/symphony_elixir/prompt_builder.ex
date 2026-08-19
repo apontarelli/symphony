@@ -3,7 +3,8 @@ defmodule SymphonyElixir.PromptBuilder do
   Builds agent prompts from Linear issue data.
   """
 
-  alias SymphonyElixir.{Config, Workflow}
+  alias SymphonyElixir.{Config, ExecutionContext, TargetContext, Workflow}
+  alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow.{Manifest, ModuleRegistry}
 
   @render_opts [strict_variables: true, strict_filters: true]
@@ -48,6 +49,293 @@ defmodule SymphonyElixir.PromptBuilder do
       prompt: prompt,
       workflow_module_resolution: workflow_module_resolution
     }
+  end
+
+  @type context_error ::
+          :duplicate_prompt_option
+          | :invalid_prompt_context
+          | :invalid_prompt_issue
+          | :invalid_prompt_options
+          | :prompt_policy_override_forbidden
+          | :prompt_render_failed
+          | :prompt_template_parse_failed
+          | :unknown_prompt_option
+
+  @spec build_prompt_bundle(ExecutionContext.t(), Issue.t(), keyword()) ::
+          {:ok, prompt_bundle()} | {:error, context_error()}
+  def build_prompt_bundle(%ExecutionContext{} = context, %Issue{} = issue, opts)
+      when is_list(opts) do
+    with {:ok, attempt} <- parse_context_prompt_options(opts),
+         :ok <- validate_context_prompt_authority(context, issue),
+         {:ok, prompt_template, resolution} <- context_prompt_workflow(context),
+         {:ok, parsed_template} <- parse_context_template(prompt_template),
+         {:ok, prompt} <-
+           render_context_prompt(
+             parsed_template,
+             issue,
+             context.policy,
+             resolution,
+             attempt
+           ) do
+      {:ok, %{prompt: prompt, workflow_module_resolution: resolution}}
+    end
+  end
+
+  def build_prompt_bundle(%ExecutionContext{}, %Issue{}, _opts),
+    do: {:error, :invalid_prompt_options}
+
+  def build_prompt_bundle(_context, _issue, _opts), do: {:error, :invalid_prompt_context}
+
+  defp parse_context_prompt_options(opts) do
+    if Keyword.keyword?(opts) do
+      keys = Keyword.keys(opts)
+
+      cond do
+        :policy in keys ->
+          {:error, :prompt_policy_override_forbidden}
+
+        length(keys) != length(Enum.uniq(keys)) ->
+          {:error, :duplicate_prompt_option}
+
+        Enum.any?(keys, &(&1 != :attempt)) ->
+          {:error, :unknown_prompt_option}
+
+        valid_prompt_attempt?(Keyword.get(opts, :attempt)) ->
+          {:ok, Keyword.get(opts, :attempt)}
+
+        true ->
+          {:error, :invalid_prompt_options}
+      end
+    else
+      {:error, :invalid_prompt_options}
+    end
+  end
+
+  defp valid_prompt_attempt?(nil), do: true
+  defp valid_prompt_attempt?(attempt), do: is_integer(attempt) and attempt >= 0
+
+  defp validate_context_prompt_authority(
+         %ExecutionContext{
+           target: %TargetContext{
+             target_id: target_id,
+             registry_generation: registry_generation,
+             policy_hash: policy_hash,
+             repo_manifest_hash: repo_manifest_hash,
+             repo_policy: repo_policy
+           },
+           issue_id: issue_id,
+           issue_identifier: issue_identifier,
+           policy: policy
+         },
+         %Issue{id: issue_id, identifier: issue_identifier}
+       ) do
+    with true <- valid_prompt_id?(target_id),
+         true <- valid_prompt_scalar?(registry_generation),
+         true <- valid_prompt_scalar?(policy_hash),
+         true <- valid_prompt_scalar?(repo_manifest_hash),
+         true <- valid_prompt_scalar?(issue_id),
+         true <- valid_prompt_issue_identifier?(issue_identifier),
+         true <- is_map(policy) and not is_struct(policy) and map_size(policy) > 0,
+         :ok <- validate_context_repo_policy(repo_policy) do
+      :ok
+    else
+      _invalid -> {:error, :invalid_prompt_context}
+    end
+  end
+
+  defp validate_context_prompt_authority(_context, _issue),
+    do: {:error, :invalid_prompt_issue}
+
+  defp valid_prompt_id?(value) do
+    is_binary(value) and String.valid?(value) and
+      Regex.match?(~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/, value)
+  end
+
+  defp valid_prompt_issue_identifier?(value) do
+    valid_prompt_scalar?(value) and value not in [".", ".."] and
+      not String.contains?(value, ["/", "\\"])
+  end
+
+  defp valid_prompt_scalar?(value) do
+    is_binary(value) and String.valid?(value) and String.trim(value) != "" and
+      not Regex.match?(~r/\p{Cc}/u, value)
+  end
+
+  defp validate_context_repo_policy(
+         %{
+           "manifest" => manifest,
+           "manifest_source_dir" => source_dir,
+           "workflow_module_resolution" => resolution
+         } = repo_policy
+       ) do
+    with true <-
+           Enum.sort(Map.keys(repo_policy)) ==
+             ["manifest", "manifest_source_dir", "workflow_module_resolution"],
+         true <- is_map(manifest) and not is_struct(manifest),
+         true <- valid_prompt_source_dir?(source_dir),
+         {:ok, _resolution} <- normalize_pinned_prompt_resolution(resolution) do
+      :ok
+    else
+      _invalid -> {:error, :invalid_prompt_context}
+    end
+  end
+
+  defp validate_context_repo_policy(_repo_policy), do: {:error, :invalid_prompt_context}
+
+  defp valid_prompt_source_dir?(source_dir) do
+    valid_prompt_scalar?(source_dir) and Path.type(source_dir) == :absolute
+  end
+
+  defp context_prompt_workflow(context) do
+    repo_policy = context.target.repo_policy
+
+    compile_context_prompt(
+      repo_policy["manifest"],
+      repo_policy["workflow_module_resolution"]
+    )
+  end
+
+  defp compile_context_prompt(manifest, pinned_resolution) do
+    case Manifest.compile(manifest) do
+      %{
+        prompt_template: prompt_template,
+        workflow_module_resolution: compiled_resolution
+      }
+      when is_binary(prompt_template) ->
+        with true <- String.valid?(prompt_template),
+             {:ok, compiled_projection} <-
+               normalize_compiled_prompt_resolution(compiled_resolution),
+             true <- compiled_projection == pinned_resolution do
+          {:ok, prompt_template, bundle_prompt_resolution(compiled_projection)}
+        else
+          _invalid -> {:error, :invalid_prompt_context}
+        end
+    end
+  rescue
+    _exception -> {:error, :invalid_prompt_context}
+  catch
+    _kind, _reason -> {:error, :invalid_prompt_context}
+  end
+
+  defp normalize_pinned_prompt_resolution(
+         %{
+           "module_names" => module_names,
+           "module_refs" => module_refs,
+           "policy_hash" => policy_hash,
+           "rendered" => rendered
+         } = resolution
+       ) do
+    if Enum.sort(Map.keys(resolution)) == ~w(module_names module_refs policy_hash rendered),
+      do: normalize_prompt_resolution_fields(module_names, module_refs, policy_hash, rendered),
+      else: {:error, :invalid_prompt_resolution}
+  end
+
+  defp normalize_pinned_prompt_resolution(_resolution),
+    do: {:error, :invalid_prompt_resolution}
+
+  defp normalize_compiled_prompt_resolution(resolution) when is_map(resolution) do
+    with {:ok, module_names} <- fetch_prompt_resolution_field(resolution, :module_names),
+         {:ok, module_refs} <- fetch_prompt_resolution_field(resolution, :module_refs),
+         {:ok, policy_hash} <- fetch_prompt_resolution_field(resolution, :policy_hash),
+         {:ok, rendered} <- fetch_prompt_resolution_field(resolution, :rendered) do
+      normalize_prompt_resolution_fields(module_names, module_refs, policy_hash, rendered)
+    else
+      _invalid -> {:error, :invalid_prompt_resolution}
+    end
+  end
+
+  defp fetch_prompt_resolution_field(resolution, key) do
+    case Map.fetch(resolution, key) do
+      {:ok, value} -> {:ok, value}
+      :error -> Map.fetch(resolution, Atom.to_string(key))
+    end
+  end
+
+  defp normalize_prompt_resolution_fields(module_names, module_refs, policy_hash, rendered) do
+    with true <- is_list(module_names) and Enum.all?(module_names, &valid_prompt_scalar?/1),
+         {:ok, normalized_refs} <- normalize_prompt_module_refs(module_refs),
+         true <- Enum.map(normalized_refs, & &1["name"]) == module_names,
+         true <- valid_prompt_scalar?(policy_hash),
+         true <- is_binary(rendered) and String.valid?(rendered) do
+      {:ok,
+       %{
+         "module_names" => module_names,
+         "module_refs" => normalized_refs,
+         "policy_hash" => policy_hash,
+         "rendered" => rendered
+       }}
+    else
+      _invalid -> {:error, :invalid_prompt_resolution}
+    end
+  end
+
+  defp normalize_prompt_module_refs(module_refs) when is_list(module_refs) do
+    Enum.reduce_while(module_refs, {:ok, []}, fn module_ref, {:ok, refs} ->
+      case normalize_prompt_module_ref(module_ref) do
+        {:ok, normalized} -> {:cont, {:ok, [normalized | refs]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, refs} -> {:ok, Enum.reverse(refs)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_prompt_module_refs(_module_refs),
+    do: {:error, :invalid_prompt_resolution}
+
+  defp normalize_prompt_module_ref(module_ref) when is_map(module_ref) do
+    with {:ok, name} <- fetch_prompt_resolution_field(module_ref, :name),
+         {:ok, version} <- fetch_prompt_resolution_field(module_ref, :version),
+         true <- valid_prompt_scalar?(name),
+         true <- valid_prompt_scalar?(version) do
+      {:ok, %{"name" => name, "version" => version}}
+    else
+      _invalid -> {:error, :invalid_prompt_resolution}
+    end
+  end
+
+  defp normalize_prompt_module_ref(_module_ref),
+    do: {:error, :invalid_prompt_resolution}
+
+  defp bundle_prompt_resolution(resolution) do
+    %{
+      module_names: resolution["module_names"],
+      module_refs:
+        Enum.map(resolution["module_refs"], fn ref ->
+          %{name: ref["name"], version: ref["version"]}
+        end),
+      policy_hash: resolution["policy_hash"],
+      rendered: resolution["rendered"]
+    }
+  end
+
+  defp parse_context_template(prompt_template) do
+    {:ok, Solid.parse!(prompt_template)}
+  rescue
+    _exception -> {:error, :prompt_template_parse_failed}
+  end
+
+  defp render_context_prompt(parsed_template, issue, policy, resolution, attempt) do
+    prompt =
+      parsed_template
+      |> Solid.render!(
+        %{
+          "attempt" => attempt,
+          "issue" => issue |> Map.from_struct() |> to_solid_map(),
+          "policy" => to_solid_value(policy),
+          "policy_json" => Jason.encode!(policy, pretty: true),
+          "workflow" => workflow_context(resolution)
+        },
+        @render_opts
+      )
+      |> IO.iodata_to_binary()
+      |> append_selected_policy_context(policy)
+
+    {:ok, prompt}
+  rescue
+    _exception -> {:error, :prompt_render_failed}
   end
 
   @doc false

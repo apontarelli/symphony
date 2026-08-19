@@ -4,7 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{AutoLand, StringOrMap}
   alias SymphonyElixir.Linear.Client
-  alias SymphonyElixir.{LocalConfig, RunTarget}
+  alias SymphonyElixir.{LocalConfig, RunTarget, TargetContext}
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -2532,5 +2532,234 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "legacy workspace creation preserves rescued filesystem and fallback issue contracts" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-fallback-#{System.unique_integer([:positive])}"
+      )
+
+    protected_parent = Path.join(test_root, "protected")
+    workspace_root = Path.join(protected_parent, "workspaces")
+    File.mkdir_p!(protected_parent)
+    File.chmod!(protected_parent, 0o500)
+    on_exit(fn -> File.chmod(protected_parent, 0o700) end)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    local_log =
+      capture_log(fn ->
+        assert {:error, %File.Error{reason: :eacces}} =
+                 Workspace.create_for_issue("SID-DENIED")
+      end)
+
+    assert local_log =~ "worker_host=local"
+    File.chmod!(protected_parent, 0o700)
+
+    writable_root = Path.join(test_root, "writable")
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: writable_root)
+
+    assert {:ok, mapped_workspace} =
+             Workspace.create_for_issue(%{id: "issue-id", identifier: nil})
+
+    assert Path.basename(mapped_workspace) == "issue"
+    assert {:ok, ^mapped_workspace} = Workspace.create_for_issue(nil)
+  end
+
+  test "legacy remote workspace maps exact marker status and adapter failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-remote-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+
+    fake_ssh = Path.join(test_root, "ssh")
+    workspace_root = "/remote/workspaces"
+    File.mkdir_p!(test_root)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    expected = Path.join(workspace_root, "SID-NOISE")
+
+    File.write!(
+      fake_ssh,
+      "#!/bin/sh\nprintf 'noise\\n%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '#{expected}'\n"
+    )
+
+    File.chmod!(fake_ssh, 0o755)
+    assert {:ok, ^expected} = Workspace.create_for_issue("SID-NOISE", "worker.example")
+
+    File.write!(fake_ssh, "#!/bin/sh\nprintf 'invalid output\\n'\n")
+    File.chmod!(fake_ssh, 0o755)
+
+    assert {:error, {:workspace_prepare_failed, :invalid_output, _output}} =
+             Workspace.create_for_issue("SID-INVALID", "worker.example")
+
+    File.write!(fake_ssh, "#!/bin/sh\nprintf 'denied\\n'\nexit 23\n")
+    File.chmod!(fake_ssh, 0o755)
+
+    assert {:error, {:workspace_prepare_failed, "worker.example", 23, "denied\n"}} =
+             Workspace.create_for_issue("SID-STATUS", "worker.example")
+
+    assert {:error, :invalid_target} =
+             Workspace.create_for_issue("SID-ERROR", "worker host")
+
+    assert {:error, {:workspace_remove_failed, "worker.example", 23, "denied\n"}, ""} =
+             Workspace.remove("/remote/workspaces/SID-STATUS", "worker.example")
+
+    assert {:error, :invalid_target, ""} =
+             Workspace.remove("/remote/workspaces/SID-ERROR", "worker host")
+  end
+
+  test "legacy workspace wrappers keep nil hooks non-directories and fanout harmless" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-wrappers-#{System.unique_integer([:positive])}"
+      )
+
+    workspace_root = Path.join(test_root, "workspaces")
+    workspace = Path.join(workspace_root, "SID-HOOKS")
+    File.mkdir_p!(workspace)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+    assert :ok = Workspace.run_before_run_hook(workspace, "SID-HOOKS")
+    assert :ok = Workspace.run_after_run_hook(workspace, "SID-HOOKS")
+
+    stale_file = Path.join(workspace_root, "SID-FILE")
+    File.write!(stale_file, "stale")
+    assert {:ok, _removed} = Workspace.remove(stale_file)
+
+    invalid_target = %{legacy_target(workspace_root) | worktree_policy: %{}}
+
+    assert {:error, :invalid_workspace_context} =
+             Workspace.remove_issue_workspaces(invalid_target, "SID-HOOKS", nil)
+
+    remote_target = legacy_target("/remote/workspaces")
+
+    assert {:error, :workspace_remote_dependency_failed} =
+             Workspace.remove_issue_workspaces(
+               remote_target,
+               "SID-HOOKS",
+               "worker.example",
+               ssh_runner: fn _, _, _ -> :invalid end
+             )
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      hook_before_remove: "before-remove",
+      hook_before_run: "before-run"
+    )
+
+    assert {:error, :invalid_target, ""} =
+             Workspace.remove("/remote/workspaces/SID-HOOKS", "worker host")
+
+    assert {:error, :invalid_target} =
+             Workspace.run_before_run_hook(
+               "/remote/workspaces/SID-HOOKS",
+               "SID-HOOKS",
+               "worker host"
+             )
+
+    previous_path = System.get_env("PATH")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+    fake_ssh = Path.join(test_root, "ssh")
+    File.write!(fake_ssh, "#!/bin/sh\nexit 0\n")
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      worker_ssh_hosts: ["worker-a", "worker-b"]
+    )
+
+    assert :ok = Workspace.remove_issue_workspaces("SID-FANOUT")
+  end
+
+  test "legacy workspace ignores unreadable cleanup roots and reports create canonicalization" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-loop-#{System.unique_integer([:positive])}"
+      )
+
+    loop_a = Path.join(test_root, "loop-a")
+    loop_b = Path.join(test_root, "loop-b")
+    File.mkdir_p!(test_root)
+    File.ln_s!(loop_b, loop_a)
+    File.ln_s!(loop_a, loop_b)
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: loop_a)
+
+    existing = Path.join(test_root, "existing")
+    File.mkdir!(existing)
+
+    assert {:error, {:workspace_path_unreadable, ^loop_a, :symlink_loop}, ""} =
+             Workspace.remove(existing)
+
+    assert :ok = Workspace.remove_issue_workspaces("SID-LOOP")
+
+    assert {:error, {:path_canonicalize_failed, _path, :symlink_loop}} =
+             Workspace.create_for_issue("SID-LOOP")
+  end
+
+  test "legacy remote workspace timeout returns its canonical fixed reason" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-legacy-timeout-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    on_exit(fn -> restore_env("PATH", previous_path) end)
+
+    fake_ssh = Path.join(test_root, "ssh")
+    File.mkdir_p!(test_root)
+    File.write!(fake_ssh, "#!/bin/sh\nwhile :; do :; done\n")
+    File.chmod!(fake_ssh, 0o755)
+    System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: "/remote/workspaces",
+      hook_timeout_ms: 10
+    )
+
+    assert {:error, {:workspace_hook_timeout, "remote_command", 10}} =
+             Workspace.create_for_issue("SID-TIMEOUT", "worker.example")
+  end
+
+  defp legacy_target(root) do
+    hash = "sha256:" <> String.duplicate("a", 64)
+
+    %TargetContext{
+      target_id: "alpha",
+      state: :active,
+      dispatch_mode: :explicit,
+      registry_generation: hash,
+      policy_hash: hash,
+      repo_manifest_hash: hash,
+      repo_policy: %{},
+      tracker_connection: %{},
+      run_target: %{},
+      worktree_policy: %{
+        "root" => root,
+        "strategy" => "per_issue",
+        "hooks" => %{
+          "after_create" => nil,
+          "after_run" => nil,
+          "before_remove" => nil,
+          "before_run" => nil,
+          "timeout_ms" => 1_000
+        }
+      },
+      runner_policy: %{},
+      effective_checks: %{},
+      external_side_effect_gates: %{},
+      capacity_limits: %{},
+      budget_limits: %{}
+    }
   end
 end
