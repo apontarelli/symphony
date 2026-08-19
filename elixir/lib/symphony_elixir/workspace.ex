@@ -9,8 +9,10 @@ defmodule SymphonyElixir.Workspace do
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
   @context_remote_marker "__SYMPHONY_CONTEXT_WORKSPACE__"
-  # The remote shell owns hook TERM/KILL cleanup. The caller keeps one second for that cleanup
-  # and SSH transport completion without extending the pinned hook execution budget.
+  # SSH setup is outside the pinned hook execution budget. Once the remote shell starts the hook,
+  # it owns the exact hook deadline and TERM/KILL cleanup; the caller then keeps one additional
+  # second for cleanup and transport completion.
+  @remote_transport_setup_timeout_ms 5_000
   @remote_cleanup_transport_grace_ms 1_000
   @remote_hook_termination_grace_ms 100
 
@@ -409,7 +411,10 @@ defmodule SymphonyElixir.Workspace do
 
   defp run_context_ssh(context, script, opts) do
     hook_timeout_ms = context.target.worktree_policy["hooks"]["timeout_ms"]
-    outer_timeout_ms = hook_timeout_ms + @remote_cleanup_transport_grace_ms
+
+    outer_timeout_ms =
+      hook_timeout_ms + @remote_transport_setup_timeout_ms + @remote_cleanup_transport_grace_ms
+
     runner = Keyword.get(opts, :ssh_runner, &default_context_ssh_runner/3)
 
     task =

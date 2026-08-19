@@ -407,7 +407,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:ok, "/remote/workspaces-a/alpha/SID-410"} =
              Workspace.create_for_issue(context, ssh_runner: ssh_runner)
 
-    assert_receive {:ssh, "worker.example", script, 2_000}
+    assert_receive {:ssh, "worker.example", script, 7_000}
     assert script =~ "set -eu"
     assert script =~ "canonical_root"
     assert script =~ "canonical_workspace"
@@ -448,7 +448,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert :ok =
              Workspace.run_before_run_hook(context, issue, ssh_runner: ssh_runner)
 
-    assert_receive {:ssh_hook, "worker.example", script, 1_444}
+    assert_receive {:ssh_hook, "worker.example", script, 6_444}
     assert script =~ "set -eu"
     assert script =~ "printf pinned-hook"
     assert script =~ "[ ! -L"
@@ -485,7 +485,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     assert {:ok, []} = Workspace.remove(context, ssh_runner: ssh_runner)
 
-    assert_receive {:ssh_remove, "worker.example", script, 1_555}
+    assert_receive {:ssh_remove, "worker.example", script, 6_555}
     assert script =~ "printf before-remove"
     assert script =~ "rm -rf -- \"$canonical_workspace\""
     assert script =~ "canonical_workspace"
@@ -507,12 +507,12 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     assert {:ok, []} = Workspace.remove(context, ssh_runner: shell_runner)
     refute File.exists?(root)
-    assert_receive {:missing_root_delete_ssh, "worker.example", first_script, 2_000}
+    assert_receive {:missing_root_delete_ssh, "worker.example", first_script, 7_000}
     refute_receive {:missing_root_delete_ssh, _host, _script, _timeout_ms}
 
     assert {:ok, []} = Workspace.remove(context, ssh_runner: shell_runner)
     refute File.exists?(root)
-    assert_receive {:missing_root_delete_ssh, "worker.example", second_script, 2_000}
+    assert_receive {:missing_root_delete_ssh, "worker.example", second_script, 7_000}
     refute_receive {:missing_root_delete_ssh, _host, _script, _timeout_ms}
 
     for script <- [first_script, second_script] do
@@ -540,7 +540,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:error, :workspace_remote_output_invalid} =
              Workspace.remove(context, ssh_runner: shell_runner)
 
-    assert_receive {:linked_root_delete_ssh, "worker.example", _script, 2_000}
+    assert_receive {:linked_root_delete_ssh, "worker.example", _script, 7_000}
     refute_receive {:linked_root_delete_ssh, _host, _script, _timeout_ms}
     assert File.read!(Path.join(outside, "sentinel")) == "unchanged"
     assert {:ok, %File.Stat{type: :symlink}} = File.lstat(root)
@@ -563,9 +563,9 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     refute File.exists?(workspace)
     assert {:ok, []} = Workspace.remove(context, ssh_runner: shell_runner)
 
-    assert_receive {:idempotent_ssh, "worker.example", create_script, 2_000}
-    assert_receive {:idempotent_ssh, "worker.example", first_delete_script, 2_000}
-    assert_receive {:idempotent_ssh, "worker.example", second_delete_script, 2_000}
+    assert_receive {:idempotent_ssh, "worker.example", create_script, 7_000}
+    assert_receive {:idempotent_ssh, "worker.example", first_delete_script, 7_000}
+    assert_receive {:idempotent_ssh, "worker.example", second_delete_script, 7_000}
     assert create_script =~ "mkdir -- \"$root_candidate\""
     assert first_delete_script =~ "rm -rf -- \"$canonical_workspace\""
     assert second_delete_script =~ "'deleted'"
@@ -643,7 +643,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
                ssh_runner: ssh_runner
              )
 
-    assert_receive {:ssh_target_remove, "worker.example", script, 2_000}
+    assert_receive {:ssh_target_remove, "worker.example", script, 7_000}
     assert script =~ "rm -rf -- \"$canonical_workspace\""
     refute_receive {:ssh_target_remove, _host, _script, _timeout_ms}
   end
@@ -908,7 +908,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:error, :workspace_remote_timeout} =
              Workspace.remove(context, ssh_runner: runner)
 
-    assert_received {:remote_deadline, 1_250}
+    assert_received {:remote_deadline, 6_250}
     assert_received {:remote_shell_result, output, 72, nonce}
 
     canonical_marker =
@@ -1054,7 +1054,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:error, :workspace_remote_timeout} =
              Workspace.create_for_issue(context, ssh_runner: runner)
 
-    assert_received {:create_deadline, 1_100}
+    assert_received {:create_deadline, 6_100}
   end
 
   @tag :tmp_dir
@@ -1090,8 +1090,8 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:error, :workspace_remote_timeout} =
              Workspace.run_before_run_hook(context, issue, ssh_runner: runner)
 
-    assert_received {:before_run_deadline, 1_100}
-    assert_received {:before_run_deadline, 1_100}
+    assert_received {:before_run_deadline, 6_100}
+    assert_received {:before_run_deadline, 6_100}
   end
 
   @tag :tmp_dir
@@ -1127,8 +1127,8 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert {:error, :workspace_remote_timeout} =
              Workspace.run_after_run_hook(context, issue, ssh_runner: runner)
 
-    assert_received {:after_run_deadline, 1_100}
-    assert_received {:after_run_deadline, 1_100}
+    assert_received {:after_run_deadline, 6_100}
+    assert_received {:after_run_deadline, 6_100}
   end
 
   @tag :tmp_dir
@@ -1160,7 +1160,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert File.dir?(root)
     assert File.read!(Path.join(workspace, "after-create.log")) == "created\n"
 
-    assert_receive {:first_use_ssh, "worker.example", script, 2_000}
+    assert_receive {:first_use_ssh, "worker.example", script, 7_000}
     assert script =~ "root_parent"
     assert script =~ "mkdir -- \"$root_candidate\""
     refute script =~ "mkdir -p"
