@@ -899,9 +899,10 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     runner = fn _host, script, timeout_ms ->
       nonce = remote_marker_nonce(script)
+      shell = System.find_executable("dash") || "/bin/sh"
       send(parent, {:remote_deadline, timeout_ms})
       send(parent, {:remote_shell_script, script})
-      {output, status} = result = System.cmd("/bin/sh", ["-c", script], stderr_to_stdout: true)
+      {output, status} = result = System.cmd(shell, ["-c", script], stderr_to_stdout: true)
       send(parent, {:remote_shell_result, output, status, nonce})
       result
     end
@@ -911,9 +912,10 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     assert_received {:remote_deadline, 6_250}
     assert_received {:remote_shell_script, script}
-    assert script =~ "kill -TERM -- \"-$hook_pid\""
-    assert script =~ "kill -KILL -- \"-$hook_pid\""
-    refute script =~ "while kill -0 -- \"-$hook_pid\""
+    assert script =~ "kill -TERM \"-$hook_pid\""
+    assert script =~ "kill -KILL \"-$hook_pid\""
+    refute script =~ ~r/kill -(?:0|TERM|KILL) -- /
+    refute script =~ "while kill -0 \"-$hook_pid\""
     assert_received {:remote_shell_result, output, 72, nonce}
 
     canonical_marker =
