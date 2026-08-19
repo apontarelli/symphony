@@ -900,6 +900,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     runner = fn _host, script, timeout_ms ->
       nonce = remote_marker_nonce(script)
       send(parent, {:remote_deadline, timeout_ms})
+      send(parent, {:remote_shell_script, script})
       {output, status} = result = System.cmd("/bin/sh", ["-c", script], stderr_to_stdout: true)
       send(parent, {:remote_shell_result, output, status, nonce})
       result
@@ -909,6 +910,10 @@ defmodule SymphonyElixir.WorkspaceContextTest do
              Workspace.remove(context, ssh_runner: runner)
 
     assert_received {:remote_deadline, 6_250}
+    assert_received {:remote_shell_script, script}
+    assert script =~ "kill -TERM -- \"-$hook_pid\""
+    assert script =~ "kill -KILL -- \"-$hook_pid\""
+    refute script =~ "while kill -0 -- \"-$hook_pid\""
     assert_received {:remote_shell_result, output, 72, nonce}
 
     canonical_marker =
@@ -943,7 +948,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     assert :stopped =
              SymphonyElixir.TestSupport.eventually(fn ->
-               if SymphonyElixir.TestSupport.os_pid_alive?(descendant_pid),
+               if process_capable_of_mutating?(descendant_pid),
                  do: nil,
                  else: :stopped
              end)
@@ -1755,6 +1760,19 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     case SymphonyElixir.TestSupport.read_pid(pid_file) do
       nil -> :ok
       pid -> System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+    end
+  end
+
+  defp process_capable_of_mutating?(pid) do
+    case File.read("/proc/#{pid}/stat") do
+      {:ok, stat} ->
+        case Regex.run(~r/^\d+\s+\(.*\)\s+([A-Za-z])\s/, stat, capture: :all_but_first) do
+          ["Z"] -> false
+          _state -> SymphonyElixir.TestSupport.os_pid_alive?(pid)
+        end
+
+      {:error, _reason} ->
+        SymphonyElixir.TestSupport.os_pid_alive?(pid)
     end
   end
 
