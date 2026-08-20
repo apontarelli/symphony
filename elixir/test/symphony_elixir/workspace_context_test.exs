@@ -190,9 +190,10 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "context removal stops when the before-remove hook replaces its workspace with a symlink", %{
-    tmp_dir: tmp_dir
-  } do
+  test "context removal stops when the before-remove hook replaces its workspace with a symlink",
+       %{
+         tmp_dir: tmp_dir
+       } do
     root = Path.join(tmp_dir, "root")
     context_a = context(root, "alpha", "SID-410-A")
     context_b = context(root, "alpha", "SID-410-B")
@@ -309,9 +310,10 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "concurrent context creation keeps pinned roots hooks and timeouts after globals change", %{
-    tmp_dir: tmp_dir
-  } do
+  test "concurrent context creation keeps pinned roots hooks and timeouts after globals change",
+       %{
+         tmp_dir: tmp_dir
+       } do
     previous_path = Application.get_env(:symphony_elixir, :workflow_file_path)
 
     on_exit(fn ->
@@ -343,12 +345,17 @@ defmodule SymphonyElixir.WorkspaceContextTest do
       )
 
     parent = self()
+    continue_ref = make_ref()
 
     runner = fn command, workspace, timeout_ms ->
       send(parent, {:ready, self(), command, workspace, timeout_ms})
 
       receive do
-        :continue -> {"", 0}
+        {:continue, ^continue_ref} ->
+          {"", 0}
+      after
+        5_000 ->
+          raise "context creation runner timed out command=#{inspect(command)} workspace=#{inspect(workspace)}"
       end
     end
 
@@ -364,11 +371,23 @@ defmodule SymphonyElixir.WorkspaceContextTest do
       Path.join(tmp_dir, "poisoned-symphony.yml")
     )
 
-    send(runner_a, :continue)
-    send(runner_b, :continue)
+    send(runner_a, {:continue, continue_ref})
+    send(runner_b, {:continue, continue_ref})
 
-    assert {:ok, ^workspace_a} = Task.await(task_a)
-    assert {:ok, ^workspace_b} = Task.await(task_b)
+    task_results =
+      [task_a, task_b]
+      |> Task.yield_many(5_000)
+      |> Map.new()
+
+    result_a = Map.fetch!(task_results, task_a)
+    result_b = Map.fetch!(task_results, task_b)
+
+    assert {:ok, {:ok, ^workspace_a}} = result_a,
+           "context A creation did not complete after release: #{inspect(result_a)}"
+
+    assert {:ok, {:ok, ^workspace_b}} = result_b,
+           "context B creation did not complete after release: #{inspect(result_b)}"
+
     assert File.dir?(workspace_a)
     assert File.dir?(workspace_b)
   end
@@ -846,23 +865,623 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
+  test "remote hook launcher probes job control before effects and fails closed", %{
+    tmp_dir: tmp_dir
+  } do
+    root = Path.join(tmp_dir, "remote-root")
+    workspace = Path.join([root, "alpha", "SID-NO-PGID"])
+    hook_effect = Path.join(tmp_dir, "hook-effect")
+
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context = context(root, "alpha", "SID-NO-PGID", hooks: hooks, worker_host: "worker")
+    File.mkdir_p!(workspace)
+    parent = self()
+
+    runner = fn _host, script, _timeout_ms ->
+      probe_position =
+        script
+        |> :binary.match("hook_probe_pid=$!")
+        |> elem(0)
+
+      hook_position =
+        script
+        |> :binary.match("printf effect")
+        |> elem(0)
+
+      assert probe_position < hook_position
+      assert script =~ "hook_probe_pgid"
+      assert script =~ "command -v setsid"
+      assert script =~ "setsid sh -c"
+
+      forced_script =
+        script
+        |> String.replace(
+          ~r/^hook_probe_pgid=.*$/m,
+          "hook_probe_pgid=unsupported",
+          global: false
+        )
+        |> String.replace("elif command -v setsid >/dev/null 2>&1; then", "elif false; then", global: false)
+
+      refute forced_script == script
+      send(parent, {:forced_launcher_script, forced_script})
+      System.cmd("/bin/sh", ["-c", forced_script], stderr_to_stdout: true)
+    end
+
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.remove(context, ssh_runner: runner)
+
+    assert_received {:forced_launcher_script, forced_script}
+    refute File.exists?(hook_effect)
+    assert File.dir?(workspace)
+
+    nonce = remote_marker_nonce(forced_script)
+    shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+    assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher rejects a partial FIFO acknowledgment at its bounded deadline", %{
+    tmp_dir: tmp_dir
+  } do
+    root = Path.join(tmp_dir, "remote-root")
+    workspace = Path.join([root, "alpha", "SID-PARTIAL-ACK"])
+    hook_effect = Path.join(tmp_dir, "hook-effect")
+    fake_bin = Path.join(tmp_dir, "bin")
+    fake_setsid = Path.join(fake_bin, "setsid")
+    writer_pid_file = Path.join(tmp_dir, "partial-writer.pid")
+
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context =
+      context(root, "alpha", "SID-PARTIAL-ACK", hooks: hooks, worker_host: "worker")
+
+    File.mkdir_p!(workspace)
+    File.mkdir!(fake_bin)
+
+    File.write!(fake_setsid, """
+    #!/bin/sh
+    ready_fifo=
+    for arg do
+      case "$arg" in
+        */setsid-probe|*/hook-ready) ready_fifo=$arg ;;
+      esac
+    done
+    if [ -n "$ready_fifo" ]; then
+      printf '%s\n' "$$" > #{SymphonyElixir.Shell.escape(writer_pid_file)}
+      printf 'malformed-partial-ack' > "$ready_fifo"
+      trap '' TERM
+      while :; do :; done
+    fi
+    #{isolated_process_group_exec()}
+    """)
+
+    File.chmod!(fake_setsid, 0o755)
+    on_exit(fn -> kill_test_process(writer_pid_file) end)
+    parent = self()
+
+    runner = fn _host, script, _timeout_ms ->
+      forced_script =
+        String.replace(
+          script,
+          ~r/^hook_probe_pgid=.*$/m,
+          "hook_probe_pgid=unsupported",
+          global: false
+        )
+
+      path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+      result =
+        System.cmd("/bin/sh", ["-c", forced_script],
+          env: [{"PATH", path}],
+          stderr_to_stdout: true
+        )
+
+      send(parent, {:partial_ack_result, forced_script, result})
+      result
+    end
+
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.remove(context, ssh_runner: runner)
+
+    assert_received {:partial_ack_result, script, {output, 70}}
+
+    assert script =~ "hook_ready_reader_pid="
+    assert script =~ ~S(hook_ready_deadline hook "$hook_ready_reader_pid" &)
+    assert script =~ ~S(wait "$hook_ready_reader_pid")
+    refute script =~ ~S(IFS= read -r hook_ready_ack <&5)
+    refute script =~ ~S(printf 'deadline:%s\n' "$hook_deadline_role" > "$hook_deadline_fifo")
+    writer_pid = SymphonyElixir.TestSupport.read_pid(writer_pid_file)
+    assert is_integer(writer_pid)
+    refute SymphonyElixir.TestSupport.os_pid_alive?(writer_pid)
+
+    refute output =~ "__SYMPHONY_CONTEXT_WORKSPACE__\t"
+    refute File.exists?(hook_effect)
+    assert File.dir?(workspace)
+
+    nonce = remote_marker_nonce(script)
+    shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+    assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher rejects failed actual setsid hook and timer launches", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_bin = Path.join(tmp_dir, "bin")
+    fake_setsid = Path.join(fake_bin, "setsid")
+    File.mkdir!(fake_bin)
+
+    for role <- [:hook, :timer] do
+      issue = "SID-FAILED-#{role |> Atom.to_string() |> String.upcase()}"
+      root = Path.join(tmp_dir, "remote-root-#{role}")
+      workspace = Path.join([root, "alpha", issue])
+      hook_effect = Path.join(tmp_dir, "hook-effect-#{role}")
+
+      hooks = %{
+        "after_create" => nil,
+        "after_run" => nil,
+        "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+        "before_run" => nil,
+        "timeout_ms" => 1_000
+      }
+
+      context = context(root, "alpha", issue, hooks: hooks, worker_host: "worker")
+      File.mkdir_p!(workspace)
+
+      failure_pattern =
+        case role do
+          :hook -> ~S(*'cd -- "$1"'*)
+          :timer -> ~S(*'hook_outcome_lock=$3'*)
+        end
+
+      File.write!(fake_setsid, """
+      #!/bin/sh
+      case "$*" in
+        *setsid-probe*) ;;
+        #{failure_pattern}) exit 71 ;;
+      esac
+      #{isolated_process_group_exec()}
+      """)
+
+      File.chmod!(fake_setsid, 0o755)
+      parent = self()
+
+      runner = fn _host, script, _timeout_ms ->
+        forced_script =
+          String.replace(
+            script,
+            ~r/^hook_probe_pgid=.*$/m,
+            "hook_probe_pgid=unsupported",
+            global: false
+          )
+
+        path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+        result =
+          System.cmd("/bin/sh", ["-c", forced_script],
+            env: [{"PATH", path}],
+            stderr_to_stdout: true
+          )
+
+        send(parent, {:failed_actual_launch, role, forced_script, result})
+        result
+      end
+
+      assert {:error, :workspace_remote_output_invalid} =
+               Workspace.remove(context, ssh_runner: runner)
+
+      assert_received {:failed_actual_launch, ^role, script, {output, 70}}
+      refute output =~ "__SYMPHONY_CONTEXT_WORKSPACE__\t"
+      refute File.exists?(hook_effect)
+      assert File.dir?(workspace)
+
+      nonce = remote_marker_nonce(script)
+      shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+      assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+    end
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher fails closed when an acknowledged launch dies", %{
+    tmp_dir: tmp_dir
+  } do
+    fake_bin = Path.join(tmp_dir, "acknowledged-bin")
+    fake_setsid = Path.join(fake_bin, "setsid")
+    fake_ps = Path.join(fake_bin, "ps")
+    File.mkdir!(fake_bin)
+
+    File.write!(fake_setsid, """
+    #!/bin/sh
+    #{isolated_process_group_exec()}
+    """)
+
+    File.chmod!(fake_setsid, 0o755)
+
+    for {role, failed_ps_call} <- [hook: 1, timer: 2] do
+      issue = "SID-ACKNOWLEDGED-#{role |> Atom.to_string() |> String.upcase()}"
+      root = Path.join(tmp_dir, "acknowledged-root-#{role}")
+      workspace = Path.join([root, "alpha", issue])
+      hook_effect = Path.join(tmp_dir, "acknowledged-hook-effect-#{role}")
+      ps_call_file = Path.join(tmp_dir, "ps-call-#{role}")
+
+      hooks = %{
+        "after_create" => nil,
+        "after_run" => nil,
+        "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+        "before_run" => nil,
+        "timeout_ms" => 1_000
+      }
+
+      context = context(root, "alpha", issue, hooks: hooks, worker_host: "worker")
+      File.mkdir_p!(workspace)
+
+      File.write!(fake_ps, """
+      #!/bin/sh
+      pid=
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = -p ]; then
+          shift
+          pid=$1
+        fi
+        shift
+      done
+      ps_call=0
+      if [ -f #{SymphonyElixir.Shell.escape(ps_call_file)} ]; then
+        IFS= read -r ps_call < #{SymphonyElixir.Shell.escape(ps_call_file)}
+      fi
+      ps_call=$((ps_call + 1))
+      printf '%s\n' "$ps_call" > #{SymphonyElixir.Shell.escape(ps_call_file)}
+      if [ "$ps_call" -eq #{failed_ps_call} ]; then
+        kill -KILL "$pid" 2>/dev/null
+      fi
+      printf '%s\n' "$pid"
+      """)
+
+      File.chmod!(fake_ps, 0o755)
+      parent = self()
+
+      runner = fn _host, script, _timeout_ms ->
+        forced_script =
+          String.replace(
+            script,
+            ~r/^hook_probe_pgid=.*$/m,
+            "hook_probe_pgid=unsupported",
+            global: false
+          )
+
+        path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+        result =
+          System.cmd("/bin/sh", ["-c", forced_script],
+            env: [{"PATH", path}],
+            stderr_to_stdout: true
+          )
+
+        send(parent, {:acknowledged_launch_died, role, forced_script, result})
+        result
+      end
+
+      assert {:error, :workspace_remote_output_invalid} =
+               Workspace.remove(context, ssh_runner: runner)
+
+      assert_received {:acknowledged_launch_died, ^role, script, {output, 70}}
+      refute output =~ "__SYMPHONY_CONTEXT_WORKSPACE__\t"
+      refute File.exists?(hook_effect)
+      assert File.dir?(workspace)
+
+      nonce = remote_marker_nonce(script)
+      shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+      assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+    end
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher directly waits for every managed child", %{tmp_dir: tmp_dir} do
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => ":",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context =
+      context(Path.join(tmp_dir, "remote-root"), "alpha", "SID-DIRECT-WAITS",
+        hooks: hooks,
+        worker_host: "worker"
+      )
+
+    File.mkdir_p!(context.workspace_path)
+    parent = self()
+
+    runner = fn _host, script, _timeout_ms ->
+      send(parent, {:direct_wait_script, script})
+      System.cmd("/bin/sh", ["-c", script], stderr_to_stdout: true)
+    end
+
+    assert {:ok, []} = Workspace.remove(context, ssh_runner: runner)
+    assert_received {:direct_wait_script, script}
+    assert script =~ "hook_ready_reader_pid="
+    assert script =~ "timer_ready_reader_pid="
+    assert script =~ "timer_sleep_pid="
+    assert script =~ ~S(wait "$hook_probe_pid")
+    assert script =~ ~S(wait "$hook_ready_reader_pid")
+    assert script =~ ~S(wait "$timer_ready_reader_pid")
+    assert script =~ ~S(wait "$hook_pid")
+    assert script =~ ~S(wait "$timer_pid")
+    assert script =~ ~S(wait "$timer_sleep_pid")
+    refute File.exists?(context.workspace_path)
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher validates actual setsid acknowledgments and bounds a hanging setsid",
+       %{
+         tmp_dir: tmp_dir
+       } do
+    root = Path.join(tmp_dir, "remote-root")
+    workspace = Path.join([root, "alpha", "SID-ACK-SETSID"])
+    hook_effect = Path.join(tmp_dir, "hook-effect")
+    fake_bin = Path.join(tmp_dir, "bin")
+    fake_setsid = Path.join(fake_bin, "setsid")
+    fake_ps = Path.join(fake_bin, "ps")
+    setsid_started = Path.join(tmp_dir, "setsid-started")
+
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context =
+      context(root, "alpha", "SID-ACK-SETSID", hooks: hooks, worker_host: "worker")
+
+    File.mkdir_p!(workspace)
+    File.mkdir!(fake_bin)
+
+    File.write!(fake_setsid, """
+    #!/bin/sh
+    case "$*" in
+      *ready:hook:*|*ready:timer:*)
+        : > #{SymphonyElixir.Shell.escape(setsid_started)}
+        ;;
+    esac
+    exec "$@"
+    """)
+
+    File.write!(fake_ps, """
+    #!/bin/sh
+    pid=
+    while [ "$#" -gt 0 ]; do
+      if [ "$1" = -p ]; then
+        shift
+        pid=$1
+      fi
+      shift
+    done
+    if [ -f #{SymphonyElixir.Shell.escape(setsid_started)} ]; then
+      printf '%s\n' "$pid"
+    else
+      printf '%s\n' unsupported
+    fi
+    """)
+
+    File.chmod!(fake_setsid, 0o755)
+    File.chmod!(fake_ps, 0o755)
+    parent = self()
+
+    runner = fn _host, script, _timeout_ms ->
+      forced_script =
+        String.replace(
+          script,
+          ~r/^hook_probe_pgid=.*$/m,
+          "hook_probe_pgid=unsupported",
+          global: false
+        )
+
+      path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+      result =
+        System.cmd("/bin/sh", ["-c", forced_script],
+          env: [{"PATH", path}],
+          stderr_to_stdout: true
+        )
+
+      send(parent, {:setsid_ack_result, forced_script, result})
+      result
+    end
+
+    assert {:ok, []} = Workspace.remove(context, ssh_runner: runner)
+    assert_received {:setsid_ack_result, _script, {_output, 0}}
+    assert File.read!(hook_effect) == "effect"
+    refute File.exists?(workspace)
+
+    File.rm!(hook_effect)
+    File.rm!(setsid_started)
+    File.mkdir_p!(workspace)
+
+    File.write!(fake_setsid, """
+    #!/bin/sh
+    trap '' TERM
+    while :; do :; done
+    """)
+
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.remove(context, ssh_runner: runner)
+
+    assert_received {:setsid_ack_result, hanging_script, {output, 70}}
+
+    assert hanging_script =~ ~S(hook_ready_fifo="$hook_state_dir/hook-ready")
+    assert hanging_script =~ ~S(timer_ready_fifo="$hook_state_dir/timer-ready")
+    assert hanging_script =~ ~S(hook_release_fifo="$hook_state_dir/hook-release")
+    assert hanging_script =~ ~S(timer_release_fifo="$hook_state_dir/timer-release")
+
+    assert hanging_script =~ ~S(kill -TERM "$hook_deadline_reader_pid" 2>/dev/null)
+    assert hanging_script =~ ~S(wait "$hook_deadline_sleep_pid")
+    assert hanging_script =~ ~S(wait "$hook_ready_reader_pid" 2>/dev/null)
+    assert hanging_script =~ ~S(wait "$timer_ready_reader_pid" 2>/dev/null)
+
+    assert hanging_script =~
+             ~S(IFS= read -r hook_ready_ack < "$hook_ready_ack_file" || hook_ready_ack_status=$?)
+
+    assert hanging_script =~
+             ~S(IFS= read -r timer_ready_ack < "$timer_ready_ack_file" || timer_ready_ack_status=$?)
+
+    assert hanging_script =~
+             ~S([ "$hook_ready_ack_status" -eq 0 ] && [ "$hook_ready_ack" = "ready:hook:$hook_pid" ] && [ -n "$hook_pgid" ] || exit 70)
+
+    assert hanging_script =~
+             ~S([ "$timer_ready_ack_status" -eq 0 ] && [ "$timer_ready_ack" = "ready:timer:$timer_pid" ] && [ -n "$timer_pgid" ] || exit 70)
+
+    assert hanging_script =~ ~S(printf 'release:timer\n' >&8 || exit 70)
+    assert hanging_script =~ ~S(printf 'release:hook\n' >&7 || exit 70)
+
+    refute hanging_script =~ "setsid-probe"
+
+    refute output =~ "__SYMPHONY_CONTEXT_WORKSPACE__\t"
+    refute File.exists?(hook_effect)
+    assert File.dir?(workspace)
+
+    nonce = remote_marker_nonce(hanging_script)
+    shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+    assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+  end
+
+  @tag :tmp_dir
+  test "remote hook launcher rejects a present setsid that does not create a process group", %{
+    tmp_dir: tmp_dir
+  } do
+    root = Path.join(tmp_dir, "remote-root")
+    workspace = Path.join([root, "alpha", "SID-NOOP-SETSID"])
+    hook_effect = Path.join(tmp_dir, "hook-effect")
+    fake_bin = Path.join(tmp_dir, "bin")
+    fake_setsid = Path.join(fake_bin, "setsid")
+
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context =
+      context(root, "alpha", "SID-NOOP-SETSID", hooks: hooks, worker_host: "worker")
+
+    File.mkdir_p!(workspace)
+    File.mkdir!(fake_bin)
+    File.write!(fake_setsid, "#!/bin/sh\nexec \"$@\"\n")
+    File.chmod!(fake_setsid, 0o755)
+    parent = self()
+
+    runner = fn _host, script, _timeout_ms ->
+      forced_script =
+        String.replace(
+          script,
+          ~r/^hook_probe_pgid=.*$/m,
+          "hook_probe_pgid=unsupported",
+          global: false
+        )
+
+      path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+      result =
+        System.cmd("/bin/sh", ["-c", forced_script],
+          env: [{"PATH", path}],
+          stderr_to_stdout: true
+        )
+
+      send(parent, {:noop_setsid_result, forced_script, result})
+      result
+    end
+
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.remove(context, ssh_runner: runner)
+
+    assert_received {:noop_setsid_result, forced_script, {output, 70}}
+    refute output =~ "__SYMPHONY_CONTEXT_WORKSPACE__\t"
+    refute File.exists?(hook_effect)
+    assert File.dir?(workspace)
+
+    nonce = remote_marker_nonce(forced_script)
+    shell_tmp_dir = System.get_env("TMPDIR") || "/tmp"
+    assert Path.wildcard(Path.join(shell_tmp_dir, ".symphony-hook-#{nonce}-*")) == []
+  end
+
+  @tag :tmp_dir
+  test "remote removal still ignores an intentional nonzero before-remove hook", %{
+    tmp_dir: tmp_dir
+  } do
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => "exit 23",
+      "before_run" => nil,
+      "timeout_ms" => 1_000
+    }
+
+    context =
+      context(Path.join(tmp_dir, "remote-root"), "alpha", "SID-FAILED-REMOVE",
+        hooks: hooks,
+        worker_host: "worker"
+      )
+
+    File.mkdir_p!(context.workspace_path)
+
+    assert {:ok, []} = Workspace.remove(context, ssh_runner: &run_generated_shell/3)
+    refute File.exists?(context.workspace_path)
+  end
+
+  @tag :tmp_dir
   test "remote before-remove timeout kills and reaps a TERM-resistant hook group", %{
     tmp_dir: tmp_dir
   } do
     root = Path.join(tmp_dir, "remote-root")
     workspace = Path.join([root, "alpha", "SID-TIMEOUT-GROUP"])
     release_fifo = Path.join(tmp_dir, "release.fifo")
+    timer_gate_fifo = Path.join(tmp_dir, "timer-gate.fifo")
     leader_pid_file = Path.join(tmp_dir, "leader.pid")
     descendant_pid_file = Path.join(tmp_dir, "descendant.pid")
     descendant_marker = Path.join(tmp_dir, "descendant-survived")
+    fake_bin = Path.join(tmp_dir, "bin")
+    fake_sleep = Path.join(fake_bin, "sleep")
+    real_sleep = System.find_executable("sleep") || "/bin/sleep"
 
     File.mkdir_p!(workspace)
+    File.mkdir!(fake_bin)
     assert {"", 0} = System.cmd("mkfifo", [release_fifo])
+    assert {"", 0} = System.cmd("mkfifo", [timer_gate_fifo])
     {:ok, release} = File.open(release_fifo, [:read, :write])
+
+    File.write!(fake_sleep, """
+    #!/bin/sh
+    if [ "$1" = 0.250 ]; then
+      IFS= read -r _ < #{SymphonyElixir.Shell.escape(timer_gate_fifo)}
+      exit 0
+    fi
+    exec #{SymphonyElixir.Shell.escape(real_sleep)} "$@"
+    """)
+
+    File.chmod!(fake_sleep, 0o755)
 
     descendant_command = """
     trap '' TERM
     printf '%s\n' "$$" > #{SymphonyElixir.Shell.escape(descendant_pid_file)}
+    printf 'hook-ready\n' > #{SymphonyElixir.Shell.escape(timer_gate_fifo)}
     IFS= read -r _ < #{SymphonyElixir.Shell.escape(release_fifo)}
     printf survived > #{SymphonyElixir.Shell.escape(descendant_marker)}
     """
@@ -899,10 +1518,23 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     runner = fn _host, script, timeout_ms ->
       nonce = remote_marker_nonce(script)
-      shell = System.find_executable("dash") || "/bin/sh"
+
+      shell =
+        if System.find_executable("setsid"),
+          do: System.find_executable("dash") || "/bin/sh",
+          else: "/bin/sh"
+
       send(parent, {:remote_deadline, timeout_ms})
       send(parent, {:remote_shell_script, script})
-      {output, status} = result = System.cmd(shell, ["-c", script], stderr_to_stdout: true)
+      path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+      {output, status} =
+        result =
+        System.cmd(shell, ["-c", script],
+          env: [{"PATH", path}],
+          stderr_to_stdout: true
+        )
+
       send(parent, {:remote_shell_result, output, status, nonce})
       result
     end
@@ -960,7 +1592,9 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "remote adapter timeout remains fixed after synchronous script execution", %{tmp_dir: tmp_dir} do
+  test "remote adapter timeout remains fixed after synchronous script execution", %{
+    tmp_dir: tmp_dir
+  } do
     root = Path.join(tmp_dir, "remote-root")
     context = context(root, "alpha", "SID-ADAPTER-TIMEOUT", worker_host: "worker")
     parent = self()
@@ -1748,6 +2382,16 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
   defp run_generated_shell(_host, script, _timeout_ms) do
     System.cmd("/bin/sh", ["-c", script], stderr_to_stdout: true)
+  end
+
+  defp isolated_process_group_exec do
+    case System.find_executable("setsid") do
+      nil ->
+        ~S|exec /usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$@"|
+
+      setsid ->
+        "exec #{SymphonyElixir.Shell.escape(setsid)} \"$@\""
+    end
   end
 
   defp resistant_hook_command(pid_file) do

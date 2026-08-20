@@ -15,6 +15,7 @@ defmodule SymphonyElixir.Workspace do
   @remote_transport_setup_timeout_ms 5_000
   @remote_cleanup_transport_grace_ms 1_000
   @remote_hook_termination_grace_ms 100
+  @remote_launcher_ready_timeout_ms 1_000
 
   @type worker_host :: String.t() | nil
 
@@ -55,6 +56,7 @@ defmodule SymphonyElixir.Workspace do
     rescue
       error in [ArgumentError, ErlangError, File.Error] ->
         Logger.error("Workspace creation failed #{issue_log_context(issue_context)} worker_host=#{worker_host_for_log(worker_host)} error=#{Exception.message(error)}")
+
         {:error, error}
     end
   end
@@ -108,7 +110,8 @@ defmodule SymphonyElixir.Workspace do
          true <- valid_context_hooks?(hooks),
          true <- valid_context_worker_host?(worker_host),
          expanded_root = Path.expand(root),
-         expected_workspace = expected_context_workspace(expanded_root, target_id, issue_identifier),
+         expected_workspace =
+           expected_context_workspace(expanded_root, target_id, issue_identifier),
          true <- pinned_workspace == expected_workspace,
          {:ok, validated_workspace} <-
            validate_context_workspace_location(expanded_root, expected_workspace, worker_host) do
@@ -465,7 +468,13 @@ defmodule SymphonyElixir.Workspace do
            |> String.split("\n", trim: true)
            |> Enum.filter(&String.starts_with?(&1, @context_remote_marker <> "\t")),
          [marker_line] <- marker_lines,
-         [@context_remote_marker, marker_nonce, canonical_root, canonical_workspace, marker_status] <-
+         [
+           @context_remote_marker,
+           marker_nonce,
+           canonical_root,
+           canonical_workspace,
+           marker_status
+         ] <-
            String.split(marker_line, "\t", trim: false),
          true <- marker_nonce == expected_nonce,
          true <- valid_context_remote_nonce?(marker_nonce),
@@ -637,7 +646,9 @@ defmodule SymphonyElixir.Workspace do
   defp context_hook_status(72, "timeout"), do: {:error, :workspace_remote_timeout}
   defp context_hook_status(0, "hooked"), do: :ok
   defp context_hook_status(_status, "hooked"), do: {:error, :workspace_hook_failed}
-  defp context_hook_status(_status, _marker_status), do: {:error, :workspace_remote_output_invalid}
+
+  defp context_hook_status(_status, _marker_status),
+    do: {:error, :workspace_remote_output_invalid}
 
   defp remote_context_delete_script(context, nonce) do
     before_remove = context.target.worktree_policy["hooks"]["before_remove"]
@@ -685,59 +696,241 @@ defmodule SymphonyElixir.Workspace do
     do: remote_timed_hook_lines(command, timeout_ms)
 
   defp remote_timed_hook_lines(command, timeout_ms) do
+    hook_command =
+      [
+        "exec 5>&- 6>&-",
+        "trap 'exit 70' 1 2 15",
+        "printf 'ready:hook:%s\\n' \"$$\" > \"$3\" || exit 70",
+        "hook_validation=",
+        "IFS= read -r hook_validation < \"$4\" || exit 70",
+        "[ \"$hook_validation\" = validate:hook ] || exit 70",
+        "printf 'validated:hook:%s\\n' \"$$\" > \"$3\" || exit 70",
+        "hook_release=",
+        "IFS= read -r hook_release < \"$4\" || exit 70",
+        "[ \"$hook_release\" = release:hook ] || exit 70",
+        "trap - 0 1 2 15",
+        ~S(cd -- "$1" && exec sh -lc "$2")
+      ]
+      |> Enum.join("\n")
+      |> Shell.escape()
+
+    timer_command =
+      timeout_ms
+      |> remote_hook_timer_lines()
+      |> Enum.join("\n")
+      |> Shell.escape()
+
     [
       "hook_status=0",
       "hook_timed_out=0",
       "hook_lifecycle_status=0",
+      "hook_probe_pid=",
+      "hook_pid=",
+      "hook_pgid=",
+      "hook_ready_reader_pid=",
+      "timer_ready_reader_pid=",
+      "hook_ready_deadline_pid=",
+      "timer_pid=",
+      "timer_pgid=",
+      "timer_ready_deadline_pid=",
       "hook_state_dir=\"${TMPDIR:-/tmp}/.symphony-hook-${marker_nonce}-$$\"",
       "hook_timeout_marker=\"$hook_state_dir/timeout\"",
       "hook_outcome_lock=\"$hook_state_dir/outcome\"",
-      "(umask 077 && mkdir -- \"$hook_state_dir\") || exit 70",
-      "hook_cleanup() { rm -rf -- \"$hook_state_dir\"; }",
+      "hook_ready_fifo=\"$hook_state_dir/hook-ready\"",
+      "timer_ready_fifo=\"$hook_state_dir/timer-ready\"",
+      "hook_release_fifo=\"$hook_state_dir/hook-release\"",
+      "timer_release_fifo=\"$hook_state_dir/timer-release\"",
+      "hook_ready_ack_file=\"$hook_state_dir/hook-ack\"",
+      "timer_ready_ack_file=\"$hook_state_dir/timer-ack\"",
+      "signal_hook_lifecycle() {",
+      "  hook_cleanup_pid=$1",
+      "  hook_cleanup_pgid=$2",
+      "  hook_cleanup_signal=$3",
+      "  if [ -n \"$hook_cleanup_pgid\" ]; then",
+      "    kill -\"$hook_cleanup_signal\" \"-$hook_cleanup_pgid\" 2>/dev/null",
+      "  elif [ -n \"$hook_cleanup_pid\" ]; then",
+      "    kill -\"$hook_cleanup_signal\" \"$hook_cleanup_pid\" 2>/dev/null",
+      "  fi",
+      "}",
+      "kill_hook_lifecycle_if_alive() {",
+      "  hook_cleanup_pid=$1",
+      "  hook_cleanup_pgid=$2",
+      "  if [ -n \"$hook_cleanup_pgid\" ]; then",
+      "    if kill -0 \"-$hook_cleanup_pgid\" 2>/dev/null; then",
+      "      kill -KILL \"-$hook_cleanup_pgid\" 2>/dev/null",
+      "    fi",
+      "  elif [ -n \"$hook_cleanup_pid\" ] && kill -0 \"$hook_cleanup_pid\" 2>/dev/null; then",
+      "    kill -KILL \"$hook_cleanup_pid\" 2>/dev/null",
+      "  fi",
+      "}",
+      "hook_read_ready() {",
+      "  hook_ready_fifo_path=$1",
+      "  hook_ready_ack_path=$2",
+      "  hook_ready_value=",
+      "  trap 'exit 70' 1 2 15",
+      "  IFS= read -r hook_ready_value < \"$hook_ready_fifo_path\" || exit 70",
+      "  printf '%s\\n' \"$hook_ready_value\" > \"$hook_ready_ack_path\" || exit 70",
+      "  trap - 0 1 2 15",
+      "}",
+      "hook_ready_deadline() {",
+      "  hook_deadline_role=$1",
+      "  hook_deadline_reader_pid=$2",
+      "  hook_deadline_sleep_pid=",
+      "  trap 'kill -TERM \"$hook_deadline_sleep_pid\" 2>/dev/null; wait \"$hook_deadline_sleep_pid\" 2>/dev/null; exit 0' 1 2 15",
+      "  sleep #{remote_timeout_seconds(@remote_launcher_ready_timeout_ms)} &",
+      "  hook_deadline_sleep_pid=$!",
+      "  wait \"$hook_deadline_sleep_pid\" 2>/dev/null",
+      "  hook_deadline_status=$?",
+      "  hook_deadline_sleep_pid=",
+      "  trap - 0 1 2 15",
+      "  [ \"$hook_deadline_status\" -eq 0 ] || exit 0",
+      "  kill -TERM \"$hook_deadline_reader_pid\" 2>/dev/null",
+      "}",
+      "hook_cleanup() {",
+      "  trap - 0 1 2 15",
+      "  set +e",
+      "  signal_hook_lifecycle \"$hook_ready_reader_pid\" '' TERM",
+      "  signal_hook_lifecycle \"$timer_ready_reader_pid\" '' TERM",
+      "  signal_hook_lifecycle \"$hook_ready_deadline_pid\" '' TERM",
+      "  signal_hook_lifecycle \"$timer_ready_deadline_pid\" '' TERM",
+      "  if [ -n \"$hook_ready_reader_pid\" ]; then wait \"$hook_ready_reader_pid\" 2>/dev/null; hook_ready_reader_pid=; fi",
+      "  if [ -n \"$timer_ready_reader_pid\" ]; then wait \"$timer_ready_reader_pid\" 2>/dev/null; timer_ready_reader_pid=; fi",
+      "  if [ -n \"$hook_ready_deadline_pid\" ]; then wait \"$hook_ready_deadline_pid\" 2>/dev/null; hook_ready_deadline_pid=; fi",
+      "  if [ -n \"$timer_ready_deadline_pid\" ]; then wait \"$timer_ready_deadline_pid\" 2>/dev/null; timer_ready_deadline_pid=; fi",
+      "  signal_hook_lifecycle \"$hook_probe_pid\" '' TERM",
+      "  signal_hook_lifecycle \"$hook_pid\" \"$hook_pgid\" TERM",
+      "  signal_hook_lifecycle \"$timer_pid\" \"$timer_pgid\" TERM",
+      "  if [ -n \"${hook_probe_pid}${hook_pid}${hook_pgid}${timer_pid}${timer_pgid}\" ]; then",
+      "    sleep #{remote_timeout_seconds(@remote_hook_termination_grace_ms)}",
+      "  fi",
+      "  kill_hook_lifecycle_if_alive \"$hook_probe_pid\" ''",
+      "  kill_hook_lifecycle_if_alive \"$hook_pid\" \"$hook_pgid\"",
+      "  kill_hook_lifecycle_if_alive \"$timer_pid\" \"$timer_pgid\"",
+      "  if [ -n \"$hook_probe_pid\" ]; then wait \"$hook_probe_pid\" 2>/dev/null; hook_probe_pid=; fi",
+      "  if [ -n \"$hook_pid\" ]; then wait \"$hook_pid\" 2>/dev/null; hook_pid=; fi",
+      "  if [ -n \"$timer_pid\" ]; then wait \"$timer_pid\" 2>/dev/null; timer_pid=; fi",
+      "  hook_pgid=",
+      "  timer_pgid=",
+      "  rm -rf -- \"$hook_state_dir\"",
+      "}",
       "trap 'hook_cleanup' 0",
       "trap 'exit 70' 1 2 15",
+      "(umask 077 && mkdir -- \"$hook_state_dir\") || exit 70",
+      "mkfifo \"$hook_ready_fifo\" \"$timer_ready_fifo\" \"$hook_release_fifo\" \"$timer_release_fifo\" || exit 70",
       "set +e",
-      "set -m",
-      "(cd -- \"$canonical_workspace\" && exec sh -lc #{Shell.escape(command)}) &",
-      "hook_pid=$!",
-      "set +m",
-      "set -m",
-      "(",
-      "  trap - 0 1 2 15",
-      "  sleep #{remote_timeout_seconds(timeout_ms)}",
-      "  if mkdir -- \"$hook_outcome_lock\" 2>/dev/null; then",
-      "    if ! : > \"$hook_timeout_marker\"; then",
-      "      kill -KILL \"-$hook_pid\" 2>/dev/null",
-      "      exit 73",
-      "    fi",
-      "    kill -TERM \"-$hook_pid\" 2>/dev/null",
-      "    sleep #{remote_timeout_seconds(@remote_hook_termination_grace_ms)}",
-      "    if kill -0 \"-$hook_pid\" 2>/dev/null; then",
-      "      kill -KILL \"-$hook_pid\" 2>/dev/null",
-      "    fi",
-      "    exit 72",
-      "  fi",
-      "  exit 0",
-      ") &",
-      "timer_pid=$!",
-      "set +m",
+      "set -m 2>/dev/null",
+      "(sleep 1) &",
+      "hook_probe_pid=$!",
+      "set +m 2>/dev/null",
+      "hook_probe_pgid=$(ps -o pgid= -p \"$hook_probe_pid\" 2>/dev/null | LC_ALL=C tr -d '[:space:]')",
+      "kill -TERM \"$hook_probe_pid\" 2>/dev/null",
+      "wait \"$hook_probe_pid\" 2>/dev/null",
+      "hook_probe_completed_pid=$hook_probe_pid",
+      "hook_probe_pid=",
+      "if [ \"$hook_probe_pgid\" = \"$hook_probe_completed_pid\" ]; then",
+      "  hook_launcher=job_control",
+      "elif command -v setsid >/dev/null 2>&1; then",
+      "  hook_launcher=setsid",
+      "else",
+      "  exit 70",
+      "fi",
+      "hook_read_ready \"$hook_ready_fifo\" \"$hook_ready_ack_file\" &",
+      "hook_ready_reader_pid=$!",
+      "hook_read_ready \"$timer_ready_fifo\" \"$timer_ready_ack_file\" &",
+      "timer_ready_reader_pid=$!",
+      "hook_ready_deadline hook \"$hook_ready_reader_pid\" &",
+      "hook_ready_deadline_pid=$!",
+      "hook_ready_deadline timer \"$timer_ready_reader_pid\" &",
+      "timer_ready_deadline_pid=$!",
+      "if [ \"$hook_launcher\" = job_control ]; then",
+      "  set -m",
+      "  sh -c #{hook_command} sh \"$canonical_workspace\" #{Shell.escape(command)} \"$hook_ready_fifo\" \"$hook_release_fifo\" &",
+      "  hook_pid=$!",
+      "  sh -c #{timer_command} sh \"$hook_pid\" \"$hook_timeout_marker\" \"$hook_outcome_lock\" \"$timer_ready_fifo\" \"$timer_release_fifo\" &",
+      "  timer_pid=$!",
+      "  set +m",
+      "else",
+      "  setsid sh -c #{hook_command} sh \"$canonical_workspace\" #{Shell.escape(command)} \"$hook_ready_fifo\" \"$hook_release_fifo\" &",
+      "  hook_pid=$!",
+      "  setsid sh -c #{timer_command} sh \"$hook_pid\" \"$hook_timeout_marker\" \"$hook_outcome_lock\" \"$timer_ready_fifo\" \"$timer_release_fifo\" &",
+      "  timer_pid=$!",
+      "fi",
+      "wait \"$hook_ready_reader_pid\" 2>/dev/null",
+      "hook_ready_ack_status=$?",
+      "hook_ready_reader_pid=",
+      "kill -TERM \"$hook_ready_deadline_pid\" 2>/dev/null",
+      "wait \"$hook_ready_deadline_pid\" 2>/dev/null",
+      "hook_ready_deadline_pid=",
+      "hook_ready_ack=",
+      "if [ \"$hook_ready_ack_status\" -eq 0 ]; then IFS= read -r hook_ready_ack < \"$hook_ready_ack_file\" || hook_ready_ack_status=$?; fi",
+      "hook_candidate_pgid=$(ps -o pgid= -p \"$hook_pid\" 2>/dev/null | LC_ALL=C tr -d '[:space:]')",
+      "if [ -n \"$hook_pid\" ] && [ \"$hook_pid\" != \"$$\" ] && [ \"$hook_candidate_pgid\" = \"$hook_pid\" ]; then hook_pgid=$hook_candidate_pgid; fi",
+      "[ \"$hook_ready_ack_status\" -eq 0 ] && [ \"$hook_ready_ack\" = \"ready:hook:$hook_pid\" ] && [ -n \"$hook_pgid\" ] || exit 70",
+      "wait \"$timer_ready_reader_pid\" 2>/dev/null",
+      "timer_ready_ack_status=$?",
+      "timer_ready_reader_pid=",
+      "kill -TERM \"$timer_ready_deadline_pid\" 2>/dev/null",
+      "wait \"$timer_ready_deadline_pid\" 2>/dev/null",
+      "timer_ready_deadline_pid=",
+      "timer_ready_ack=",
+      "if [ \"$timer_ready_ack_status\" -eq 0 ]; then IFS= read -r timer_ready_ack < \"$timer_ready_ack_file\" || timer_ready_ack_status=$?; fi",
+      "timer_candidate_pgid=$(ps -o pgid= -p \"$timer_pid\" 2>/dev/null | LC_ALL=C tr -d '[:space:]')",
+      "if [ -n \"$timer_pid\" ] && [ \"$timer_pid\" != \"$$\" ] && [ \"$timer_candidate_pgid\" = \"$timer_pid\" ]; then timer_pgid=$timer_candidate_pgid; fi",
+      "[ \"$timer_ready_ack_status\" -eq 0 ] && [ \"$timer_ready_ack\" = \"ready:timer:$timer_pid\" ] && [ -n \"$timer_pgid\" ] || exit 70",
+      "exec 7<> \"$hook_release_fifo\" || exit 70",
+      "exec 8<> \"$timer_release_fifo\" || exit 70",
+      "hook_read_ready \"$hook_ready_fifo\" \"$hook_ready_ack_file\" &",
+      "hook_ready_reader_pid=$!",
+      "hook_read_ready \"$timer_ready_fifo\" \"$timer_ready_ack_file\" &",
+      "timer_ready_reader_pid=$!",
+      "hook_ready_deadline hook \"$hook_ready_reader_pid\" &",
+      "hook_ready_deadline_pid=$!",
+      "hook_ready_deadline timer \"$timer_ready_reader_pid\" &",
+      "timer_ready_deadline_pid=$!",
+      "printf 'validate:hook\\n' >&7 || exit 70",
+      "printf 'release:timer\\n' >&8 || exit 70",
+      "wait \"$hook_ready_reader_pid\" 2>/dev/null",
+      "hook_ready_ack_status=$?",
+      "hook_ready_reader_pid=",
+      "kill -TERM \"$hook_ready_deadline_pid\" 2>/dev/null",
+      "wait \"$hook_ready_deadline_pid\" 2>/dev/null",
+      "hook_ready_deadline_pid=",
+      "hook_ready_ack=",
+      "if [ \"$hook_ready_ack_status\" -eq 0 ]; then IFS= read -r hook_ready_ack < \"$hook_ready_ack_file\" || hook_ready_ack_status=$?; fi",
+      "[ \"$hook_ready_ack_status\" -eq 0 ] && [ \"$hook_ready_ack\" = \"validated:hook:$hook_pid\" ] || exit 70",
+      "wait \"$timer_ready_reader_pid\" 2>/dev/null",
+      "timer_ready_ack_status=$?",
+      "timer_ready_reader_pid=",
+      "kill -TERM \"$timer_ready_deadline_pid\" 2>/dev/null",
+      "wait \"$timer_ready_deadline_pid\" 2>/dev/null",
+      "timer_ready_deadline_pid=",
+      "timer_ready_ack=",
+      "if [ \"$timer_ready_ack_status\" -eq 0 ]; then IFS= read -r timer_ready_ack < \"$timer_ready_ack_file\" || timer_ready_ack_status=$?; fi",
+      "[ \"$timer_ready_ack_status\" -eq 0 ] && [ \"$timer_ready_ack\" = \"armed:timer:$timer_pid\" ] || exit 70",
+      "printf 'release:hook\\n' >&7 || exit 70",
+      "exec 7>&-",
+      "exec 8>&-",
       "wait \"$hook_pid\"",
       "hook_status=$?",
+      "hook_pid=",
       "if mkdir -- \"$hook_outcome_lock\" 2>/dev/null; then",
-      "  if kill -0 \"-$timer_pid\" 2>/dev/null; then",
-      "    kill -TERM \"-$timer_pid\" 2>/dev/null",
-      "  fi",
+      "  signal_hook_lifecycle \"$timer_pid\" \"$timer_pgid\" TERM",
+      "  signal_hook_lifecycle '' \"$hook_pgid\" TERM",
+      "  sleep #{remote_timeout_seconds(@remote_hook_termination_grace_ms)}",
+      "  kill_hook_lifecycle_if_alive \"$timer_pid\" \"$timer_pgid\"",
+      "  kill_hook_lifecycle_if_alive '' \"$hook_pgid\"",
       "  wait \"$timer_pid\"",
-      "  if kill -0 \"-$hook_pid\" 2>/dev/null; then",
-      "    kill -TERM \"-$hook_pid\" 2>/dev/null",
-      "    sleep #{remote_timeout_seconds(@remote_hook_termination_grace_ms)}",
-      "    if kill -0 \"-$hook_pid\" 2>/dev/null; then",
-      "      kill -KILL \"-$hook_pid\" 2>/dev/null",
-      "    fi",
-      "  fi",
+      "  timer_status=$?",
+      "  timer_pid=",
+      "  timer_pgid=",
+      "  hook_pgid=",
+      "  if [ \"$timer_status\" -ne 0 ]; then hook_lifecycle_status=70; fi",
       "else",
       "  wait \"$timer_pid\"",
       "  timer_status=$?",
+      "  timer_pid=",
+      "  timer_pgid=",
+      "  hook_pgid=",
       "  if [ \"$timer_status\" -eq 72 ] && [ -f \"$hook_timeout_marker\" ]; then",
       "    hook_timed_out=1",
       "  else",
@@ -748,6 +941,60 @@ defmodule SymphonyElixir.Workspace do
       "trap - 0 1 2 15",
       "set -e",
       "[ \"$hook_lifecycle_status\" -eq 0 ] || exit 70"
+    ]
+  end
+
+  defp remote_hook_timer_lines(timeout_ms) do
+    [
+      "hook_pid=$1",
+      "hook_timeout_marker=$2",
+      "hook_outcome_lock=$3",
+      "timer_ready_fifo=$4",
+      "timer_release_fifo=$5",
+      "timer_sleep_pid=",
+      "timer_cleanup() {",
+      "  trap - 0 1 2 15",
+      "  set +e",
+      "  if [ -n \"$timer_sleep_pid\" ]; then",
+      "    kill -TERM \"$timer_sleep_pid\" 2>/dev/null",
+      "    wait \"$timer_sleep_pid\" 2>/dev/null",
+      "    timer_sleep_pid=",
+      "  fi",
+      "}",
+      "exec 5>&- 6>&-",
+      "trap 'timer_cleanup' 0",
+      "trap 'exit 70' 1 2",
+      "trap 'exit 0' 15",
+      "printf 'ready:timer:%s\\n' \"$$\" > \"$timer_ready_fifo\" || exit 70",
+      "timer_release=",
+      "IFS= read -r timer_release < \"$timer_release_fifo\" || exit 70",
+      "[ \"$timer_release\" = release:timer ] || exit 70",
+      "sleep #{remote_timeout_seconds(timeout_ms)} &",
+      "timer_sleep_pid=$!",
+      "kill -0 \"$timer_sleep_pid\" 2>/dev/null || exit 70",
+      "printf 'armed:timer:%s\\n' \"$$\" > \"$timer_ready_fifo\" || exit 70",
+      "wait \"$timer_sleep_pid\"",
+      "timer_sleep_status=$?",
+      "timer_sleep_pid=",
+      "[ \"$timer_sleep_status\" -eq 0 ] || exit 70",
+      "if mkdir -- \"$hook_outcome_lock\" 2>/dev/null; then",
+      "  if ! : > \"$hook_timeout_marker\"; then",
+      "    kill -KILL \"-$hook_pid\" 2>/dev/null",
+      "    exit 73",
+      "  fi",
+      "  kill -TERM \"-$hook_pid\" 2>/dev/null",
+      "  sleep #{remote_timeout_seconds(@remote_hook_termination_grace_ms)} &",
+      "  timer_sleep_pid=$!",
+      "  wait \"$timer_sleep_pid\"",
+      "  timer_sleep_status=$?",
+      "  timer_sleep_pid=",
+      "  [ \"$timer_sleep_status\" -eq 0 ] || exit 73",
+      "  if kill -0 \"-$hook_pid\" 2>/dev/null; then",
+      "    kill -KILL \"-$hook_pid\" 2>/dev/null",
+      "  fi",
+      "  exit 72",
+      "fi",
+      "exit 0"
     ]
   end
 
@@ -1146,7 +1393,8 @@ defmodule SymphonyElixir.Workspace do
   def remove_issue_workspaces(identifier), do: remove_issue_workspaces(identifier, nil)
 
   @spec remove_issue_workspaces(term(), worker_host()) :: :ok
-  def remove_issue_workspaces(identifier, worker_host) when is_binary(identifier) and is_binary(worker_host) do
+  def remove_issue_workspaces(identifier, worker_host)
+      when is_binary(identifier) and is_binary(worker_host) do
     safe_id = safe_identifier(identifier)
 
     {:ok, workspace} = workspace_path_for_issue(safe_id, worker_host)
@@ -1200,7 +1448,8 @@ defmodule SymphonyElixir.Workspace do
 
   @spec run_before_run_hook(Path.t(), map() | String.t() | nil, worker_host()) ::
           :ok | {:error, term()}
-  def run_before_run_hook(workspace, issue_or_identifier, worker_host) when is_binary(workspace) do
+  def run_before_run_hook(workspace, issue_or_identifier, worker_host)
+      when is_binary(workspace) do
     issue_context = issue_context(issue_or_identifier)
     hooks = Config.settings!().hooks
 
@@ -1286,7 +1535,8 @@ defmodule SymphonyElixir.Workspace do
     |> PathSafety.canonicalize()
   end
 
-  defp workspace_path_for_issue(safe_id, worker_host) when is_binary(safe_id) and is_binary(worker_host) do
+  defp workspace_path_for_issue(safe_id, worker_host)
+       when is_binary(safe_id) and is_binary(worker_host) do
     {:ok, Path.join(Config.settings!().workspace.root, safe_id)}
   end
 
@@ -1398,12 +1648,17 @@ defmodule SymphonyElixir.Workspace do
     end
   end
 
-  defp run_hook(command, workspace, issue_context, hook_name, worker_host) when is_binary(worker_host) do
+  defp run_hook(command, workspace, issue_context, hook_name, worker_host)
+       when is_binary(worker_host) do
     timeout_ms = Config.settings!().hooks.timeout_ms
 
     Logger.info("Running workspace hook hook=#{hook_name} #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host}")
 
-    case run_remote_command(worker_host, "cd #{Shell.escape(workspace)} && #{command}", timeout_ms) do
+    case run_remote_command(
+           worker_host,
+           "cd #{Shell.escape(workspace)} && #{command}",
+           timeout_ms
+         ) do
       {:ok, cmd_result} ->
         handle_hook_command_result(cmd_result, workspace, issue_context, hook_name)
 
@@ -1507,7 +1762,8 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp run_remote_command(worker_host, script, timeout_ms)
-       when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and timeout_ms > 0 do
+       when is_binary(worker_host) and is_binary(script) and is_integer(timeout_ms) and
+              timeout_ms > 0 do
     task =
       Task.async(fn ->
         SSH.run(worker_host, script, stderr_to_stdout: true)

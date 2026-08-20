@@ -30,9 +30,10 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "context HarnessHome resolves pinned relative configuration and ignores the override environment", %{
-    tmp_dir: tmp_dir
-  } do
+  test "context HarnessHome resolves pinned relative configuration and ignores the override environment",
+       %{
+         tmp_dir: tmp_dir
+       } do
     previous_home = System.get_env("SYMPHONY_CODEX_HOME")
     on_exit(fn -> restore_env("SYMPHONY_CODEX_HOME", previous_home) end)
     System.put_env("SYMPHONY_CODEX_HOME", "/poisoned/codex-home")
@@ -157,7 +158,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "context Launch starts the pinned local Codex runner with safe provenance", %{tmp_dir: tmp_dir} do
+  test "context Launch starts the pinned local Codex runner with safe provenance", %{
+    tmp_dir: tmp_dir
+  } do
     context =
       execution_context(tmp_dir,
         codex_home: nil,
@@ -288,7 +291,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "context Launch rejects a forged workspace before local process effects", %{tmp_dir: tmp_dir} do
+  test "context Launch rejects a forged workspace before local process effects", %{
+    tmp_dir: tmp_dir
+  } do
     context = execution_context(tmp_dir, codex_home: nil)
     forged = %{context | workspace_path: Path.join(tmp_dir, "forged-workspace")}
     parent = self()
@@ -467,7 +472,10 @@ defmodule SymphonyElixir.Codex.LaunchTest do
     assert {:error, :invalid_argv} =
              Launch.start(invalid_argv, process_starter: process_starter)
 
-    forged_runner = %{context | runner_config: Map.put(context.runner_config, "command", ["forged"])}
+    forged_runner = %{
+      context
+      | runner_config: Map.put(context.runner_config, "command", ["forged"])
+    }
 
     assert {:error, :invalid_launch_context} =
              Launch.start(forged_runner, process_starter: process_starter)
@@ -540,29 +548,61 @@ defmodule SymphonyElixir.Codex.LaunchTest do
     File.mkdir_p!(context_b.workspace_path)
 
     parent = self()
+    launch_gate = make_ref()
 
     process_starter = fn argv, opts ->
       send(parent, {:launch_ready, self(), argv, opts})
 
       receive do
-        :continue ->
+        {:continue_launch, ^launch_gate} ->
           {:ok, %{port: {:port, self()}, process: {:process, self()}}}
+      after
+        5_000 -> {:error, :launch_test_continue_timeout}
       end
     end
 
-    task_a = Task.async(fn -> Launch.start(context_a, process_starter: process_starter) end)
-    task_b = Task.async(fn -> Launch.start(context_b, process_starter: process_starter) end)
+    task_a =
+      Task.async(fn ->
+        send(parent, {:launch_task_ready, :a, self()})
 
-    assert_receive {:launch_ready, starter_a, argv_a, opts_a}, 1_000
-    assert_receive {:launch_ready, starter_b, argv_b, opts_b}, 1_000
+        receive do
+          {:start_launch, ^launch_gate} ->
+            Launch.start(context_a, process_starter: process_starter)
+        after
+          5_000 -> {:error, :launch_test_start_timeout}
+        end
+      end)
+
+    task_b =
+      Task.async(fn ->
+        send(parent, {:launch_task_ready, :b, self()})
+
+        receive do
+          {:start_launch, ^launch_gate} ->
+            Launch.start(context_b, process_starter: process_starter)
+        after
+          5_000 -> {:error, :launch_test_start_timeout}
+        end
+      end)
+
+    assert_receive {:launch_task_ready, :a, task_a_pid}, 5_000
+    assert_receive {:launch_task_ready, :b, task_b_pid}, 5_000
+    assert task_a_pid == task_a.pid
+    assert task_b_pid == task_b.pid
+
+    send(task_a_pid, {:start_launch, launch_gate})
+    send(task_b_pid, {:start_launch, launch_gate})
+
+    assert_receive {:launch_ready, starter_a, argv_a, opts_a}, 5_000
+    assert_receive {:launch_ready, starter_b, argv_b, opts_b}, 5_000
 
     System.put_env("SYMPHONY_CODEX_HOME", "/poisoned/home")
     Application.put_env(:symphony_elixir, :workflow_file_path, "/poisoned/manifest")
-    send(starter_a, :continue)
-    send(starter_b, :continue)
+    send(starter_a, {:continue_launch, launch_gate})
+    send(starter_b, {:continue_launch, launch_gate})
 
-    assert {:ok, result_a} = Task.await(task_a)
-    assert {:ok, result_b} = Task.await(task_b)
+    assert {:ok, result_a} = Task.await(task_a, 5_000)
+    assert {:ok, result_b} = Task.await(task_b, 5_000)
 
     launch_calls = [{argv_a, opts_a}, {argv_b, opts_b}]
 
@@ -604,7 +644,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "context Launch normalizes hostile pre-starter exceptions without effects", %{tmp_dir: tmp_dir} do
+  test "context Launch normalizes hostile pre-starter exceptions without effects", %{
+    tmp_dir: tmp_dir
+  } do
     secret = "secret-sentinel-hostile-context"
     context = execution_context(tmp_dir, codex_home: nil)
     hostile = %{context | execution_profile: secret}
@@ -689,7 +731,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "context Launch normalizes starter error and malformed success results", %{tmp_dir: tmp_dir} do
+  test "context Launch normalizes starter error and malformed success results", %{
+    tmp_dir: tmp_dir
+  } do
     context = execution_context(tmp_dir, codex_home: nil)
     File.mkdir_p!(context.workspace_path)
 
@@ -749,7 +793,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
   end
 
   @tag :tmp_dir
-  test "legacy Launch preserves argv override home and executable lookup contracts", %{tmp_dir: tmp_dir} do
+  test "legacy Launch preserves argv override home and executable lookup contracts", %{
+    tmp_dir: tmp_dir
+  } do
     previous_home = System.get_env("SYMPHONY_CODEX_HOME")
     on_exit(fn -> restore_env("SYMPHONY_CODEX_HOME", previous_home) end)
 
