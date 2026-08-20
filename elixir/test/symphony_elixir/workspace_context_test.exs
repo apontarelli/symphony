@@ -1347,8 +1347,29 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert hanging_script =~
              ~S([ "$timer_ready_ack_status" -eq 0 ] && [ "$timer_ready_ack" = "ready:timer:$timer_pid" ] && [ -n "$timer_pgid" ] || exit 70)
 
+    timer_validation =
+      ~S([ "$timer_ready_ack_status" -eq 0 ] && [ "$timer_ready_ack" = "validated:timer:$timer_pid" ] || exit 70)
+
+    timer_started =
+      ~S([ "$timer_ready_ack_status" -eq 0 ] && [ "$timer_ready_ack" = "started:timer:$timer_pid" ] || exit 70)
+
+    assert hanging_script =~ timer_validation
+    assert hanging_script =~ timer_started
     assert hanging_script =~ ~S(printf 'release:timer\n' >&8 || exit 70)
     assert hanging_script =~ ~S(printf 'release:hook\n' >&7 || exit 70)
+    {timer_validation_offset, _length} = :binary.match(hanging_script, timer_validation)
+
+    {hook_release_offset, _length} =
+      :binary.match(hanging_script, ~S(printf 'release:hook\n' >&7 || exit 70))
+
+    {timer_release_offset, _length} =
+      :binary.match(hanging_script, ~S(printf 'release:timer\n' >&8 || exit 70))
+
+    {timer_started_offset, _length} = :binary.match(hanging_script, timer_started)
+
+    assert timer_validation_offset < hook_release_offset
+    assert hook_release_offset < timer_release_offset
+    assert timer_release_offset < timer_started_offset
 
     refute hanging_script =~ "setsid-probe"
 
@@ -1613,14 +1634,19 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "remote hook script preserves fast success", %{tmp_dir: tmp_dir} do
+  test "remote hook script releases a fast hook before timer startup", %{tmp_dir: tmp_dir} do
     marker = Path.join(tmp_dir, "fast-hook")
+    timer_start_gate = Path.join(tmp_dir, "timer-start-gate.fifo")
+    assert {"", 0} = System.cmd("mkfifo", [timer_start_gate])
 
     hooks = %{
       "after_create" => nil,
       "after_run" => nil,
       "before_remove" => nil,
-      "before_run" => "printf success > #{SymphonyElixir.Shell.escape(marker)}",
+      "before_run" => """
+      printf 'hook-released\n' > #{SymphonyElixir.Shell.escape(timer_start_gate)}
+      printf success > #{SymphonyElixir.Shell.escape(marker)}
+      """,
       "timeout_ms" => 1_000
     }
 
@@ -1631,12 +1657,33 @@ defmodule SymphonyElixir.WorkspaceContextTest do
       )
 
     issue = %Issue{id: context.issue_id, identifier: context.issue_identifier}
-    runner = &run_generated_shell/3
 
-    assert {:ok, workspace} = Workspace.create_for_issue(context, ssh_runner: runner)
+    assert {:ok, workspace} =
+             Workspace.create_for_issue(context, ssh_runner: &run_generated_shell/3)
+
     assert workspace == context.workspace_path
 
-    assert :ok = Workspace.run_before_run_hook(context, issue, ssh_runner: runner)
+    hook_runner = fn _host, script, _timeout_ms ->
+      timer_start_check = ~S(kill -0 "$timer_sleep_pid" 2>/dev/null || exit 70)
+
+      gated_script =
+        String.replace(
+          script,
+          timer_start_check,
+          timer_start_check <>
+            "\n" <> ~S(IFS= read -r timer_start_gate < "$SYMPHONY_TIMER_START_GATE" || exit 70),
+          global: false
+        )
+
+      refute gated_script == script
+
+      System.cmd("/bin/sh", ["-c", gated_script],
+        env: [{"SYMPHONY_TIMER_START_GATE", timer_start_gate}],
+        stderr_to_stdout: true
+      )
+    end
+
+    assert :ok = Workspace.run_before_run_hook(context, issue, ssh_runner: hook_runner)
     assert File.read!(marker) == "success"
   end
 
