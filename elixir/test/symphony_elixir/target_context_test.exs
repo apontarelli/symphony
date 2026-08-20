@@ -220,8 +220,8 @@ defmodule SymphonyElixir.TargetContextTest do
 
     contexts =
       Map.new(tasks, fn {target_id, {task, variable, credential}} ->
-        assert_receive {:secret_resolved, ^target_id, ^variable}
         assert {:ok, context} = Task.await(task)
+        assert_receive {:secret_resolved, ^target_id, ^variable}
         assert context.tracker_connection["policy"]["api_key"] == credential
         {target_id, context}
       end)

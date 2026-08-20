@@ -1660,6 +1660,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
 
       orchestrator_name = Module.concat(__MODULE__, :PolicyRunningOrchestrator)
+      :ok = SymphonyElixirWeb.ObservabilityPubSub.subscribe()
       {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
       on_exit(fn ->
@@ -1667,17 +1668,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end)
 
       running_entry =
-        wait_for_running_entry(
-          pid,
-          issue.id,
-          fn running_entry ->
-            running_entry.session_id == "thread-policy-running-turn-policy-running" and
-              running_entry.profile == "strict" and
-              running_entry.target == "project/old" and
-              running_entry.policy["checks"] == ["old-policy"]
-          end,
-          1_000
-        )
+        wait_for_observed_running_entry(orchestrator_name, issue.identifier, fn running_entry ->
+          running_entry.session_id == "thread-policy-running-turn-policy-running" and
+            running_entry.profile == "strict" and
+            running_entry.target == "project/old" and
+            running_entry.policy["checks"] == ["old-policy"]
+        end)
 
       pinned_policy = running_entry.policy
       assert %{running: [snapshot_entry]} = GenServer.call(pid, :snapshot)
@@ -1709,6 +1705,33 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "observed running entry wait times out with the last public snapshot" do
+    orchestrator_name = Module.concat(__MODULE__, :MissingObservedRunningEntryOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      stop_orchestrator_and_workers(pid)
+    end)
+
+    assert %{running: []} = Orchestrator.snapshot(orchestrator_name, 5_000)
+
+    send(self(), :observability_updated)
+
+    error =
+      assert_raise ExUnit.AssertionError, fn ->
+        wait_for_observed_running_entry(
+          orchestrator_name,
+          "MT-MISSING",
+          fn _running_entry -> true end,
+          5_000
+        )
+      end
+
+    assert error.message =~ "MT-MISSING"
+    assert error.message =~ "last public orchestrator snapshot/state observed:"
+    assert error.message =~ "running: []"
   end
 
   test "two local orchestrators share candidate cache and coordinator leases" do
@@ -2739,8 +2762,37 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       end
     end)
 
+    # The refresh can wait on Orchestrator.snapshot/0 for up to 15 seconds.
+    # This system-state request is a causal barrier for the preceding refresh messages.
+    await_dashboard_state = fn phase, predicate ->
+      try do
+        state = :sys.get_state(pid, 20_000)
+
+        assert predicate.(state),
+               "status dashboard acknowledged #{phase} without reaching the expected state: " <>
+                 "state=#{inspect(state)} process=#{inspect(Process.info(pid))}"
+
+        state
+      catch
+        :exit, reason ->
+          flunk(
+            "status dashboard did not acknowledge #{phase}: " <>
+              "reason=#{inspect(reason)} process=#{inspect(Process.info(pid))}"
+          )
+      end
+    end
+
     StatusDashboard.notify_update(dashboard_name)
-    assert_receive {:render, first_render_ms, _content}, 200
+
+    first_state =
+      await_dashboard_state.(:first_refresh, &is_integer(&1.last_rendered_at_ms))
+
+    assert is_integer(first_state.last_rendered_at_ms),
+           "first refresh was acknowledged without a render: state=#{inspect(first_state)}"
+
+    assert_receive {:render, first_render_ms, _content},
+                   200,
+                   "first refresh was acknowledged but no render arrived: state=#{inspect(first_state)}"
 
     :sys.replace_state(pid, fn state ->
       %{state | last_snapshot_fingerprint: :force_next_change, last_rendered_content: nil}
@@ -2749,7 +2801,27 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     StatusDashboard.notify_update(dashboard_name)
     StatusDashboard.notify_update(dashboard_name)
 
-    assert_receive {:render, second_render_ms, _content}, 200
+    coalesced_state =
+      await_dashboard_state.(:coalesced_refreshes, fn state ->
+        state.last_rendered_at_ms > first_state.last_rendered_at_ms or
+          (is_binary(state.pending_content) and is_reference(state.flush_timer_ref))
+      end)
+
+    render_completed = coalesced_state.last_rendered_at_ms > first_state.last_rendered_at_ms
+
+    render_scheduled =
+      is_binary(coalesced_state.pending_content) and
+        is_reference(coalesced_state.flush_timer_ref)
+
+    assert render_completed or render_scheduled,
+           "coalesced refreshes were acknowledged without a render or flush: " <>
+             "state=#{inspect(coalesced_state)}"
+
+    assert_receive {:render, second_render_ms, _content},
+                   200,
+                   "coalesced refreshes were acknowledged but no render arrived: " <>
+                     "state=#{inspect(coalesced_state)} process=#{inspect(Process.info(pid))}"
+
     assert second_render_ms > first_render_ms
     refute_receive {:render, _third_render_ms, _content}, 60
   end
@@ -2854,22 +2926,25 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
   test "status dashboard renders last codex message in EVENT column" do
     row =
-      StatusDashboard.format_running_summary_for_test(%{
-        identifier: "MT-233",
-        state: "running",
-        session_id: "thread-1234567890",
-        adapter: adapter_diagnostics("4242"),
-        runtime_total_tokens: 12,
-        runtime_seconds: 15,
-        last_runtime_event: :notification,
-        last_runtime_message: %{
-          event: :notification,
-          message: %{
-            "method" => "turn/completed",
-            "params" => %{"turn" => %{"status" => "completed"}}
+      StatusDashboard.format_running_summary_for_test(
+        %{
+          identifier: "MT-233",
+          state: "running",
+          session_id: "thread-1234567890",
+          adapter: adapter_diagnostics("4242"),
+          runtime_total_tokens: 12,
+          runtime_seconds: 15,
+          last_runtime_event: :notification,
+          last_runtime_message: %{
+            event: :notification,
+            message: %{
+              "method" => "turn/completed",
+              "params" => %{"turn" => %{"status" => "completed"}}
+            }
           }
-        }
-      })
+        },
+        140
+      )
 
     plain = Regex.replace(~r/\e\[[\\d;]*m/, row, "")
 
@@ -3150,6 +3225,69 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         do_wait_for_snapshot(pid, predicate, deadline_ms)
       end
     end
+  end
+
+  defp wait_for_observed_running_entry(server, identifier, predicate, timeout_ms \\ 5_000)
+       when is_function(predicate, 1) and is_integer(timeout_ms) and timeout_ms >= 0 do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+
+    do_wait_for_observed_running_entry(
+      server,
+      identifier,
+      predicate,
+      deadline_ms,
+      :no_snapshot_observed
+    )
+  end
+
+  defp do_wait_for_observed_running_entry(
+         server,
+         identifier,
+         predicate,
+         deadline_ms,
+         last_snapshot
+       ) do
+    remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
+
+    if remaining_ms <= 0 do
+      flunk_observed_running_entry(identifier, last_snapshot)
+    else
+      receive do
+        :observability_updated ->
+          snapshot = Orchestrator.snapshot(server, remaining_ms)
+
+          running_entry =
+            case snapshot do
+              %{running: running} ->
+                Enum.find(running, &(&1.identifier == identifier))
+
+              _other ->
+                nil
+            end
+
+          if is_map(running_entry) and predicate.(running_entry) do
+            running_entry
+          else
+            do_wait_for_observed_running_entry(
+              server,
+              identifier,
+              predicate,
+              deadline_ms,
+              snapshot
+            )
+          end
+      after
+        remaining_ms ->
+          flunk_observed_running_entry(identifier, last_snapshot)
+      end
+    end
+  end
+
+  defp flunk_observed_running_entry(identifier, last_snapshot) do
+    flunk("""
+    timed out waiting for observed running entry #{inspect(identifier)} to match its predicate
+    last public orchestrator snapshot/state observed: #{inspect(last_snapshot)}
+    """)
   end
 
   defp wait_for_retry_entry(pid, issue_id, predicate, timeout_ms \\ 1_000)

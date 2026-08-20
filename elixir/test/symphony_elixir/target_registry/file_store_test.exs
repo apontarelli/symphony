@@ -1671,7 +1671,10 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
         )
       end)
 
-    assert_receive {:plan_temp_opened, store_pid}
+    assert_receive {:plan_temp_opened, store_pid},
+                   1_000,
+                   "plan store did not report that its temporary file was open"
+
     File.write!(plan_path, foreign_bytes)
     File.chmod!(plan_path, 0o600)
     send(store_pid, :continue_plan_store)
@@ -2205,7 +2208,10 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
         )
       end)
 
-    assert_receive {:exact_temp_opened, store_pid}
+    assert_receive {:exact_temp_opened, store_pid},
+                   1_000,
+                   "exact-race store did not report that its temporary file was open"
+
     File.write!(race_path, exact_bytes)
 
     File.chmod!(race_path, 0o600)

@@ -963,11 +963,10 @@ defmodule SymphonyElixir.QualityGateTest do
     )
 
     send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
+    :sys.get_state(pid, 5_000)
 
     assert_receive {:quality_gate_review, :source_correctness}
     assert_receive {:quality_gate_review, :test_quality}
-    :sys.get_state(pid)
 
     assert {:ok, record} =
              eventually(fn ->

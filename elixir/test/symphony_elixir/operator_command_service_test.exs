@@ -835,7 +835,6 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                {:ok, ^proposed_bytes} <- rebuild.(locked_bytes) do
             unless Process.get(first_locked_read) do
               Process.put(first_locked_read, true)
-              send(parent, {:patch_lock_acquired, self()})
 
               receive do
                 :release_patch_lock -> :ok
@@ -852,7 +851,19 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
           path,
           proposed_bytes,
           expected_generation,
-          file_ops: %{read: guarded_read}
+          file_ops: %{
+            mkdir: fn lock_path ->
+              case File.mkdir(lock_path) do
+                :ok ->
+                  send(parent, {:patch_lock_acquired, self()})
+                  :ok
+
+                {:error, _reason} = error ->
+                  error
+              end
+            end,
+            read: guarded_read
+          }
         )
       end
     end
@@ -865,7 +876,16 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     end
 
     winner = Task.async(confirm)
-    assert_receive {:patch_lock_acquired, winner_pid}, 1_000
+    winner_pid = winner.pid
+
+    barrier_result =
+      receive do
+        {:patch_lock_acquired, ^winner_pid} -> :patch_lock_acquired
+      after
+        1_000 -> {:patch_lock_not_acquired, Task.yield(winner, 0)}
+      end
+
+    assert barrier_result == :patch_lock_acquired
     loser = Task.async(confirm)
 
     assert {:error, loser_error} = Task.await(loser)
@@ -2327,6 +2347,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     registry_path = write_registry(tmp_dir, %{})
     workflow = Path.join(tmp_dir, "legacy.runtime.yml")
     File.write!(workflow, applicable_import_source())
+    now = fn -> "2026-08-19T00:00:00Z" end
 
     assert {:ok, plan} =
              OperatorCommandService.plan(
@@ -2337,6 +2358,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                  connection_id: "linear-main"
                },
                registry_path: registry_path,
+               now: now,
                encode_import_preview: fn _result -> "{" end
              )
 
@@ -2354,6 +2376,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                  connection_id: "linear-main"
                },
                registry_path: registry_path,
+               now: now,
                encode_import_preview: fn _result -> raise "encoding failed" end
              )
 

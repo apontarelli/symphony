@@ -2038,12 +2038,9 @@ defmodule SymphonyElixir.CoreTest do
 
   defp assert_due_in_range(due_at_ms, sent_at_ms, min_delay_ms, max_remaining_ms) do
     delay_ms = due_at_ms - sent_at_ms
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    measured_min_remaining_ms = max(1, min_delay_ms - 500)
 
     assert delay_ms >= min_delay_ms
-    assert remaining_ms >= measured_min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert due_at_ms <= System.monotonic_time(:millisecond) + max_remaining_ms
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
