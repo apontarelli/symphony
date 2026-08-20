@@ -1664,13 +1664,13 @@ defmodule SymphonyElixir.WorkspaceContextTest do
     assert workspace == context.workspace_path
 
     hook_runner = fn _host, script, _timeout_ms ->
-      timer_start_check = ~S(kill -0 "$timer_sleep_pid" 2>/dev/null || exit 70)
+      timer_release_check = ~S([ "$timer_release" = release:timer ] || exit 70)
 
       gated_script =
         String.replace(
           script,
-          timer_start_check,
-          timer_start_check <>
+          timer_release_check,
+          timer_release_check <>
             "\n" <> ~S(IFS= read -r timer_start_gate < "$SYMPHONY_TIMER_START_GATE" || exit 70),
           global: false
         )
