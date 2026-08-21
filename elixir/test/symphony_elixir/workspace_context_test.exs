@@ -7,6 +7,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   alias SymphonyElixir.Linear.Issue
 
   @hash "sha256:" <> String.duplicate("a", 64)
+  @protocol_cleanup_timeout_ms 1_000
 
   @tag :tmp_dir
   test "context creation isolates the same issue under pinned target roots", %{tmp_dir: tmp_dir} do
@@ -1634,57 +1635,65 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "remote hook script releases a fast hook before timer startup", %{tmp_dir: tmp_dir} do
-    marker = Path.join(tmp_dir, "fast-hook")
-    timer_start_gate = Path.join(tmp_dir, "timer-start-gate.fifo")
-    assert {"", 0} = System.cmd("mkfifo", [timer_start_gate])
+  test "remote hook accepts a PID-qualified release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    %{context: context, issue: issue, paths: paths, runner: runner} =
+      remote_hook_protocol_harness(tmp_dir, "valid")
 
-    hooks = %{
-      "after_create" => nil,
-      "after_run" => nil,
-      "before_remove" => nil,
-      "before_run" => """
-      printf 'hook-released\n' > #{SymphonyElixir.Shell.escape(timer_start_gate)}
-      printf success > #{SymphonyElixir.Shell.escape(marker)}
-      """,
-      "timeout_ms" => 1_000
-    }
+    assert :ok = Workspace.run_before_run_hook(context, issue, ssh_runner: runner)
+    assert File.read!(paths.hook_effect) == "success"
+    assert File.read!(paths.timer_release) == "release:timer\n"
+    assert_protocol_processes_stopped(paths)
+  end
 
-    context =
-      context(Path.join(tmp_dir, "remote-root"), "alpha", "SID-FAST",
-        hooks: hooks,
-        worker_host: "worker"
-      )
+  @tag :tmp_dir
+  test "remote hook rejects an absent release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    assert_hook_release_acknowledgment_failure(tmp_dir, "absent")
+  end
 
-    issue = %Issue{id: context.issue_id, identifier: context.issue_identifier}
+  @tag :tmp_dir
+  test "remote hook rejects a partial release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    assert_hook_release_acknowledgment_failure(tmp_dir, "partial")
+  end
 
-    assert {:ok, workspace} =
-             Workspace.create_for_issue(context, ssh_runner: &run_generated_shell/3)
+  @tag :tmp_dir
+  test "remote hook rejects a late release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    %{paths: paths} = assert_hook_release_acknowledgment_failure(tmp_dir, "late")
+    assert File.read!(paths.late_ack) == "released:hook\n"
+  end
 
-    assert workspace == context.workspace_path
+  @tag :tmp_dir
+  test "remote hook rejects a forged release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    assert_hook_release_acknowledgment_failure(tmp_dir, "forged")
+  end
 
-    hook_runner = fn _host, script, _timeout_ms ->
-      timer_release_check = ~S([ "$timer_release" = release:timer ] || exit 70)
+  @tag :tmp_dir
+  test "remote hook rejects a wrong-PID release acknowledgment before timer startup", %{
+    tmp_dir: tmp_dir
+  } do
+    assert_hook_release_acknowledgment_failure(tmp_dir, "wrong_pid")
+  end
 
-      gated_script =
-        String.replace(
-          script,
-          timer_release_check,
-          timer_release_check <>
-            "\n" <> ~S(IFS= read -r timer_start_gate < "$SYMPHONY_TIMER_START_GATE" || exit 70),
-          global: false
-        )
+  @tag :tmp_dir
+  test "remote hook rejects a wrong-PID timer startup acknowledgment", %{tmp_dir: tmp_dir} do
+    %{context: context, issue: issue, paths: paths, runner: runner} =
+      remote_hook_protocol_harness(tmp_dir, "valid", "wrong_pid")
 
-      refute gated_script == script
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.run_before_run_hook(context, issue, ssh_runner: runner)
 
-      System.cmd("/bin/sh", ["-c", gated_script],
-        env: [{"SYMPHONY_TIMER_START_GATE", timer_start_gate}],
-        stderr_to_stdout: true
-      )
-    end
-
-    assert :ok = Workspace.run_before_run_hook(context, issue, ssh_runner: hook_runner)
-    assert File.read!(marker) == "success"
+    assert File.read!(paths.timer_release) == "release:timer\n"
+    assert File.dir?(context.workspace_path)
+    assert_protocol_processes_stopped(paths)
   end
 
   @tag :tmp_dir
@@ -2416,6 +2425,265 @@ defmodule SymphonyElixir.WorkspaceContextTest do
                invalid_runner_context,
                command_runner: fn _, _, _ -> :invalid end
              )
+  end
+
+  defp assert_hook_release_acknowledgment_failure(tmp_dir, mode) do
+    %{context: context, issue: issue, paths: paths, runner: runner} =
+      harness = remote_hook_protocol_harness(tmp_dir, mode)
+
+    assert {:error, :workspace_remote_output_invalid} =
+             Workspace.run_before_run_hook(context, issue, ssh_runner: runner)
+
+    refute File.exists?(paths.timer_release)
+    refute File.exists?(paths.hook_effect)
+    assert File.dir?(context.workspace_path)
+    assert_protocol_processes_stopped(paths)
+    harness
+  end
+
+  defp assert_protocol_processes_stopped(paths) do
+    Enum.each(
+      [
+        paths.hook_pid,
+        paths.hook_descendant_pid,
+        paths.timer_pid,
+        paths.timer_descendant_pid
+      ],
+      &assert_protocol_process_stopped/1
+    )
+  end
+
+  defp assert_protocol_process_stopped(pid_path) do
+    pid = SymphonyElixir.TestSupport.read_pid(pid_path)
+    assert is_integer(pid)
+
+    assert :stopped =
+             SymphonyElixir.TestSupport.eventually(fn ->
+               if process_capable_of_mutating?(pid), do: nil, else: :stopped
+             end)
+  end
+
+  defp remote_hook_protocol_harness(tmp_dir, hook_ack_mode, timer_ack_mode \\ "valid") do
+    root = Path.join(tmp_dir, "remote-root")
+    workspace = Path.join([root, "alpha", "SID-PROTOCOL"])
+    harness_dir = Path.join(tmp_dir, "protocol-harness")
+    fake_bin = Path.join(harness_dir, "bin")
+    barrier = Path.join(harness_dir, "blocked")
+
+    paths = %{
+      barrier: barrier,
+      hook_descendant_pid: Path.join(harness_dir, "hook-descendant.pid"),
+      hook_effect: Path.join(harness_dir, "hook-effect"),
+      hook_pid: Path.join(harness_dir, "hook.pid"),
+      late_ack: Path.join(harness_dir, "late-ack"),
+      timer_descendant_pid: Path.join(harness_dir, "timer-descendant.pid"),
+      timer_pid: Path.join(harness_dir, "timer.pid"),
+      timer_release: Path.join(harness_dir, "timer-release")
+    }
+
+    hooks = %{
+      "after_create" => nil,
+      "after_run" => nil,
+      "before_remove" => nil,
+      "before_run" => "printf success > #{SymphonyElixir.Shell.escape(paths.hook_effect)}",
+      "timeout_ms" => 1_000
+    }
+
+    context = context(root, "alpha", "SID-PROTOCOL", hooks: hooks, worker_host: "worker")
+    issue = %Issue{id: context.issue_id, identifier: context.issue_identifier}
+
+    File.mkdir_p!(workspace)
+    File.mkdir_p!(fake_bin)
+    assert {"", 0} = System.cmd("mkfifo", [barrier])
+
+    {:ok, task_tracker} = Agent.start(fn -> MapSet.new() end)
+    on_exit(fn -> cleanup_protocol_harness(paths, task_tracker) end)
+
+    fake_sh = Path.join(fake_bin, "sh")
+    File.write!(fake_sh, protocol_harness_shell())
+    File.chmod!(fake_sh, 0o755)
+
+    runner = fn _host, script, timeout_ms ->
+      path = fake_bin <> ":" <> (System.get_env("PATH") || "")
+
+      run_protocol_harness_shell(
+        script,
+        [
+          {"PATH", path},
+          {"SYMPHONY_PROTOCOL_BARRIER", barrier},
+          {"SYMPHONY_PROTOCOL_HOOK_ACK_MODE", hook_ack_mode},
+          {"SYMPHONY_PROTOCOL_HOOK_DESCENDANT_PID", paths.hook_descendant_pid},
+          {"SYMPHONY_PROTOCOL_HOOK_PID", paths.hook_pid},
+          {"SYMPHONY_PROTOCOL_LATE_ACK", paths.late_ack},
+          {"SYMPHONY_PROTOCOL_TIMER_ACK_MODE", timer_ack_mode},
+          {"SYMPHONY_PROTOCOL_TIMER_DESCENDANT_PID", paths.timer_descendant_pid},
+          {"SYMPHONY_PROTOCOL_TIMER_PID", paths.timer_pid},
+          {"SYMPHONY_PROTOCOL_TIMER_RELEASE", paths.timer_release}
+        ],
+        timeout_ms,
+        task_tracker
+      )
+    end
+
+    %{context: context, issue: issue, paths: paths, runner: runner}
+  end
+
+  defp run_protocol_harness_shell(script, env, timeout_ms, task_tracker) do
+    caller = self()
+    result_ref = make_ref()
+
+    {:ok, task_pid} =
+      Task.start(fn ->
+        result = System.cmd("/bin/sh", ["-c", script], env: env, stderr_to_stdout: true)
+        send(caller, {result_ref, result})
+      end)
+
+    :ok = Agent.update(task_tracker, &MapSet.put(&1, task_pid))
+
+    receive do
+      {^result_ref, result} ->
+        result
+    after
+      timeout_ms -> {:error, :timeout}
+    end
+  end
+
+  defp cleanup_protocol_harness(paths, task_tracker) do
+    _ =
+      File.open(paths.barrier, [:read, :write], fn barrier ->
+        IO.binwrite(barrier, "release\nrelease\nrelease\nrelease\n")
+      end)
+
+    task_pids =
+      if Process.alive?(task_tracker) do
+        Agent.get(task_tracker, &MapSet.to_list/1)
+      else
+        []
+      end
+
+    Enum.each(task_pids, &await_protocol_task/1)
+
+    if Process.alive?(task_tracker) do
+      Agent.stop(task_tracker, :normal, @protocol_cleanup_timeout_ms)
+    end
+  end
+
+  defp await_protocol_task(task_pid) do
+    monitor_ref = Process.monitor(task_pid)
+
+    receive do
+      {:DOWN, ^monitor_ref, :process, ^task_pid, _reason} ->
+        :ok
+    after
+      @protocol_cleanup_timeout_ms ->
+        Process.exit(task_pid, :kill)
+
+        receive do
+          {:DOWN, ^monitor_ref, :process, ^task_pid, _reason} -> :ok
+        after
+          @protocol_cleanup_timeout_ms ->
+            raise "failed to stop protocol runner task"
+        end
+    end
+  end
+
+  defp protocol_harness_shell do
+    """
+    #!/bin/sh
+    start_protocol_descendant() {
+      protocol_descendant_pid_path=$1
+      /bin/sh -c 'trap "" TERM; exec 9<> "$1"; IFS= read -r _ <&9' sh \
+        "$SYMPHONY_PROTOCOL_BARRIER" &
+      protocol_descendant_pid=$!
+      printf '%s\n' "$protocol_descendant_pid" > "$protocol_descendant_pid_path"
+      trap 'kill -KILL "$protocol_descendant_pid" 2>/dev/null; wait "$protocol_descendant_pid" 2>/dev/null' EXIT
+    }
+
+    if [ "$1" != -c ]; then
+      exec /bin/sh "$@"
+    fi
+
+    case "$#" in
+      7)
+        hook_ready_fifo=$6
+        hook_release_fifo=$7
+        printf '%s\n' "$$" > "$SYMPHONY_PROTOCOL_HOOK_PID"
+        start_protocol_descendant "$SYMPHONY_PROTOCOL_HOOK_DESCENDANT_PID"
+        printf 'ready:hook:%s\n' "$$" > "$hook_ready_fifo" || exit 70
+        IFS= read -r hook_validation < "$hook_release_fifo" || exit 70
+        [ "$hook_validation" = validate:hook ] || exit 70
+        printf 'validated:hook:%s\n' "$$" > "$hook_ready_fifo" || exit 70
+        IFS= read -r hook_release < "$hook_release_fifo" || exit 70
+        [ "$hook_release" = release:hook ] || exit 70
+
+        case "$SYMPHONY_PROTOCOL_HOOK_ACK_MODE" in
+          valid)
+            printf 'released:hook:%s\n' "$$" > "$hook_ready_fifo" || exit 70
+            cd -- "$4" && exec /bin/sh -lc "$5"
+            ;;
+          absent)
+            ;;
+          partial)
+            printf 'released:hook:' > "$hook_ready_fifo"
+            ;;
+          late)
+            exec 9<> "$hook_ready_fifo"
+            trap '
+              printf "released:hook\n" > "$SYMPHONY_PROTOCOL_LATE_ACK"
+              printf "released:hook:%s\n" "$$" >&9
+              exit 0
+            ' TERM
+            ;;
+          forged)
+            printf 'released:hook:%s:forged\n' "$$" > "$hook_ready_fifo"
+            ;;
+          wrong_pid)
+            printf 'released:hook:%s\n' "$(( $$ + 1 ))" > "$hook_ready_fifo"
+            ;;
+          *)
+            exit 70
+            ;;
+        esac
+
+        exec 8<> "$SYMPHONY_PROTOCOL_BARRIER"
+        IFS= read -r _ <&8
+        exit 70
+        ;;
+      8)
+        timer_ready_fifo=$7
+        timer_release_fifo=$8
+        printf '%s\n' "$$" > "$SYMPHONY_PROTOCOL_TIMER_PID"
+        start_protocol_descendant "$SYMPHONY_PROTOCOL_TIMER_DESCENDANT_PID"
+        trap 'exit 0' TERM
+        printf 'ready:timer:%s\n' "$$" > "$timer_ready_fifo" || exit 70
+        IFS= read -r timer_validation < "$timer_release_fifo" || exit 70
+        [ "$timer_validation" = validate:timer ] || exit 70
+        printf 'validated:timer:%s\n' "$$" > "$timer_ready_fifo" || exit 70
+        IFS= read -r timer_release < "$timer_release_fifo" || exit 70
+        [ "$timer_release" = release:timer ] || exit 70
+        printf '%s\n' "$timer_release" > "$SYMPHONY_PROTOCOL_TIMER_RELEASE"
+
+        case "$SYMPHONY_PROTOCOL_TIMER_ACK_MODE" in
+          valid)
+            printf 'started:timer:%s\n' "$$" > "$timer_ready_fifo" || exit 70
+            ;;
+          wrong_pid)
+            printf 'started:timer:%s\n' "$(( $$ + 1 ))" > "$timer_ready_fifo" || exit 70
+            ;;
+          *)
+            exit 70
+            ;;
+        esac
+
+        exec 8<> "$SYMPHONY_PROTOCOL_BARRIER"
+        IFS= read -r _ <&8
+        exit 70
+        ;;
+      *)
+        exec /bin/sh "$@"
+        ;;
+    esac
+    """
   end
 
   defp remote_marker_nonce(script) do
