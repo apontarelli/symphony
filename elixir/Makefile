@@ -24,6 +24,15 @@ lint:
 	$(MIX) lint
 
 coverage:
+	@original_home="$$HOME"; \
+	temp_home="$$(mktemp -d)" || exit 1; \
+	trap 'rm -rf "$$temp_home"' EXIT; \
+	HOME="$$temp_home" \
+	MIX_HOME="$${MIX_HOME:-$$original_home/.mix}" \
+	MIX_ARCHIVES="$${MIX_ARCHIVES:-$$original_home/.mix/archives}" \
+	HEX_HOME="$${HEX_HOME:-$$original_home/.hex}" \
+	MISE_DATA_DIR="$${MISE_DATA_DIR:-$$original_home/.local/share/mise}" \
+	MISE_CACHE_DIR="$${MISE_CACHE_DIR:-$$original_home/.cache/mise}" \
 	$(MIX) test --cover
 
 test:
