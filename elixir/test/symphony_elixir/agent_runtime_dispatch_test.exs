@@ -106,7 +106,12 @@ defmodule SymphonyElixir.AgentRuntimeDispatchTest do
                profiles: %{default: %{delivery: %{pr_target: "main"}}}
              })
 
-    assert %{adapter: :opencode_server, client_side_tools: [], continuation_turns: true} =
+    assert %{
+             adapter: :opencode_server,
+             client_side_tools: ["linear_graphql"],
+             continuation_turns: true,
+             unattended_permissions: true
+           } =
              AgentRuntime.capabilities(settings: opencode_settings)
 
     assert {:error, {:runner_adapter_unavailable, "open", "opencode_server"}} =

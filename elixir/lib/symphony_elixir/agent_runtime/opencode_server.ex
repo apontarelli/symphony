@@ -43,8 +43,13 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
           session_id: String.t(),
           state: pid(),
           turn_timeout_ms: pos_integer(),
-          workspace: Path.t()
+          workspace: Path.t(),
+          config_overlay: Path.t() | nil
         }
+
+  @inherited_env_keys ~w(PATH HOME TMPDIR TEMP LANG LC_ALL LC_CTYPE TERM)
+  @provider_env_keys ~w(OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY)
+  @secret_ref_pattern ~r/^env:([A-Z][A-Z0-9_]*)$/
 
   @impl true
   @spec start(Path.t(), map(), keyword()) :: {:ok, session()} | {:error, term()}
@@ -53,11 +58,13 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     profile_ref = Keyword.get(opts, :execution_profile, "implementation")
 
     with {:ok, execution_profile} <- resolve_execution_profile(runner, profile_ref),
+         {:ok, server_auth} <- resolve_server_auth(runner["server_auth"]),
          :ok <- ensure_local_worker(Keyword.get(opts, :worker_host)),
          {:ok, workspace} <- PathSafety.canonicalize(workspace),
          :ok <- validate_loopback_hostname(runner["hostname"]),
-         {:ok, process} <- launch(workspace, runner, execution_profile),
-         {:ok, client, session_info} <- await_ready(process, workspace, issue, runner, opts),
+         {:ok, {process, config_overlay}} <- launch(workspace, runner, execution_profile, server_auth),
+         {:ok, client, session_info} <-
+           await_ready(process, workspace, issue, runner, server_auth, opts),
          {:ok, state} <-
            Agent.start_link(fn ->
              %{
@@ -76,6 +83,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
       {:ok,
        %{
          client: client,
+         config_overlay: config_overlay,
          process: process,
          runner_config: runner,
          execution_profile: execution_profile,
@@ -218,6 +226,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     request_for_stop(session, :post, "/instance/dispose")
     ProcessSupervisor.stop(session.process)
     stop_state(session.state)
+    if session.config_overlay, do: File.rm_rf(session.config_overlay)
     :ok
   end
 
@@ -226,8 +235,9 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   def capabilities(_runner_config) do
     %{
       adapter: @runtime,
-      client_side_tools: [],
-      continuation_turns: true
+      client_side_tools: ["linear_graphql"],
+      continuation_turns: true,
+      unattended_permissions: true
     }
   end
 
@@ -241,24 +251,108 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   defp validate_loopback_hostname(hostname) when hostname in @loopback_hosts, do: :ok
   defp validate_loopback_hostname(hostname), do: {:error, {:unsupported_opencode_hostname, hostname}}
 
-  defp launch(workspace, runner, execution_profile) do
-    with {:ok, port_argument} <- launch_port(runner["hostname"], runner["port"]) do
-      argv =
-        execution_profile.command ++
-          [
-            "--hostname",
-            runner["hostname"],
-            "--port",
-            port_argument
-          ]
-
-      ProcessSupervisor.start(argv,
-        cd: workspace,
-        env: server_auth_env(runner["server_auth"]),
-        line: @line_bytes
-      )
+  defp launch(workspace, runner, execution_profile, server_auth) do
+    with {:ok, port_argument} <- launch_port(runner["hostname"], runner["port"]),
+         {:ok, config_overlay} <- prepare_config_overlay(workspace, runner),
+         {:ok, process} <-
+           ProcessSupervisor.start(
+             execution_profile.command ++
+               ["--hostname", runner["hostname"], "--port", port_argument],
+             cd: workspace,
+             env: launch_env(runner, server_auth, config_overlay),
+             line: @line_bytes
+           ) do
+      {:ok, {process, config_overlay}}
     end
   end
+
+  defp launch_env(runner, server_auth, config_overlay) do
+    allowed =
+      inherited_env()
+      |> Map.merge(%{
+        "OPENCODE_CONFIG_DIR" => config_overlay,
+        "OPENCODE_SERVER_PASSWORD" => Map.get(server_auth, "password") || false,
+        "OPENCODE_SERVER_USERNAME" => Map.get(server_auth, "username") || false
+      })
+      |> Map.merge(provider_env(runner))
+
+    System.get_env()
+    |> Map.new(fn {key, _value} -> {key, false} end)
+    |> Map.merge(allowed)
+  end
+
+  defp inherited_env do
+    Enum.reduce(@inherited_env_keys, %{}, fn key, env ->
+      case System.get_env(key) do
+        value when is_binary(value) and value != "" -> Map.put(env, key, value)
+        _missing -> env
+      end
+    end)
+  end
+
+  defp provider_env(_runner) do
+    Enum.reduce(@provider_env_keys, %{}, fn key, env ->
+      case System.get_env(key) do
+        value when is_binary(value) and value != "" -> Map.put(env, key, value)
+        _missing -> env
+      end
+    end)
+  end
+
+  defp prepare_config_overlay(workspace, runner) do
+    overlay_root = Path.join(workspace, ".symphony")
+    overlay_parent = Path.join(overlay_root, "opencode")
+    overlay = Path.join(overlay_parent, "config-#{System.unique_integer([:positive])}")
+    source = runner["config_path"]
+
+    with :ok <- ensure_overlay_directory(overlay_root),
+         :ok <- ensure_overlay_directory(overlay_parent),
+         :ok <- ensure_overlay_directory(overlay),
+         {:ok, content} <- config_content(runner["config_content"], source),
+         {:ok, rendered} <- render_config(content, runner["permissions"]),
+         :ok <- File.write(Path.join(overlay, "opencode.json"), rendered) do
+      {:ok, overlay}
+    else
+      {:error, reason} -> {:error, {:opencode_config_overlay_failed, reason}}
+    end
+  end
+
+  defp ensure_overlay_directory(path) do
+    case File.lstat(path) do
+      {:ok, %File.Stat{type: :directory}} ->
+        :ok
+
+      {:ok, _stat} ->
+        {:error, {:unsafe_config_overlay_parent, path}}
+
+      {:error, :enoent} ->
+        case File.mkdir(path) do
+          :ok -> :ok
+          {:error, :eexist} -> ensure_overlay_directory(path)
+          {:error, reason} -> {:error, {:config_overlay_directory_create_failed, path, reason}}
+        end
+
+      {:error, reason} ->
+        {:error, {:config_overlay_directory_check_failed, path, reason}}
+    end
+  end
+
+  defp config_content(nil, nil), do: {:ok, %{}}
+  defp config_content(nil, path) when is_binary(path), do: File.read(path)
+  defp config_content(content, _path), do: {:ok, content}
+
+  defp render_config(content, permissions) when is_map(content) do
+    Jason.encode(Map.put(content, "permission", permissions || %{*: "deny"}))
+  end
+
+  defp render_config(content, permissions) when is_binary(content) do
+    case Jason.decode(content) do
+      {:ok, decoded} when is_map(decoded) -> render_config(decoded, permissions)
+      _invalid -> {:ok, content}
+    end
+  end
+
+  defp render_config(_content, _permissions), do: {:error, :invalid_config_content}
 
   defp launch_port(_hostname, port) when is_integer(port), do: {:ok, Integer.to_string(port)}
 
@@ -285,21 +379,37 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp server_auth_env(%{"password" => password} = auth) when is_binary(password) and password != "" do
-    %{
-      "OPENCODE_SERVER_PASSWORD" => password,
-      "OPENCODE_SERVER_USERNAME" => Map.get(auth, "username") || "opencode"
-    }
+  defp resolve_server_auth(nil), do: {:ok, %{}}
+
+  defp resolve_server_auth(%{"password" => password} = auth) when is_binary(password) do
+    with {:ok, resolved_password} <- resolve_secret(password) do
+      {:ok, Map.put(auth, "password", resolved_password)}
+    end
   end
 
-  defp server_auth_env(_auth),
-    do: %{"OPENCODE_SERVER_PASSWORD" => false, "OPENCODE_SERVER_USERNAME" => false}
+  defp resolve_server_auth(_auth), do: {:ok, %{}}
 
-  defp await_ready(process, workspace, issue, runner, opts) do
+  defp resolve_secret("env:" <> variable) do
+    case Regex.run(@secret_ref_pattern, "env:" <> variable, capture: :all_but_first) do
+      [^variable] ->
+        case System.get_env(variable) do
+          value when is_binary(value) and value != "" -> {:ok, value}
+          _missing -> {:error, {:auth_missing, variable}}
+        end
+
+      _invalid ->
+        {:error, {:invalid_secret_reference, "env:" <> variable}}
+    end
+  end
+
+  defp resolve_secret(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp resolve_secret(_value), do: {:ok, nil}
+
+  defp await_ready(process, workspace, issue, runner, server_auth, opts) do
     startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, runner["startup_timeout_ms"])
 
     case ProcessSupervisor.await_startup(process, startup_timeout_ms, fn process, timeout ->
-           initialize_server(process, workspace, issue, runner, timeout)
+           initialize_server(process, workspace, issue, runner, server_auth, timeout)
          end) do
       {:ok, {client, %{"id" => session_id} = session_info}} when is_binary(session_id) ->
         {:ok, client, session_info}
@@ -313,8 +423,8 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp initialize_server(process, workspace, issue, runner, timeout) do
-    with {:ok, client} <- await_health(process, workspace, runner, timeout),
+  defp initialize_server(process, workspace, issue, runner, server_auth, timeout) do
+    with {:ok, client} <- await_health(process, workspace, runner, server_auth, timeout),
          {:ok, session_info} <-
            request(client, :post, "/session", %{"title" => session_title(issue)}, timeout.()) do
       {:ok, {client, session_info}}
@@ -324,54 +434,81 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   defp session_title(%{identifier: identifier}) when is_binary(identifier), do: "Symphony #{identifier}"
   defp session_title(_issue), do: "Symphony"
 
-  defp await_health(process, workspace, runner, timeout) do
-    await_health_loop(process, nil, workspace, runner, timeout, "")
+  defp await_health(process, workspace, runner, server_auth, timeout) do
+    await_health_loop(process, nil, workspace, runner, server_auth, timeout, "")
   end
 
-  defp await_health_loop(process, client, workspace, runner, timeout, pending_output) do
+  defp await_health_loop(process, client, workspace, runner, server_auth, timeout, pending_output) do
     remaining_ms = timeout.()
 
     cond do
       remaining_ms <= 0 ->
         {:error, :response_timeout}
 
-      client && healthy?(client, min(remaining_ms, client.read_timeout_ms)) ->
-        {:ok, client}
+      client ->
+        case health_check(client, min(remaining_ms, client.read_timeout_ms)) do
+          :ok ->
+            {:ok, client}
+
+          {:error, {:http_error, 401, _body}} ->
+            {:error, {:auth_missing, :server}}
+
+          _retry ->
+            receive_startup_output(
+              process,
+              client,
+              workspace,
+              runner,
+              server_auth,
+              timeout,
+              pending_output,
+              remaining_ms
+            )
+        end
 
       true ->
-        receive_startup_output(process, client, workspace, runner, timeout, pending_output, remaining_ms)
+        receive_startup_output(process, client, workspace, runner, server_auth, timeout, pending_output, remaining_ms)
     end
   end
 
-  defp receive_startup_output(process, client, workspace, runner, timeout, pending_output, remaining_ms) do
+  defp receive_startup_output(
+         process,
+         client,
+         workspace,
+         runner,
+         server_auth,
+         timeout,
+         pending_output,
+         remaining_ms
+       ) do
     port = ProcessSupervisor.port(process)
 
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         output = pending_output <> to_string(chunk)
-        client = client || client_from_output(output, workspace, runner)
-        await_health_loop(process, client, workspace, runner, timeout, "")
+        client = client || client_from_output(output, workspace, runner, server_auth)
+        await_health_loop(process, client, workspace, runner, server_auth, timeout, "")
 
       {^port, {:data, {:noeol, chunk}}} ->
         output = pending_output <> to_string(chunk)
-        client = client || client_from_output(output, workspace, runner)
-        await_health_loop(process, client, workspace, runner, timeout, output)
+        client = client || client_from_output(output, workspace, runner, server_auth)
+        await_health_loop(process, client, workspace, runner, server_auth, timeout, output)
 
       {^port, {:exit_status, status}} ->
         {:error, {:server_exit, status}}
     after
       min(remaining_ms, @blocking_poll_interval_ms) ->
-        await_health_loop(process, client, workspace, runner, timeout, pending_output)
+        await_health_loop(process, client, workspace, runner, server_auth, timeout, pending_output)
     end
   end
 
-  defp client_from_output(output, workspace, runner) do
+  defp client_from_output(output, workspace, runner, server_auth) do
     case Regex.run(~r/opencode server listening on http:\/\/(?:\[[^\]]+\]|[^:\s]+):(\d+)/, output, capture: :all_but_first) do
       [port_text] ->
         port = String.to_integer(port_text)
 
         if runner["port"] in ["auto", port] do
-          build_client(runner["hostname"], port, workspace, runner)
+          build_client(runner["hostname"], port, workspace, server_auth, runner)
         end
 
       _no_port ->
@@ -379,12 +516,12 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp build_client(hostname, port, workspace, runner) do
+  defp build_client(hostname, port, workspace, server_auth, runner) do
     base_url = "http://#{url_hostname(hostname)}:#{port}"
 
     %{
       base_url: base_url,
-      headers: client_headers(workspace, runner["server_auth"]),
+      headers: client_headers(workspace, server_auth),
       read_timeout_ms: runner["read_timeout_ms"],
       workspace: workspace
     }
@@ -407,8 +544,11 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
 
   defp maybe_put_authorization(headers, _server_auth), do: headers
 
-  defp healthy?(client, timeout_ms) do
-    match?({:ok, %{"healthy" => true}}, request(client, :get, "/global/health", :no_body, timeout_ms))
+  defp health_check(client, timeout_ms) do
+    case request(client, :get, "/global/health", :no_body, timeout_ms) do
+      {:ok, %{"healthy" => true}} -> :ok
+      other -> other
+    end
   end
 
   defp prompt_body(prompt, runner, execution_profile) do
@@ -771,8 +911,17 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   end
 
   defp handle_turn_response(session, on_event, {:error, reason}) do
-    fail_turn(session, on_event, reason)
+    if auth_error?(reason) do
+      emit_event(on_event, :blocked, session, %{reason: :auth_missing}, nil, nil, :auth_missing)
+      {:error, {:auth_missing, :provider}}
+    else
+      fail_turn(session, on_event, reason)
+    end
   end
+
+  defp auth_error?({:http_error, 401, _body}), do: true
+  defp auth_error?({:auth_missing, _source}), do: true
+  defp auth_error?(_reason), do: false
 
   defp emit_part(on_event, session, %{"type" => "text", "text" => text} = part, usage)
        when is_binary(text) and text != "" do

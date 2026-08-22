@@ -129,7 +129,12 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                :turn_completed
              ]
 
-      assert %{adapter: :opencode_server, client_side_tools: [], continuation_turns: true} =
+      assert %{
+               adapter: :opencode_server,
+               client_side_tools: ["linear_graphql"],
+               continuation_turns: true,
+               unattended_permissions: true
+             } =
                OpenCodeServer.capabilities(session.runner_config)
     after
       assert :ok = OpenCodeServer.stop(session)
@@ -231,6 +236,47 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     after
       OpenCodeServer.stop(session)
     end
+  end
+
+  test "creates and removes a private config overlay for each run", %{context: context} do
+    runner =
+      runner_config(context, :success)
+      |> Map.merge(%{
+        "config_content" => %{"theme" => "dark"},
+        "permissions" => %{"bash" => "deny"},
+        "server_auth" => %{"password" => "env:OPENCODE_TEST_PASSWORD"}
+      })
+
+    System.put_env("OPENCODE_TEST_PASSWORD", "overlay-secret")
+
+    try do
+      assert {:ok, session} =
+               OpenCodeServer.start(context.workspace, issue(),
+                 runner_config: runner,
+                 startup_timeout_ms: 1_000
+               )
+
+      overlay = session.config_overlay
+      assert File.exists?(Path.join(overlay, "opencode.json"))
+      refute File.read!(Path.join(overlay, "opencode.json")) =~ "overlay-secret"
+      assert Jason.decode!(File.read!(Path.join(overlay, "opencode.json")))["permission"] == %{"bash" => "deny"}
+      assert :ok = OpenCodeServer.stop(session)
+      refute File.exists?(overlay)
+    after
+      System.delete_env("OPENCODE_TEST_PASSWORD")
+    end
+  end
+
+  test "fails before launch when an auth secret reference is absent", %{context: context} do
+    System.delete_env("OPENCODE_TEST_PASSWORD")
+
+    assert {:error, {:auth_missing, "OPENCODE_TEST_PASSWORD"}} =
+             OpenCodeServer.start(context.workspace, issue(),
+               runner_config:
+                 Map.put(runner_config(context, :success), "server_auth", %{
+                   "password" => "env:OPENCODE_TEST_PASSWORD"
+                 })
+             )
   end
 
   test "rejects malformed OpenCode profile command and model values", %{context: context} do
@@ -593,6 +639,55 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     assert :ok = OpenCodeServer.stop(session)
   end
 
+  test "forwards only declared provider environment variables", %{context: context} do
+    unlisted_key = "SYMPHONY_OPENCODE_UNLISTED_SECRET"
+    provider_key = "OPENAI_API_KEY"
+    previous_unlisted = System.get_env(unlisted_key)
+    previous_provider = System.get_env(provider_key)
+
+    System.put_env(unlisted_key, "host-secret")
+    System.put_env(provider_key, "provider-key")
+
+    on_exit(fn ->
+      restore_env(unlisted_key, previous_unlisted)
+      restore_env(provider_key, previous_provider)
+    end)
+
+    assert {:ok, session} = start_adapter(context, :environment_allowlist)
+    assert :ok = OpenCodeServer.stop(session)
+  end
+
+  test "fails closed when config overlay parents are symlinks", %{context: context} do
+    workspace_root = Path.dirname(context.workspace)
+
+    for {component, index} <- Enum.with_index([".symphony", "opencode"]) do
+      workspace = Path.join(workspace_root, "symlink-workspace-#{index}")
+      outside = Path.join(workspace_root, "symlink-outside-#{index}")
+
+      File.mkdir_p!(workspace)
+      {:ok, canonical_workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
+
+      link =
+        case component do
+          ".symphony" ->
+            Path.join(canonical_workspace, ".symphony")
+
+          "opencode" ->
+            parent = Path.join(canonical_workspace, ".symphony")
+            File.mkdir_p!(parent)
+            Path.join(parent, "opencode")
+        end
+
+      File.mkdir_p!(outside)
+      File.ln_s!(outside, link)
+
+      assert {:error, {:opencode_config_overlay_failed, {:unsafe_config_overlay_parent, ^link}}} =
+               OpenCodeServer.start(workspace, issue(), runner_config: runner_config(context, :success))
+
+      assert File.ls!(outside) == []
+    end
+  end
+
   test "defaults a null auth username consistently", %{context: context} do
     runner =
       context
@@ -749,6 +844,12 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         os.environ.get("OPENCODE_SERVER_USERNAME")
     ):
         raise SystemExit(11)
+    if scenario == "environment_allowlist" and (
+        os.environ.get("SYMPHONY_OPENCODE_UNLISTED_SECRET") or
+        os.environ.get("OPENAI_API_KEY") != "provider-key"
+    ):
+        raise SystemExit(13)
+
 
     if scenario == "startup_timeout":
         time.sleep(30)
