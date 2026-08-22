@@ -539,14 +539,18 @@ runtime:
 - `opencode_server` launches a supervised localhost `opencode serve` process, waits for health,
   creates and reuses a session, submits prompts, maps messages/tools/failures/blocking requests into
   normalized runtime events, aborts timed-out turns, and disposes the server during stop. Remote
-  OpenCode workers fail before launch. Its schema requires command argv and supports `model`,
-  `agent`, `hostname`, automatic or static `port`, `config_dir`, `config_path`, string/map
-  `config_content`, `server_auth`, `permissions`, `execution_profiles`, `max_concurrent_startups`,
-  and startup/turn/read/stall timeouts. Synchronous OpenCode turns use `turn_timeout_ms`; the generic
-  stall watchdog remains disabled until the adapter consumes trustworthy SSE progress. Config
-  overlays, permission injection, and environment-backed auth hardening remain intentionally staged;
-  see `docs/agent_runtime_adapters.md`.
-  OpenCode `model` selectors use `provider/model`.
+  OpenCode workers fail before launch. Each run receives a unique `OPENCODE_CONFIG_DIR` overlay under
+  the issue workspace; Symphony never mutates `~/.config/opencode` or the target workspace config.
+  The overlay injects an explicit noninteractive permission policy (`permissions`, default deny) and
+  is removed during stop. Its schema supports `model`, `agent`, `hostname`, automatic or static
+  `port`, `config_dir`, `config_path`, string/map `config_content`, `server_auth`, `permissions`,
+  `execution_profiles`, `max_concurrent_startups`, and startup/turn/read/stall timeouts.
+  `server_auth.password` accepts direct local-test values or an exact `env:VAR_NAME` reference;
+  references resolve only at launch and missing values return `auth_missing`. Basic auth is sent only
+  to the launched loopback server. OpenCode advertises the `linear_graphql` Symphony capability and
+  continuation turns; unresolved permissions/questions become blocked evidence.
+  Synchronous OpenCode turns use `turn_timeout_ms`; the generic stall watchdog remains disabled until
+  the adapter consumes trustworthy SSE progress. See `docs/agent_runtime_adapters.md`.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

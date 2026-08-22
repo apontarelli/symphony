@@ -73,20 +73,29 @@ The OpenCode waves established:
   assistant failures, process exits, permission requests, and question requests. Native payloads
   remain in `Event.native` and are preserved in blocked orchestration evidence.
 - Fake-server coverage for startup, continuation, tools, failures, operator input, timeout/abort,
-  server exit, remote rejection, and descendant cleanup.
-- No Symphony-provided client-side tools for OpenCode. Codex's `linear_graphql` integration remains
-  Codex-specific.
+  server exit, remote rejection, descendant cleanup, isolated config overlays, inherited environment,
+  secret references, authentication failures, and unattended permission handling.
+- OpenCode exposes the Symphony capability posture (`linear_graphql`, continuation turns, and
+  explicit unattended permissions) through `OpenCodeServer.capabilities/1`. The adapter does not
+  enable remote execution or the generic stall watchdog.
 
-## Remaining Runtime Contract Gaps
+## Unattended Hardening
 
-The unattended hardening wave still needs to:
-
-- Create a Symphony-owned OpenCode config overlay without replacing the target workspace cwd.
-  Worker machines still provide the `opencode` executable and provider credentials.
-- Resolve environment-backed server auth, fail clearly when configured secrets are absent, and map
-  provider authentication failures to stable blocked evidence.
-- Inject an explicit unattended permission policy so normal runs avoid `ask`; unresolved permission
-  and question requests already map to normalized `blocked` events.
+- Every run gets a unique `OPENCODE_CONFIG_DIR` below the issue workspace. `config_content` or
+  `config_path` is rendered to that overlay as `opencode.json`; the adapter never writes
+  `~/.config/opencode` and concurrent runs do not share an overlay.
+- The overlay contains the configured `permissions` map, or `* => deny` when no policy is
+  supplied. Pending permission and question requests are not answered automatically. They are
+  emitted as `blocked` evidence, the session is aborted, and the turn returns an error.
+- `server_auth.password` may use exactly `env:VAR_NAME`. Symphony resolves the reference at launch,
+  passes the value only to the launched server/client path, and returns `{:auth_missing, VAR_NAME}`
+  when it is absent. The reference and resolved value are not persisted in the overlay or logs.
+  Basic authorization is sent only to the loopback server launched for that run.
+- The child environment is controlled. Symphony forwards the execution path, locale, terminal,
+  temporary directory, home, and supported provider credential variables; unrelated inherited
+  variables are not forwarded.
+- Provider HTTP 401 responses become stable `auth_missing` blocked evidence. Codex remains the
+  dogfood default until the guarded live OpenCode smoke path is available.
 - Consume OpenCode SSE progress before enabling the generic stall watchdog. Until then, synchronous
   OpenCode turns are governed by `turn_timeout_ms`; `stall_timeout_ms` remains schema-compatible but
   is not enforced for this adapter because no trustworthy in-turn progress signal is available.
@@ -101,17 +110,32 @@ over SSH or use an stdio protocol such as ACP.
 - The adapter accepts loopback hosts only. Static ports are suitable for local development; automatic
   ports avoid collisions across concurrent issue runs. Startup waits for the launched process's
   bound-port banner before health checks, so it cannot attach to a stale daemon on a configured port.
-- Direct `server_auth.password` values enable server Basic auth;
-  `server_auth.username` is optional and defaults to `opencode`. When auth is omitted, the adapter
-  clears inherited OpenCode server-auth variables. Environment references and missing-secret
-  handling belong to the unattended hardening wave.
-- `OPENCODE_CONFIG_DIR`, `OPENCODE_CONFIG`, or `OPENCODE_CONFIG_CONTENT` must be isolated per run.
-  The current adapter does not apply the staged config overlay fields yet and never writes
-  operator-global OpenCode config.
-- Provider credentials remain host-owned. Missing provider auth is currently a turn failure; the
-  hardening wave will normalize it to `auth_missing` or `blocked`.
+- `server_auth.password` direct values are retained for local tests; unattended deployments use
+  `env:VAR_NAME`. When auth is omitted, inherited OpenCode server-auth variables are cleared.
+- Provider credentials remain host-owned and are passed through only for the supported provider key
+  allowlist. Missing provider auth returns stable `auth_missing` blocked evidence.
 - Unresolved permission or question requests are polled during each turn, normalized to `blocked`,
   aborted, and returned as an error.
+
+Example unattended runner:
+
+```yaml
+runtime:
+  runners:
+    opencode:
+      kind: opencode_server
+      command: ["opencode", "serve"]
+      server_auth:
+        username: symphony
+        password: env:OPENCODE_SERVER_PASSWORD
+      permissions:
+        "*": deny
+        read: allow
+        edit: allow
+```
+
+Keep `env:OPENCODE_SERVER_PASSWORD` as the reference. Do not place the password value in workflow
+files, `config_content`, or generated artifacts.
 
 ## Event Mapping
 
