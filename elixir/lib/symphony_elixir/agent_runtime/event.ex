@@ -10,6 +10,7 @@ defmodule SymphonyElixir.AgentRuntime.Event do
   @type event_type ::
           :session_started
           | :turn_started
+          | :turn_progress
           | :message_delta
           | :tool_call
           | :tool_result
@@ -37,6 +38,7 @@ defmodule SymphonyElixir.AgentRuntime.Event do
   @event_types [
     :session_started,
     :turn_started,
+    :turn_progress,
     :message_delta,
     :tool_call,
     :tool_result,
@@ -96,6 +98,12 @@ defmodule SymphonyElixir.AgentRuntime.Event do
   """
   @spec turn_started(attrs()) :: {:ok, t()} | {:error, term()}
   def turn_started(attrs \\ []), do: new(:turn_started, attrs)
+
+  @doc """
+  Builds a `turn_progress` event from authoritative in-turn runtime activity.
+  """
+  @spec turn_progress(attrs()) :: {:ok, t()} | {:error, term()}
+  def turn_progress(attrs \\ []), do: new(:turn_progress, attrs)
 
   @doc """
   Builds a `message_delta` event.

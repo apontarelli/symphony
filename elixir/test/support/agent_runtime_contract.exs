@@ -19,6 +19,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
       @normalized_event_types [
         :session_started,
         :turn_started,
+        :turn_progress,
         :message_delta,
         :tool_call,
         :tool_result,

@@ -912,15 +912,11 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
-    cond do
-      Map.has_key?(state.blocked, issue_id) -> state
-      not stall_watchdog_supported?(running_entry) -> state
-      true -> restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
+    if Map.has_key?(state.blocked, issue_id) do
+      state
+    else
+      restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms)
     end
-  end
-
-  defp stall_watchdog_supported?(running_entry) do
-    Map.get(running_entry, :runtime) not in [:opencode_server, "opencode_server"]
   end
 
   defp restart_stalled_issue(state, issue_id, running_entry, now, timeout_ms) do
@@ -2850,6 +2846,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp runtime_progress_event?(%{event: event}, _token_delta)
        when event in [
               :session_started,
+              :turn_progress,
               :turn_completed,
               :turn_failed,
               :turn_cancelled,

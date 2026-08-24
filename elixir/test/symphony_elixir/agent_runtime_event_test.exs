@@ -43,6 +43,7 @@ defmodule SymphonyElixir.AgentRuntimeEventTest do
     constructors = [
       session_started: :session_started,
       turn_started: :turn_started,
+      turn_progress: :turn_progress,
       message_delta: :message_delta,
       tool_call: :tool_call,
       tool_result: :tool_result,

@@ -476,6 +476,86 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert payload.tracker.rate_limit.source == "candidate_fetch"
   end
 
+  test "authoritative turn progress refreshes stall protection" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      codex_stall_timeout_ms: 1_000
+    )
+
+    issue_id = "issue-authoritative-progress"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-PROGRESS",
+      title: "Authoritative progress test",
+      description: "Refresh stall protection from a normalized runtime progress event",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PROGRESS"
+    }
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+
+    orchestrator_name = Module.concat(__MODULE__, :AuthoritativeProgressOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    worker_pid =
+      spawn(fn ->
+        receive do
+          :done -> :ok
+        end
+      end)
+
+    on_exit(fn ->
+      if Process.alive?(worker_pid), do: Process.exit(worker_pid, :kill)
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    stale_at = DateTime.add(DateTime.utc_now(), -5, :second)
+    progress_at = DateTime.utc_now()
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: worker_pid,
+      ref: make_ref(),
+      identifier: issue.identifier,
+      issue: issue,
+      session_id: "session-progress",
+      last_runtime_message: nil,
+      last_runtime_timestamp: stale_at,
+      last_runtime_progress_timestamp: stale_at,
+      last_runtime_event: :turn_started,
+      started_at: stale_at
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
+    end)
+
+    send(
+      pid,
+      {:runtime_event, issue_id,
+       %{
+         event: :turn_progress,
+         payload: %{kind: :message_part, source: :opencode_global_event},
+         timestamp: progress_at
+       }}
+    )
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert %{running: [running_after_progress]} = snapshot
+    assert running_after_progress.last_runtime_timestamp == progress_at
+    assert running_after_progress.last_runtime_progress_timestamp == progress_at
+    assert running_after_progress.last_runtime_event == :turn_progress
+
+    send(pid, :tick)
+    send(pid, :run_poll_cycle)
+    snapshot_after_tick = GenServer.call(pid, :snapshot)
+    assert Process.alive?(worker_pid)
+    assert %{running: [%{last_runtime_progress_timestamp: ^progress_at}]} = snapshot_after_tick
+  end
+
   test "repeated non-progress error notifications do not refresh stall protection" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
@@ -2174,7 +2254,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert due_at_ms > System.monotonic_time(:millisecond)
   end
 
-  test "orchestrator leaves synchronous OpenCode turns to their turn deadline" do
+  test "orchestrator restarts silent OpenCode turns with retry backoff" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
       tracker_api_token: nil,
@@ -2182,10 +2262,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       codex_stall_timeout_ms: 1_000
     )
 
-    issue_id = "issue-opencode-long-turn"
-    issue = %Issue{id: issue_id, identifier: "MT-OPENCODE-LONG", state: "In Progress"}
+    issue_id = "issue-opencode-silent-turn"
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-OPENCODE-SILENT",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-OPENCODE-SILENT"
+    }
+
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-    orchestrator_name = Module.concat(__MODULE__, :OpenCodeLongTurnOrchestrator)
+    orchestrator_name = Module.concat(__MODULE__, :OpenCodeSilentTurnOrchestrator)
     {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
 
     worker_pid =
@@ -2207,11 +2294,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       pid: worker_pid,
       ref: make_ref(),
       runtime: :opencode_server,
-      identifier: "MT-OPENCODE-LONG",
+      identifier: issue.identifier,
       issue: issue,
-      session_id: "session-opencode-long",
+      session_id: "session-opencode-silent",
       last_runtime_message: nil,
       last_runtime_timestamp: stale_activity_at,
+      last_runtime_progress_timestamp: stale_activity_at,
       last_runtime_event: :turn_started,
       started_at: stale_activity_at
     }
@@ -2223,12 +2311,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     end)
 
     send(pid, :tick)
-    Process.sleep(100)
+    send(pid, :run_poll_cycle)
+    _snapshot = GenServer.call(pid, :snapshot)
     state = :sys.get_state(pid)
 
-    assert Process.alive?(worker_pid)
-    assert state.running[issue_id].runtime == :opencode_server
-    refute Map.has_key?(state.retry_attempts, issue_id)
+    refute Process.alive?(worker_pid)
+    refute Map.has_key?(state.running, issue_id)
+
+    assert %{
+             attempt: 1,
+             identifier: "MT-OPENCODE-SILENT",
+             error: "stalled for " <> _,
+             session_id: "session-opencode-silent"
+           } = state.retry_attempts[issue_id]
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do

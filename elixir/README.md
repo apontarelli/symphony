@@ -553,9 +553,10 @@ runtime:
   `server_auth.password` accepts direct local-test values or an exact `env:VAR_NAME` reference;
   references resolve only at launch and missing values return `auth_missing`. Basic auth is sent only
   to the launched loopback server. OpenCode advertises the `linear_graphql` Symphony capability and
-  continuation turns; unresolved permissions/questions become blocked evidence.
-  Synchronous OpenCode turns use `turn_timeout_ms`; the generic stall watchdog remains disabled until
-  the adapter consumes trustworthy SSE progress. See `docs/agent_runtime_adapters.md`.
+  continuation turns; unresolved permissions/questions become blocked evidence. Each active turn
+  subscribes to `GET /global/event` before prompt submission. Only owned assistant/message/tool
+  activity refreshes the generic stall watchdog; health checks, blocker polls, heartbeats, unrelated
+  events, and raw process output do not. `turn_timeout_ms` remains the hard turn deadline.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

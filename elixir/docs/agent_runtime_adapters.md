@@ -70,14 +70,19 @@ The OpenCode waves established:
   `ProcessSupervisor`, wait for `/global/health`, create one session, reuse it across turns, abort on
   timeout or blocking requests, delete the session, dispose the instance, and stop the process.
 - Response mapping for assistant text, native tool parts, cumulative runner-neutral token/cost usage,
-  assistant failures, process exits, permission requests, and question requests. Native payloads
-  remain in `Event.native` and are preserved in blocked orchestration evidence.
-- Fake-server coverage for startup, continuation, tools, failures, operator input, timeout/abort,
-  server exit, remote rejection, descendant cleanup, isolated config overlays, inherited environment,
-  secret references, authentication failures, and unattended permission handling.
+  assistant failures, process exits, permission requests, and question requests. During an active
+  turn, the adapter subscribes to OpenCode's `GET /global/event` SSE stream before sending the
+  synchronous message request. Matching-workspace `message.updated` events for the owned assistant
+  message, its `message.part.updated` text/reasoning/tool/step/retry/patch events, and owned-session
+  retry status become normalized `turn_progress` events. Native envelopes remain in `Event.native`;
+  orchestration status uses the redaction-safe normalized payload.
+- Fake-server coverage includes streamed progress, progress floods, startup, continuation, tools,
+  failures, operator input, timeout/abort, server exit, remote rejection, descendant cleanup,
+  isolated config overlays, inherited environment, secret references, authentication failures, and
+  unattended permission handling.
 - OpenCode exposes the Symphony capability posture (`linear_graphql`, continuation turns, and
   explicit unattended permissions) through `OpenCodeServer.capabilities/1`. The adapter does not
-  enable remote execution or the generic stall watchdog.
+  enable remote execution.
 
 ## Unattended Hardening
 
@@ -96,9 +101,12 @@ The OpenCode waves established:
   variables are not forwarded.
 - Provider HTTP 401 responses become stable `auth_missing` blocked evidence. Codex remains the
   dogfood default until the guarded live OpenCode smoke path is available.
-- Consume OpenCode SSE progress before enabling the generic stall watchdog. Until then, synchronous
-  OpenCode turns are governed by `turn_timeout_ms`; `stall_timeout_ms` remains schema-compatible but
-  is not enforced for this adapter because no trustworthy in-turn progress signal is available.
+- The generic stall watchdog is enabled for OpenCode. Only owned assistant/message/tool events from
+  `GET /global/event` refresh stall activity. Server heartbeat/connection events, health checks,
+  permission/question polling, arbitrary process stdout, malformed envelopes, and other sessions or
+  workspaces do not count as progress. Stream connection/protocol failure fails the active turn
+  instead of silently disabling stall protection. Event and stdout drains are bounded so completion,
+  blocker polling, and turn deadlines remain authoritative.
 
 Remote workers remain intentionally unsupported until Symphony can either tunnel the HTTP server
 over SSH or use an stdio protocol such as ACP.

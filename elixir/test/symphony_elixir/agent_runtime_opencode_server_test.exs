@@ -170,6 +170,98 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
            ]
   end
 
+  test "streams authoritative assistant and tool progress for each continuation turn", %{
+    context: context
+  } do
+    assert {:ok, session} = start_adapter(context, :progress_slow)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:ok, _result} =
+               OpenCodeServer.send_turn(session, "Long turn", issue(), on_event: on_event)
+
+      first_events = received_events()
+      first_progress = Enum.filter(first_events, &(&1.event == :turn_progress))
+
+      assert Enum.map(first_progress, & &1.payload.kind) == [
+               :assistant_message,
+               :message_part,
+               :tool_activity
+             ]
+
+      assert Enum.any?(first_progress, fn event ->
+               event.payload.kind == :message_part and
+                 Jason.encode!(event.native) =~ "secret-progress-text" and
+                 not String.contains?(inspect(event.payload), "secret-progress-text")
+             end)
+
+      assert List.last(first_events).event == :turn_completed
+
+      assert {:ok, _result} =
+               OpenCodeServer.send_turn(session, "Continuation", issue(), on_event: on_event)
+
+      continuation_events = received_events()
+      assert Enum.count(continuation_events, &(&1.event == :turn_progress)) == 3
+      assert List.first(continuation_events).event == :turn_started
+      assert List.last(continuation_events).event == :turn_completed
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "bounded progress draining cannot starve completion", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :progress_flood)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:ok, _result} =
+               OpenCodeServer.send_turn(session, "Flood progress", issue(),
+                 on_event: on_event,
+                 turn_timeout_ms: 1_000
+               )
+
+      events = received_events()
+      assert Enum.count(events, &(&1.event == :turn_progress)) > 64
+      assert List.last(events).event == :turn_completed
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "ignores progress from unrelated sessions and workspaces", %{context: context} do
+    assert {:ok, session} = start_adapter(context, :unrelated_progress)
+    test_pid = self()
+    on_event = fn event -> send(test_pid, {:runtime_event, event}) end
+
+    try do
+      assert {:ok, _result} =
+               OpenCodeServer.send_turn(session, "Ignore unrelated progress", issue(), on_event: on_event)
+
+      events = received_events()
+      refute Enum.any?(events, &(&1.event == :turn_progress))
+      assert List.last(events).event == :turn_completed
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
+  test "fails before prompt submission when the progress stream is unavailable", %{
+    context: context
+  } do
+    assert {:ok, session} = start_adapter(context, :progress_stream_http_error)
+
+    try do
+      assert {:error, {:progress_stream_failed, {:http_error, 500, ""}}} =
+               OpenCodeServer.send_turn(session, "Do not submit", issue(), [])
+
+      refute "POST /session/session-contract/message" in request_paths(context)
+    after
+      OpenCodeServer.stop(session)
+    end
+  end
+
   test "maps completed native tool parts to tool call and result events", %{context: context} do
     assert {:ok, session} = start_adapter(context, :tool)
     test_pid = self()
@@ -854,6 +946,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     ~S"""
     #!/usr/bin/env python3
     import json
+    import queue
     import os
     import subprocess
     import sys
@@ -908,16 +1001,38 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     if scenario == "startup_timeout":
         time.sleep(30)
 
-    state = {"aborted": False, "pending_question": False, "pending_permission": False, "message_count": 0}
+    state = {
+        "aborted": False,
+        "pending_question": False,
+        "pending_permission": False,
+        "message_count": 0,
+    }
+    event_queues = []
+    event_queues_lock = threading.Lock()
     queue_request_held = threading.Event()
     permission_request_held = threading.Event()
     turn_task_result_sent = threading.Event()
     abort_request_started = threading.Event()
+    progress_flood_poll_observed = threading.Event()
 
     def trace(method, path):
         with open(trace_path, "a", encoding="utf-8") as file:
             file.write(f"{method} {path}\n")
             file.flush()
+
+    def publish_event(event_type, properties, directory=None):
+        envelope = {
+            "directory": directory or os.getcwd(),
+            "payload": {
+                "id": f"event-{time.time_ns()}",
+                "type": event_type,
+                "properties": properties,
+            },
+        }
+        with event_queues_lock:
+            subscribers = list(event_queues)
+        for subscriber in subscribers:
+            subscriber.put(envelope)
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -943,6 +1058,49 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+        def stream_events(self):
+            events = queue.Queue()
+            with event_queues_lock:
+                event_queues.append(events)
+
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("cache-control", "no-cache")
+            self.send_header("transfer-encoding", "chunked")
+            self.send_header("connection", "keep-alive")
+            self.end_headers()
+
+            connected = {
+                "payload": {
+                    "id": "event-connected",
+                    "type": "server.connected",
+                    "properties": {},
+                },
+            }
+
+            try:
+                connected_payload = f"data: {json.dumps(connected)}\n\n".encode("utf-8")
+                self.wfile.write(f"{len(connected_payload):x}\r\n".encode("ascii"))
+                self.wfile.write(connected_payload + b"\r\n")
+                self.wfile.flush()
+
+                while True:
+                    try:
+                        event = events.get(timeout=0.05)
+                        payload = f"data: {json.dumps(event)}\n\n".encode("utf-8")
+                    except queue.Empty:
+                        payload = b": heartbeat\n\n"
+
+                    self.wfile.write(f"{len(payload):x}\r\n".encode("ascii"))
+                    self.wfile.write(payload + b"\r\n")
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                with event_queues_lock:
+                    if events in event_queues:
+                        event_queues.remove(events)
+
         def do_GET(self):
             path = urlparse(self.path).path
             trace("GET", path)
@@ -955,10 +1113,18 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                     self.reply(401, {"error": "bad auth"})
                 else:
                     self.reply(200, {"healthy": True, "version": "fake"})
+            elif path == "/global/event" and scenario == "progress_stream_http_error":
+                self.reply(500, {"error": "event stream unavailable"})
+            elif path == "/global/event":
+                self.stream_events()
             elif path == "/question" and scenario == "completion_poll_race":
                 queue_request_held.set()
                 turn_task_result_sent.wait()
                 self.reply(500, {"error": "queue unavailable"})
+                return
+            elif path == "/question" and scenario == "progress_flood":
+                progress_flood_poll_observed.set()
+                self.reply(200, [])
                 return
             elif path == "/question" and scenario in ("poll_http_500", "abort_result_race"):
                 self.reply(500, {"error": "queue unavailable"})
@@ -1030,6 +1196,76 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                 self.reply(404, {"error": "not found"})
                 return
             state["message_count"] += 1
+
+            if scenario in ("progress_slow", "progress_flood"):
+                publish_event("message.updated", {
+                    "info": {
+                        "id": "message-success",
+                        "sessionID": "session-contract",
+                        "role": "assistant",
+                    },
+                })
+
+                progress_count = 200 if scenario == "progress_flood" else 1
+                for index in range(progress_count):
+                    publish_event("message.part.updated", {
+                        "part": {
+                            "id": f"part-progress-{index}",
+                            "sessionID": "session-contract",
+                            "messageID": "message-success",
+                            "type": "text",
+                            "text": "secret-progress-text",
+                        },
+                        "delta": "secret-progress-text",
+                    })
+
+                if scenario == "progress_flood":
+                    progress_flood_poll_observed.wait()
+
+                if scenario == "progress_slow":
+                    time.sleep(0.08)
+                    publish_event("message.part.updated", {
+                        "part": {
+                            "id": "part-progress-tool",
+                            "sessionID": "session-contract",
+                            "messageID": "message-success",
+                            "type": "tool",
+                            "callID": "call-progress",
+                            "tool": "read",
+                            "state": {
+                                "status": "running",
+                                "input": {"path": "README.md"},
+                                "time": {"start": 1},
+                            },
+                        },
+                    })
+                    time.sleep(0.08)
+
+            if scenario == "unrelated_progress":
+                publish_event("message.updated", {
+                    "info": {
+                        "id": "message-other-session",
+                        "sessionID": "session-other",
+                        "role": "assistant",
+                    },
+                })
+                publish_event("message.updated", {
+                    "info": {
+                        "id": "message-other-workspace",
+                        "sessionID": "session-contract",
+                        "role": "assistant",
+                    },
+                }, directory="/tmp/other-workspace")
+                publish_event("message.part.updated", {
+                    "part": {
+                        "id": "part-other-session",
+                        "sessionID": "session-other",
+                        "messageID": "message-other-session",
+                        "type": "text",
+                        "text": "unrelated",
+                    },
+                    "delta": "unrelated",
+                })
 
             if scenario == "server_exit":
                 os._exit(7)
