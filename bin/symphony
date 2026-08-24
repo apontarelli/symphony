@@ -281,6 +281,7 @@ run_saved_setup_cli() {
   local use_env_file=1
   local escript_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
   local env_optional=0
+  local interactive_tty=0
   local arg
 
   while [[ $# -gt 0 ]]; do
@@ -317,6 +318,10 @@ run_saved_setup_cli() {
   symphony_home="$(absolute_path "$symphony_home")"
   env_file="$(absolute_path "$env_file")"
 
+  if [[ -t 0 && -t 1 ]]; then
+    interactive_tty=1
+  fi
+
   if [[ "$use_env_file" == "1" && ! -f "$env_file" && "$env_optional" == "1" ]]; then
     use_env_file=0
   fi
@@ -333,9 +338,9 @@ run_saved_setup_cli() {
       exit 127
     }
 
-    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" op run --env-file "$env_file" -- mise exec -- ./bin/symphony "${escript_args[@]}")
+    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" op run --env-file "$env_file" -- mise exec -- ./bin/symphony "${escript_args[@]}")
   else
-    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- ./bin/symphony "${escript_args[@]}")
+    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" mise exec -- ./bin/symphony "${escript_args[@]}")
   fi
 
   exec "${cmd[@]}"

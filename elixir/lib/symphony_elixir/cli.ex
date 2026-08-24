@@ -802,6 +802,10 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp default_tty? do
+    System.get_env("SYMPHONY_INTERACTIVE_TTY") == "1" or standard_io_terminal?()
+  end
+
+  defp standard_io_terminal? do
     case :io.getopts(:standard_io) do
       opts when is_list(opts) -> Keyword.get(opts, :terminal, false) == true
       _ -> false
