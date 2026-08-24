@@ -20,6 +20,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   @blocking_poll_retry_delay_ms 20
   @stop_request_timeout_ms 250
   @output_drain_batch_size 64
+  @turn_output_drain_ms 50
   @loopback_hosts ["127.0.0.1", "localhost", "::1"]
 
   @type client :: %{
@@ -1018,7 +1019,19 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
 
   defp finish_turn_response(session, task, on_event, result) do
     shutdown_progress_stream(task.progress_stream)
+    drain_turn_output(session, System.monotonic_time(:millisecond) + @turn_output_drain_ms)
     handle_turn_response(session, on_event, result)
+  end
+
+  defp drain_turn_output(session, deadline_ms) do
+    port = ProcessSupervisor.port(session.process)
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, _output}} -> drain_turn_output(session, deadline_ms)
+    after
+      remaining_ms -> :ok
+    end
   end
 
   defp poll_blocking_request(session, task, on_event, deadline_ms) do

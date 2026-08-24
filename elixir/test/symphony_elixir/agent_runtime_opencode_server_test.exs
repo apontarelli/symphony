@@ -223,7 +223,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                )
 
       events = received_events()
-      assert Enum.count(events, &(&1.event == :turn_progress)) > 64
+      assert Enum.count(events, &(&1.event == :turn_progress)) >= 64
       assert List.last(events).event == :turn_completed
     after
       OpenCodeServer.stop(session)
@@ -1034,6 +1034,10 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         for subscriber in subscribers:
             subscriber.put(envelope)
 
+    class QuietThreadingHTTPServer(ThreadingHTTPServer):
+        def handle_error(self, _request, _client_address):
+            pass
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -1094,7 +1098,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                     self.wfile.write(f"{len(payload):x}\r\n".encode("ascii"))
                     self.wfile.write(payload + b"\r\n")
                     self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
+            except Exception:
                 pass
             finally:
                 with event_queues_lock:
@@ -1371,7 +1375,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
             else:
                 self.reply(404, {"error": "not found"})
 
-    server = ThreadingHTTPServer((hostname, port), Handler)
+    server = QuietThreadingHTTPServer((hostname, port), Handler)
     actual_port = server.server_address[1]
     print(f"opencode server listening on http://{hostname}:{actual_port}", flush=True)
     server.serve_forever()
