@@ -442,7 +442,7 @@ defmodule SymphonyElixir.CLI do
   defp evaluate_picker(opts, deps) do
     cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
     repo = opts |> Keyword.get(:repo, cwd) |> Path.expand()
-    tty? = deps |> Map.get(:tty?, fn -> IO.ANSI.enabled?() end) |> apply([])
+    tty? = deps |> Map.get(:tty?, &default_tty?/0) |> apply([])
 
     cond do
       not RunSetup.repo_setup_valid?(repo) ->
