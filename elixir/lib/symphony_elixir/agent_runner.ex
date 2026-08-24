@@ -202,14 +202,67 @@ defmodule SymphonyElixir.AgentRunner do
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
 
     with {:ok, policy} <- policy_for_issue(issue, opts),
-         {:ok, session} <- AgentRuntime.start_session(workspace, issue, worker_host: worker_host, policy: policy) do
-      try do
-        opts = Keyword.put(opts, :policy, policy)
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
-      after
-        AgentRuntime.stop_session(session)
-      end
+         {:ok, session} <-
+           AgentRuntime.start_session(workspace, issue,
+             worker_host: worker_host,
+             policy: policy
+           ) do
+      opts = Keyword.put(opts, :policy, policy)
+
+      run_result =
+        try do
+          {:returned,
+           do_run_codex_turns(
+             session,
+             workspace,
+             issue,
+             codex_update_recipient,
+             opts,
+             issue_state_fetcher,
+             1,
+             max_turns
+           )}
+        rescue
+          error -> {:raised, :error, error, __STACKTRACE__}
+        catch
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finish_runtime_run(run_result, stop_runtime_session(session))
     end
+  end
+
+  defp stop_runtime_session(session) do
+    case AgentRuntime.stop_session(session) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error ->
+      {:error, {:runtime_cleanup_exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason ->
+      {:error, {:runtime_cleanup_exit, kind, reason}}
+  end
+
+  defp finish_runtime_run({:returned, result}, :ok), do: result
+
+  defp finish_runtime_run({:returned, :ok}, {:error, cleanup_reason}),
+    do: {:error, {:runtime_cleanup_failed, cleanup_reason}}
+
+  defp finish_runtime_run(
+         {:returned, {:error, primary_reason}},
+         {:error, cleanup_reason}
+       ) do
+    {:error, {:agent_run_failed, primary_reason, {:runtime_cleanup_failed, cleanup_reason}}}
+  end
+
+  defp finish_runtime_run({:raised, kind, reason, stacktrace}, cleanup_result) do
+    if cleanup_result != :ok do
+      Logger.error("Agent runtime cleanup failed while preserving raised failure: #{inspect(cleanup_result)}")
+    end
+
+    :erlang.raise(kind, reason, stacktrace)
   end
 
   defp policy_for_issue(issue, opts) do

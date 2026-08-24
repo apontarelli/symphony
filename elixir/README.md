@@ -541,6 +541,11 @@ runtime:
   normalized runtime events, aborts timed-out turns, and disposes the server during stop. Remote
   OpenCode workers fail before launch. Each run receives a unique `OPENCODE_CONFIG_DIR` overlay under
   the issue workspace; Symphony never mutates `~/.config/opencode` or the target workspace config.
+  On Darwin and Linux, every local runner gets a verified isolated process group owned by the
+  worker lifecycle. Stop sends TERM to the group, waits 150 ms, then sends KILL to survivors.
+  Worker/startup failure uses the same cleanup path. Unsupported hosts or missing local `sh`, `ps`,
+  or `kill` tools fail before launch; Linux also requires `setsid -f -w`. Adopted SSH ports remain
+  port-only cleanup.
   The overlay injects an explicit noninteractive permission policy (`permissions`, default deny) and
   is removed during stop. Its schema supports `model`, `agent`, `hostname`, automatic or static
   `port`, `config_dir`, `config_path`, string/map `config_content`, `server_auth`, `permissions`,

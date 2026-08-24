@@ -7,6 +7,7 @@ defmodule SymphonyElixir.AgentRuntime do
   `SymphonyElixir.AgentRuntime.Event` values to orchestration through the
   callback options they support.
   """
+  require Logger
 
   alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OpenCodeServer}
   alias SymphonyElixir.Config
@@ -70,12 +71,50 @@ defmodule SymphonyElixir.AgentRuntime do
   @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def run(workspace, prompt, issue, opts \\ []) do
     with {:ok, session} <- start_session(workspace, issue, opts) do
-      try do
-        send_turn(session, prompt, issue, opts)
-      after
-        stop_session(session)
-      end
+      turn_result =
+        try do
+          {:returned, send_turn(session, prompt, issue, opts)}
+        rescue
+          error -> {:raised, :error, error, __STACKTRACE__}
+        catch
+          kind, reason -> {:raised, kind, reason, __STACKTRACE__}
+        end
+
+      finish_run(turn_result, stop_session_safely(session))
     end
+  end
+
+  defp stop_session_safely(session) do
+    case stop_session(session) do
+      :ok -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    error ->
+      {:error, {:runtime_cleanup_exception, error.__struct__, Exception.message(error)}}
+  catch
+    kind, reason ->
+      {:error, {:runtime_cleanup_exit, kind, reason}}
+  end
+
+  defp finish_run({:returned, result}, :ok), do: result
+
+  defp finish_run(
+         {:returned, {:error, primary_reason}},
+         {:error, cleanup_reason}
+       ) do
+    {:error, {:agent_run_failed, primary_reason, {:runtime_cleanup_failed, cleanup_reason}}}
+  end
+
+  defp finish_run({:returned, _result}, {:error, cleanup_reason}),
+    do: {:error, {:runtime_cleanup_failed, cleanup_reason}}
+
+  defp finish_run({:raised, kind, reason, stacktrace}, cleanup_result) do
+    if cleanup_result != :ok do
+      Logger.error("Agent runtime cleanup failed while preserving raised failure: #{inspect(cleanup_result)}")
+    end
+
+    :erlang.raise(kind, reason, stacktrace)
   end
 
   @spec start_session(Path.t(), map(), keyword()) :: {:ok, Session.t()} | {:error, term()}

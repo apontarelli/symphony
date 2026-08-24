@@ -174,17 +174,15 @@ defmodule SymphonyElixir.Codex.LaunchTest do
 
     process_starter = fn argv, opts ->
       send(parent, {:local_start, argv, opts})
-      {:ok, %{port: :fake_port, process: :fake_process, argv: Enum.drop(argv, 4)}}
+      {:ok, %{port: :fake_port, process: :fake_process, argv: argv}}
     end
 
     assert {:ok, result} =
              Launch.start(context, line: 8_192, process_starter: process_starter)
 
     assert_receive {:local_start, argv, opts}
-    assert Enum.at(argv, 0) == "/bin/sh"
-    assert Enum.at(argv, 1) == "-c"
 
-    assert Enum.drop(argv, 4) == [
+    assert argv == [
              "/pinned/codex",
              "app-server",
              "--stdio",

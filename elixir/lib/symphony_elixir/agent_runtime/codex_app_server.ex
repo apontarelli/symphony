@@ -116,9 +116,18 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
           )
 
         {:error, reason} ->
-          ProcessSupervisor.stop(process)
-          {:error, reason}
+          cleanup_failed_start(process, reason)
       end
+    end
+  end
+
+  defp cleanup_failed_start(process, primary_reason) do
+    case ProcessSupervisor.stop(process) do
+      :ok ->
+        {:error, primary_reason}
+
+      {:error, cleanup_reason} ->
+        {:error, {:agent_runtime_start_failed, primary_reason, {:runtime_cleanup_failed, cleanup_reason}}}
     end
   end
 
@@ -234,7 +243,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     end
   end
 
-  @spec stop_session(session()) :: :ok
+  @spec stop_session(session()) :: :ok | {:error, term()}
   def stop_session(%{process: %ProcessSupervisor{} = process}) do
     ProcessSupervisor.stop(process)
   end
