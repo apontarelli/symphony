@@ -705,16 +705,27 @@ defmodule SymphonyElixir.Config.Schema do
         _no_selected_runner -> default_runner_config!(settings)
       end
 
-    case runner["turn_sandbox_policy"] do
-      %{} = policy ->
-        {:ok, policy}
-
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> default_runtime_turn_sandbox_policy(opts)
-    end
+    workspace = default_workspace_root(workspace, settings.workspace.root)
+    resolve_pinned_turn_sandbox_policy(runner, workspace, Keyword.get(opts, :remote, false))
   end
+
+  @spec resolve_pinned_turn_sandbox_policy(map(), Path.t(), boolean()) ::
+          {:ok, map()} | {:error, term()}
+  def resolve_pinned_turn_sandbox_policy(
+        %{"turn_sandbox_policy" => %{} = policy},
+        _workspace,
+        remote?
+      )
+      when is_boolean(remote?),
+      do: {:ok, policy}
+
+  def resolve_pinned_turn_sandbox_policy(%{}, workspace, remote?)
+      when is_boolean(remote?) do
+    default_runtime_turn_sandbox_policy(workspace, remote: remote?)
+  end
+
+  def resolve_pinned_turn_sandbox_policy(_runner, _workspace, _remote?),
+    do: {:error, {:unsafe_turn_sandbox_policy, :invalid_pinned_authority}}
 
   @spec normalize_issue_state(String.t()) :: String.t()
   def normalize_issue_state(state_name) when is_binary(state_name) do

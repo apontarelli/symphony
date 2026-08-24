@@ -10,8 +10,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   @behaviour SymphonyElixir.AgentRuntime
 
   alias SymphonyElixir.AgentRuntime.Event
-  alias SymphonyElixir.PathSafety
-  alias SymphonyElixir.ProcessSupervisor
+  alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor}
 
   @runtime :opencode_server
   @line_bytes 16_384
@@ -53,7 +52,43 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   @secret_ref_pattern ~r/^env:([A-Z][A-Z0-9_]*)$/
 
   @impl true
-  @spec start(Path.t(), map(), keyword()) :: {:ok, session()} | {:error, term()}
+  @spec start(ExecutionContext.t() | Path.t(), map(), keyword()) ::
+          {:ok, session()} | {:error, term()}
+  def start(%ExecutionContext{} = context, issue, opts) do
+    with :ok <- validate_context_start_options(opts),
+         :ok <- ExecutionContext.validate(context),
+         %{"kind" => "opencode_server"} = runner <- context.runner_config,
+         {:ok, execution_profile} <-
+           resolve_execution_profile(runner, context.execution_profile.name),
+         {:ok, server_auth} <- resolve_server_auth(runner["server_auth"]),
+         :ok <- ensure_local_worker(context.worker_host),
+         {:ok, workspace} <- PathSafety.canonicalize(context.workspace_path),
+         true <- workspace == context.workspace_path,
+         :ok <- validate_loopback_hostname(runner["hostname"]),
+         {:ok, {process, config_overlay}} <-
+           launch(workspace, runner, execution_profile, server_auth),
+         {:ok, session} <-
+           start_launched_session(
+             process,
+             config_overlay,
+             workspace,
+             issue,
+             runner,
+             execution_profile,
+             server_auth,
+             startup_timeout_ms: runner["startup_timeout_ms"],
+             turn_timeout_ms: context.timeout_ms
+           ) do
+      {:ok, Map.put(session, :execution_context, context)}
+    else
+      %{"kind" => _other_kind} -> {:error, :unsupported_runner_kind}
+      false -> {:error, :invalid_agent_runtime_context}
+      {:error, :invalid_context} -> {:error, :invalid_agent_runtime_context}
+      {:error, _reason} = error -> error
+      _invalid -> {:error, :invalid_agent_runtime_context}
+    end
+  end
+
   def start(workspace, issue, opts) do
     runner = Keyword.get(opts, :runner_config, %{})
     profile_ref = Keyword.get(opts, :execution_profile, "implementation")
@@ -137,6 +172,20 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
+  defp validate_context_start_options([]), do: :ok
+
+  defp validate_context_start_options(_opts),
+    do: {:error, :invalid_agent_runtime_options}
+
+  defp session_turn_timeout(
+         %{execution_context: %ExecutionContext{timeout_ms: timeout_ms}},
+         _opts
+       ),
+       do: timeout_ms
+
+  defp session_turn_timeout(session, opts),
+    do: Keyword.get(opts, :turn_timeout_ms, session.turn_timeout_ms)
+
   defp resolve_execution_profile(runner, profile_ref) do
     profile_name = normalize_profile_name(profile_ref)
 
@@ -219,7 +268,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
 
     with {:ok, body} <- prompt_body(prompt, session.runner_config, session.execution_profile),
          {:ok, progress_stream} <- start_progress_stream(session) do
-      timeout_ms = Keyword.get(opts, :turn_timeout_ms, session.turn_timeout_ms)
+      timeout_ms = session_turn_timeout(session, opts)
       request_timeout_ms = timeout_ms + session.client.read_timeout_ms
 
       emit_session_started_once(session, on_event)

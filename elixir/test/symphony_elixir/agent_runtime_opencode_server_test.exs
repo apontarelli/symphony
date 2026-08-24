@@ -4,7 +4,8 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
   alias SymphonyElixir.AgentRuntime
   alias SymphonyElixir.AgentRuntime.{Event, OpenCodeServer}
   alias SymphonyElixir.Config.Schema
-  alias SymphonyElixir.ProcessSupervisor
+  alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor, TargetContext}
+  alias SymphonyElixir.Linear.Issue
 
   setup do
     test_root =
@@ -72,6 +73,56 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
       assert {:ok, %{session_id: "session-contract-message-success"}} =
                AgentRuntime.send_turn(session, "Facade prompt", issue())
+    after
+      assert :ok = AgentRuntime.stop_session(session)
+    end
+  end
+
+  test "context facade pins OpenCode profile after global workflow poisoning", %{
+    context: context
+  } do
+    runner =
+      context
+      |> runner_config(:success)
+      |> Map.put("model", "anthropic/global-fallback")
+      |> Map.put("execution_profiles", %{
+        "implementation" => %{
+          "model" => "anthropic/pinned-opencode",
+          "timeout_ms" => 750,
+          "max_retries" => 0
+        }
+      })
+
+    issue = %Issue{
+      id: "issue-opencode-context",
+      identifier: "SID-383",
+      title: "Pinned OpenCode context"
+    }
+
+    target = context_target(context, runner)
+    assert {:ok, execution_context} = ExecutionContext.new(target, issue, policy: %{"capabilities" => %{"required" => []}})
+    File.mkdir_p!(execution_context.workspace_path)
+
+    write_workflow_file!(SymphonyElixir.Workflow.workflow_file_path(),
+      codex_command: "/definitely/missing/codex app-server"
+    )
+
+    assert {:ok, session} = AgentRuntime.start_session(execution_context, issue)
+
+    try do
+      assert session.context == execution_context
+      assert session.runner_kind == "opencode_server"
+      assert session.adapter_session.execution_context == execution_context
+
+      assert session.adapter_session.execution_profile.model == %{
+               "modelID" => "pinned-opencode",
+               "providerID" => "anthropic"
+             }
+
+      assert session.adapter_session.turn_timeout_ms == 750
+
+      assert {:ok, %{session_id: "session-contract-message-success"}} =
+               AgentRuntime.send_turn(session, "Pinned facade prompt", issue)
     after
       assert :ok = AgentRuntime.stop_session(session)
     end
@@ -845,6 +896,48 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       assert ProcessSupervisor.descendant_cleanup_supported?() == false
     end
   end
+
+  defp context_target(context, runner) do
+    {:ok, root} = PathSafety.canonicalize(context.workspace)
+
+    %TargetContext{
+      target_id: Path.basename(root),
+      state: :active,
+      dispatch_mode: :explicit,
+      registry_generation: context_hash(),
+      policy_hash: context_hash(),
+      repo_manifest_hash: context_hash(),
+      repo_policy: %{
+        "manifest" => %{},
+        "manifest_source_dir" => context.workspace |> Path.dirname() |> Path.expand(),
+        "workflow_module_resolution" => %{}
+      },
+      tracker_connection: %{},
+      run_target: %{},
+      worktree_policy: %{
+        "root" => root,
+        "strategy" => "per_issue",
+        "hooks" => %{
+          "after_create" => nil,
+          "after_run" => nil,
+          "before_remove" => nil,
+          "before_run" => nil,
+          "timeout_ms" => 1_000
+        }
+      },
+      runner_policy: %{
+        "default" => "open",
+        "allowed" => ["open"],
+        "runners" => %{"open" => runner}
+      },
+      effective_checks: %{},
+      external_side_effect_gates: %{},
+      capacity_limits: %{},
+      budget_limits: %{}
+    }
+  end
+
+  defp context_hash, do: "sha256:" <> String.duplicate("a", 64)
 
   defp start_adapter(context, scenario, opts \\ []) do
     OpenCodeServer.start(

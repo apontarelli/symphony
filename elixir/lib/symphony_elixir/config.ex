@@ -4,8 +4,9 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{ExecutionContext, RunTarget}
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.RunTarget
+
   alias SymphonyElixir.Workflow
   alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.Workflow.ModuleRegistry
@@ -186,9 +187,48 @@ defmodule SymphonyElixir.Config do
     |> normalized_string()
   end
 
-  @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
+  @spec codex_runtime_settings() ::
           {:ok, codex_runtime_settings()} | {:error, term()}
-  def codex_runtime_settings(workspace \\ nil, opts \\ []) do
+  def codex_runtime_settings, do: codex_runtime_settings(nil, [])
+
+  @spec codex_runtime_settings(ExecutionContext.t() | Path.t() | nil) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
+  def codex_runtime_settings(%ExecutionContext{} = context),
+    do: codex_runtime_settings(context, [])
+
+  def codex_runtime_settings(workspace),
+    do: codex_runtime_settings(workspace, [])
+
+  @spec codex_runtime_settings(ExecutionContext.t() | Path.t() | nil, keyword()) ::
+          {:ok, codex_runtime_settings()} | {:error, term()}
+  def codex_runtime_settings(%ExecutionContext{} = context, []) do
+    with :ok <- ExecutionContext.validate(context),
+         %{"kind" => "codex_app_server"} = runner <- context.runner_config,
+         {:ok, runner_policy_overrides} <- policy_runner_overrides(context.policy, context.runner_name),
+         {:ok, turn_sandbox_policy} <-
+           context_turn_sandbox_policy(context, runner, runner_policy_overrides),
+         {:ok, approval_policy} <-
+           runtime_approval_policy(runner["approval_policy"], runner_policy_overrides),
+         {:ok, thread_sandbox} <-
+           runtime_thread_sandbox(runner["thread_sandbox"], runner_policy_overrides) do
+      {:ok,
+       %{
+         approval_policy: approval_policy,
+         thread_sandbox: thread_sandbox,
+         turn_sandbox_policy: turn_sandbox_policy
+       }}
+    else
+      %{"kind" => _other_kind} -> {:error, :unsupported_runner_kind}
+      {:error, :invalid_context} -> {:error, :invalid_context}
+      {:error, _reason} -> {:error, :invalid_context_runtime_policy}
+      _invalid -> {:error, :invalid_context}
+    end
+  end
+
+  def codex_runtime_settings(%ExecutionContext{}, _opts),
+    do: {:error, :invalid_context_runtime_options}
+
+  def codex_runtime_settings(workspace, opts) do
     with {:ok, settings} <- selected_runtime_settings(opts) do
       codex_runtime_settings(settings, workspace, opts)
     end
@@ -216,6 +256,30 @@ defmodule SymphonyElixir.Config do
          thread_sandbox: thread_sandbox,
          turn_sandbox_policy: turn_sandbox_policy
        }}
+    end
+  end
+
+  defp context_turn_sandbox_policy(context, runner, runner_policy_overrides) do
+    case Map.fetch(runner_policy_overrides, "turn_sandbox_policy") do
+      {:ok, %{} = policy} ->
+        {:ok, normalize_map_keys(policy)}
+
+      {:ok, nil} ->
+        Schema.resolve_pinned_turn_sandbox_policy(
+          runner,
+          context.workspace_path,
+          is_binary(context.worker_host)
+        )
+
+      {:ok, policy} ->
+        {:error, {:invalid_policy_runner_turn_sandbox_policy, policy}}
+
+      :error ->
+        Schema.resolve_pinned_turn_sandbox_policy(
+          runner,
+          context.workspace_path,
+          is_binary(context.worker_host)
+        )
     end
   end
 

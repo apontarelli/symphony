@@ -7,7 +7,7 @@ defmodule SymphonyElixir.CapabilityPreflight do
   capabilities are left unchanged.
   """
 
-  alias SymphonyElixir.{Config, Shell, SSH}
+  alias SymphonyElixir.{AgentRuntime, Config, ExecutionContext, Shell, SSH}
   alias SymphonyElixir.Workflow.PublishTarget
 
   @tcp_capabilities MapSet.new(["localhost_tcp", "local_tcp", "mix_pubsub_tcp"])
@@ -25,8 +25,40 @@ defmodule SymphonyElixir.CapabilityPreflight do
         }
   @type result :: %{status: :passed | :blocked, failures: [failure()]}
 
+  @type context_error ::
+          :invalid_capability_preflight_context
+          | :invalid_capability_preflight_options
+
+  @spec run(ExecutionContext.t()) :: result() | {:error, context_error() | term()}
+  def run(%ExecutionContext{} = context), do: run(context, [])
+
+  @spec run(ExecutionContext.t(), keyword()) :: result() | {:error, context_error() | term()}
+  def run(%ExecutionContext{} = context, opts) do
+    with {:ok, opts} <- validate_context_options(opts),
+         :ok <- validate_execution_context(context),
+         capabilities when is_map(capabilities) <-
+           AgentRuntime.capabilities(
+             context,
+             Keyword.take(opts, [:adapter_registry])
+           ),
+         {:ok, context_opts} <-
+           context_preflight_options(
+             context,
+             capabilities,
+             Keyword.drop(opts, [:adapter_registry])
+           ) do
+      run(context.workspace_path, context.policy, context_opts)
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec run(Path.t(), map()) :: result()
+  def run(workspace, policy), do: run(workspace, policy, [])
+
   @spec run(Path.t(), map(), keyword()) :: result()
-  def run(workspace, policy, opts \\ []) when is_binary(workspace) and is_map(policy) and is_list(opts) do
+  def run(workspace, policy, opts)
+      when is_binary(workspace) and is_map(policy) and is_list(opts) do
     required = required_capabilities(policy)
 
     failures =
@@ -36,6 +68,67 @@ defmodule SymphonyElixir.CapabilityPreflight do
       |> maybe_check(required, @github_capabilities, fn -> github_publish_result(workspace, policy, opts) end)
 
     %{status: if(failures == [], do: :passed, else: :blocked), failures: Enum.reverse(failures)}
+  end
+
+  defp validate_context_options(opts) when is_list(opts) do
+    allowed = [
+      :adapter_registry,
+      :env,
+      :runner,
+      :tcp_close,
+      :tcp_listen,
+      :tcp_probe
+    ]
+
+    if Keyword.keyword?(opts) and length(opts) == length(Enum.uniq_by(opts, &elem(&1, 0))) and
+         Enum.all?(Keyword.keys(opts), &(&1 in allowed)) do
+      {:ok, opts}
+    else
+      {:error, :invalid_capability_preflight_options}
+    end
+  end
+
+  defp validate_context_options(_opts),
+    do: {:error, :invalid_capability_preflight_options}
+
+  defp validate_execution_context(context) do
+    case ExecutionContext.validate(context) do
+      :ok -> :ok
+      {:error, :invalid_context} -> {:error, :invalid_capability_preflight_context}
+    end
+  end
+
+  defp context_preflight_options(context, capabilities, opts) do
+    timeout_ms = context.target.worktree_policy["hooks"]["timeout_ms"]
+
+    context_opts =
+      opts
+      |> Keyword.put(:worker_host, context.worker_host)
+      |> Keyword.put(:timeout_ms, timeout_ms)
+      |> Keyword.put(:probe_context, %{
+        issue_identifier: context.issue_identifier,
+        runner_capabilities: capabilities,
+        runner_kind: context.runner_config["kind"],
+        runner_name: context.runner_name,
+        target_id: context.target.target_id
+      })
+
+    case context.runner_config["kind"] do
+      "codex_app_server" ->
+        case Config.codex_runtime_settings(context) do
+          {:ok, %{turn_sandbox_policy: turn_sandbox_policy}} ->
+            {:ok, Keyword.put(context_opts, :turn_sandbox_policy, turn_sandbox_policy)}
+
+          {:error, _reason} ->
+            {:error, :invalid_capability_preflight_context}
+        end
+
+      "opencode_server" ->
+        {:ok, context_opts}
+
+      _unsupported ->
+        {:error, :invalid_capability_preflight_context}
+    end
   end
 
   @spec blocker(result()) :: map() | nil
@@ -250,6 +343,7 @@ defmodule SymphonyElixir.CapabilityPreflight do
 
   defp run_command(workspace, worker_host, runner, step, command, opts) do
     timeout_ms = timeout_ms(opts)
+    runner = context_runner(runner, Keyword.get(opts, :probe_context, %{}))
 
     task =
       Task.async(fn ->
@@ -267,7 +361,8 @@ defmodule SymphonyElixir.CapabilityPreflight do
     kind, reason -> {:error, {kind, reason}}
   end
 
-  defp execute_command(workspace, worker_host, runner, step, command, timeout_ms, env) when is_function(runner, 1) do
+  defp execute_command(workspace, worker_host, runner, step, command, timeout_ms, env)
+       when is_function(runner, 1) do
     %{
       workspace: workspace,
       worker_host: worker_host,
@@ -295,6 +390,13 @@ defmodule SymphonyElixir.CapabilityPreflight do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp context_runner(runner, context)
+       when is_function(runner, 1) and is_map(context) do
+    fn command_context -> runner.(Map.merge(context, command_context)) end
+  end
+
+  defp context_runner(runner, _context), do: runner
 
   defp yield_command(task, timeout_ms, step) do
     case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do

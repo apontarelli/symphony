@@ -15,6 +15,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     Codex.ExecutionProfile,
     Codex.Launch,
     Config,
+    ExecutionContext,
     PathSafety,
     ProcessSupervisor,
     Shell,
@@ -48,7 +49,12 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
         }
 
   @impl true
-  @spec start(Path.t(), map(), keyword()) :: {:ok, session()} | {:error, term()}
+  @spec start(ExecutionContext.t() | Path.t(), map(), keyword()) ::
+          {:ok, session()} | {:error, term()}
+  def start(%ExecutionContext{} = context, _issue, opts) do
+    start_session(context, opts)
+  end
+
   def start(workspace, _issue, opts) do
     start_session(workspace, opts)
   end
@@ -82,8 +88,57 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     end
   end
 
-  @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
-  def start_session(workspace, opts \\ []) do
+  @spec start_session(ExecutionContext.t() | Path.t()) ::
+          {:ok, session()} | {:error, term()}
+  def start_session(context_or_workspace),
+    do: start_session(context_or_workspace, [])
+
+  @spec start_session(ExecutionContext.t() | Path.t(), keyword()) ::
+          {:ok, session()} | {:error, term()}
+  def start_session(%ExecutionContext{} = context, opts) do
+    with :ok <- validate_context_start_options(opts),
+         :ok <- ExecutionContext.validate(context),
+         {:ok, session_policies} <- Config.codex_runtime_settings(context),
+         {:ok, launch} <- Launch.start(context, line: @port_line_bytes) do
+      process = launch.process
+      port = launch.port
+      execution_profile = context.execution_profile
+      codex_command_display = Shell.argv_to_command(launch.argv)
+
+      metadata =
+        port
+        |> port_metadata(context.worker_host)
+        |> Map.merge(
+          context_launch_provenance(
+            context,
+            launch.codex_home,
+            codex_command_display
+          )
+        )
+
+      Logger.info("Codex app-server launched target_id=#{context.target.target_id} runner=#{context.runner_name} cwd=#{context.workspace_path} execution_profile=#{execution_profile.name}")
+
+      case finish_session_startup(
+             process,
+             port,
+             context.workspace_path,
+             session_policies,
+             context.runner_config["read_timeout_ms"],
+             metadata: metadata,
+             codex_home: launch.codex_home,
+             worker_host: context.worker_host,
+             runner_config: context.runner_config
+           ) do
+        {:ok, session} ->
+          {:ok, Map.put(session, :execution_context, context)}
+
+        {:error, reason} ->
+          cleanup_failed_start(process, reason)
+      end
+    end
+  end
+
+  def start_session(workspace, opts) do
     worker_host = Keyword.get(opts, :worker_host)
 
     settings = Keyword.get_lazy(opts, :runtime_settings, &Config.settings!/0)
@@ -172,20 +227,23 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
           thread_id: thread_id,
           workspace: workspace,
           runner_config: runner_config
-        },
+        } = session,
         prompt,
         issue,
         opts \\ []
       ) do
     on_event = Keyword.get(opts, :on_event, &default_on_event/1)
-    workflow_module_resolution = Keyword.get(opts, :workflow_module_resolution)
+
+    workflow_module_resolution =
+      context_workflow_module_resolution(session) ||
+        Keyword.get(opts, :workflow_module_resolution)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
         DynamicTool.execute(tool, arguments)
       end)
 
-    timeout_ms = Keyword.get(opts, :turn_timeout_ms, runner_config["turn_timeout_ms"])
+    timeout_ms = context_turn_timeout(session, opts)
     read_timeout_ms = runner_config["read_timeout_ms"]
 
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy, read_timeout_ms) do
@@ -1344,6 +1402,65 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
   end
 
   defp maybe_set_usage(metadata, _payload), do: metadata
+
+  defp validate_context_start_options([]), do: :ok
+
+  defp validate_context_start_options(_opts),
+    do: {:error, :invalid_agent_runtime_options}
+
+  defp context_turn_timeout(
+         %{execution_context: %ExecutionContext{timeout_ms: timeout_ms}},
+         _opts
+       ),
+       do: timeout_ms
+
+  defp context_turn_timeout(%{runner_config: runner_config}, opts),
+    do: Keyword.get(opts, :turn_timeout_ms, runner_config["turn_timeout_ms"])
+
+  defp context_workflow_module_resolution(%{
+         execution_context: %ExecutionContext{
+           target: %{repo_policy: %{"workflow_module_resolution" => resolution}}
+         }
+       }) do
+    normalize_workflow_module_resolution(resolution)
+  end
+
+  defp context_workflow_module_resolution(_session), do: nil
+
+  defp normalize_workflow_module_resolution(%{
+         "module_refs" => refs,
+         "policy_hash" => policy_hash
+       })
+       when is_list(refs) and is_binary(policy_hash) do
+    %{
+      module_refs:
+        Enum.map(refs, fn ref ->
+          %{name: Map.get(ref, "name"), version: Map.get(ref, "version")}
+        end),
+      policy_hash: policy_hash
+    }
+  end
+
+  defp normalize_workflow_module_resolution(_resolution), do: nil
+
+  defp context_launch_provenance(context, codex_home, codex_command) do
+    profile = context.execution_profile
+
+    %{
+      codex_command: codex_command,
+      codex_home: codex_home,
+      codex_workspace: context.workspace_path,
+      codex_execution_profile: profile.name,
+      codex_execution_profile_model: profile.model,
+      codex_execution_profile_reasoning_effort: profile.reasoning_effort,
+      codex_execution_profile_budget: profile.budget,
+      codex_execution_profile_timeout_ms: profile.timeout_ms,
+      target_id: context.target.target_id,
+      registry_generation: context.target.registry_generation,
+      policy_hash: context.target.policy_hash,
+      workflow_config_sha256: context.target.repo_manifest_hash
+    }
+  end
 
   defp launch_provenance(workspace, codex_home, codex_command, execution_profile) do
     workflow_file_path = Workflow.selected_workflow_file_path()

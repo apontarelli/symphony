@@ -10,8 +10,10 @@ work closed by SID-344.
 - Codex app-server and local OpenCode server are production adapters; Codex remains the dogfood
   default.
 - `SymphonyElixir.Config.Schema` accepts `codex_app_server` and `opencode_server` runner kinds.
-- `SymphonyElixir.AgentRuntime` selects start, turn, stop, and capability callbacks from
-  `runtime.agent.default_runner` and its runner `kind`.
+- `SymphonyElixir.AgentRuntime` selects the adapter from a validated `ExecutionContext`, and each
+  session retains that exact runner, profile, model, worker, timeout, and policy snapshot.
+- Legacy workspace/config entry points still select `runtime.agent.default_runner` as a
+  single-context compatibility path.
 - `opencode_server` is local-worker only. Remote selection fails before launch with
   `{:unsupported_remote_runner, "opencode_server", worker_host}`.
 - SID-382 closed runner schema and dispatch. SID-383 added the local HTTP lifecycle, normalized

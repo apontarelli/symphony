@@ -2048,10 +2048,16 @@ Codex-specific failures SHOULD be translated into these categories at the Codex 
 
 An `AgentRuntime` wraps a concrete coding-agent runtime behind a small orchestration interface:
 
-1. `start(workspace, issue, opts) -> session`
-2. `send_turn(session, prompt) -> event_stream`
+1. `start(execution_context, issue, opts) -> session`
+2. `send_turn(session, prompt, issue, opts) -> event_stream`
 3. `stop(session) -> ok`
-4. `capabilities(adapter) -> map`
+4. `capabilities(execution_context) -> map`
+
+The session retains the validated execution context supplied at start. Adapter selection, execution
+profile, model, worker host, runtime timeouts, and target policy MUST come from that pinned context.
+Turn submission and cleanup MUST use the session's retained context and MUST NOT reread process-global
+runtime configuration. Context-first options MUST NOT override pinned authority. Implementations MAY
+retain legacy workspace/config entry points as single-context compatibility adapters.
 
 Behavior:
 

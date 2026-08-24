@@ -163,6 +163,10 @@ defmodule SymphonyElixir.ExecutionContext do
 
   def derive_child(_parent, _role, _opts), do: {:error, :invalid_context}
 
+  @spec validate(t()) :: :ok | {:error, :invalid_context}
+  def validate(%__MODULE__{} = context), do: validate_context(context)
+  def validate(_context), do: {:error, :invalid_context}
+
   defp validate_review_role(role) when role in @review_roles, do: :ok
   defp validate_review_role(_role), do: {:error, :invalid_role}
 
