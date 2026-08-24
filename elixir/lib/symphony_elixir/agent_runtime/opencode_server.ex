@@ -214,21 +214,26 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   @impl true
   @spec send_turn(session(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def send_turn(session, prompt, _issue, opts) when is_binary(prompt) do
-    with {:ok, body} <- prompt_body(prompt, session.runner_config, session.execution_profile) do
-      on_event = Keyword.get(opts, :on_event, fn _event -> :ok end)
+    on_event = Keyword.get(opts, :on_event, fn _event -> :ok end)
+
+    with {:ok, body} <- prompt_body(prompt, session.runner_config, session.execution_profile),
+         {:ok, progress_stream} <- start_progress_stream(session) do
       timeout_ms = Keyword.get(opts, :turn_timeout_ms, session.turn_timeout_ms)
       request_timeout_ms = timeout_ms + session.client.read_timeout_ms
 
       emit_session_started_once(session, on_event)
       emit_event(on_event, :turn_started, session, %{prompt: prompt})
 
-      task = start_turn_task(session, body, request_timeout_ms, opts)
+      task = start_turn_task(session, body, request_timeout_ms, progress_stream, opts)
 
       await_turn(session, task, on_event, timeout_ms)
+    else
+      {:error, {:progress_stream_failed, _reason} = reason} ->
+        fail_turn(session, on_event, reason)
     end
   end
 
-  defp start_turn_task(session, body, request_timeout_ms, opts) do
+  defp start_turn_task(session, body, request_timeout_ms, progress_stream, opts) do
     owner = self()
     ref = make_ref()
     on_result_sent = Keyword.get(opts, :on_turn_task_result_sent)
@@ -253,11 +258,287 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
 
     monitor_ref = Process.monitor(pid)
     send(pid, {:start_turn_request, ref})
-    %{pid: pid, ref: ref, monitor_ref: monitor_ref}
+    %{pid: pid, ref: ref, monitor_ref: monitor_ref, progress_stream: progress_stream}
   end
 
   defp notify_turn_task_result_sent(callback, ref) when is_function(callback, 1), do: callback.(ref)
   defp notify_turn_task_result_sent(_callback, _ref), do: :ok
+
+  defp start_progress_stream(session) do
+    owner = self()
+    ref = make_ref()
+
+    {:ok, pid} =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        run_progress_stream(session.client, session.session_id, owner, ref)
+      end)
+
+    stream = %{pid: pid, ref: ref, monitor_ref: Process.monitor(pid)}
+    await_progress_stream_start(stream, session.client.read_timeout_ms)
+  end
+
+  defp await_progress_stream_start(stream, timeout_ms) do
+    receive do
+      {stream_ref, :ready} when stream_ref == stream.ref ->
+        {:ok, stream}
+
+      {stream_ref, {:error, reason}} when stream_ref == stream.ref ->
+        await_progress_stream_shutdown(stream)
+        {:error, {:progress_stream_failed, reason}}
+
+      {:DOWN, monitor_ref, :process, pid, reason}
+      when monitor_ref == stream.monitor_ref and pid == stream.pid ->
+        drain_progress_stream_messages(stream)
+        {:error, {:progress_stream_failed, {:stream_process_exit, reason}}}
+    after
+      timeout_ms ->
+        shutdown_progress_stream(stream)
+        {:error, {:progress_stream_failed, :connect_timeout}}
+    end
+  end
+
+  defp run_progress_stream(client, session_id, owner, ref) do
+    initial_state = %{
+      assistant_message_ids: MapSet.new(),
+      buffer: "",
+      ready?: false,
+      session_id: session_id,
+      workspace: client.workspace
+    }
+
+    into = fn chunk, request_response ->
+      stream_progress_chunk(chunk, request_response, initial_state, owner, ref)
+    end
+
+    result =
+      Req.get(
+        client.base_url <> "/global/event",
+        headers: [{"accept", "text/event-stream"} | client.headers],
+        params: [directory: client.workspace],
+        retry: false,
+        receive_timeout: :infinity,
+        connect_options: [timeout: client.read_timeout_ms],
+        into: into
+      )
+
+    case result do
+      {:ok, %Req.Response{status: status, private: private}} when status in 200..299 ->
+        unless Map.has_key?(private, :symphony_progress_stream_error) do
+          send(owner, {ref, {:error, :stream_closed}})
+        end
+
+      {:ok, %Req.Response{status: status, body: body}} ->
+        send(owner, {ref, {:error, {:http_error, status, body}}})
+
+      {:error, reason} ->
+        send(owner, {ref, {:error, {:http_request_failed, reason}}})
+    end
+  end
+
+  defp stream_progress_chunk(
+         {:data, data},
+         {request, response},
+         initial_state,
+         owner,
+         ref
+       ) do
+    state = Map.get(response.private, :symphony_progress_stream, initial_state)
+
+    case consume_progress_data(state, data) do
+      {:ok, next_state, progress_events} ->
+        if not state.ready? and next_state.ready?, do: send(owner, {ref, :ready})
+
+        Enum.each(progress_events, fn {native, payload} ->
+          send(owner, {ref, {:progress, native, payload}})
+        end)
+
+        response =
+          %{response | private: Map.put(response.private, :symphony_progress_stream, next_state)}
+
+        {:cont, {request, response}}
+
+      {:error, reason} ->
+        send(owner, {ref, {:error, reason}})
+
+        response =
+          %{response | private: Map.put(response.private, :symphony_progress_stream_error, reason)}
+
+        {:halt, {request, response}}
+    end
+  end
+
+  defp consume_progress_data(state, data) when is_binary(data) do
+    parts =
+      (state.buffer <> data)
+      |> String.replace("\r\n", "\n")
+      |> String.split("\n\n")
+
+    buffer = List.last(parts)
+    frames = Enum.drop(parts, -1)
+    state = %{state | buffer: buffer}
+
+    Enum.reduce_while(frames, {:ok, state, []}, fn frame, {:ok, state, progress_events} ->
+      case consume_progress_frame(state, frame) do
+        {:ok, next_state, nil} ->
+          {:cont, {:ok, next_state, progress_events}}
+
+        {:ok, next_state, progress_event} ->
+          {:cont, {:ok, next_state, [progress_event | progress_events]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, next_state, progress_events} ->
+        {:ok, next_state, Enum.reverse(progress_events)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp consume_progress_frame(state, frame) do
+    data =
+      frame
+      |> String.split("\n")
+      |> Enum.flat_map(fn
+        "data:" <> line -> [String.trim_leading(line)]
+        _other -> []
+      end)
+      |> Enum.join("\n")
+
+    case data do
+      "" -> {:ok, state, nil}
+      data -> decode_progress_frame(state, data)
+    end
+  end
+
+  defp decode_progress_frame(state, data) do
+    case Jason.decode(data) do
+      {:ok, %{"payload" => %{"type" => type} = native_payload} = native}
+      when is_binary(type) ->
+        state = %{state | ready?: true}
+        {next_state, payload} = progress_payload(state, native, native_payload)
+        {:ok, next_state, if(payload, do: {native, payload})}
+
+      {:ok, _invalid} ->
+        {:error, :invalid_event_envelope}
+
+      {:error, _reason} ->
+        {:error, :invalid_event_json}
+    end
+  end
+
+  defp progress_payload(
+         state,
+         %{"directory" => workspace},
+         %{
+           "type" => "message.updated",
+           "properties" => %{
+             "info" => %{
+               "id" => message_id,
+               "role" => "assistant",
+               "sessionID" => session_id
+             }
+           }
+         }
+       )
+       when workspace == state.workspace and session_id == state.session_id and
+              is_binary(message_id) do
+    next_state = %{
+      state
+      | assistant_message_ids: MapSet.put(state.assistant_message_ids, message_id)
+    }
+
+    {next_state,
+     %{
+       kind: :assistant_message,
+       message_id: message_id,
+       source: :opencode_global_event
+     }}
+  end
+
+  defp progress_payload(
+         state,
+         %{"directory" => workspace},
+         %{
+           "type" => "message.part.updated",
+           "properties" => %{
+             "part" =>
+               %{
+                 "id" => part_id,
+                 "messageID" => message_id,
+                 "sessionID" => session_id,
+                 "type" => part_type
+               } = part
+           }
+         }
+       )
+       when workspace == state.workspace and session_id == state.session_id and
+              is_binary(part_id) and is_binary(message_id) and is_binary(part_type) do
+    if MapSet.member?(state.assistant_message_ids, message_id) and
+         part_type in [
+           "text",
+           "reasoning",
+           "tool",
+           "step-start",
+           "step-finish",
+           "retry",
+           "patch"
+         ] do
+      {state, progress_part_payload(part, part_id, message_id, part_type)}
+    else
+      {state, nil}
+    end
+  end
+
+  defp progress_payload(
+         state,
+         %{"directory" => workspace},
+         %{
+           "type" => "session.status",
+           "properties" => %{
+             "sessionID" => session_id,
+             "status" => %{"type" => "retry", "attempt" => attempt}
+           }
+         }
+       )
+       when workspace == state.workspace and session_id == state.session_id and
+              is_integer(attempt) do
+    {state,
+     %{
+       attempt: attempt,
+       kind: :session_retry,
+       source: :opencode_global_event
+     }}
+  end
+
+  defp progress_payload(state, _native, _native_payload), do: {state, nil}
+
+  defp progress_part_payload(part, part_id, message_id, "tool") do
+    state = Map.get(part, "state", %{})
+
+    %{
+      call_id: Map.get(part, "callID"),
+      kind: :tool_activity,
+      message_id: message_id,
+      part_id: part_id,
+      source: :opencode_global_event,
+      status: Map.get(state, "status"),
+      tool: Map.get(part, "tool")
+    }
+  end
+
+  defp progress_part_payload(_part, part_id, message_id, part_type) do
+    %{
+      kind: :message_part,
+      message_id: message_id,
+      part_id: part_id,
+      part_type: part_type,
+      source: :opencode_global_event
+    }
+  end
 
   @impl true
   @spec stop(session()) :: :ok | {:error, term()}
@@ -625,33 +906,50 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   defp await_turn_loop(session, task, on_event, deadline_ms),
     do: await_turn_loop(session, task, on_event, deadline_ms, 0)
 
-  defp await_turn_loop(session, task, on_event, deadline_ms, output_count) do
+  defp await_turn_loop(session, task, on_event, deadline_ms, drain_count) do
     remaining_ms = deadline_ms - System.monotonic_time(:millisecond)
 
     if remaining_ms <= 0 do
       case receive_turn_task(task, 0) do
         :pending -> finish_timed_out_turn(session, task, on_event)
-        task_result -> handle_turn_task(session, on_event, task_result)
+        task_result -> handle_turn_task(session, task, on_event, task_result)
       end
     else
       port = ProcessSupervisor.port(session.process)
       wait_ms = min(remaining_ms, @blocking_poll_interval_ms)
       task_ref = task.ref
       monitor_ref = task.monitor_ref
+      progress_ref = task.progress_stream.ref
+      progress_monitor_ref = task.progress_stream.monitor_ref
+      progress_pid = task.progress_stream.pid
 
       receive do
         {^task_ref, result} ->
           Process.demonitor(monitor_ref, [:flush])
-          handle_turn_response(session, on_event, result)
+          finish_turn_response(session, task, on_event, result)
 
         {:DOWN, ^monitor_ref, :process, _pid, reason} ->
+          shutdown_progress_stream(task.progress_stream)
           fail_turn(session, on_event, {:request_process_exit, reason})
 
+        {^progress_ref, {:progress, native, payload}} ->
+          emit_event(on_event, :turn_progress, session, payload, native)
+          continue_after_turn_activity(session, task, on_event, deadline_ms, drain_count + 1)
+
+        {^progress_ref, {:error, reason}} ->
+          shutdown_turn_task(task)
+          fail_turn(session, on_event, {:progress_stream_failed, reason})
+
+        {:DOWN, ^progress_monitor_ref, :process, ^progress_pid, reason} ->
+          shutdown_request_task(task)
+          drain_progress_stream_messages(task.progress_stream)
+          fail_turn(session, on_event, {:progress_stream_failed, {:stream_process_exit, reason}})
+
         {^port, {:data, {:eol, _chunk}}} ->
-          continue_after_server_output(session, task, on_event, deadline_ms, output_count + 1)
+          continue_after_turn_activity(session, task, on_event, deadline_ms, drain_count + 1)
 
         {^port, {:data, {:noeol, _chunk}}} ->
-          continue_after_server_output(session, task, on_event, deadline_ms, output_count + 1)
+          continue_after_turn_activity(session, task, on_event, deadline_ms, drain_count + 1)
 
         {^port, {:exit_status, status}} ->
           shutdown_turn_task(task)
@@ -663,12 +961,12 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp continue_after_server_output(session, task, on_event, deadline_ms, output_count)
-       when output_count < @output_drain_batch_size do
-    await_turn_loop(session, task, on_event, deadline_ms, output_count)
+  defp continue_after_turn_activity(session, task, on_event, deadline_ms, drain_count)
+       when drain_count < @output_drain_batch_size do
+    await_turn_loop(session, task, on_event, deadline_ms, drain_count)
   end
 
-  defp continue_after_server_output(session, task, on_event, deadline_ms, _output_count) do
+  defp continue_after_turn_activity(session, task, on_event, deadline_ms, _drain_count) do
     service_turn_control(session, task, on_event, deadline_ms)
   end
 
@@ -680,9 +978,10 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     receive do
       {^task_ref, result} ->
         Process.demonitor(monitor_ref, [:flush])
-        handle_turn_response(session, on_event, result)
+        finish_turn_response(session, task, on_event, result)
 
       {:DOWN, ^monitor_ref, :process, _pid, reason} ->
+        shutdown_progress_stream(task.progress_stream)
         fail_turn(session, on_event, {:request_process_exit, reason})
 
       {^port, {:exit_status, status}} ->
@@ -709,11 +1008,18 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp handle_turn_task(session, on_event, {:turn_task_completed, result}),
-    do: handle_turn_response(session, on_event, result)
+  defp handle_turn_task(session, task, on_event, {:turn_task_completed, result}),
+    do: finish_turn_response(session, task, on_event, result)
 
-  defp handle_turn_task(session, on_event, {:turn_task_exited, reason}),
-    do: fail_turn(session, on_event, {:request_process_exit, reason})
+  defp handle_turn_task(session, task, on_event, {:turn_task_exited, reason}) do
+    shutdown_progress_stream(task.progress_stream)
+    fail_turn(session, on_event, {:request_process_exit, reason})
+  end
+
+  defp finish_turn_response(session, task, on_event, result) do
+    shutdown_progress_stream(task.progress_stream)
+    handle_turn_response(session, on_event, result)
+  end
 
   defp poll_blocking_request(session, task, on_event, deadline_ms) do
     case blocking_request(session, task, deadline_ms) do
@@ -727,7 +1033,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
         finish_blocking_poll_failed(session, task, on_event, path, raw_reason)
 
       task_result ->
-        handle_turn_task(session, on_event, task_result)
+        handle_turn_task(session, task, on_event, task_result)
     end
   end
 
@@ -753,7 +1059,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
         {:error, error}
 
       task_result ->
-        handle_turn_task(session, on_event, task_result)
+        handle_turn_task(session, task, on_event, task_result)
     end
   end
 
@@ -765,11 +1071,16 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
         fail_turn(session, on_event, {:blocking_poll_failed, path, raw_reason})
 
       task_result ->
-        handle_turn_task(session, on_event, task_result)
+        handle_turn_task(session, task, on_event, task_result)
     end
   end
 
   defp shutdown_turn_task(task) do
+    shutdown_request_task(task)
+    shutdown_progress_stream(task.progress_stream)
+  end
+
+  defp shutdown_request_task(task) do
     Process.exit(task.pid, :kill)
     await_turn_task_shutdown(task)
   end
@@ -791,6 +1102,35 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     receive do
       {^task_ref, _result} -> drain_turn_task_messages(task)
       {:DOWN, ^monitor_ref, :process, _pid, _reason} -> drain_turn_task_messages(task)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp shutdown_progress_stream(stream) do
+    Process.exit(stream.pid, :kill)
+    await_progress_stream_shutdown(stream)
+  end
+
+  defp await_progress_stream_shutdown(stream) do
+    receive do
+      {stream_ref, _message} when stream_ref == stream.ref ->
+        await_progress_stream_shutdown(stream)
+
+      {:DOWN, monitor_ref, :process, pid, _reason}
+      when monitor_ref == stream.monitor_ref and pid == stream.pid ->
+        drain_progress_stream_messages(stream)
+    end
+  end
+
+  defp drain_progress_stream_messages(stream) do
+    receive do
+      {stream_ref, _message} when stream_ref == stream.ref ->
+        drain_progress_stream_messages(stream)
+
+      {:DOWN, monitor_ref, :process, pid, _reason}
+      when monitor_ref == stream.monitor_ref and pid == stream.pid ->
+        drain_progress_stream_messages(stream)
     after
       0 -> :ok
     end
