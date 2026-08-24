@@ -62,24 +62,34 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
          :ok <- ensure_local_worker(Keyword.get(opts, :worker_host)),
          {:ok, workspace} <- PathSafety.canonicalize(workspace),
          :ok <- validate_loopback_hostname(runner["hostname"]),
-         {:ok, {process, config_overlay}} <- launch(workspace, runner, execution_profile, server_auth),
-         {:ok, client, session_info} <-
+         {:ok, {process, config_overlay}} <-
+           launch(workspace, runner, execution_profile, server_auth) do
+      start_launched_session(
+        process,
+        config_overlay,
+        workspace,
+        issue,
+        runner,
+        execution_profile,
+        server_auth,
+        opts
+      )
+    end
+  end
+
+  defp start_launched_session(
+         process,
+         config_overlay,
+         workspace,
+         issue,
+         runner,
+         execution_profile,
+         server_auth,
+         opts
+       ) do
+    with {:ok, client, session_info} <-
            await_ready(process, workspace, issue, runner, server_auth, opts),
-         {:ok, state} <-
-           Agent.start_link(fn ->
-             %{
-               session_started?: false,
-               usage: %{
-                 "cache_read_tokens" => 0,
-                 "cache_write_tokens" => 0,
-                 "cost" => 0,
-                 "input_tokens" => 0,
-                 "output_tokens" => 0,
-                 "reasoning_tokens" => 0,
-                 "total_tokens" => 0
-               }
-             }
-           end) do
+         {:ok, state} <- Agent.start_link(fn -> initial_state() end) do
       {:ok,
        %{
          client: client,
@@ -92,6 +102,37 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
          turn_timeout_ms: Keyword.get(opts, :turn_timeout_ms, runner["turn_timeout_ms"]),
          workspace: workspace
        }}
+    else
+      {:error, reason} ->
+        cleanup_failed_start(process, config_overlay, reason)
+    end
+  end
+
+  defp initial_state do
+    %{
+      session_started?: false,
+      usage: %{
+        "cache_read_tokens" => 0,
+        "cache_write_tokens" => 0,
+        "cost" => 0,
+        "input_tokens" => 0,
+        "output_tokens" => 0,
+        "reasoning_tokens" => 0,
+        "total_tokens" => 0
+      }
+    }
+  end
+
+  defp cleanup_failed_start(process, config_overlay, primary_reason) do
+    process_cleanup = ProcessSupervisor.stop(process)
+    File.rm_rf(config_overlay)
+
+    case process_cleanup do
+      :ok ->
+        {:error, primary_reason}
+
+      {:error, cleanup_reason} ->
+        {:error, {:agent_runtime_start_failed, primary_reason, {:runtime_cleanup_failed, cleanup_reason}}}
     end
   end
 
@@ -219,15 +260,15 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   defp notify_turn_task_result_sent(_callback, _ref), do: :ok
 
   @impl true
-  @spec stop(session()) :: :ok
+  @spec stop(session()) :: :ok | {:error, term()}
   def stop(session) do
     abort_session(session)
     request_for_stop(session, :delete, "/session/#{session.session_id}")
     request_for_stop(session, :post, "/instance/dispose")
-    ProcessSupervisor.stop(session.process)
+    process_cleanup = ProcessSupervisor.stop(session.process)
     stop_state(session.state)
     if session.config_overlay, do: File.rm_rf(session.config_overlay)
-    :ok
+    process_cleanup
   end
 
   @impl true
@@ -253,16 +294,21 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
 
   defp launch(workspace, runner, execution_profile, server_auth) do
     with {:ok, port_argument} <- launch_port(runner["hostname"], runner["port"]),
-         {:ok, config_overlay} <- prepare_config_overlay(workspace, runner),
-         {:ok, process} <-
-           ProcessSupervisor.start(
+         {:ok, config_overlay} <- prepare_config_overlay(workspace, runner) do
+      case ProcessSupervisor.start(
              execution_profile.command ++
                ["--hostname", runner["hostname"], "--port", port_argument],
              cd: workspace,
              env: launch_env(runner, server_auth, config_overlay),
              line: @line_bytes
            ) do
-      {:ok, {process, config_overlay}}
+        {:ok, process} ->
+          {:ok, {process, config_overlay}}
+
+        {:error, _reason} = error ->
+          File.rm_rf(config_overlay)
+          error
+      end
     end
   end
 
@@ -415,7 +461,6 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
         {:ok, client, session_info}
 
       {:ok, {_client, session_info}} ->
-        ProcessSupervisor.stop(process)
         {:error, {:startup_failed, {:invalid_session_response, session_info}}}
 
       {:error, _reason} = error ->

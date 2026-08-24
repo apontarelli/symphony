@@ -2,40 +2,92 @@ defmodule SymphonyElixir.ProcessSupervisor do
   @moduledoc """
   Shared OS process primitive for local runner adapters.
 
-  Local processes are launched from argv without an intermediate shell and can be
-  stopped with descendant cleanup when the host `ps`/`kill` tools expose the
-  process tree. SSH-backed launches should wrap the local ssh port with
-  `cleanup: :port_only`; remote process-group cleanup is intentionally outside
-  this primitive's current guarantee.
-  The launch/adoption caller is monitored by a lifecycle owner, which cleans up the process tree when the caller goes down.
+  Local processes are launched from argv through a fixed, non-interpolating
+  wrapper that creates one isolated process group. The lifecycle owner monitors
+  the launch caller and terminates the whole group when the caller exits.
+  Adopted and SSH-backed ports use `cleanup: :port_only`; they do not claim a
+  local process-group guarantee.
   """
 
-  defstruct [:port, :os_pid, :owner, cleanup: :descendants]
+  @process_group_marker "__SYMPHONY_PROCESS_GROUP__:"
+  @process_group_release "__SYMPHONY_PROCESS_GROUP_RELEASE__"
+  @process_group_start_timeout_ms 1_000
+  @termination_grace_ms 150
+  @group_identity_attempts 50
+
+  @process_group_child_wrapper """
+  marker=$1
+  release=$2
+  shift 2
+  printf '%s%s\n' "$marker" "$$"
+  IFS= read -r received_release
+  [ "$received_release" = "$release" ] || exit 126
+  exec "$@"
+  """
+
+  @process_group_wrapper """
+  marker=$1
+  release=$2
+  shift 2
+  set -m 2>/dev/null || exit 125
+  exec 3<&0
+
+  (
+    IFS= read -r received_release
+    [ "$received_release" = "$release" ] || exit 126
+    exec "$@"
+  ) <&3 &
+  group_pid=$!
+  set +m 2>/dev/null || true
+
+  printf '%s%s\n' "$marker" "$group_pid"
+  wait "$group_pid"
+  status=$?
+  exec 3<&-
+
+  if kill -0 "-$group_pid" 2>/dev/null; then
+    kill -TERM "-$group_pid" 2>/dev/null || true
+    sleep 0.15
+    kill -KILL "-$group_pid" 2>/dev/null || true
+  fi
+  exit "$status"
+  """
+
+  defstruct [:port, :os_pid, :process_group_id, :wrapper_pid, :owner, cleanup: :process_group]
+  @type cleanup_result :: :ok | {:error, {:process_cleanup_failed, map()}}
 
   @type argv :: [String.t()]
-  @type cleanup :: :descendants | :port_only
+  @type cleanup :: :process_group | :port_only
   @type env_value :: String.t() | charlist() | false
   @type env_overlay ::
           %{optional(String.t()) => env_value()}
           | [
               {String.t() | charlist(), env_value()}
             ]
-  @type identity :: %{os_pid: non_neg_integer() | nil}
+  @type identity :: %{
+          os_pid: non_neg_integer() | nil,
+          process_group_id: non_neg_integer() | nil
+        }
   @type startup_timeout :: (-> non_neg_integer())
   @type startup_fun :: (t(), startup_timeout() -> :ok | {:ok, term()} | {:error, term()})
   @type t :: %__MODULE__{
           port: port(),
           os_pid: non_neg_integer() | nil,
+          process_group_id: non_neg_integer() | nil,
+          wrapper_pid: non_neg_integer() | nil,
           owner: pid() | nil,
           cleanup: cleanup()
         }
 
   @spec start(argv(), keyword()) :: {:ok, t()} | {:error, term()}
   def start(argv, opts \\ []) when is_list(argv) do
-    with {:ok, cleanup} <- normalize_cleanup(Keyword.get(opts, :cleanup, :descendants)),
+    with {:ok, cleanup} <- normalize_cleanup(Keyword.get(opts, :cleanup, :process_group)),
+         :ok <- ensure_cleanup_supported(cleanup),
          {:ok, {executable, args}} <- resolve_argv(argv, Keyword.get(opts, :cd)),
-         {:ok, port_opts} <- port_options(args, opts) do
-      start_owned(executable, port_opts, cleanup)
+         {:ok, {launch_executable, launch_args}} <-
+           process_group_launch(executable, args, cleanup),
+         {:ok, port_opts} <- port_options(launch_args, opts) do
+      start_owned(launch_executable, port_opts, cleanup)
     end
   rescue
     error -> {:error, {:process_start_failed, Exception.message(error)}}
@@ -45,22 +97,23 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   @spec from_port(port(), keyword()) :: t()
   def from_port(port, opts \\ []) when is_port(port) do
-    adopt_port(port, normalize_cleanup!(Keyword.get(opts, :cleanup, :descendants)))
+    adopt_port(port, normalize_cleanup!(Keyword.get(opts, :cleanup, :port_only)))
   end
 
   @spec port(t()) :: port()
   def port(%__MODULE__{port: port}), do: port
 
   @spec identity(t() | port()) :: identity()
-  def identity(%__MODULE__{os_pid: os_pid}), do: %{os_pid: os_pid}
-  def identity(port) when is_port(port), do: %{os_pid: port_os_pid(port)}
+  def identity(%__MODULE__{os_pid: os_pid, process_group_id: process_group_id}),
+    do: %{os_pid: os_pid, process_group_id: process_group_id}
+
+  def identity(port) when is_port(port),
+    do: %{os_pid: port_os_pid(port), process_group_id: nil}
 
   @spec descendant_cleanup_supported?() :: boolean()
-  def descendant_cleanup_supported? do
-    match?({_output, 0}, process_list())
-  end
+  def descendant_cleanup_supported?, do: process_group_supported?()
 
-  @spec await_startup(t(), pos_integer(), startup_fun()) :: {:ok, term()} | {:error, {:startup_failed, term()}}
+  @spec await_startup(t(), pos_integer(), startup_fun()) :: {:ok, term()} | {:error, term()}
   def await_startup(%__MODULE__{} = process, timeout_ms, startup_fun)
       when is_integer(timeout_ms) and timeout_ms > 0 and is_function(startup_fun, 2) do
     timeout = startup_timeout(timeout_ms)
@@ -72,32 +125,34 @@ defmodule SymphonyElixir.ProcessSupervisor do
       {:ok, result} ->
         {:ok, result}
 
-      {:error, {:startup_failed, _reason} = reason} ->
-        stop(process)
-        {:error, reason}
+      {:error, {:startup_failed, reason}} ->
+        startup_failure(process, reason)
 
       {:error, reason} ->
-        stop(process)
-        {:error, {:startup_failed, normalize_startup_error(reason, timeout_ms)}}
+        startup_failure(process, normalize_startup_error(reason, timeout_ms))
 
       other ->
-        stop(process)
-        {:error, {:startup_failed, {:unexpected_startup_result, other}}}
+        startup_failure(process, {:unexpected_startup_result, other})
     end
   rescue
     error ->
-      stop(process)
-      {:error, {:startup_failed, {:exception, error.__struct__, Exception.message(error)}}}
+      startup_failure(process, {:exception, error.__struct__, Exception.message(error)})
   catch
     kind, reason ->
-      stop(process)
-      {:error, {:startup_failed, {kind, reason}}}
+      startup_failure(process, {kind, reason})
   end
 
-  @spec stop(t()) :: :ok
+  defp startup_failure(process, reason) do
+    case stop(process) do
+      :ok -> {:error, {:startup_failed, reason}}
+      {:error, cleanup_reason} -> {:error, {:startup_failed, reason, cleanup_reason}}
+    end
+  end
+
+  @spec stop(t()) :: cleanup_result()
   def stop(%__MODULE__{} = process), do: request_owner(process, :stop)
 
-  @spec kill(t()) :: :ok
+  @spec kill(t()) :: cleanup_result()
   def kill(%__MODULE__{} = process), do: request_owner(process, :kill)
 
   defp start_owned(executable, port_opts, cleanup) do
@@ -121,25 +176,45 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
     try do
       port = Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)
-      os_pid = port_os_pid(port)
-      send(caller, {:process_supervisor_started, self(), port, os_pid})
+      wrapper_pid = port_os_pid(port)
 
-      state = %{
-        caller: caller,
-        caller_monitor: caller_monitor,
-        port: port,
-        os_pid: os_pid,
-        cleanup: cleanup
-      }
+      case initialize_owned_process(port, wrapper_pid, cleanup) do
+        {:ok, os_pid, process_group_id} ->
+          send(
+            caller,
+            {:process_supervisor_started, self(), port, os_pid, process_group_id, wrapper_pid}
+          )
 
-      lifecycle_owner_loop(state)
+          lifecycle_owner_loop(%{
+            caller: caller,
+            caller_monitor: caller_monitor,
+            port: port,
+            os_pid: os_pid,
+            process_group_id: process_group_id,
+            wrapper_pid: wrapper_pid,
+            cleanup: cleanup
+          })
+
+        {:error, reason} ->
+          close_port(port)
+          send(caller, {:process_supervisor_start_failed, self(), reason})
+          Process.demonitor(caller_monitor, [:flush])
+      end
     rescue
       error ->
-        send(caller, {:process_supervisor_start_failed, self(), {:process_start_failed, Exception.message(error)}})
+        send(
+          caller,
+          {:process_supervisor_start_failed, self(), {:process_start_failed, Exception.message(error)}}
+        )
+
         Process.demonitor(caller_monitor, [:flush])
     catch
       kind, reason ->
-        send(caller, {:process_supervisor_start_failed, self(), {:process_start_failed, {kind, reason}}})
+        send(
+          caller,
+          {:process_supervisor_start_failed, self(), {:process_start_failed, {kind, reason}}}
+        )
+
         Process.demonitor(caller_monitor, [:flush])
     end
   end
@@ -160,6 +235,8 @@ defmodule SymphonyElixir.ProcessSupervisor do
             caller_monitor: caller_monitor,
             port: port,
             os_pid: os_pid,
+            process_group_id: nil,
+            wrapper_pid: os_pid,
             cleanup: cleanup
           }
 
@@ -184,9 +261,18 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   defp await_owner_start(owner, owner_monitor, cleanup) do
     receive do
-      {:process_supervisor_started, ^owner, port, os_pid} ->
+      {:process_supervisor_started, ^owner, port, os_pid, process_group_id, wrapper_pid} ->
         Process.demonitor(owner_monitor, [:flush])
-        {:ok, %__MODULE__{port: port, os_pid: os_pid, owner: owner, cleanup: cleanup}}
+
+        {:ok,
+         %__MODULE__{
+           port: port,
+           os_pid: os_pid,
+           process_group_id: process_group_id,
+           wrapper_pid: wrapper_pid,
+           owner: owner,
+           cleanup: cleanup
+         }}
 
       {:process_supervisor_start_failed, ^owner, reason} ->
         Process.demonitor(owner_monitor, [:flush])
@@ -240,7 +326,15 @@ defmodule SymphonyElixir.ProcessSupervisor do
     receive do
       {:process_supervisor_adopted, ^owner, ^adoption_ref, port, os_pid} ->
         Process.demonitor(owner_monitor, [:flush])
-        %__MODULE__{port: port, os_pid: os_pid, owner: owner, cleanup: cleanup}
+
+        %__MODULE__{
+          port: port,
+          os_pid: os_pid,
+          process_group_id: nil,
+          wrapper_pid: os_pid,
+          owner: owner,
+          cleanup: cleanup
+        }
 
       {:process_supervisor_adopt_failed, ^owner, ^adoption_ref, reason} ->
         await_owner_exit(owner, owner_monitor)
@@ -264,6 +358,7 @@ defmodule SymphonyElixir.ProcessSupervisor do
   defp lifecycle_owner_loop(%{port: port} = state) do
     receive do
       {^port, {:exit_status, status}} ->
+        cleanup_exited_process_group(state_process(state))
         send(state.caller, {port, {:exit_status, status}})
 
       {^port, message} ->
@@ -271,12 +366,12 @@ defmodule SymphonyElixir.ProcessSupervisor do
         lifecycle_owner_loop(state)
 
       {:process_supervisor_stop, requester, request_ref} ->
-        stop_owned_process(state_process(state))
-        send(requester, {:process_supervisor_reply, request_ref})
+        result = stop_owned_process(state_process(state))
+        send(requester, {:process_supervisor_reply, request_ref, result})
 
       {:process_supervisor_kill, requester, request_ref} ->
-        kill_owned_process(state_process(state))
-        send(requester, {:process_supervisor_reply, request_ref})
+        result = kill_owned_process(state_process(state))
+        send(requester, {:process_supervisor_reply, request_ref, result})
 
       {:DOWN, caller_monitor, :process, caller, _reason}
       when caller_monitor == state.caller_monitor and caller == state.caller ->
@@ -288,6 +383,8 @@ defmodule SymphonyElixir.ProcessSupervisor do
     %__MODULE__{
       port: state.port,
       os_pid: state.os_pid,
+      process_group_id: state.process_group_id,
+      wrapper_pid: state.wrapper_pid,
       owner: self(),
       cleanup: state.cleanup
     }
@@ -299,9 +396,9 @@ defmodule SymphonyElixir.ProcessSupervisor do
     send(owner, {request_message(action), self(), request_ref})
 
     receive do
-      {:process_supervisor_reply, ^request_ref} ->
+      {:process_supervisor_reply, ^request_ref, result} ->
         Process.demonitor(owner_monitor, [:flush])
-        :ok
+        result
 
       {:DOWN, ^owner_monitor, :process, ^owner, _reason} ->
         fallback_request(process, action)
@@ -316,20 +413,284 @@ defmodule SymphonyElixir.ProcessSupervisor do
   defp fallback_request(process, :stop), do: stop_owned_process(process)
   defp fallback_request(process, :kill), do: kill_owned_process(process)
 
-  defp stop_owned_process(%__MODULE__{} = process) do
-    signal_os_pids(termination_targets(process), "TERM")
-    Process.sleep(150)
-    kill_targets = termination_targets(process)
-    signal_os_pids(kill_targets, "KILL")
+  defp stop_owned_process(%__MODULE__{cleanup: :port_only} = process) do
     close_port(process.port)
-    wait_for_os_pids(kill_targets, 10)
     :ok
   end
 
-  defp kill_owned_process(%__MODULE__{} = process) do
-    signal_os_pids(termination_targets(process), "KILL")
+  defp stop_owned_process(%__MODULE__{cleanup: :process_group} = process) do
+    case owned_process_group(process) do
+      nil ->
+        cleanup_without_owned_group(process)
+
+      process_group_id ->
+        signal_process_group(process_group_id, "TERM")
+        Process.sleep(@termination_grace_ms)
+
+        if process_group_alive?(process_group_id) or
+             owned_process_group(process) == process_group_id do
+          signal_process_group(process_group_id, "KILL")
+        end
+
+        close_port(process.port)
+        wait_for_process_group(process_group_id, 10)
+        process_group_cleanup_result(process_group_id)
+    end
+  end
+
+  defp kill_owned_process(%__MODULE__{cleanup: :port_only} = process) do
     close_port(process.port)
     :ok
+  end
+
+  defp kill_owned_process(%__MODULE__{cleanup: :process_group} = process) do
+    case owned_process_group(process) do
+      nil ->
+        cleanup_without_owned_group(process)
+
+      process_group_id ->
+        signal_process_group(process_group_id, "KILL")
+        close_port(process.port)
+        wait_for_process_group(process_group_id, 10)
+        process_group_cleanup_result(process_group_id)
+    end
+  end
+
+  defp cleanup_without_owned_group(process) do
+    wrapper_alive? = port_os_pid(process.port) != nil
+    close_port(process.port)
+
+    if wrapper_alive? do
+      {:error,
+       {:process_cleanup_failed,
+        %{
+          process_group_id: process.process_group_id,
+          reason: :group_identity_lost
+        }}}
+    else
+      :ok
+    end
+  end
+
+  defp cleanup_exited_process_group(%__MODULE__{
+         cleanup: :process_group,
+         process_group_id: process_group_id
+       })
+       when is_integer(process_group_id) and process_group_id > 0 do
+    if process_group_alive?(process_group_id) do
+      signal_process_group(process_group_id, "TERM")
+      Process.sleep(@termination_grace_ms)
+
+      if process_group_alive?(process_group_id) do
+        signal_process_group(process_group_id, "KILL")
+      end
+
+      wait_for_process_group(process_group_id, 10)
+    end
+
+    :ok
+  end
+
+  defp cleanup_exited_process_group(_process), do: :ok
+
+  defp process_group_cleanup_result(process_group_id) do
+    case process_group_members(process_group_id) do
+      {:ok, []} ->
+        :ok
+
+      {:ok, remaining_pids} ->
+        {:error,
+         {:process_cleanup_failed,
+          %{
+            process_group_id: process_group_id,
+            reason: :members_survived_kill,
+            remaining_pids: Enum.sort(remaining_pids)
+          }}}
+
+      {:error, reason} ->
+        {:error,
+         {:process_cleanup_failed,
+          %{
+            process_group_id: process_group_id,
+            reason: :group_inspection_failed,
+            detail: reason
+          }}}
+    end
+  end
+
+  defp initialize_owned_process(_port, wrapper_pid, :port_only),
+    do: {:ok, wrapper_pid, nil}
+
+  defp initialize_owned_process(port, wrapper_pid, :process_group)
+       when is_integer(wrapper_pid) and wrapper_pid > 0 do
+    deadline_ms = System.monotonic_time(:millisecond) + @process_group_start_timeout_ms
+    await_process_group_marker(port, wrapper_pid, deadline_ms, "")
+  end
+
+  defp initialize_owned_process(_port, _wrapper_pid, :process_group),
+    do: {:error, {:process_group_start_failed, :missing_wrapper_pid}}
+
+  defp await_process_group_marker(port, wrapper_pid, deadline_ms, buffered) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, {:eol, chunk}}} ->
+        parse_process_group_marker(buffered <> chunk, port, wrapper_pid)
+
+      {^port, {:data, {:noeol, chunk}}} ->
+        await_process_group_marker(port, wrapper_pid, deadline_ms, buffered <> chunk)
+
+      {^port, {:data, chunk}} when is_binary(chunk) ->
+        parse_raw_process_group_marker(buffered <> chunk, port, wrapper_pid, deadline_ms)
+
+      {^port, {:exit_status, status}} ->
+        {:error, {:process_group_start_failed, {:wrapper_exit, status}}}
+    after
+      remaining_ms ->
+        {:error, {:process_group_start_failed, :marker_timeout}}
+    end
+  end
+
+  defp parse_raw_process_group_marker(buffered, port, wrapper_pid, deadline_ms) do
+    case String.split(buffered, "\n", parts: 2) do
+      [line, ""] ->
+        parse_process_group_marker(line, port, wrapper_pid)
+
+      [_line, _unexpected_output] ->
+        {:error, {:process_group_start_failed, :unexpected_wrapper_output}}
+
+      [_partial] ->
+        await_process_group_marker(port, wrapper_pid, deadline_ms, buffered)
+    end
+  end
+
+  defp parse_process_group_marker(
+         @process_group_marker <> process_group_text,
+         port,
+         wrapper_pid
+       ) do
+    with {process_group_id, ""} <- Integer.parse(process_group_text),
+         true <- process_group_id > 0,
+         :ok <-
+           await_owned_group_leader(
+             process_group_id,
+             wrapper_pid,
+             @group_identity_attempts
+           ),
+         true <- Port.command(port, @process_group_release <> "\n") do
+      {:ok, process_group_id, process_group_id}
+    else
+      {:error, observed_identity} ->
+        {:error,
+         {:process_group_start_failed,
+          {:invalid_group_identity,
+           %{
+             process_group_id: parse_positive_integer(process_group_text),
+             wrapper_pid: wrapper_pid,
+             observed_identity: observed_identity
+           }}}}
+
+      _invalid ->
+        {:error, {:process_group_start_failed, :invalid_group_identity}}
+    end
+  end
+
+  defp parse_process_group_marker(_line, _port, _wrapper_pid),
+    do: {:error, {:process_group_start_failed, :invalid_marker}}
+
+  defp await_owned_group_leader(process_group_id, wrapper_pid, attempts)
+       when attempts > 0 do
+    if owned_group_leader?(process_group_id, wrapper_pid) do
+      :ok
+    else
+      Process.sleep(10)
+      await_owned_group_leader(process_group_id, wrapper_pid, attempts - 1)
+    end
+  end
+
+  defp await_owned_group_leader(process_group_id, _wrapper_pid, 0),
+    do: {:error, process_identity(process_group_id)}
+
+  defp parse_positive_integer(value) do
+    case Integer.parse(value) do
+      {integer, ""} when integer > 0 -> integer
+      _invalid -> nil
+    end
+  end
+
+  defp process_group_launch(executable, args, :port_only),
+    do: {:ok, {executable, args}}
+
+  defp process_group_launch(executable, args, :process_group) do
+    with shell when is_binary(shell) <- System.find_executable("sh"),
+         {:ok, launcher} <- process_group_launcher() do
+      {:ok, process_group_command(shell, launcher, executable, args)}
+    else
+      nil -> {:error, {:process_group_unsupported, :missing_shell}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp process_group_command(shell, "direct", executable, args) do
+    {shell,
+     [
+       "-c",
+       @process_group_wrapper,
+       "symphony-process-group",
+       @process_group_marker,
+       @process_group_release,
+       executable
+       | args
+     ]}
+  end
+
+  defp process_group_command(shell, setsid, executable, args) do
+    {setsid,
+     [
+       "-f",
+       "-w",
+       shell,
+       "-c",
+       @process_group_child_wrapper,
+       "symphony-process-group-child",
+       @process_group_marker,
+       @process_group_release,
+       executable
+       | args
+     ]}
+  end
+
+  defp ensure_cleanup_supported(:port_only), do: :ok
+
+  defp ensure_cleanup_supported(:process_group), do: process_group_support()
+
+  defp process_group_supported?, do: process_group_support() == :ok
+
+  defp process_group_support do
+    with true <- :os.type() in [{:unix, :darwin}, {:unix, :linux}],
+         true <- Enum.all?(["sh", "ps", "kill"], &is_binary(System.find_executable(&1))),
+         {:ok, _launcher} <- process_group_launcher() do
+      :ok
+    else
+      false -> {:error, {:process_group_unsupported, :os.type()}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp process_group_launcher do
+    case :os.type() do
+      {:unix, :darwin} ->
+        {:ok, "direct"}
+
+      {:unix, :linux} ->
+        case System.find_executable("setsid") do
+          setsid when is_binary(setsid) -> {:ok, setsid}
+          nil -> {:error, {:process_group_unsupported, :missing_setsid}}
+        end
+
+      os_type ->
+        {:error, {:process_group_unsupported, os_type}}
+    end
   end
 
   defp resolve_argv([], _cwd), do: {:error, :empty_argv}
@@ -483,121 +844,149 @@ defmodule SymphonyElixir.ProcessSupervisor do
   defp normalize_startup_error({:timeout, _timeout_ms} = reason, _default_timeout_ms), do: reason
   defp normalize_startup_error(reason, _timeout_ms), do: reason
 
-  defp normalize_cleanup(cleanup) when cleanup in [:descendants, :port_only], do: {:ok, cleanup}
+  defp normalize_cleanup(cleanup) when cleanup in [:process_group, :port_only],
+    do: {:ok, cleanup}
 
   defp normalize_cleanup(cleanup), do: {:error, {:invalid_cleanup, cleanup}}
 
   defp normalize_cleanup!(cleanup) do
     case normalize_cleanup(cleanup) do
-      {:ok, normalized} -> normalized
-      {:error, {:invalid_cleanup, invalid}} -> raise ArgumentError, "invalid cleanup mode: #{inspect(invalid)}"
+      {:ok, normalized} ->
+        normalized
+
+      {:error, {:invalid_cleanup, invalid}} ->
+        raise ArgumentError, "invalid cleanup mode: #{inspect(invalid)}"
     end
   end
 
-  defp termination_targets(%__MODULE__{} = process) do
-    os_pid = current_os_pid(process)
-
-    descendants =
-      case process.cleanup do
-        :descendants -> os_pid_descendants(os_pid)
-        :port_only -> []
-      end
-
-    [os_pid | descendants]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
+  defp owned_process_group(%__MODULE__{
+         port: port,
+         process_group_id: process_group_id,
+         wrapper_pid: wrapper_pid
+       })
+       when is_integer(process_group_id) and process_group_id > 0 and
+              is_integer(wrapper_pid) and wrapper_pid > 0 do
+    if port_os_pid(port) == wrapper_pid and
+         owned_group_leader?(process_group_id, wrapper_pid) do
+      process_group_id
+    end
   end
 
-  defp current_os_pid(%__MODULE__{port: port}), do: port_os_pid(port)
+  defp owned_process_group(_process), do: nil
+
+  defp owned_group_leader?(process_group_id, wrapper_pid) do
+    case process_identity(process_group_id) do
+      {:ok, ^wrapper_pid, ^process_group_id} -> true
+      _invalid -> false
+    end
+  end
+
+  defp process_identity(pid) when is_integer(pid) and pid > 0 do
+    case System.cmd(
+           "ps",
+           ["-o", "ppid=,pgid=", "-p", Integer.to_string(pid)],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} -> parse_process_identity(output)
+      _failed -> :error
+    end
+  rescue
+    _exception -> :error
+  end
+
+  defp parse_process_identity(output) when is_binary(output) do
+    with [parent_text, group_text] <-
+           output |> String.trim() |> String.split(~r/\s+/, trim: true),
+         {parent_pid, ""} <- Integer.parse(parent_text),
+         {process_group_id, ""} <- Integer.parse(group_text) do
+      {:ok, parent_pid, process_group_id}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp process_group_alive?(process_group_id) do
+    case process_group_members(process_group_id) do
+      {:ok, members} -> members != []
+      {:error, _reason} -> false
+    end
+  end
+
+  defp process_group_members(process_group_id)
+       when is_integer(process_group_id) and process_group_id > 0 do
+    case System.cmd("ps", ["-axo", "pid=,pgid=,stat="], stderr_to_stdout: true) do
+      {output, 0} ->
+        members =
+          output
+          |> String.split("\n", trim: true)
+          |> Enum.reduce(
+            [],
+            &collect_process_group_member(&1, &2, process_group_id)
+          )
+
+        {:ok, members}
+
+      {_output, status} ->
+        {:error, {:ps_exit, status}}
+    end
+  rescue
+    error -> {:error, {:ps_exception, error.__struct__, Exception.message(error)}}
+  end
+
+  defp collect_process_group_member(line, members, process_group_id) do
+    case parse_process_group_member(line, process_group_id) do
+      {:ok, pid} -> [pid | members]
+      :skip -> members
+    end
+  end
+
+  defp parse_process_group_member(line, expected_group_id) do
+    with [pid_text, group_text, status] <-
+           line |> String.trim() |> String.split(~r/\s+/, trim: true),
+         false <- String.starts_with?(status, "Z"),
+         {pid, ""} <- Integer.parse(pid_text),
+         {^expected_group_id, ""} <- Integer.parse(group_text) do
+      {:ok, pid}
+    else
+      _invalid -> :skip
+    end
+  end
+
+  defp signal_process_group(process_group_id, signal) do
+    System.cmd(
+      "kill",
+      process_group_signal_args(process_group_id, signal),
+      stderr_to_stdout: true
+    )
+
+    :ok
+  rescue
+    _exception -> :ok
+  end
+
+  defp process_group_signal_args(process_group_id, signal) do
+    case :os.type() do
+      {:unix, :linux} -> ["-#{signal}", "--", "-#{process_group_id}"]
+      _other -> ["-#{signal}", "-#{process_group_id}"]
+    end
+  end
+
+  defp wait_for_process_group(_process_group_id, 0), do: :ok
+
+  defp wait_for_process_group(process_group_id, attempts) do
+    if process_group_alive?(process_group_id) do
+      Process.sleep(50)
+      wait_for_process_group(process_group_id, attempts - 1)
+    else
+      :ok
+    end
+  end
 
   defp port_os_pid(port) when is_port(port) do
     case :erlang.port_info(port, :os_pid) do
       {:os_pid, pid} when is_integer(pid) and pid > 0 -> pid
       _ -> nil
     end
-  end
-
-  defp os_pid_descendants(nil), do: []
-
-  defp os_pid_descendants(pid) when is_integer(pid) do
-    case process_list() do
-      {output, 0} ->
-        output
-        |> parent_index()
-        |> collect_descendant_pids(pid)
-
-      _ ->
-        []
-    end
-  rescue
-    _ -> []
-  end
-
-  defp parent_index(output) when is_binary(output) do
-    output
-    |> String.split("\n", trim: true)
-    |> Enum.reduce(%{}, &put_parent_index_entry/2)
-  end
-
-  defp put_parent_index_entry(line, by_parent) do
-    case parse_pid_pair(line) do
-      {:ok, child, parent} -> Map.update(by_parent, parent, [child], &[child | &1])
-      :error -> by_parent
-    end
-  end
-
-  defp parse_pid_pair(line) do
-    with [child_text, parent_text] <- line |> String.trim() |> String.split(~r/\s+/, trim: true),
-         {child, ""} <- Integer.parse(child_text),
-         {parent, ""} <- Integer.parse(parent_text) do
-      {:ok, child, parent}
-    else
-      _ -> :error
-    end
-  end
-
-  defp process_list do
-    System.cmd("ps", ["-axo", "pid=,ppid="], stderr_to_stdout: true)
-  rescue
-    _ -> {"", 1}
-  end
-
-  defp collect_descendant_pids(by_parent, pid) do
-    children = Map.get(by_parent, pid, [])
-    Enum.flat_map(children, &collect_descendant_pids(by_parent, &1)) ++ children
-  end
-
-  defp signal_os_pids(pids, signal) do
-    pids
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-    |> Enum.each(fn pid ->
-      System.cmd("kill", ["-#{signal}", Integer.to_string(pid)], stderr_to_stdout: true)
-    end)
-
-    :ok
-  rescue
-    _ -> :ok
-  end
-
-  defp wait_for_os_pids(_pids, 0), do: :ok
-
-  defp wait_for_os_pids(pids, attempts) do
-    if Enum.any?(pids, &os_pid_running?/1) do
-      Process.sleep(50)
-      wait_for_os_pids(pids, attempts - 1)
-    else
-      :ok
-    end
-  end
-
-  defp os_pid_running?(pid) when is_integer(pid) do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_, 0} -> true
-      _ -> false
-    end
-  rescue
-    _ -> false
   end
 
   defp close_port(port) when is_port(port) do

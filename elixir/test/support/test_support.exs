@@ -132,10 +132,20 @@ defmodule SymphonyElixir.TestSupport do
   def os_pid_alive?(nil), do: false
 
   def os_pid_alive?(pid) when is_integer(pid) do
-    case System.cmd("kill", ["-0", Integer.to_string(pid)], stderr_to_stdout: true) do
-      {_, 0} -> true
-      _ -> false
+    case System.cmd(
+           "ps",
+           ["-o", "stat=", "-p", Integer.to_string(pid)],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        status = String.trim(output)
+        status != "" and not String.starts_with?(status, "Z")
+
+      _missing ->
+        false
     end
+  rescue
+    _exception -> false
   end
 
   def eventually(fun, attempts \\ 20)

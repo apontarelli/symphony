@@ -6,6 +6,9 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
   test "spawns argv without shell and applies cwd env and line buffering" do
     test_root = Path.join(System.tmp_dir!(), "symphony-process-supervisor-argv-#{System.unique_integer([:positive])}")
+    unlisted_key = "SYMP_PROCESS_SUPERVISOR_UNLISTED"
+    previous_unlisted = System.get_env(unlisted_key)
+    System.put_env(unlisted_key, "host-secret")
 
     try do
       workspace = Path.join(test_root, "workspace")
@@ -20,6 +23,8 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       printf 'ARG2:%s\\n' "$2"
       printf 'PWD:%s\\n' "$PWD"
       printf 'ENV:%s\\n' "$SYMP_PROCESS_SUPERVISOR_ENV"
+      printf 'PROVIDER:%s\\n' "$OPENAI_API_KEY"
+      printf 'UNLISTED:%s\\n' "$SYMP_PROCESS_SUPERVISOR_UNLISTED"
 
       while IFS= read -r line; do
         printf 'INPUT:%s\\n' "$line"
@@ -30,15 +35,29 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       File.chmod!(fake_binary, 0o755)
       expected_workspace_suffix = "/#{Path.basename(test_root)}/workspace"
 
+      child_env =
+        System.get_env()
+        |> Map.new(fn {key, _value} -> {key, false} end)
+        |> Map.merge(%{
+          "OPENAI_API_KEY" => "provider-key",
+          "PATH" => System.get_env("PATH"),
+          "SYMP_PROCESS_SUPERVISOR_ENV" => "overlay"
+        })
+
       assert {:ok, process} =
                ProcessSupervisor.start(
                  [fake_binary, "literal $SYMP_PROCESS_SUPERVISOR_ENV", "two words"],
                  cd: workspace,
-                 env: [{"SYMP_PROCESS_SUPERVISOR_ENV", "overlay"}],
+                 env: child_env,
                  line: 1024
                )
 
       port = ProcessSupervisor.port(process)
+
+      assert %{os_pid: process_group_id, process_group_id: process_group_id} =
+               ProcessSupervisor.identity(process)
+
+      assert is_integer(process_group_id)
 
       assert_receive {^port, {:data, {:eol, "ARGC:2"}}}, 1_000
       assert_receive {^port, {:data, {:eol, "ARG1:literal $SYMP_PROCESS_SUPERVISOR_ENV"}}}
@@ -46,6 +65,8 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       assert_receive {^port, {:data, {:eol, "PWD:" <> child_pwd}}}
       assert String.ends_with?(child_pwd, expected_workspace_suffix)
       assert_receive {^port, {:data, {:eol, "ENV:overlay"}}}
+      assert_receive {^port, {:data, {:eol, "PROVIDER:provider-key"}}}
+      assert_receive {^port, {:data, {:eol, "UNLISTED:"}}}
 
       Port.command(port, "hello\n")
       assert_receive {^port, {:data, {:eol, "INPUT:hello"}}}
@@ -53,6 +74,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       ProcessSupervisor.stop(process)
     after
       File.rm_rf(test_root)
+      restore_env(unlisted_key, previous_unlisted)
     end
   end
 
@@ -150,6 +172,51 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     assert_receive {:DOWN, ^owner_monitor, :process, ^owner, _reason}
   end
 
+  test "runner exit reaps descendants before publishing exit status" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-process-supervisor-runner-exit-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      fake_binary = Path.join(test_root, "fake-runner")
+      child_pid_file = Path.join(test_root, "child.pid")
+      File.mkdir_p!(test_root)
+
+      File.write!(fake_binary, """
+      #!/usr/bin/env python3
+      import os
+      import subprocess
+      import sys
+
+      child = subprocess.Popen(
+          ["sleep", "60"],
+          stdin=subprocess.DEVNULL,
+          stdout=subprocess.DEVNULL,
+          stderr=subprocess.DEVNULL,
+          close_fds=True,
+      )
+      with open("#{child_pid_file}", "w", encoding="utf-8") as file:
+          file.write(str(child.pid))
+      sys.stdin.readline()
+      os._exit(7)
+      """)
+
+      File.chmod!(fake_binary, 0o755)
+      assert {:ok, process} = ProcessSupervisor.start([fake_binary])
+      child_pid = eventually(fn -> read_pid(child_pid_file) end)
+      assert os_pid_alive?(child_pid)
+
+      port = process.port
+      Port.command(port, "exit\n")
+      assert_receive {^port, {:exit_status, 7}}, 3_000
+      assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "from_port reports adoption failure for a closed port" do
     port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary, :exit_status])
     Port.close(port)
@@ -194,12 +261,15 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     try do
       fake_binary = Path.join(test_root, "fake-runner")
       pid_file = Path.join(test_root, "runner.pid")
+      child_pid_file = Path.join(test_root, "child.pid")
 
       File.mkdir_p!(test_root)
 
       File.write!(fake_binary, """
       #!/bin/sh
       printf '%s\\n' "$$" > "#{pid_file}"
+      sleep 60 &
+      printf '%s\\n' "$!" > "#{child_pid_file}"
       while :; do
         sleep 1
       done
@@ -209,7 +279,9 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
       assert {:ok, process} = ProcessSupervisor.start([fake_binary])
       os_pid = eventually(fn -> read_pid(pid_file) end)
+      child_pid = eventually(fn -> read_pid(child_pid_file) end)
       assert os_pid_alive?(os_pid)
+      assert os_pid_alive?(child_pid)
 
       assert {:error, {:startup_failed, {:timeout, 20}}} =
                ProcessSupervisor.await_startup(process, 20, fn _process, timeout ->
@@ -221,6 +293,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
                end)
 
       assert eventually(fn -> if os_pid_alive?(os_pid), do: nil, else: :stopped end) == :stopped
+      assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
     after
       File.rm_rf(test_root)
     end
@@ -270,6 +343,29 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "await_startup preserves cleanup failure with the primary error" do
+    port = Port.open({:spawn_executable, ~c"/bin/cat"}, [:binary, :exit_status])
+    {:os_pid, wrapper_pid} = :erlang.port_info(port, :os_pid)
+
+    process = %ProcessSupervisor{
+      port: port,
+      os_pid: wrapper_pid,
+      process_group_id: nil,
+      wrapper_pid: wrapper_pid,
+      owner: nil,
+      cleanup: :process_group
+    }
+
+    assert {:error, {:startup_failed, :not_ready, {:process_cleanup_failed, cleanup_evidence}}} =
+             ProcessSupervisor.await_startup(process, 100, fn _process, _timeout ->
+               {:error, :not_ready}
+             end)
+
+    assert cleanup_evidence == %{process_group_id: nil, reason: :group_identity_lost}
+
+    assert :undefined = :erlang.port_info(port)
   end
 
   test "stop terminates descendant processes" do
@@ -385,6 +481,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
         Path.join(System.tmp_dir!(), "symphony-process-supervisor-owner-death-#{System.unique_integer([:positive])}")
 
       child_pid_file = Path.join(test_root, "child.pid")
+      grandchild_pid_file = Path.join(test_root, "grandchild.pid")
       root_pid_file = Path.join(test_root, "root.pid")
       {:ok, cleanup_agent} = Agent.start(fn -> %{} end)
 
@@ -400,7 +497,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       File.write!(fake_binary, """
       #!/bin/sh
       printf '%s\\n' "$$" > "#{root_pid_file}"
-      sleep 60 &
+      /bin/sh -c 'sleep 60 & printf "%s\\n" "$!" > "$1"; wait' child "#{grandchild_pid_file}" &
       printf '%s\\n' "$!" > "#{child_pid_file}"
 
       while :; do
@@ -432,13 +529,16 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       root_pid = ProcessSupervisor.identity(process).os_pid
       assert eventually(fn -> if read_pid(root_pid_file) == root_pid, do: root_pid, else: nil end) == root_pid
       child_pid = eventually(fn -> read_pid(child_pid_file) end)
+      grandchild_pid = eventually(fn -> read_pid(grandchild_pid_file) end)
       assert os_pid_alive?(root_pid)
       assert os_pid_alive?(child_pid)
+      assert os_pid_alive?(grandchild_pid)
 
       Process.exit(launcher, :kill)
 
       assert eventually(fn -> if os_pid_alive?(root_pid), do: nil, else: :stopped end) == :stopped
       assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+      assert eventually(fn -> if os_pid_alive?(grandchild_pid), do: nil, else: :stopped end) == :stopped
     else
       assert ProcessSupervisor.descendant_cleanup_supported?() == false
     end
@@ -489,6 +589,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       Path.join(System.tmp_dir!(), "symphony-process-supervisor-descendant-cleanup-#{System.unique_integer([:positive])}")
 
     child_pid_file = Path.join(test_root, "child.pid")
+    grandchild_pid_file = Path.join(test_root, "grandchild.pid")
 
     try do
       fake_binary = Path.join(test_root, "fake-runner")
@@ -497,7 +598,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
       File.write!(fake_binary, """
       #!/bin/sh
-      sleep 60 &
+      /bin/sh -c 'sleep 60 & printf "%s\\n" "$!" > "$1"; wait' child "#{grandchild_pid_file}" &
       printf '%s\\n' "$!" > "#{child_pid_file}"
 
       while :; do
@@ -509,14 +610,23 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
       assert {:ok, process} = ProcessSupervisor.start([fake_binary])
       on_exit(fn -> ProcessSupervisor.kill(process) end)
+      root_pid = ProcessSupervisor.identity(process).os_pid
       child_pid = eventually(fn -> read_pid(child_pid_file) end)
+      grandchild_pid = eventually(fn -> read_pid(grandchild_pid_file) end)
+      assert os_pid_alive?(root_pid)
       assert os_pid_alive?(child_pid)
+      assert os_pid_alive?(grandchild_pid)
 
       ProcessSupervisor.stop(process)
 
+      assert eventually(fn -> if os_pid_alive?(root_pid), do: nil, else: :stopped end) == :stopped
       assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+      assert eventually(fn -> if os_pid_alive?(grandchild_pid), do: nil, else: :stopped end) == :stopped
     after
       File.rm_rf(test_root)
     end
   end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 end

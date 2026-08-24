@@ -11,19 +11,30 @@ defmodule SymphonyElixir.AgentRuntimeDispatchTest do
     @impl true
     def start(workspace, issue, opts) do
       send(Keyword.fetch!(opts, :probe), {:started, workspace, issue, opts})
-      {:ok, %{probe: Keyword.fetch!(opts, :probe), id: "native-session"}}
+
+      {:ok,
+       %{
+         cleanup_result: Keyword.get(opts, :cleanup_result, :ok),
+         id: "native-session",
+         probe: Keyword.fetch!(opts, :probe),
+         turn_result: Keyword.get(opts, :turn_result, {:ok, %{result: :completed}})
+       }}
     end
 
     @impl true
     def send_turn(session, prompt, issue, opts) do
       send(session.probe, {:turn, session, prompt, issue, opts})
-      {:ok, %{session_id: session.id, result: :completed}}
+
+      case session.turn_result do
+        {:ok, result} -> {:ok, Map.put(result, :session_id, session.id)}
+        {:error, _reason} = error -> error
+      end
     end
 
     @impl true
     def stop(session) do
       send(session.probe, {:stopped, session})
-      :ok
+      session.cleanup_result
     end
 
     @impl true
@@ -90,6 +101,33 @@ defmodule SymphonyElixir.AgentRuntimeDispatchTest do
 
     assert %{kind: "opencode_server", command: ["opencode", "serve"]} =
              AgentRuntime.capabilities(settings: settings, adapter_registry: registry)
+  end
+
+  test "run returns cleanup failures without hiding the primary turn failure" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               agent: %{default_runner: "open"},
+               runners: %{open: %{kind: "opencode_server", command: ["opencode", "serve"]}},
+               profiles: %{default: %{delivery: %{pr_target: "main"}}}
+             })
+
+    opts = [
+      settings: settings,
+      adapter_registry: %{"opencode_server" => CaptureAdapter},
+      probe: self(),
+      cleanup_result: {:error, :cannot_stop}
+    ]
+
+    assert {:error, {:runtime_cleanup_failed, :cannot_stop}} =
+             AgentRuntime.run("/tmp/workspace", "continue", %{id: "issue-1"}, opts)
+
+    assert {:error, {:agent_run_failed, :turn_failed, {:runtime_cleanup_failed, :cannot_stop}}} =
+             AgentRuntime.run(
+               "/tmp/workspace",
+               "continue",
+               %{id: "issue-1"},
+               Keyword.put(opts, :turn_result, {:error, :turn_failed})
+             )
   end
 
   test "preserves the Codex default and reports an unavailable selected adapter" do

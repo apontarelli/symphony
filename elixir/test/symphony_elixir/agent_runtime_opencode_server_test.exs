@@ -18,16 +18,23 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     trace = Path.join(test_root, "requests.trace")
     contract_trace = Path.join(test_root, "contract.trace")
     child_pid_file = Path.join(test_root, "child.pid")
+    grandchild_pid_file = Path.join(test_root, "grandchild.pid")
     python = System.find_executable("python3") || flunk("python3 is required for the fake OpenCode server")
+
+    provider_key =
+      Enum.find(
+        ~w(OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY),
+        &is_nil(System.get_env(&1))
+      ) || flunk("one supported provider key must be unset for environment isolation coverage")
 
     File.mkdir_p!(workspace)
     File.write!(script, fake_server_script())
     File.chmod!(script, 0o755)
 
     on_exit(fn ->
-      child_pid_file
-      |> read_child_pid()
-      |> kill_pid()
+      [child_pid_file, grandchild_pid_file]
+      |> Enum.map(&read_child_pid/1)
+      |> Enum.each(&kill_pid/1)
 
       File.rm_rf(test_root)
     end)
@@ -35,8 +42,10 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     {:ok,
      context: %{
        child_pid_file: child_pid_file,
+       grandchild_pid_file: grandchild_pid_file,
        contract_trace: contract_trace,
        python: python,
+       provider_key: provider_key,
        script: script,
        trace: trace,
        workspace: workspace
@@ -456,6 +465,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
   test "maps pending questions to blocked evidence and aborts the turn", %{context: context} do
     assert {:ok, session} = start_adapter(context, :operator_input)
+    process_group_id = ProcessSupervisor.identity(session.process).process_group_id
     test_pid = self()
     on_event = fn event -> send(test_pid, {:runtime_event, event}) end
 
@@ -478,6 +488,9 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
       assert %Event{event: :blocked, reason: :operator_input_requested} = List.last(events)
       assert eventually(fn -> Enum.member?(request_paths(context), "POST /session/session-contract/abort") end)
+      assert os_pid_alive?(process_group_id)
+      assert :ok = OpenCodeServer.stop(session)
+      assert eventually(fn -> if os_pid_alive?(process_group_id), do: nil, else: :stopped end) == :stopped
     after
       OpenCodeServer.stop(session)
     end
@@ -505,6 +518,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
   test "aborts timed out turns and emits normalized timeout failure", %{context: context} do
     assert {:ok, session} = start_adapter(context, :timeout)
+    process_group_id = ProcessSupervisor.identity(session.process).process_group_id
     test_pid = self()
     on_event = fn event -> send(test_pid, {:runtime_event, event}) end
 
@@ -519,6 +533,9 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       assert Enum.map(events, & &1.event) == [:session_started, :turn_started, :turn_failed]
       assert %Event{payload: %{reason: :turn_timeout}} = List.last(events)
       assert eventually(fn -> Enum.member?(request_paths(context), "POST /session/session-contract/abort") end)
+      assert os_pid_alive?(process_group_id)
+      assert :ok = OpenCodeServer.stop(session)
+      assert eventually(fn -> if os_pid_alive?(process_group_id), do: nil, else: :stopped end) == :stopped
     after
       OpenCodeServer.stop(session)
     end
@@ -589,9 +606,17 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     assert :ok = OpenCodeServer.stop(session)
   end
 
-  test "times out startup and rejects remote execution before launch", %{context: context} do
+  test "startup timeout tears down the launched process group before returning", %{
+    context: context
+  } do
     assert {:error, {:startup_failed, {:timeout, 80}}} =
              start_adapter(context, :startup_timeout, startup_timeout_ms: 80)
+
+    child_pid = eventually(fn -> read_child_pid(context.child_pid_file) end)
+    grandchild_pid = eventually(fn -> read_child_pid(context.grandchild_pid_file) end)
+    assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+    assert eventually(fn -> if os_pid_alive?(grandchild_pid), do: nil, else: :stopped end) == :stopped
+    assert config_overlays(context) == []
 
     runner = runner_config(context, :success)
 
@@ -600,6 +625,16 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
                runner_config: runner,
                worker_host: "worker.example"
              )
+  end
+
+  test "removes the config overlay when local process launch fails", %{context: context} do
+    missing_executable = Path.join(context.workspace, "missing-opencode")
+    runner = context |> runner_config(:success) |> Map.put("command", [missing_executable])
+
+    assert {:error, {:executable_not_found, ^missing_executable}} =
+             OpenCodeServer.start(context.workspace, issue(), runner_config: runner)
+
+    assert config_overlays(context) == []
   end
 
   test "allocates a concrete local port for automatic mode", %{context: context} do
@@ -641,7 +676,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
   test "forwards only declared provider environment variables", %{context: context} do
     unlisted_key = "SYMPHONY_OPENCODE_UNLISTED_SECRET"
-    provider_key = "OPENAI_API_KEY"
+    provider_key = context.provider_key
     previous_unlisted = System.get_env(unlisted_key)
     previous_provider = System.get_env(provider_key)
 
@@ -703,14 +738,17 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     assert :ok = OpenCodeServer.stop(session)
   end
 
-  test "stops descendant processes with the supervised local server", %{context: context} do
+  test "stops the complete process group with the supervised local server", %{context: context} do
     if ProcessSupervisor.descendant_cleanup_supported?() do
       assert {:ok, session} = start_adapter(context, :descendant)
       child_pid = eventually(fn -> read_child_pid(context.child_pid_file) end)
+      grandchild_pid = eventually(fn -> read_child_pid(context.grandchild_pid_file) end)
       assert os_pid_alive?(child_pid)
+      assert os_pid_alive?(grandchild_pid)
 
       assert :ok = OpenCodeServer.stop(session)
       assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
+      assert eventually(fn -> if os_pid_alive?(grandchild_pid), do: nil, else: :stopped end) == :stopped
     else
       assert ProcessSupervisor.descendant_cleanup_supported?() == false
     end
@@ -736,7 +774,9 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         Atom.to_string(scenario),
         context.trace,
         context.child_pid_file,
-        context.contract_trace
+        context.grandchild_pid_file,
+        context.contract_trace,
+        context.provider_key
       ],
       "hostname" => "127.0.0.1",
       "port" => "auto",
@@ -768,6 +808,10 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       {:ok, contents} -> String.split(contents, "\n", trim: true)
       {:error, :enoent} -> []
     end
+  end
+
+  defp config_overlays(context) do
+    Path.wildcard(Path.join([context.workspace, ".symphony", "opencode", "config-*"]))
   end
 
   defp contract_records(context) do
@@ -818,7 +862,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     from urllib.parse import urlparse
 
-    scenario, trace_path, child_pid_path, contract_trace_path = sys.argv[1:5]
+    scenario, trace_path, child_pid_path, grandchild_pid_path, contract_trace_path, provider_key = sys.argv[1:7]
 
     def contract(record):
         with open(contract_trace_path, "a", encoding="utf-8") as file:
@@ -844,21 +888,25 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         os.environ.get("OPENCODE_SERVER_USERNAME")
     ):
         raise SystemExit(11)
-    if scenario == "environment_allowlist" and (
-        os.environ.get("SYMPHONY_OPENCODE_UNLISTED_SECRET") or
-        os.environ.get("OPENAI_API_KEY") != "provider-key"
-    ):
+    if scenario == "environment_allowlist" and os.environ.get("SYMPHONY_OPENCODE_UNLISTED_SECRET"):
         raise SystemExit(13)
+    if scenario == "environment_allowlist" and os.environ.get(provider_key) != "provider-key":
+        raise SystemExit(14)
 
+
+    if scenario in ("startup_timeout", "descendant"):
+        child = subprocess.Popen([
+            "/bin/sh",
+            "-c",
+            'sleep 30 & printf "%s\\n" "$!" > "$1"; wait',
+            "child",
+            grandchild_pid_path,
+        ])
+        with open(child_pid_path, "w", encoding="utf-8") as file:
+            file.write(str(child.pid))
 
     if scenario == "startup_timeout":
         time.sleep(30)
-
-
-    if scenario == "descendant":
-        child = subprocess.Popen(["sleep", "30"])
-        with open(child_pid_path, "w", encoding="utf-8") as file:
-            file.write(str(child.pid))
 
     state = {"aborted": False, "pending_question": False, "pending_permission": False, "message_count": 0}
     queue_request_held = threading.Event()

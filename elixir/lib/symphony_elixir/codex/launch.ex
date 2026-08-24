@@ -6,26 +6,6 @@ defmodule SymphonyElixir.Codex.Launch do
   alias SymphonyElixir.Codex.{ExecutionProfile, HarnessHome}
   alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor, Shell, SSH, TargetContext}
 
-  @local_runner_wrapper """
-  set -m 2>/dev/null || true
-  exec 3<&0
-
-  cleanup() {
-    kill -TERM "-$child" 2>/dev/null || kill -TERM "$child" 2>/dev/null || true
-    sleep 0.1
-    kill -KILL "-$child" 2>/dev/null || kill -KILL "$child" 2>/dev/null || true
-  }
-
-  "$@" <&3 &
-  child=$!
-  trap 'cleanup; exit 143' TERM INT HUP
-  wait "$child"
-  status=$?
-  trap - TERM INT HUP
-  exec 3<&-
-  exit "$status"
-  """
-
   @type command :: [String.t()]
   @type result :: %{
           port: port(),
@@ -314,8 +294,6 @@ defmodule SymphonyElixir.Codex.Launch do
     do: HarnessHome.remote_prepare(context)
 
   defp start_context_transport(%{worker_host: nil} = authority, harness, transport) do
-    argv = ["/bin/sh", "-c", @local_runner_wrapper, "symphony-runner" | authority.argv]
-
     opts = [
       cd: authority.workspace,
       env: HarnessHome.local_port_env(harness.path),
@@ -324,7 +302,7 @@ defmodule SymphonyElixir.Codex.Launch do
 
     with :ok <- validate_local_launch_workspace(authority),
          {:ok, started} <-
-           invoke_context_starter(fn -> transport.process_starter.(argv, opts) end) do
+           invoke_context_starter(fn -> transport.process_starter.(authority.argv, opts) end) do
       {:ok, %{port: started.port, process: started.process, argv: authority.argv}}
     end
   end
@@ -523,17 +501,10 @@ defmodule SymphonyElixir.Codex.Launch do
 
   defp start_port(workspace, nil, codex_home, codex_command, line_bytes)
        when is_list(codex_command) do
-    runner_argv = [
-      System.find_executable("sh") || "/bin/sh",
-      "-c",
-      @local_runner_wrapper,
-      "symphony-runner"
-    ]
-
     with {:ok, argv} <- command_argv(codex_command),
          {:ok, executable, args} <- local_command(workspace, argv),
          {:ok, process} <-
-           ProcessSupervisor.start(runner_argv ++ [executable | args],
+           ProcessSupervisor.start([executable | args],
              cd: workspace,
              env: HarnessHome.local_port_env(codex_home),
              line: line_bytes

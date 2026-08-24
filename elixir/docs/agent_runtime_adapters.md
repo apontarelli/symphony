@@ -158,16 +158,28 @@ accumulated into runner-neutral usage totals before orchestration consumes them.
 
 ## Process Lifecycle Constraints
 
-- Run one OpenCode server process per active Symphony worker run unless a later design proves safe
-  server sharing.
+- Run one OpenCode server process group per active Symphony worker run. Local runner argv is passed
+  through a fixed Symphony wrapper as positional arguments; runner values are never interpolated
+  into shell source.
+- On Darwin, the wrapper uses local job control; on Linux, it launches the guarded runner directly
+  through `setsid -f -w`. `ProcessSupervisor` releases the runner only after its PID equals its PGID
+  and its parent PID equals the live wrapper PID. A lifecycle owner monitors the worker process that
+  launched the group.
+- Normal stop keeps protocol shutdown first: abort an active turn, delete the OpenCode session,
+  dispose the instance, then send TERM to the owned process group. After a bounded 150 ms grace,
+  any surviving group receives KILL. The wrapper applies the same escalation to descendants left
+  behind when the runner exits.
+- Startup failure, worker failure, explicit stop, and orchestrator task termination all converge on
+  the same lifecycle owner. Repeated cleanup checks the live wrapper and group-leader parent
+  relationship before signaling, so a stale cached PID cannot target a reused unrelated process.
+- Process-group launch fails closed with `{:process_group_unsupported, reason}` outside Darwin/Linux
+  or when required local `sh`, `ps`, or `kill` tools are unavailable. Linux also requires
+  `setsid -f -w`. Adopted ports and SSH-backed launches use `cleanup: :port_only` and do not claim
+  local descendant cleanup.
 - Keep the OpenCode server alive across continuation turns for the same issue so session context is
   preserved.
 - Observe only response parts and pending permission/question requests for the session owned by the
   worker run; do not let one issue consume another issue's signals.
-- On timeout, call the OpenCode abort endpoint when a session/message is active, then stop the
-  supervised process.
-- On normal completion, dispose the OpenCode instance if supported, then stop the supervised process
-  and rely on `ProcessSupervisor` for descendant cleanup.
 - Startup is complete only after health and session creation succeed. A started OS process without a
   usable OpenCode session is still startup failure.
 - First-wave production support is local-worker only unless SSH port forwarding or ACP stdio support
