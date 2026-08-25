@@ -2937,7 +2937,7 @@ defmodule SymphonyElixir.CoreTest do
                  issue_state_fetcher: fn [_issue_id] -> {:ok, [%{issue | state: "Done"}]} end
                )
 
-      assert_receive {:workflow_module_resolution, "issue-live-updates",
+      assert_receive {:workflow_module_resolution, {"legacy", "issue-live-updates"},
                       %{
                         policy_hash: workflow_module_policy_hash,
                         module_refs: workflow_module_refs,
@@ -2949,7 +2949,7 @@ defmodule SymphonyElixir.CoreTest do
       assert %{name: "linear-operation", version: "v1"} in workflow_module_refs
       assert Enum.any?(workflow_modules_with_config, &(&1.id == "linear-operation" and is_map(&1.config)))
 
-      assert_receive {:runtime_event, "issue-live-updates",
+      assert_receive {:runtime_event, {"legacy", "issue-live-updates"},
                       %{
                         event: :session_started,
                         runtime: :codex_app_server,
@@ -3022,7 +3022,7 @@ defmodule SymphonyElixir.CoreTest do
         AgentRunner.run(issue, self())
       end
 
-      assert_received {:runtime_event, "issue-invalid-codex-schema",
+      assert_received {:runtime_event, {"legacy", "issue-invalid-codex-schema"},
                        %{
                          event: :agent_blocked,
                          timestamp: %DateTime{},
@@ -3446,7 +3446,7 @@ defmodule SymphonyElixir.CoreTest do
       assert length(String.split(trace, "RUN", trim: true)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
 
-      assert_received {:runtime_event, "issue-max-turns",
+      assert_received {:runtime_event, {"legacy", "issue-max-turns"},
                        %{
                          event: :agent_max_turns_exhausted,
                          completion: %{

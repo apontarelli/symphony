@@ -93,7 +93,7 @@ defmodule SymphonyElixir.AgentRunner do
           :ok
 
         {:error, reason} = error ->
-          maybe_send_non_retryable_agent_blocker(codex_update_recipient, issue, reason)
+          maybe_send_non_retryable_agent_blocker(codex_update_recipient, context, reason)
           Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
           error
       end
@@ -190,7 +190,7 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, workspace} ->
         send_worker_runtime_info(
           codex_update_recipient,
-          issue,
+          context,
           context.worker_host,
           workspace
         )
@@ -209,9 +209,9 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp runtime_event_handler(recipient, issue) do
+  defp runtime_event_handler(recipient, context) do
     fn %Event{} = event ->
-      send_codex_update(recipient, issue, runtime_event_update(event))
+      send_codex_update(recipient, context, runtime_event_update(event))
     end
   end
 
@@ -231,13 +231,19 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_put_runtime_field(update, _key, nil), do: update
   defp maybe_put_runtime_field(update, key, value), do: Map.put(update, key, value)
 
+  defp send_codex_update(recipient, %ExecutionContext{} = context, message)
+       when is_pid(recipient) do
+    send(recipient, {:runtime_event, ExecutionContext.run_id(context), message})
+    :ok
+  end
+
   defp send_codex_update(recipient, %Issue{id: issue_id}, message)
        when is_binary(issue_id) and is_pid(recipient) do
     send(recipient, {:runtime_event, issue_id, message})
     :ok
   end
 
-  defp send_codex_update(_recipient, _issue, _message), do: :ok
+  defp send_codex_update(_recipient, _context_or_issue, _message), do: :ok
 
   defp maybe_send_non_retryable_agent_blocker(recipient, issue, reason) do
     case non_retryable_agent_blocker(reason) do
@@ -292,11 +298,11 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp non_empty_string(_value), do: nil
 
-  defp send_worker_runtime_info(recipient, %Issue{id: issue_id}, worker_host, workspace)
-       when is_binary(issue_id) and is_pid(recipient) and is_binary(workspace) do
+  defp send_worker_runtime_info(recipient, %ExecutionContext{} = context, worker_host, workspace)
+       when is_pid(recipient) and is_binary(workspace) do
     send(
       recipient,
-      {:worker_runtime_info, issue_id,
+      {:worker_runtime_info, ExecutionContext.run_id(context),
        %{
          worker_host: worker_host,
          workspace_path: workspace
@@ -306,9 +312,9 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
-  defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
+  defp send_worker_runtime_info(_recipient, _context, _worker_host, _workspace), do: :ok
 
-  defp run_capability_preflight(context, issue, recipient, opts) do
+  defp run_capability_preflight(context, _issue, recipient, opts) do
     case CapabilityPreflight.run(context, capability_preflight_opts(opts)) do
       %{} = preflight ->
         case CapabilityPreflight.blocker(preflight) do
@@ -316,7 +322,7 @@ defmodule SymphonyElixir.AgentRunner do
             :ok
 
           blocker ->
-            send_capability_blocker(recipient, issue, blocker, preflight)
+            send_capability_blocker(recipient, context, blocker, preflight)
             {:error, {:capability_preflight_blocked, blocker}}
         end
 
@@ -325,8 +331,8 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp send_capability_blocker(recipient, issue, blocker, preflight) do
-    send_codex_update(recipient, issue, %{
+  defp send_capability_blocker(recipient, context, blocker, preflight) do
+    send_codex_update(recipient, context, %{
       event: :agent_blocked,
       timestamp: DateTime.utc_now(),
       completion: %{
@@ -444,7 +450,7 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt_bundle.prompt,
              issue,
-             on_event: runtime_event_handler(codex_update_recipient, issue)
+             on_event: runtime_event_handler(codex_update_recipient, context)
            ) do
       Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{context.workspace_path} turn=#{turn_number}/#{max_turns}")
 
@@ -466,7 +472,7 @@ defmodule SymphonyElixir.AgentRunner do
 
     send_workflow_module_resolution(
       recipient,
-      issue,
+      context,
       event_workflow_module_resolution(
         context,
         prompt_bundle.workflow_module_resolution
@@ -504,7 +510,7 @@ defmodule SymphonyElixir.AgentRunner do
 
         send_max_turns_exhausted(
           codex_update_recipient,
-          refreshed_issue,
+          context,
           turn_number,
           max_turns
         )
@@ -543,8 +549,8 @@ defmodule SymphonyElixir.AgentRunner do
      }}
   end
 
-  defp send_max_turns_exhausted(recipient, %Issue{} = issue, turn_number, max_turns) do
-    send_codex_update(recipient, issue, %{
+  defp send_max_turns_exhausted(recipient, %ExecutionContext{} = context, turn_number, max_turns) do
+    send_codex_update(recipient, context, %{
       event: :agent_max_turns_exhausted,
       timestamp: DateTime.utc_now(),
       completion: %{
@@ -573,13 +579,21 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp event_workflow_module_resolution(_context, resolution), do: resolution
 
-  defp send_workflow_module_resolution(recipient, %Issue{id: issue_id}, workflow_module_resolution)
-       when is_binary(issue_id) and is_pid(recipient) and is_map(workflow_module_resolution) do
-    send(recipient, {:workflow_module_resolution, issue_id, workflow_module_resolution})
+  defp send_workflow_module_resolution(
+         recipient,
+         %ExecutionContext{} = context,
+         workflow_module_resolution
+       )
+       when is_pid(recipient) and is_map(workflow_module_resolution) do
+    send(
+      recipient,
+      {:workflow_module_resolution, ExecutionContext.run_id(context), workflow_module_resolution}
+    )
+
     :ok
   end
 
-  defp send_workflow_module_resolution(_recipient, _issue, _workflow_module_resolution), do: :ok
+  defp send_workflow_module_resolution(_recipient, _context, _workflow_module_resolution), do: :ok
 
   defp continue_with_issue?(
          %ExecutionContext{target: target} = context,

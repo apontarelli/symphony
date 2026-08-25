@@ -95,6 +95,8 @@ defmodule SymphonyElixir.ExecutionContextTest do
     assert context.max_retries == 1
     assert context.worker_host == nil
     assert context.policy == policy
+    assert ExecutionContext.run_id(context) == {"alpha", "issue-407"}
+    assert ExecutionContext.run_id(:invalid) == nil
   end
 
   @tag :tmp_dir

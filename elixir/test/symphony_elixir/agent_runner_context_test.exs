@@ -173,8 +173,8 @@ defmodule SymphonyElixir.AgentRunnerContextTest do
     assert Enum.map(refreshes, &elem(&1, 3)) == [@hash, @hash, @hash, @hash]
     assert Enum.map(stops, &elem(&1, 1)) |> Enum.sort() == ["alpha", "beta"]
 
-    assert_receive {:runtime_event, "issue-420", %{event: :agent_max_turns_exhausted, max_turns: 2}}
-    assert_receive {:runtime_event, "issue-420", %{event: :agent_max_turns_exhausted, max_turns: 2}}
+    assert_receive {:runtime_event, {"alpha", "issue-420"}, %{event: :agent_max_turns_exhausted, max_turns: 2}}
+    assert_receive {:runtime_event, {"beta", "issue-420"}, %{event: :agent_max_turns_exhausted, max_turns: 2}}
 
     assert File.read!(Path.join(alpha.workspace_path, "cleanup.txt")) == "alpha"
     assert File.read!(Path.join(beta.workspace_path, "cleanup.txt")) == "beta"

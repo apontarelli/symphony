@@ -1,5 +1,7 @@
 defmodule SymphonyElixir.OrchestratorStatusTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.{ExecutionContext, TargetContext}
+  alias SymphonyElixir.TargetContext.Legacy
 
   test "snapshot returns :timeout when snapshot server is unresponsive" do
     server_name = Module.concat(__MODULE__, :UnresponsiveSnapshotServer)
@@ -19,6 +21,140 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert Orchestrator.snapshot(server_name, 10) == :timeout
 
     send(pid, :stop)
+  end
+
+  @tag :tmp_dir
+  test "run state isolates overlapping issue ids and pins context generations", %{tmp_dir: tmp_dir} do
+    issue = %Issue{
+      id: "shared-issue",
+      identifier: "SID-SHARED",
+      title: "Isolate overlapping target runs",
+      description: "Target-scoped state must not collide.",
+      state: "In Progress",
+      labels: []
+    }
+
+    workspace_root = Path.join(tmp_dir, "workspaces")
+
+    write_policy_workflow!(workspace_root, Path.join(tmp_dir, "fake-codex"),
+      target: "main",
+      checks: ["pinned"],
+      prompt: "Pinned {{ issue.identifier }}"
+    )
+
+    context = fn target_id ->
+      {:ok, target} = Legacy.build_at_process_start(saved_run_name: target_id)
+
+      profile = get_in(target.issue_policy_authority, ["profile"]) || "default"
+
+      policy =
+        case TargetContext.issue_policy(target, issue, profile: profile) do
+          {:ok, policy} -> policy
+          {:error, :forbidden_policy_broadening} -> elem(Config.issue_policy(issue), 1)
+        end
+
+      {:ok, execution_context} = ExecutionContext.new(target, issue, policy: policy)
+      execution_context
+    end
+
+    secret = "runner-secret-must-not-project"
+    alpha = context.("alpha")
+    alpha = %{alpha | policy: Map.put(alpha.policy, "credential", secret)}
+    beta = context.("beta")
+    alpha_run_id = ExecutionContext.run_id(alpha)
+    beta_run_id = ExecutionContext.run_id(beta)
+    started_at = DateTime.utc_now()
+
+    running_entry = fn execution_context ->
+      %{
+        pid: nil,
+        ref: nil,
+        identifier: issue.identifier,
+        issue: issue,
+        execution_context: execution_context,
+        worker_host: execution_context.worker_host,
+        workspace_path: execution_context.workspace_path,
+        runtime: nil,
+        session_id: nil,
+        last_runtime_message: nil,
+        last_runtime_timestamp: nil,
+        last_runtime_progress_timestamp: nil,
+        last_runtime_event: nil,
+        last_runtime_error_signature: nil,
+        startup_slot?: false,
+        runtime_input_tokens: 0,
+        runtime_output_tokens: 0,
+        runtime_total_tokens: 0,
+        runtime_last_reported_input_tokens: 0,
+        runtime_last_reported_output_tokens: 0,
+        runtime_last_reported_total_tokens: 0,
+        turn_count: 0,
+        retry_attempt: 0,
+        profile: "default",
+        target: "main",
+        policy_ref: execution_context.policy["policy_ref"],
+        workflow_module_resolution: nil,
+        started_at: started_at
+      }
+    end
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 2,
+      max_concurrent_startups: 2,
+      running: %{
+        alpha_run_id => running_entry.(alpha),
+        beta_run_id => running_entry.(beta)
+      },
+      claimed: MapSet.new([alpha_run_id, beta_run_id]),
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0}
+    }
+
+    event = %{event: :turn_progress, timestamp: DateTime.utc_now(), session_id: "alpha-session"}
+    assert {:noreply, progressed} = Orchestrator.handle_info({:runtime_event, alpha_run_id, event}, state)
+    assert progressed.running[alpha_run_id].session_id == "alpha-session"
+    assert progressed.running[alpha_run_id].last_runtime_event == :turn_progress
+    assert progressed.running[beta_run_id].session_id == nil
+    assert progressed.running[beta_run_id].last_runtime_event == nil
+
+    retry_state =
+      %Orchestrator.State{}
+      |> Orchestrator.schedule_issue_retry_for_test(alpha, 1, %{
+        identifier: issue.identifier,
+        retry_delay_ms: 60_000
+      })
+      |> Orchestrator.schedule_issue_retry_for_test(beta, 1, %{
+        identifier: issue.identifier,
+        retry_delay_ms: 60_000
+      })
+
+    assert retry_state.retry_attempts[alpha_run_id].execution_context == alpha
+    assert retry_state.retry_attempts[beta_run_id].execution_context == beta
+    assert map_size(retry_state.retry_attempts) == 2
+
+    terminated = Orchestrator.terminate_running_issue_for_test(progressed, alpha_run_id)
+    refute Map.has_key?(terminated.running, alpha_run_id)
+    assert terminated.running[beta_run_id].execution_context == beta
+    refute MapSet.member?(terminated.claimed, alpha_run_id)
+    assert MapSet.member?(terminated.claimed, beta_run_id)
+
+    assert {:reply, snapshot, _snapshot_state} = Orchestrator.handle_call(:snapshot, self(), progressed)
+    assert Enum.map(snapshot.running, & &1.target_id) |> Enum.sort() == ["alpha", "beta"]
+    refute inspect(snapshot) =~ secret
+    refute Enum.any?(snapshot.running, &Map.has_key?(&1, :policy))
+
+    original_generation = alpha.target.registry_generation
+
+    write_policy_workflow!(workspace_root, Path.join(tmp_dir, "fake-codex"),
+      target: "changed",
+      checks: ["later-admission"],
+      prompt: "Changed {{ issue.identifier }}"
+    )
+
+    later_alpha = context.("alpha")
+    refute later_alpha.target.registry_generation == original_generation
+
+    assert progressed.running[alpha_run_id].execution_context.target.registry_generation ==
+             original_generation
   end
 
   test "orchestrator snapshot reflects last codex update and session id" do
@@ -1752,21 +1888,32 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           running_entry.session_id == "thread-policy-running-turn-policy-running" and
             running_entry.profile == "strict" and
             running_entry.target == "project/old" and
-            running_entry.policy["checks"] == ["old-policy"]
+            running_entry.target_id == "legacy"
         end)
 
-      pinned_policy = running_entry.policy
+      internal_entry =
+        wait_for_running_entry(pid, issue.id, fn entry ->
+          match?(%ExecutionContext{}, Map.get(entry, :execution_context))
+        end)
+
+      pinned_context = internal_entry.execution_context
+      pinned_policy = pinned_context.policy
       assert %{running: [snapshot_entry]} = GenServer.call(pid, :snapshot)
 
       assert running_entry.profile == "strict"
       assert running_entry.target == "project/old"
       assert running_entry.policy_ref == pinned_policy["policy_ref"]
+      assert running_entry.registry_generation == pinned_context.target.registry_generation
+      assert running_entry.policy_hash == pinned_context.target.policy_hash
       assert pinned_policy["checks"] == ["old-policy"]
 
       assert snapshot_entry.profile == "strict"
       assert snapshot_entry.target == "project/old"
       assert snapshot_entry.policy_ref == pinned_policy["policy_ref"]
-      assert snapshot_entry.policy == pinned_policy
+      assert snapshot_entry.target_id == "legacy"
+      assert snapshot_entry.registry_generation == pinned_context.target.registry_generation
+      assert snapshot_entry.policy_hash == pinned_context.target.policy_hash
+      refute Map.has_key?(snapshot_entry, :policy)
 
       write_policy_workflow!(workspace_root, codex_binary,
         target: "project/new",
@@ -1780,8 +1927,10 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       refute future_policy["policy_ref"] == pinned_policy["policy_ref"]
 
       reloaded_state = :sys.get_state(pid)
-      assert reloaded_state.running[issue.id].policy_ref == pinned_policy["policy_ref"]
-      assert reloaded_state.running[issue.id].policy == pinned_policy
+      reloaded_entry = state_entry(reloaded_state, [:running, issue.id])
+      assert reloaded_entry.policy_ref == pinned_policy["policy_ref"]
+      assert reloaded_entry.execution_context == pinned_context
+      assert reloaded_entry.execution_context.policy == pinned_policy
     after
       File.rm_rf(test_root)
     end
@@ -1933,10 +2082,12 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       original_entry =
         wait_for_running_entry(pid, issue.id, fn running_entry ->
-          Map.get(running_entry, :retry_attempt) == 0 and is_map(Map.get(running_entry, :policy))
+          Map.get(running_entry, :retry_attempt) == 0 and
+            match?(%ExecutionContext{}, Map.get(running_entry, :execution_context))
         end)
 
-      original_policy = original_entry.policy
+      original_context = original_entry.execution_context
+      original_policy = original_context.policy
       assert original_entry.profile == "strict"
       assert original_entry.target == "project/retry-old"
 
@@ -1947,7 +2098,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           Map.get(retry_entry, :attempt) == 1
         end)
 
-      assert retry_entry.policy == original_policy
+      assert retry_entry.execution_context == original_context
       assert retry_entry.profile == "strict"
       assert retry_entry.target == "project/retry-old"
       assert retry_entry.policy_ref == original_policy["policy_ref"]
@@ -1963,14 +2114,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert reloaded_policy["checks"] == ["retry-new"]
 
       Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-      send(pid, {:retry_issue, issue.id, retry_entry.retry_token})
+      send(pid, {:retry_issue, {"legacy", issue.id}, retry_entry.retry_token})
 
       retried_entry =
         wait_for_running_entry(pid, issue.id, fn running_entry ->
           Map.get(running_entry, :retry_attempt) == 1
         end)
 
-      assert retried_entry.policy == original_policy
+      assert retried_entry.execution_context == original_context
+      assert retried_entry.execution_context.policy == original_policy
       assert retried_entry.profile == "strict"
       assert retried_entry.target == "project/retry-old"
       assert retried_entry.policy_ref == original_policy["policy_ref"]
@@ -3411,7 +3563,7 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       entry
     else
       if System.monotonic_time(:millisecond) >= deadline_ms do
-        flunk("timed out waiting for orchestrator state entry #{inspect(path)}: #{inspect(entry)}")
+        flunk("timed out waiting for orchestrator state entry #{inspect(path)}: entry=#{inspect(entry)} state=#{inspect(state)}")
       else
         Process.sleep(5)
         do_wait_for_state_entry(pid, path, predicate, deadline_ms)
@@ -3422,7 +3574,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp state_entry(state, [section, issue_id]) when is_atom(section) and is_binary(issue_id) do
     state
     |> Map.get(section, %{})
-    |> Map.get(issue_id)
+    |> Enum.find_value(fn
+      {^issue_id, entry} ->
+        entry
+
+      {{_target_id, ^issue_id}, entry} ->
+        entry
+
+      {_run_id, %{execution_context: %ExecutionContext{issue_id: ^issue_id}} = entry} ->
+        entry
+
+      _entry ->
+        nil
+    end)
   end
 
   defp adapter_diagnostics(app_server_pid) do

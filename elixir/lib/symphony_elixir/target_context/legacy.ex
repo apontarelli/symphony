@@ -115,7 +115,7 @@ defmodule SymphonyElixir.TargetContext.Legacy do
          {:ok, %{config: config} = loaded_workflow} when is_map(config) <- Workflow.current(),
          {:ok, settings} <- Schema.parse(config),
          run_setup = RunSetup.current(),
-         profile = RunSetup.profile(run_setup),
+         profile = Config.profile_override() || RunSetup.profile(run_setup),
          {:ok, target_id} <- target_id(opts, run_setup),
          {:ok, repo_manifest} <-
            Manifest.read(Workflow.selected_workflow_file_path(), repo_setup?: false),

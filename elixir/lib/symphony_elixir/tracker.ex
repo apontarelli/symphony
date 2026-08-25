@@ -238,9 +238,16 @@ defmodule SymphonyElixir.Tracker do
   defp context_run_target(%TargetContext{run_target: run_target}, nil, kind) do
     scope = Map.get(run_target, "scope", run_target)
 
-    if query_file_only?(scope),
-      do: {:error, :query_file_not_materialized},
-      else: RunTarget.parse(scope, default_tracker: kind)
+    cond do
+      query_file_only?(scope) ->
+        {:error, :query_file_not_materialized}
+
+      memory_default_target?(scope, kind) ->
+        {:ok, %RunTarget{tracker: kind}}
+
+      true ->
+        RunTarget.parse(scope, default_tracker: kind)
+    end
   end
 
   defp context_run_target(%TargetContext{}, %RunTarget{} = target, kind) do
@@ -248,6 +255,13 @@ defmodule SymphonyElixir.Tracker do
       do: {:ok, target},
       else: {:error, :invalid_tracker_adapter}
   end
+
+  defp memory_default_target?(scope, "memory") when is_map(scope) do
+    type = scope_value(scope, "type", :type) || scope_value(scope, "kind", :kind)
+    normalized_kind(type) in [nil, "nil"]
+  end
+
+  defp memory_default_target?(_scope, _kind), do: false
 
   defp query_file_only?(scope) when is_map(scope) do
     type = scope_value(scope, "type", :type) || scope_value(scope, "kind", :kind)

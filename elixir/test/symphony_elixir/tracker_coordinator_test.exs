@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.TrackerCoordinatorTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{RunTarget, TrackerCoordinator}
+  alias SymphonyElixir.{RunTarget, TargetContext, TrackerCoordinator}
 
   setup do
     state_root =
@@ -43,6 +43,42 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
 
     assert_receive :candidate_fetch
     refute_receive :candidate_fetch, 10
+  end
+
+  test "target-scoped leases isolate overlapping issue ids", %{state_path: state_path} do
+    shared_issue = issue("shared-issue", "SID-SHARED")
+    alpha = target_context("alpha")
+    beta = target_context("beta")
+    opts = [state_path: state_path, lease_ttl_ms: 60_000, now_ms: 1_000]
+
+    assert :ok = TrackerCoordinator.claim_issue(alpha, shared_issue, "daemon-alpha", opts)
+    assert :ok = TrackerCoordinator.claim_issue(beta, shared_issue, "daemon-beta", opts)
+
+    assert :ok =
+             TrackerCoordinator.refresh_issue_lease(
+               alpha,
+               shared_issue.id,
+               "daemon-alpha",
+               Keyword.put(opts, :now_ms, 2_000)
+             )
+
+    assert [
+             %{issue_id: "shared-issue", target_id: "alpha", owner_id: "daemon-alpha"},
+             %{issue_id: "shared-issue", target_id: "beta", owner_id: "daemon-beta"}
+           ] =
+             TrackerCoordinator.snapshot(state_path: state_path, now_ms: 2_000).leases
+             |> Enum.sort_by(& &1.target_id)
+
+    assert :ok =
+             TrackerCoordinator.release_issue(
+               alpha,
+               shared_issue.id,
+               "daemon-alpha",
+               state_path: state_path
+             )
+
+    assert [%{target_id: "beta", owner_id: "daemon-beta"}] =
+             TrackerCoordinator.snapshot(state_path: state_path, now_ms: 2_000).leases
   end
 
   test "different cache keys do not share candidate results", %{state_path: state_path} do
@@ -372,6 +408,29 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
     File.write!(state_path, :erlang.term_to_binary(state))
 
     assert TrackerCoordinator.rate_limit(state_path: state_path) == nil
+  end
+
+  defp target_context(target_id) do
+    hash = "sha256:" <> String.duplicate("a", 64)
+
+    %TargetContext{
+      target_id: target_id,
+      state: :active,
+      dispatch_mode: :explicit,
+      registry_generation: hash,
+      policy_hash: hash,
+      repo_manifest_hash: hash,
+      issue_policy_authority: %{},
+      repo_policy: %{},
+      tracker_connection: %{},
+      run_target: %{},
+      worktree_policy: %{},
+      runner_policy: %{},
+      effective_checks: %{},
+      external_side_effect_gates: %{},
+      capacity_limits: %{},
+      budget_limits: %{}
+    }
   end
 
   defp issue(id, identifier) do

@@ -1323,6 +1323,7 @@ defmodule SymphonyElixir.TrackerContextTest do
     legacy_target = %RunTarget{tracker: "memory", type: :issues, issue_ids: ["memory-1"]}
     assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues(nil)
     assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues_uncached(nil)
+    assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues_uncached()
 
     assert {:ok, %RunTarget.Resolution{target: ^legacy_target}} =
              Tracker.resolve_candidate_issues_uncached(legacy_target)

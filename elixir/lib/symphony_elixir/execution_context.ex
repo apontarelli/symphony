@@ -46,6 +46,7 @@ defmodule SymphonyElixir.ExecutionContext do
           | :security_reviewer
 
   @type role :: implementation_role() | review_role()
+  @type run_id :: {String.t(), String.t()}
 
   @type constructor_options ::
           [{:policy, map()}]
@@ -161,6 +162,15 @@ defmodule SymphonyElixir.ExecutionContext do
   end
 
   def derive_child(_parent, _role, _opts), do: {:error, :invalid_context}
+  @spec run_id(t()) :: run_id() | nil
+  def run_id(%__MODULE__{
+        target: %TargetContext{target_id: target_id},
+        issue_id: issue_id
+      })
+      when is_binary(target_id) and is_binary(issue_id),
+      do: {target_id, issue_id}
+
+  def run_id(_context), do: nil
 
   @spec validate(t()) :: :ok | {:error, :invalid_context}
   def validate(%__MODULE__{} = context), do: validate_context(context)

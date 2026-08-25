@@ -10,7 +10,7 @@ defmodule SymphonyElixir.TrackerCoordinator do
 
   require Logger
 
-  alias SymphonyElixir.{Config, RunTarget}
+  alias SymphonyElixir.{Config, RunTarget, TargetContext}
   alias SymphonyElixir.Linear.Issue
 
   @default_cache_ttl_ms 30_000
@@ -90,26 +90,50 @@ defmodule SymphonyElixir.TrackerCoordinator do
   @spec claim_issue(Issue.t(), String.t(), keyword()) :: lease_result()
   def claim_issue(%Issue{id: issue_id} = issue, owner_id, opts \\ [])
       when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
+    claim_lease(issue_id, issue, owner_id, %{}, opts)
+  end
+
+  @spec claim_issue(TargetContext.t(), Issue.t(), String.t(), keyword()) :: lease_result()
+  def claim_issue(
+        %TargetContext{target_id: target_id, registry_generation: registry_generation} = target,
+        %Issue{id: issue_id} = issue,
+        owner_id,
+        opts
+      )
+      when is_binary(target_id) and is_binary(registry_generation) and is_binary(issue_id) and
+             is_binary(owner_id) and is_list(opts) do
+    claim_lease(
+      lease_key(target, issue_id),
+      issue,
+      owner_id,
+      %{target_id: target_id, registry_generation: registry_generation},
+      opts
+    )
+  end
+
+  defp claim_lease(key, %Issue{id: issue_id} = issue, owner_id, provenance, opts) do
     now_ms = wall_clock_now_ms(opts)
 
     with_state_write(opts, fn state ->
-      {state, result} = reclaim_expired_lease(state, issue_id, now_ms)
+      {state, result} = reclaim_expired_lease(state, key, now_ms)
 
-      case Map.get(state.leases, issue_id) do
+      case Map.get(state.leases, key) do
         nil ->
-          lease = %{
-            issue_id: issue_id,
-            identifier: issue.identifier,
-            owner_id: owner_id,
-            acquired_at_ms: now_ms,
-            expires_at_ms: now_ms + lease_ttl_ms(opts)
-          }
+          lease =
+            %{
+              issue_id: issue_id,
+              identifier: issue.identifier,
+              owner_id: owner_id,
+              acquired_at_ms: now_ms,
+              expires_at_ms: now_ms + lease_ttl_ms(opts)
+            }
+            |> Map.merge(provenance)
 
-          {%{state | leases: Map.put(state.leases, issue_id, lease)}, :ok}
+          {%{state | leases: Map.put(state.leases, key, lease)}, :ok}
 
         %{owner_id: ^owner_id} = lease ->
           refreshed = refresh_lease(lease, now_ms, opts)
-          {%{state | leases: Map.put(state.leases, issue_id, refreshed)}, :ok}
+          {%{state | leases: Map.put(state.leases, key, refreshed)}, :ok}
 
         _lease ->
           {state, result}
@@ -120,16 +144,26 @@ defmodule SymphonyElixir.TrackerCoordinator do
   @spec refresh_issue_lease(String.t(), String.t(), keyword()) :: lease_result()
   def refresh_issue_lease(issue_id, owner_id, opts \\ [])
       when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
+    refresh_lease_by_key(issue_id, owner_id, opts)
+  end
+
+  @spec refresh_issue_lease(TargetContext.t(), String.t(), String.t(), keyword()) :: lease_result()
+  def refresh_issue_lease(%TargetContext{} = target, issue_id, owner_id, opts)
+      when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
+    refresh_lease_by_key(lease_key(target, issue_id), owner_id, opts)
+  end
+
+  defp refresh_lease_by_key(key, owner_id, opts) do
     now_ms = wall_clock_now_ms(opts)
 
     with_state_write(opts, fn state ->
-      case Map.get(state.leases, issue_id) do
+      case Map.get(state.leases, key) do
         nil ->
           {state, {:error, :missing}}
 
         %{owner_id: ^owner_id} = lease ->
           refreshed = refresh_lease(lease, now_ms, opts)
-          {%{state | leases: Map.put(state.leases, issue_id, refreshed)}, :ok}
+          {%{state | leases: Map.put(state.leases, key, refreshed)}, :ok}
 
         _lease ->
           {state, {:error, :leased}}
@@ -137,20 +171,32 @@ defmodule SymphonyElixir.TrackerCoordinator do
     end)
   end
 
-  @spec release_issue(String.t(), String.t() | nil, keyword()) :: :ok | {:error, coordinator_error()}
+  @spec release_issue(String.t(), String.t() | nil, keyword()) ::
+          :ok | {:error, coordinator_error()}
   def release_issue(issue_id, owner_id \\ nil, opts \\ [])
       when is_binary(issue_id) and is_list(opts) do
+    release_lease(issue_id, owner_id, opts)
+  end
+
+  @spec release_issue(TargetContext.t(), String.t(), String.t() | nil, keyword()) ::
+          :ok | {:error, coordinator_error()}
+  def release_issue(%TargetContext{} = target, issue_id, owner_id, opts)
+      when is_binary(issue_id) and is_list(opts) do
+    release_lease(lease_key(target, issue_id), owner_id, opts)
+  end
+
+  defp release_lease(key, owner_id, opts) do
     with_state_write(opts, fn state ->
       leases =
-        case Map.get(state.leases, issue_id) do
+        case Map.get(state.leases, key) do
           nil ->
             state.leases
 
           %{owner_id: ^owner_id} ->
-            Map.delete(state.leases, issue_id)
+            Map.delete(state.leases, key)
 
           _lease when is_nil(owner_id) ->
-            Map.delete(state.leases, issue_id)
+            Map.delete(state.leases, key)
 
           _lease ->
             state.leases
@@ -470,6 +516,9 @@ defmodule SymphonyElixir.TrackerCoordinator do
   defp refresh_lease(lease, now_ms, opts) when is_map(lease) do
     %{lease | expires_at_ms: now_ms + lease_ttl_ms(opts)}
   end
+
+  defp lease_key(%TargetContext{target_id: target_id}, issue_id),
+    do: {target_id, issue_id}
 
   defp target_key(target) do
     target
