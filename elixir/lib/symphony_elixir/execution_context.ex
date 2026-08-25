@@ -166,6 +166,23 @@ defmodule SymphonyElixir.ExecutionContext do
   def validate(%__MODULE__{} = context), do: validate_context(context)
   def validate(_context), do: {:error, :invalid_context}
 
+  @spec safe_provenance(t()) :: {:ok, map()} | {:error, :invalid_context}
+  def safe_provenance(%__MODULE__{} = context) do
+    with :ok <- validate_context(context) do
+      {:ok,
+       %{
+         target_id: context.target.target_id,
+         registry_generation: context.target.registry_generation,
+         policy_hash: context.target.policy_hash,
+         issue_id: context.issue_id,
+         issue_identifier: context.issue_identifier,
+         role: Atom.to_string(context.role)
+       }}
+    end
+  end
+
+  def safe_provenance(_context), do: {:error, :invalid_context}
+
   defp validate_review_role(role) when role in @review_roles, do: :ok
   defp validate_review_role(_role), do: {:error, :invalid_role}
 

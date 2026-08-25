@@ -9,7 +9,7 @@ defmodule SymphonyElixir.PublishHandoff do
 
   import Bitwise, only: [&&&: 2]
 
-  alias SymphonyElixir.{Config, HandoffManifest, PathSafety, PrBody}
+  alias SymphonyElixir.{Config, ExecutionContext, HandoffManifest, PathSafety, PrBody}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow.PublishTarget
 
@@ -58,6 +58,47 @@ defmodule SymphonyElixir.PublishHandoff do
           failure: failure() | nil
         }
 
+  @spec run_context(ExecutionContext.t(), Issue.t(), map()) ::
+          result() | {:error, atom()}
+  def run_context(context, issue, completion),
+    do: run_context(context, issue, completion, [])
+
+  @spec run_context(ExecutionContext.t(), Issue.t(), map(), keyword()) ::
+          result() | {:error, atom()}
+
+  def run_context(
+        %ExecutionContext{} = execution_context,
+        %Issue{} = issue,
+        completion,
+        opts
+      )
+      when is_map(completion) and is_list(opts) do
+    with :ok <- validate_implementation_context(execution_context, issue),
+         :ok <- validate_context_options(opts),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(execution_context),
+         :ok <- validate_preflight_provenance(completion, provenance) do
+      execution_context.workspace_path
+      |> run(
+        execution_context.policy,
+        issue,
+        completion,
+        opts
+        |> Keyword.put(:worker_host, execution_context.worker_host)
+        |> Keyword.put(:timeout_ms, execution_context.timeout_ms)
+        |> Keyword.put(:context_mode, true)
+        |> Keyword.put(:delivery_gates, execution_context.target.external_side_effect_gates)
+        |> Keyword.put(:provenance, provenance)
+      )
+      |> Map.put(:provenance, provenance)
+    end
+  end
+
+  def run_context(%ExecutionContext{}, %Issue{}, _completion, _opts),
+    do: {:error, :invalid_publish_handoff_options}
+
+  def run_context(_context, _issue, _completion, _opts),
+    do: {:error, :invalid_publish_handoff_context}
+
   @spec run(Path.t() | nil, map(), Issue.t() | map() | nil, map(), keyword()) :: result()
   def run(workspace, policy, issue, completion, opts \\ [])
       when is_map(policy) and is_map(completion) and is_list(opts) do
@@ -67,8 +108,10 @@ defmodule SymphonyElixir.PublishHandoff do
       workspace: workspace,
       worker_host: Keyword.get(opts, :worker_host),
       timeout_ms: Keyword.get(opts, :timeout_ms, default_timeout_ms()),
-      runner: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_handoff_runner),
-      env: if(is_list(env), do: env, else: [])
+      runner: configured_runner(opts),
+      env: if(is_list(env), do: env, else: []),
+      delivery_gates: Keyword.get(opts, :delivery_gates),
+      provenance: Keyword.get(opts, :provenance)
     }
 
     target = PublishTarget.resolve_policy(policy) || empty_publish_target()
@@ -92,7 +135,8 @@ defmodule SymphonyElixir.PublishHandoff do
       failure: nil
     }
 
-    with :ok <- require_publish_target(target),
+    with :ok <- require_delivery_authority(context),
+         :ok <- require_publish_target(target),
          :ok <- require_supported_vcs_mode(mode),
          :ok <- validate_local_workspace(context),
          :ok <- require_preflight_passed(completion),
@@ -511,6 +555,7 @@ defmodule SymphonyElixir.PublishHandoff do
       cwd: context.workspace,
       env: context.env
     }
+    |> maybe_put_command_provenance(context.provenance)
     |> runner.()
     |> normalize_command_result()
   end
@@ -536,6 +581,11 @@ defmodule SymphonyElixir.PublishHandoff do
 
     yield_command(task, context.timeout_ms)
   end
+
+  defp maybe_put_command_provenance(command, provenance) when is_map(provenance),
+    do: Map.put(command, :provenance, provenance)
+
+  defp maybe_put_command_provenance(command, _provenance), do: command
 
   defp executable_path(command, env) do
     env
@@ -847,6 +897,82 @@ defmodule SymphonyElixir.PublishHandoff do
       "" -> nil
       trimmed -> binary_part(trimmed, 0, min(byte_size(trimmed), 2_048))
     end
+  end
+
+  defp configured_runner(opts) do
+    if Keyword.get(opts, :context_mode, false),
+      do: Keyword.get(opts, :runner),
+      else: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_handoff_runner)
+  end
+
+  defp validate_implementation_context(
+         %ExecutionContext{role: :implementation} = context,
+         %Issue{} = issue
+       ) do
+    with :ok <- ExecutionContext.validate(context),
+         true <- context.issue_id == issue.id,
+         true <- context.issue_identifier == issue.identifier do
+      :ok
+    else
+      _invalid -> {:error, :invalid_publish_handoff_context}
+    end
+  end
+
+  defp validate_implementation_context(_context, _issue),
+    do: {:error, :invalid_publish_handoff_context}
+
+  defp validate_context_options(opts) do
+    if Keyword.keyword?(opts) and
+         length(opts) == length(Enum.uniq_by(opts, &elem(&1, 0))) and
+         Enum.all?(Keyword.keys(opts), &(&1 in [:env, :runner])),
+       do: :ok,
+       else: {:error, :invalid_publish_handoff_options}
+  end
+
+  defp validate_preflight_provenance(completion, provenance) do
+    case fetch(completion, :publish_preflight, nil) do
+      preflight when is_map(preflight) ->
+        if fetch(preflight, :provenance, nil) == provenance,
+          do: :ok,
+          else: {:error, :publish_preflight_context_mismatch}
+
+      _missing ->
+        :ok
+    end
+  end
+
+  defp require_delivery_authority(%{delivery_gates: nil}), do: :ok
+
+  defp require_delivery_authority(%{delivery_gates: gates}) when is_map(gates) do
+    if gates["vcs_publish"] == "allow" and gates["pull_request_write"] == "allow" do
+      :ok
+    else
+      {:blocked,
+       failure(
+         :delivery_not_allowed,
+         "Pinned target policy does not allow publish handoff.",
+         nil,
+         nil,
+         [],
+         nil,
+         nil,
+         %{gates: Map.take(gates, ["vcs_publish", "pull_request_write"])}
+       )}
+    end
+  end
+
+  defp require_delivery_authority(_context) do
+    {:blocked,
+     failure(
+       :delivery_not_allowed,
+       "Pinned target delivery policy is invalid.",
+       nil,
+       nil,
+       [],
+       nil,
+       nil,
+       %{}
+     )}
   end
 
   defp default_timeout_ms do

@@ -3,7 +3,7 @@ defmodule SymphonyElixir.ReviewRecords do
   Persists host-owned quality-gate review records and retrospective exports.
   """
 
-  alias SymphonyElixir.Config
+  alias SymphonyElixir.{Config, ExecutionContext}
   alias SymphonyElixir.HandoffRoute
   alias SymphonyElixir.HandoffRoute.Decision
   alias SymphonyElixir.Linear.Issue
@@ -34,6 +34,27 @@ defmodule SymphonyElixir.ReviewRecords do
   @spec records_root(Path.t() | nil) :: Path.t()
   def records_root(nil), do: Path.join(default_logs_root(), "review-records")
   def records_root(logs_root) when is_binary(logs_root), do: Path.join(Path.expand(logs_root), "review-records")
+
+  @spec write_quality_gate_run(ExecutionContext.t(), map()) ::
+          {:ok, write_result()} | {:error, term()}
+  def write_quality_gate_run(%ExecutionContext{} = context, params) when is_map(params) do
+    with :ok <- validate_implementation_context(context),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(context),
+         :ok <- validate_context_logs_root(params),
+         :ok <- validate_context_issue(params, context),
+         :ok <- validate_quality_gate_provenance(params, provenance),
+         :ok <- validate_handoff_provenance(params, provenance) do
+      params
+      |> Map.put(:issue, context_issue(params, context))
+      |> Map.put(:workspace, context.workspace_path)
+      |> Map.put(:policy, context.policy)
+      |> Map.put(:context_provenance, provenance)
+      |> write_quality_gate_run()
+    end
+  end
+
+  def write_quality_gate_run(%ExecutionContext{}, _params),
+    do: {:error, :invalid_review_record_params}
 
   @spec write_quality_gate_run(map()) :: {:ok, write_result()} | {:error, term()}
   def write_quality_gate_run(params) when is_map(params) do
@@ -156,16 +177,20 @@ defmodule SymphonyElixir.ReviewRecords do
     run = normalize_run(field(params, :run, %{}), params)
     logs_root = field(params, :logs_root, nil)
     workspace = workspace_path(params)
-    record_dir = Path.join([records_root(logs_root), "quality-gates", project.slug, issue.identifier, run.id])
+    provenance = normalize_provenance(field(params, :context_provenance, nil), run)
+    records_root = scoped_records_root(logs_root, provenance)
+    record_dir = Path.join([records_root, "quality-gates", project.slug, issue.identifier, run.id])
 
     {:ok,
      %{
        logs_root: logs_root,
+       records_root: records_root,
        workspace: workspace,
        project: project,
        issue: issue,
        workflow: workflow,
        run: run,
+       provenance: provenance,
        quality_gate: field(params, :quality_gate, %{}),
        handoff_route: field(params, :handoff_route, %{}),
        record_dir: record_dir
@@ -286,6 +311,7 @@ defmodule SymphonyElixir.ReviewRecords do
         handoff_route: Path.basename(files.handoff_route)
       }
     }
+    |> maybe_put_metadata_provenance(normalized.provenance)
     |> Redaction.json_ready()
   end
 
@@ -565,9 +591,11 @@ defmodule SymphonyElixir.ReviewRecords do
   end
 
   defp metadata_paths(records_root) do
-    records_root
-    |> Path.join("quality-gates/*/*/*/metadata.json")
-    |> Path.wildcard()
+    [
+      Path.join(records_root, "quality-gates/*/*/*/metadata.json"),
+      Path.join(records_root, "targets/*/quality-gates/*/*/*/metadata.json")
+    ]
+    |> Enum.flat_map(&Path.wildcard/1)
   end
 
   defp record_summary(metadata_path, records_root) do
@@ -905,6 +933,102 @@ defmodule SymphonyElixir.ReviewRecords do
       string -> Redaction.redact_string(string)
     end
   end
+
+  defp validate_implementation_context(%ExecutionContext{role: :implementation} = context) do
+    case ExecutionContext.validate(context) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :invalid_review_record_context}
+    end
+  end
+
+  defp validate_implementation_context(_context),
+    do: {:error, :invalid_review_record_context}
+
+  defp validate_context_logs_root(params) do
+    case field(params, :logs_root, nil) do
+      value when is_binary(value) ->
+        if String.trim(value) == "",
+          do: {:error, :invalid_review_record_root},
+          else: :ok
+
+      _invalid ->
+        {:error, :missing_review_record_root}
+    end
+  end
+
+  defp validate_context_issue(params, context) do
+    issue = field(params, :issue, nil)
+
+    if is_nil(issue) or
+         (field(issue, :id, nil) == context.issue_id and
+            field(issue, :identifier, nil) == context.issue_identifier),
+       do: :ok,
+       else: {:error, :review_record_issue_mismatch}
+  end
+
+  defp context_issue(params, context) do
+    case field(params, :issue, nil) do
+      nil ->
+        %{id: context.issue_id, identifier: context.issue_identifier}
+
+      issue ->
+        issue
+    end
+  end
+
+  defp validate_quality_gate_provenance(params, provenance) do
+    case field(params, :quality_gate, nil) do
+      quality_gate when is_map(quality_gate) ->
+        if field(quality_gate, :provenance, nil) == provenance,
+          do: :ok,
+          else: {:error, :review_record_context_mismatch}
+
+      _invalid ->
+        {:error, :review_record_context_mismatch}
+    end
+  end
+
+  defp validate_handoff_provenance(params, provenance) do
+    case field(params, :handoff_route, nil) do
+      nil ->
+        :ok
+
+      %Decision{metadata: metadata} ->
+        validate_nested_provenance(metadata, provenance)
+
+      route when is_map(route) ->
+        validate_nested_provenance(field(route, :metadata, %{}), provenance)
+
+      _invalid ->
+        {:error, :review_record_context_mismatch}
+    end
+  end
+
+  defp validate_nested_provenance(metadata, provenance) when is_map(metadata) do
+    recorded = field(metadata, :provenance, %{})
+
+    if is_map(recorded) and Map.take(recorded, Map.keys(provenance)) == provenance,
+      do: :ok,
+      else: {:error, :review_record_context_mismatch}
+  end
+
+  defp validate_nested_provenance(_metadata, _provenance),
+    do: {:error, :review_record_context_mismatch}
+
+  defp normalize_provenance(provenance, run) when is_map(provenance),
+    do: Map.put(provenance, :run_id, run.id)
+
+  defp normalize_provenance(_provenance, _run), do: nil
+
+  defp scoped_records_root(logs_root, %{target_id: target_id}),
+    do: Path.join([records_root(logs_root), "targets", sanitize_segment(target_id)])
+
+  defp scoped_records_root(logs_root, _provenance), do: records_root(logs_root)
+
+  defp maybe_put_metadata_provenance(payload, provenance) when is_map(provenance),
+    do: Map.put(payload, :provenance, provenance)
+
+  defp maybe_put_metadata_provenance(payload, _provenance), do: payload
 
   defp sanitize_segment(value) do
     value

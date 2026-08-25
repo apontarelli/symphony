@@ -37,7 +37,8 @@ defmodule SymphonyElixir.ReviewRecords.RetrospectiveAdapter do
 
   @spec write(map(), map()) :: :ok | {:error, term()}
   def write(normalized, files) when is_map(normalized) and is_map(files) do
-    compatibility_dir = review_dir(ReviewRecords.records_root(normalized.logs_root), normalized.project.slug, normalized.run.id)
+    records_root = Map.get(normalized, :records_root, ReviewRecords.records_root(normalized.logs_root))
+    compatibility_dir = review_dir(records_root, normalized.project.slug, normalized.run.id)
 
     with :ok <- File.mkdir_p(compatibility_dir) do
       findings = files.findings |> File.read!() |> Jason.decode!()
@@ -224,9 +225,9 @@ defmodule SymphonyElixir.ReviewRecords.RetrospectiveAdapter do
 
   defp review_rationale(rationale, _native_status, _status), do: rationale || ""
 
-  defp source_record_path(%{record_dir: record_dir} = normalized) when is_binary(record_dir) do
-    normalized.record_dir
-    |> relative_path(ReviewRecords.records_root(normalized.logs_root))
+  defp source_record_path(%{record_dir: record_dir, records_root: records_root})
+       when is_binary(record_dir) and is_binary(records_root) do
+    relative_path(record_dir, records_root)
   end
 
   defp source_record_path(_normalized), do: nil

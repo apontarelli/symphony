@@ -6,23 +6,28 @@ defmodule SymphonyElixir.PublishPreflight do
   performs a git push dry-run, and checks GitHub PR target accessibility.
   """
 
-  alias SymphonyElixir.{Config, Shell, SSH}
+  alias SymphonyElixir.{Config, ExecutionContext, Shell, SSH}
   alias SymphonyElixir.Workflow.PublishTarget
 
   @preflight_branch "refs/heads/symphony/publish-preflight"
   @failure_summaries %{
     workspace_vcs_metadata_unavailable: "Workspace VCS metadata is unavailable to the host.",
     remote_push_unavailable: "Remote push dry-run is unavailable to the host.",
-    pr_creation_unavailable: "PR creation preflight is unavailable for the configured repository/base branch."
+    pr_creation_unavailable: "PR creation preflight is unavailable for the configured repository/base branch.",
+    delivery_not_allowed: "Pinned target policy does not allow publish preflight."
   }
   @failure_reasons %{
     workspace_vcs_metadata_unavailable: :git_metadata_denied,
     remote_push_unavailable: :github_publish_unavailable,
-    pr_creation_unavailable: :github_publish_unavailable
+    pr_creation_unavailable: :github_publish_unavailable,
+    delivery_not_allowed: :delivery_not_allowed
   }
 
   @type failure_class ::
-          :workspace_vcs_metadata_unavailable | :remote_push_unavailable | :pr_creation_unavailable
+          :workspace_vcs_metadata_unavailable
+          | :remote_push_unavailable
+          | :pr_creation_unavailable
+          | :delivery_not_allowed
   @type capability_map :: %{
           workspace_vcs_metadata: boolean(),
           remote_push: boolean(),
@@ -30,7 +35,7 @@ defmodule SymphonyElixir.PublishPreflight do
         }
   @type failure :: %{
           class: failure_class(),
-          reason: :git_metadata_denied | :github_publish_unavailable,
+          reason: :git_metadata_denied | :github_publish_unavailable | :delivery_not_allowed,
           summary: String.t(),
           command: String.t() | nil,
           exit_status: non_neg_integer() | nil,
@@ -44,14 +49,47 @@ defmodule SymphonyElixir.PublishPreflight do
           failures: [failure()]
         }
 
+  @spec run_context(ExecutionContext.t()) :: result() | {:error, atom()}
+  def run_context(context), do: run_context(context, [])
+
+  @spec run_context(ExecutionContext.t(), keyword()) :: result() | {:error, atom()}
+
+  def run_context(%ExecutionContext{} = execution_context, opts) when is_list(opts) do
+    with :ok <- validate_implementation_context(execution_context),
+         :ok <- validate_context_options(opts),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(execution_context) do
+      if publish_allowed?(execution_context) do
+        execution_context.workspace_path
+        |> run(
+          execution_context.policy,
+          opts
+          |> Keyword.put(:worker_host, execution_context.worker_host)
+          |> Keyword.put(:timeout_ms, execution_context.timeout_ms)
+          |> Keyword.put(:context_mode, true)
+          |> Keyword.put(:provenance, provenance)
+        )
+        |> Map.put(:provenance, provenance)
+      else
+        blocked_by_delivery_policy(execution_context, provenance)
+      end
+    end
+  end
+
+  def run_context(%ExecutionContext{}, _opts),
+    do: {:error, :invalid_publish_preflight_options}
+
+  def run_context(_context, _opts),
+    do: {:error, :invalid_publish_preflight_context}
+
   @spec run(Path.t() | nil, map(), keyword()) :: result()
   def run(workspace, policy, opts \\ []) when is_map(policy) and is_list(opts) do
     context = %{
       workspace: workspace,
       worker_host: Keyword.get(opts, :worker_host),
       timeout_ms: Keyword.get(opts, :timeout_ms, default_timeout_ms()),
-      runner: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_preflight_runner),
-      env: Keyword.get(opts, :env, [])
+      runner: configured_runner(opts),
+      env: Keyword.get(opts, :env, []),
+      provenance: Keyword.get(opts, :provenance)
     }
 
     publish_target = PublishTarget.resolve_policy(policy) || empty_publish_target()
@@ -151,6 +189,7 @@ defmodule SymphonyElixir.PublishPreflight do
   defp execute_command(%{runner: runner} = context, step, command) when is_function(runner, 1) do
     context
     |> Map.take([:workspace, :worker_host, :timeout_ms, :env])
+    |> maybe_put_command_provenance(context.provenance)
     |> Map.merge(%{step: step, command: command})
     |> runner.()
     |> normalize_command_result()
@@ -184,6 +223,11 @@ defmodule SymphonyElixir.PublishPreflight do
 
     yield_command(task, timeout_ms)
   end
+
+  defp maybe_put_command_provenance(command, provenance) when is_map(provenance),
+    do: Map.put(command, :provenance, provenance)
+
+  defp maybe_put_command_provenance(command, _provenance), do: command
 
   defp yield_command(task, timeout_ms) do
     case Task.yield(task, timeout_ms) do
@@ -226,6 +270,60 @@ defmodule SymphonyElixir.PublishPreflight do
       "" -> nil
       trimmed -> binary_part(trimmed, 0, min(byte_size(trimmed), 2_048))
     end
+  end
+
+  defp configured_runner(opts) do
+    if Keyword.get(opts, :context_mode, false),
+      do: Keyword.get(opts, :runner),
+      else: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_preflight_runner)
+  end
+
+  defp validate_implementation_context(%ExecutionContext{role: :implementation} = context) do
+    case ExecutionContext.validate(context) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :invalid_publish_preflight_context}
+    end
+  end
+
+  defp validate_implementation_context(_context),
+    do: {:error, :invalid_publish_preflight_context}
+
+  defp validate_context_options(opts) do
+    if Keyword.keyword?(opts) and
+         length(opts) == length(Enum.uniq_by(opts, &elem(&1, 0))) and
+         Enum.all?(Keyword.keys(opts), &(&1 in [:env, :runner])),
+       do: :ok,
+       else: {:error, :invalid_publish_preflight_options}
+  end
+
+  defp publish_allowed?(%ExecutionContext{target: target}) do
+    gates = target.external_side_effect_gates
+    gates["vcs_publish"] == "allow" and gates["pull_request_write"] == "allow"
+  end
+
+  defp blocked_by_delivery_policy(context, provenance) do
+    target = PublishTarget.resolve_policy(context.policy) || empty_publish_target()
+    gates = Map.take(context.target.external_side_effect_gates, ["vcs_publish", "pull_request_write"])
+
+    %{
+      status: :blocked,
+      repository: target.repository,
+      base_branch: target.base_branch,
+      capabilities: %{
+        workspace_vcs_metadata: false,
+        remote_push: false,
+        pr_creation: false
+      },
+      failures: [
+        failure(
+          :delivery_not_allowed,
+          nil,
+          nil,
+          "target delivery gates: #{inspect(gates)}"
+        )
+      ],
+      provenance: provenance
+    }
   end
 
   defp default_timeout_ms do

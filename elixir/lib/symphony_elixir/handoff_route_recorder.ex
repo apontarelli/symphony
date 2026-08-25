@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   Records structured handoff route decisions to the configured tracker.
   """
 
-  alias SymphonyElixir.{Config, HandoffManifest, HandoffRoute, PathSafety, QualityGate, Tracker}
+  alias SymphonyElixir.{Config, ExecutionContext, HandoffManifest, HandoffRoute, PathSafety, QualityGate, Tracker}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.WorkflowModules.ProductVisualReview
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
@@ -128,6 +128,49 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     |> HandoffRoute.classify()
   end
 
+  @spec classify_completion_context(ExecutionContext.t(), Issue.t(), term()) ::
+          HandoffRoute.Decision.t() | {:error, atom()}
+  def classify_completion_context(context, issue, completion),
+    do: classify_completion_context(context, issue, completion, nil)
+
+  @spec classify_completion_context(
+          ExecutionContext.t(),
+          Issue.t(),
+          term(),
+          map() | nil
+        ) :: HandoffRoute.Decision.t() | {:error, atom()}
+
+  def classify_completion_context(
+        %ExecutionContext{} = context,
+        %Issue{} = issue,
+        completion,
+        blocker
+      ) do
+    with :ok <- validate_implementation_context(context, issue),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(context),
+         :ok <- validate_completion_provenance(completion, provenance) do
+      decision =
+        classify_completion(
+          completion,
+          blocker,
+          context.workspace_path,
+          context.worker_host,
+          %{
+            policy: context.policy,
+            labels: issue.labels,
+            workflow_module_resolution: get_in(context.target.repo_policy, ["workflow_module_resolution"])
+          },
+          issue
+        )
+
+      provenance = maybe_put_run_identity(provenance, completion)
+      %{decision | metadata: Map.put(decision.metadata, :provenance, provenance)}
+    end
+  end
+
+  def classify_completion_context(_context, _issue, _completion, _blocker),
+    do: {:error, :invalid_handoff_context}
+
   @spec completion_metadata?(term()) :: boolean()
   def completion_metadata?(completion) when is_map(completion) do
     Enum.any?(@completion_keys, &Map.has_key?(completion, &1))
@@ -135,12 +178,123 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
   def completion_metadata?(_completion), do: false
 
+  @spec record(ExecutionContext.t(), HandoffRoute.Decision.t()) ::
+          :ok | {:error, atom() | term()}
+  def record(%ExecutionContext{} = context, %HandoffRoute.Decision{} = decision) do
+    with :ok <- validate_implementation_context(context),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(context),
+         :ok <- validate_decision_provenance(decision, provenance),
+         :ok <- require_tracker_write(context),
+         :ok <-
+           Tracker.create_comment(
+             context,
+             context.issue_id,
+             context_comment(decision, provenance)
+           ) do
+      Tracker.update_issue_state(context, context.issue_id, decision.target_state)
+    end
+  end
+
   @spec record(String.t(), HandoffRoute.Decision.t()) :: :ok | {:error, term()}
   def record(issue_id, %HandoffRoute.Decision{} = decision) when is_binary(issue_id) do
     with :ok <- Tracker.create_comment(issue_id, HandoffRoute.format_comment(decision)) do
       Tracker.update_issue_state(issue_id, decision.target_state)
     end
   end
+
+  defp validate_implementation_context(%ExecutionContext{role: :implementation} = context) do
+    case ExecutionContext.validate(context) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :invalid_handoff_context}
+    end
+  end
+
+  defp validate_implementation_context(_context),
+    do: {:error, :invalid_handoff_context}
+
+  defp validate_implementation_context(%ExecutionContext{} = context, %Issue{} = issue) do
+    with :ok <- validate_implementation_context(context),
+         true <- context.issue_id == issue.id,
+         true <- context.issue_identifier == issue.identifier do
+      :ok
+    else
+      _invalid -> {:error, :invalid_handoff_context}
+    end
+  end
+
+  defp validate_completion_provenance(completion, provenance) when is_map(completion) do
+    [:quality_gate, :publish_preflight, :publish_handoff]
+    |> Enum.reduce_while(:ok, fn field, :ok ->
+      completion
+      |> completion_field(field, nil)
+      |> validate_evidence_provenance(provenance)
+    end)
+  end
+
+  defp validate_completion_provenance(_completion, _provenance),
+    do: {:error, :handoff_evidence_context_mismatch}
+
+  defp validate_evidence_provenance(nil, _provenance), do: {:cont, :ok}
+
+  defp validate_evidence_provenance(evidence, provenance) when is_map(evidence) do
+    if context_provenance(evidence) == provenance,
+      do: {:cont, :ok},
+      else: {:halt, {:error, :handoff_evidence_context_mismatch}}
+  end
+
+  defp validate_evidence_provenance(_invalid, _provenance),
+    do: {:halt, {:error, :handoff_evidence_context_mismatch}}
+
+  defp context_provenance(evidence),
+    do: context_field(evidence, :provenance, nil)
+
+  defp validate_decision_provenance(%HandoffRoute.Decision{} = decision, provenance) do
+    case context_field(decision.metadata, :provenance, %{}) do
+      decision_provenance when is_map(decision_provenance) ->
+        if Map.take(decision_provenance, Map.keys(provenance)) == provenance,
+          do: :ok,
+          else: {:error, :handoff_context_mismatch}
+
+      _invalid ->
+        {:error, :handoff_context_mismatch}
+    end
+  end
+
+  defp require_tracker_write(%ExecutionContext{} = context) do
+    if context.target.external_side_effect_gates["tracker_write"] == "allow",
+      do: :ok,
+      else: {:error, :tracker_write_not_allowed}
+  end
+
+  defp context_comment(decision, provenance) do
+    [
+      HandoffRoute.format_comment(decision),
+      "",
+      "#### Symphony Context",
+      "",
+      "- Target: `#{provenance.target_id}`",
+      "- Registry generation: `#{provenance.registry_generation}`",
+      "- Policy hash: `#{provenance.policy_hash}`",
+      "- Issue: `#{provenance.issue_identifier}` (`#{provenance.issue_id}`)",
+      "- Role: `#{provenance.role}`"
+    ]
+    |> Enum.join("\n")
+  end
+
+  defp maybe_put_run_identity(provenance, completion) do
+    run_id =
+      completion_field(completion, :run_id, nil) ||
+        completion_field(completion, :session_id, nil)
+
+    if safe_run_id?(run_id),
+      do: Map.put(provenance, :run_id, run_id),
+      else: provenance
+  end
+
+  defp safe_run_id?(value) when is_binary(value),
+    do: byte_size(value) <= 200 and Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9._:-]*$/, value)
+
+  defp safe_run_id?(_value), do: false
 
   defp completion_field(completion, key, default) do
     key
