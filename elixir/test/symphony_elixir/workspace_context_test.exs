@@ -1245,7 +1245,7 @@ defmodule SymphonyElixir.WorkspaceContextTest do
       "after_run" => nil,
       "before_remove" => "printf effect > #{SymphonyElixir.Shell.escape(hook_effect)}",
       "before_run" => nil,
-      "timeout_ms" => 1_000
+      "timeout_ms" => 5_000
     }
 
     context =

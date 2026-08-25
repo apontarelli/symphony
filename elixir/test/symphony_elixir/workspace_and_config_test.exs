@@ -2717,18 +2717,38 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     on_exit(fn -> restore_env("PATH", previous_path) end)
 
     fake_ssh = Path.join(test_root, "ssh")
+    fake_ssh_pid = Path.join(test_root, "ssh.pid")
     File.mkdir_p!(test_root)
-    File.write!(fake_ssh, "#!/bin/sh\nwhile :; do :; done\n")
+
+    File.write!(
+      fake_ssh,
+      "#!/bin/sh\nprintf '%s' \"$$\" > \"#{fake_ssh_pid}\"\nwhile :; do :; done\n"
+    )
+
     File.chmod!(fake_ssh, 0o755)
     System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
 
+    on_exit(fn ->
+      case read_pid(fake_ssh_pid) do
+        pid when is_integer(pid) ->
+          System.cmd("kill", ["-KILL", Integer.to_string(pid)], stderr_to_stdout: true)
+
+        _missing ->
+          :ok
+      end
+    end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       workspace_root: "/remote/workspaces",
-      hook_timeout_ms: 10
+      hook_timeout_ms: 500
     )
 
-    assert {:error, {:workspace_hook_timeout, "remote_command", 10}} =
+    assert {:error, {:workspace_hook_timeout, "remote_command", 500}} =
              Workspace.create_for_issue("SID-TIMEOUT", "worker.example")
+
+    ssh_pid = eventually(fn -> read_pid(fake_ssh_pid) end)
+    assert is_integer(ssh_pid)
+    assert eventually(fn -> if os_pid_alive?(ssh_pid), do: nil, else: :stopped end) == :stopped
   end
 
   defp legacy_target(root) do

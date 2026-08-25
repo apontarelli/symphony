@@ -9,6 +9,8 @@ defmodule SymphonyElixir.ProcessSupervisor do
   local process-group guarantee.
   """
 
+  require Logger
+
   @process_group_marker "__SYMPHONY_PROCESS_GROUP__:"
   @process_group_release "__SYMPHONY_PROCESS_GROUP_RELEASE__"
   @process_group_start_timeout_ms 1_000
@@ -93,6 +95,57 @@ defmodule SymphonyElixir.ProcessSupervisor do
     error -> {:error, {:process_start_failed, Exception.message(error)}}
   catch
     kind, reason -> {:error, {:process_start_failed, {kind, reason}}}
+  end
+
+  @spec run(argv(), pos_integer()) ::
+          {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
+  def run(argv, timeout_ms), do: run(argv, timeout_ms, [])
+
+  @spec run(argv(), pos_integer(), keyword()) ::
+          {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
+  def run(argv, timeout_ms, opts)
+      when is_list(argv) and is_integer(timeout_ms) and timeout_ms > 0 and is_list(opts) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+
+    with {:ok, process} <- start(argv, opts) do
+      owner_monitor = Process.monitor(process.owner)
+      await_run(process, owner_monitor, deadline_ms, [])
+    end
+  end
+
+  def run(_argv, _timeout_ms, _opts), do: {:error, :invalid_process_timeout}
+
+  defp await_run(%__MODULE__{port: port} = process, owner_monitor, deadline_ms, output) do
+    remaining_ms = max(deadline_ms - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, chunk}} ->
+        await_run(process, owner_monitor, deadline_ms, [run_output_chunk(chunk) | output])
+
+      {^port, {:exit_status, status}} ->
+        Process.demonitor(owner_monitor, [:flush])
+        {:ok, {output |> Enum.reverse() |> IO.iodata_to_binary(), status}}
+
+      {:DOWN, ^owner_monitor, :process, _owner, reason} ->
+        {:error, {:process_owner_exit, reason}}
+    after
+      remaining_ms ->
+        Process.demonitor(owner_monitor, [:flush])
+        process_timeout(process)
+    end
+  end
+
+  defp run_output_chunk({:eol, chunk}), do: [chunk, "\n"]
+  defp run_output_chunk({:noeol, chunk}), do: chunk
+  defp run_output_chunk(chunk), do: chunk
+
+  defp process_timeout(process) do
+    case kill(process) do
+      :ok -> :ok
+      {:error, _reason} = cleanup_error -> Logger.error("Timed-out process cleanup failed: #{inspect(cleanup_error)}")
+    end
+
+    {:error, :process_timeout}
   end
 
   @spec from_port(port(), keyword()) :: t()

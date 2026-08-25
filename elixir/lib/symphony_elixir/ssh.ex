@@ -1,18 +1,32 @@
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
-  alias SymphonyElixir.Shell
+  alias SymphonyElixir.{ProcessSupervisor, Shell}
 
   @type target :: %{destination: String.t(), port: String.t() | nil}
   @type parse_error :: :invalid_target
 
-  @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
+  @spec run(String.t(), String.t(), keyword()) ::
+          {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
+    {timeout_ms, command_opts} = Keyword.pop(opts, :timeout)
+
     with {:ok, target} <- parse_target(host),
          {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(target, command), opts)}
+      run_command(executable, ssh_args(target, command), timeout_ms, command_opts)
     end
   end
+
+  defp run_command(executable, args, nil, opts),
+    do: {:ok, System.cmd(executable, args, opts)}
+
+  defp run_command(executable, args, timeout_ms, opts)
+       when is_integer(timeout_ms) and timeout_ms > 0 do
+    ProcessSupervisor.run([executable | args], timeout_ms, opts)
+  end
+
+  defp run_command(_executable, _args, _timeout_ms, _opts),
+    do: {:error, :invalid_ssh_timeout}
 
   @spec start_port(String.t(), String.t(), keyword()) :: {:ok, port()} | {:error, term()}
   def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do

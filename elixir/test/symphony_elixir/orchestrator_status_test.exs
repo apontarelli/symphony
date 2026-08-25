@@ -3466,6 +3466,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
   defp write_holding_codex!(path, thread_suffix) do
     File.write!(path, """
     #!/bin/sh
+    child_pid=
+    cleanup() {
+      if [ -n "$child_pid" ]; then
+        kill "$child_pid" 2>/dev/null || true
+        wait "$child_pid" 2>/dev/null || true
+      fi
+    }
+    trap 'cleanup; exit 143' TERM INT
+    trap 'cleanup' EXIT
+
     count=0
     while IFS= read -r line; do
       count=$((count + 1))
@@ -3478,7 +3488,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           ;;
         4)
           printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-#{thread_suffix}"}}}'
-          sleep 120
+          sleep 120 &
+          child_pid=$!
           ;;
       esac
     done

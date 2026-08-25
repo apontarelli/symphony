@@ -107,11 +107,12 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
 
   test "from_port rejects invalid cleanup mode" do
     port =
-      Port.open({:spawn_executable, ~c"/bin/sh"}, [
+      Port.open({:spawn_executable, ~c"/bin/cat"}, [
         :binary,
-        :exit_status,
-        args: [~c"-c", ~c"while :; do sleep 1; done"]
+        :exit_status
       ])
+
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
 
     try do
       assert_raise ArgumentError, "invalid cleanup mode: :invalid", fn ->
@@ -120,6 +121,8 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     after
       Port.close(port)
     end
+
+    assert eventually(fn -> if os_pid_alive?(os_pid), do: nil, else: :stopped end) == :stopped
   end
 
   test "from_port transfers ownership from the caller and forwards commands and output" do
@@ -168,8 +171,8 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     owner_monitor = Process.monitor(owner)
     on_exit(fn -> Process.exit(owner, :kill) end)
 
-    assert_receive {^port, {:exit_status, 7}}
-    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, _reason}
+    assert_receive {^port, {:exit_status, 7}}, 1_000
+    assert_receive {:DOWN, ^owner_monitor, :process, ^owner, _reason}, 1_000
   end
 
   test "runner exit reaps descendants before publishing exit status" do

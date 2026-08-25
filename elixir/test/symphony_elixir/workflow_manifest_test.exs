@@ -1187,8 +1187,9 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["delivery"]["pr_target"] == "main"
   end
 
-  test "defaults detect jj and harness validation requires AGENTS.md" do
-    repo_root = Path.join(System.tmp_dir!(), "symphony-default-test-#{System.unique_integer([:positive])}")
+  @tag :tmp_dir
+  test "defaults detect jj and harness validation requires AGENTS.md", %{tmp_dir: tmp_dir} do
+    repo_root = Path.join(tmp_dir, "repo")
     codex_home = Path.join(repo_root, "codex-home")
     File.mkdir_p!(Path.join(repo_root, ".jj"))
     File.mkdir_p!(codex_home)

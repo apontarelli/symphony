@@ -123,6 +123,26 @@ defmodule SymphonyElixir.SSHTest do
     end
   end
 
+  test "run/3 rejects invalid timeouts before invoking ssh" do
+    test_root = Path.join(System.tmp_dir!(), "symphony-ssh-timeout-test-#{System.unique_integer([:positive])}")
+    trace_file = Path.join(test_root, "ssh.trace")
+    previous_path = System.get_env("PATH")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      File.rm_rf(test_root)
+    end)
+
+    install_fake_ssh!(test_root, trace_file)
+
+    for timeout <- [0, -1, :invalid] do
+      assert {:error, :invalid_ssh_timeout} =
+               SSH.run("worker.example", "printf should-not-run", timeout: timeout)
+
+      refute File.exists?(trace_file)
+    end
+  end
+
   test "run/3 passes an opaque destination as one argument" do
     test_root = Path.join(System.tmp_dir!(), "symphony-ssh-opaque-test-#{System.unique_integer([:positive])}")
     trace_file = Path.join(test_root, "ssh.trace")
