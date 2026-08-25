@@ -752,11 +752,13 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
   test "startup timeout tears down the launched process group before returning", %{
     context: context
   } do
-    assert {:error, {:startup_failed, {:timeout, 80}}} =
-             start_adapter(context, :startup_timeout, startup_timeout_ms: 80)
+    assert {:error, {:startup_failed, {:timeout, 500}}} =
+             start_adapter(context, :startup_timeout, startup_timeout_ms: 500)
 
     child_pid = eventually(fn -> read_child_pid(context.child_pid_file) end)
     grandchild_pid = eventually(fn -> read_child_pid(context.grandchild_pid_file) end)
+    assert is_integer(child_pid)
+    assert is_integer(grandchild_pid)
     assert eventually(fn -> if os_pid_alive?(child_pid), do: nil, else: :stopped end) == :stopped
     assert eventually(fn -> if os_pid_alive?(grandchild_pid), do: nil, else: :stopped end) == :stopped
     assert config_overlays(context) == []

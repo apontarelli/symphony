@@ -7,7 +7,8 @@ on:
       - main
 
 jobs:
-  make-all:
+  checks:
+    name: Checks
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -24,15 +25,136 @@ jobs:
           cache: true
           working_directory: elixir
 
-      - name: Cache deps and build
+      - name: Cache dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: elixir/deps
+          key: ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-
+
+      - name: Cache build output
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         with:
           path: |
-            elixir/deps
             elixir/_build
-          key: ${{ runner.os }}-mix-${{ hashFiles('elixir/mix.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-mix-
+            !elixir/_build/dev/*.plt*
+          key: ${{ runner.os }}-mix-build-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
 
-      - name: Verify make all
-        run: make all
+      - name: Set up dependencies
+        run: make setup
+
+      - name: Audit dependencies
+        run: make audit
+
+      - name: Build
+        run: make build
+
+      - name: Check formatting
+        run: make fmt-check
+
+      - name: Lint
+        run: make lint
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: elixir
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: elixir/deps
+          key: ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-
+
+      - name: Cache build output
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            elixir/_build
+            !elixir/_build/dev/*.plt*
+          key: ${{ runner.os }}-mix-build-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+
+      - name: Set up dependencies
+        run: make setup
+
+      - name: Test with coverage
+        run: make coverage
+
+      - name: Check for leaked test processes
+        run: |
+          sleep 2
+          if leaked_processes="$(pgrep -af 'fake-codex|symphony-elixir-legacy-timeout|while :; do sleep 1; done')"; then
+            echo "::error::Test processes remained alive after the coverage gate."
+            printf '%s\n' "$leaked_processes"
+            exit 1
+          fi
+
+  dialyzer:
+    name: Dialyzer
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: elixir
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up mise tools
+        uses: jdx/mise-action@5228313ee0372e111a38da051671ca30fc5a96db # v3
+        with:
+          install: true
+          cache: true
+          working_directory: elixir
+
+      - name: Cache dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: elixir/deps
+          key: ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-deps-${{ hashFiles('elixir/mise.toml') }}-
+
+      - name: Cache build output
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            elixir/_build
+            !elixir/_build/dev/*.plt*
+          key: ${{ runner.os }}-mix-build-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+
+      - name: Cache Dialyzer PLT
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: elixir/_build/dev/*.plt*
+          key: ${{ runner.os }}-mix-plt-${{ hashFiles('elixir/mise.toml') }}-${{ hashFiles('elixir/mix.lock') }}
+
+      - name: Analyze types
+        run: make dialyzer
+
+  make-all:
+    name: make-all
+    needs:
+      - checks
+      - coverage
+      - dialyzer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm canonical gates
+        run: echo "All canonical gates passed."
