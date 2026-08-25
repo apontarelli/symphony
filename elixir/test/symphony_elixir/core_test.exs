@@ -19,6 +19,7 @@ defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{ExecutionContext, TargetContext}
+  alias SymphonyElixir.TargetContext.Legacy
   alias SymphonyElixir.Workflow.Manifest
 
   test "config defaults and validation checks" do
@@ -1487,10 +1488,41 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     refreshed_issue = %{issue | labels: []}
-    fetcher = fn ["issue-label-continuation"] -> {:ok, [refreshed_issue]} end
+
+    fetcher = fn _target, ["issue-label-continuation"] ->
+      {:ok, [refreshed_issue]}
+    end
+
+    assert {:ok, target} = Legacy.build_at_process_start([])
+
+    assert {:ok, policy} = Config.issue_policy(issue)
+
+    assert {:ok, context} =
+             ExecutionContext.new(target, issue, policy: policy)
 
     assert {:done, ^refreshed_issue} =
-             AgentRunner.continue_with_issue_for_test(issue, fetcher)
+             AgentRunner.continue_with_issue_for_test(context, issue, fetcher)
+  end
+
+  test "agent runner does not continue when the pinned active-state set is empty" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: [])
+
+    issue = %Issue{
+      id: "issue-no-active-states",
+      identifier: "MT-566",
+      title: "Stop when no state is active",
+      state: "In Progress",
+      labels: []
+    }
+
+    fetcher = fn _target, ["issue-no-active-states"] -> {:ok, [issue]} end
+
+    assert {:ok, target} = Legacy.build_at_process_start([])
+    assert {:ok, policy} = Config.issue_policy(issue)
+    assert {:ok, context} = ExecutionContext.new(target, issue, policy: policy)
+
+    assert {:done, ^issue} =
+             AgentRunner.continue_with_issue_for_test(context, issue, fetcher)
   end
 
   test "normal worker exit schedules active-state continuation retry" do
@@ -2269,7 +2301,10 @@ defmodule SymphonyElixir.CoreTest do
     assert bundle.prompt =~
              "pinned=strict issue=SID-410 attempt=2 modules=#{Enum.join(pinned_resolution["module_names"], ", ")}"
 
-    assert bundle.workflow_module_resolution == %{
+    assert Map.take(
+             bundle.workflow_module_resolution,
+             [:module_names, :module_refs, :policy_hash, :rendered]
+           ) == %{
              module_names: pinned_resolution["module_names"],
              module_refs:
                Enum.map(pinned_resolution["module_refs"], fn ref ->
@@ -2278,6 +2313,8 @@ defmodule SymphonyElixir.CoreTest do
              policy_hash: pinned_resolution["policy_hash"],
              rendered: pinned_resolution["rendered"]
            }
+
+    assert is_list(bundle.workflow_module_resolution.modules)
   end
 
   test "context prompt bundle rejects policy overrides duplicate attempts and mismatched issues" do

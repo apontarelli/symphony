@@ -7,6 +7,7 @@ defmodule SymphonyElixir.TargetContext.Legacy do
   alias SymphonyElixir.TargetContext
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.Workflow
+  alias SymphonyElixir.Workflow.Manifest
 
   @module_resolution_fields [
     {"module_names", :module_names},
@@ -116,20 +117,27 @@ defmodule SymphonyElixir.TargetContext.Legacy do
          run_setup = RunSetup.current(),
          profile = RunSetup.profile(run_setup),
          {:ok, target_id} <- target_id(opts, run_setup),
-         repo_manifest = normalize_json(Map.fetch!(config, "manifest")),
+         {:ok, repo_manifest} <-
+           Manifest.read(Workflow.selected_workflow_file_path(), repo_setup?: false),
+         repo_manifest = normalize_json(repo_manifest),
+         repo_manifest_identity = normalize_json(Map.fetch!(config, "manifest")),
          module_resolution = module_resolution(loaded_workflow),
          {:ok, manifest_source_dir} <- manifest_source_dir(loaded_workflow),
          {:ok, effective_policy} <- Config.effective_policy(settings, profile),
          effective_policy = RunSetup.apply_restrictive_policy(effective_policy, run_setup),
+         manifest_authority = %{
+           manifest: repo_manifest,
+           identity: repo_manifest_identity,
+           module_resolution: module_resolution,
+           source_dir: manifest_source_dir
+         },
          {:ok, context} <-
            build_context(
              target_id,
              settings,
              run_setup,
              profile,
-             repo_manifest,
-             module_resolution,
-             manifest_source_dir,
+             manifest_authority,
              effective_policy
            ) do
       {:ok, context}
@@ -145,9 +153,12 @@ defmodule SymphonyElixir.TargetContext.Legacy do
          settings,
          run_setup,
          profile,
-         repo_manifest,
-         module_resolution,
-         manifest_source_dir,
+         %{
+           manifest: repo_manifest,
+           identity: repo_manifest_identity,
+           module_resolution: module_resolution,
+           source_dir: manifest_source_dir
+         },
          effective_policy
        ) do
     repo_policy = %{
@@ -165,22 +176,23 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     {state, dispatch_mode} = target_state(RunSetup.mode(run_setup))
 
     with {:ok, authority_policy} <-
-           issue_policy_authority_projection(effective_policy, repo_manifest),
+           issue_policy_authority_projection(effective_policy, repo_manifest_identity),
          issue_policy_authority = %{"policy" => authority_policy, "profile" => profile},
-         effective_checks = effective_checks(repo_manifest, authority_policy),
+         effective_checks = effective_checks(repo_manifest_identity, authority_policy),
          external_side_effect_gates = external_side_effect_gates(authority_policy),
          policy_projection = %{
            budget_limits: budget_limits,
            capacity_limits: capacity_limits,
            effective_checks: effective_checks,
            external_side_effect_gates: external_side_effect_gates,
-           repo_policy: repo_policy,
+           repo_policy: %{repo_policy | "manifest" => repo_manifest_identity},
            run_target: run_target,
            tracker_connection: tracker_connection,
            runner_policy: runner_policy,
            worktree_policy: worktree_policy
          },
-         {:ok, repo_manifest_hash} <- Composition.canonical_hash(repo_manifest),
+         {:ok, repo_manifest_hash} <-
+           Composition.canonical_hash(repo_manifest_identity),
          {:ok, policy_hash} <- policy_hash(policy_projection, authority_policy),
          {:ok, registry_generation} <-
            Composition.canonical_hash(%{
@@ -344,8 +356,12 @@ defmodule SymphonyElixir.TargetContext.Legacy do
   end
 
   defp runner_policy(settings) do
-    runners = normalize_json(settings.runners)
     default = Config.default_runner_name(settings)
+
+    runners =
+      settings.runners
+      |> normalize_json()
+      |> Map.update!(default, &Map.put(&1, "max_turns", settings.agent.max_turns))
 
     %{
       "allowed" => runners |> Map.keys() |> Enum.sort(),
@@ -859,11 +875,13 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     end
   end
 
-  defp project_runner_approval_policy(projected, runner, path) do
+  defp project_runner_approval_policy(projected, runner, _path) do
     case Map.fetch(runner, "approval_policy") do
-      :error -> {:ok, projected}
-      {:ok, value} when is_binary(value) -> {:ok, Map.put(projected, "approval_policy", value)}
-      {:ok, value} when is_map(value) -> invalid_runner_policy(path, :unsupported_map)
+      :error ->
+        {:ok, projected}
+
+      {:ok, value} when is_binary(value) or (is_map(value) and not is_struct(value)) ->
+        {:ok, Map.put(projected, "approval_policy", normalize_json(value))}
     end
   end
 

@@ -52,26 +52,22 @@ defmodule SymphonyElixir.Codex.HarnessHome do
   end
 
   defp context_path(%ExecutionContext{
-         target: %TargetContext{
-           target_id: target_id,
-           registry_generation: registry_generation,
-           policy_hash: policy_hash,
-           repo_policy: repo_policy,
-           worktree_policy: worktree_policy
-         },
+         target:
+           %TargetContext{
+             target_id: target_id,
+             registry_generation: registry_generation,
+             policy_hash: policy_hash,
+             repo_policy: repo_policy
+           } = target,
          issue_identifier: issue_identifier,
-         workspace_path: workspace_path
+         workspace_path: workspace_path,
+         worker_host: worker_host
        }) do
     with true <- valid_context_id?(target_id),
          true <- valid_context_hash?(registry_generation),
          true <- valid_context_hash?(policy_hash),
          :ok <-
-           validate_context_workspace(
-             worktree_policy,
-             target_id,
-             issue_identifier,
-             workspace_path
-           ),
+           validate_context_workspace(target, issue_identifier, workspace_path, worker_host),
          {:ok, manifest, source_dir} <- context_repo_policy(repo_policy),
          {:ok, codex_home} <-
            context_codex_home(manifest, source_dir, workspace_path),
@@ -93,17 +89,21 @@ defmodule SymphonyElixir.Codex.HarnessHome do
   defp context_path(_context), do: {:error, :invalid_harness_home_context}
 
   defp validate_context_workspace(
-         %{"root" => root, "strategy" => "per_issue", "hooks" => hooks} = worktree_policy,
-         target_id,
+         %TargetContext{
+           worktree_policy:
+             %{"root" => root, "strategy" => "per_issue", "hooks" => hooks} =
+               worktree_policy
+         } = target,
          issue_identifier,
-         workspace_path
+         workspace_path,
+         worker_host
        ) do
     expanded_root = if is_binary(root), do: Path.expand(root), else: nil
 
     expected_workspace =
-      if is_binary(expanded_root) and Path.basename(expanded_root) == target_id,
-        do: Path.join(expanded_root, issue_identifier),
-        else: context_workspace_join(expanded_root, target_id, issue_identifier)
+      target
+      |> expected_context_workspace(expanded_root, issue_identifier)
+      |> canonical_context_workspace(worker_host)
 
     if Enum.sort(Map.keys(worktree_policy)) == ~w(hooks root strategy) and
          safe_context_path?(expanded_root) and valid_issue_segment?(issue_identifier) and
@@ -113,18 +113,37 @@ defmodule SymphonyElixir.Codex.HarnessHome do
   end
 
   defp validate_context_workspace(
-         _worktree_policy,
-         _target_id,
+         _target,
          _issue_identifier,
-         _workspace_path
+         _workspace_path,
+         _worker_host
        ),
        do: {:error, :invalid_harness_home_context}
 
-  defp context_workspace_join(root, target_id, issue_identifier)
-       when is_binary(root) and is_binary(target_id) and is_binary(issue_identifier),
-       do: Path.join([root, target_id, issue_identifier])
+  defp expected_context_workspace(
+         %TargetContext{} = target,
+         expanded_root,
+         issue_identifier
+       )
+       when is_binary(expanded_root) do
+    if is_map(target.issue_policy_authority) or
+         Path.basename(expanded_root) == target.target_id,
+       do: Path.join(expanded_root, issue_identifier),
+       else: Path.join([expanded_root, target.target_id, issue_identifier])
+  end
 
-  defp context_workspace_join(_root, _target_id, _issue_identifier), do: nil
+  defp expected_context_workspace(_target, _expanded_root, _issue_identifier), do: nil
+
+  defp canonical_context_workspace(workspace, nil) when is_binary(workspace) do
+    {:ok, canonical} = PathSafety.canonicalize(workspace)
+    canonical
+  end
+
+  defp canonical_context_workspace(workspace, worker_host)
+       when is_binary(workspace) and is_binary(worker_host),
+       do: workspace
+
+  defp canonical_context_workspace(_workspace, _worker_host), do: nil
 
   defp context_repo_policy(
          %{

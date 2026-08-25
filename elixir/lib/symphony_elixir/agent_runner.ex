@@ -4,51 +4,204 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{AgentRuntime, CapabilityPreflight, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
-  alias SymphonyElixir.AgentRuntime.Event
 
+  alias SymphonyElixir.{
+    AgentRuntime,
+    CapabilityPreflight,
+    Config,
+    ExecutionContext,
+    Linear.Issue,
+    PromptBuilder,
+    TargetContext,
+    Tracker,
+    Workspace
+  }
+
+  alias SymphonyElixir.AgentRuntime.Event
+  alias SymphonyElixir.TargetContext.Legacy
+
+  @default_max_turns 20
   @type worker_host :: String.t() | nil
+  @type result :: :ok | {:error, term()}
 
   @doc false
-  @spec continue_with_issue_for_test(Issue.t(), ([String.t()] -> term())) ::
+  @spec continue_with_issue_for_test(
+          ExecutionContext.t(),
+          Issue.t(),
+          (TargetContext.t(), [String.t()] -> term())
+        ) ::
           {:continue, Issue.t()} | {:done, Issue.t()} | {:error, term()}
-  def continue_with_issue_for_test(%Issue{} = issue, issue_state_fetcher)
-      when is_function(issue_state_fetcher, 1) do
-    continue_with_issue?(issue, issue_state_fetcher)
+  def continue_with_issue_for_test(
+        %ExecutionContext{} = context,
+        %Issue{} = issue,
+        issue_state_fetcher
+      )
+      when is_function(issue_state_fetcher, 2) do
+    continue_with_issue?(context, issue, issue_state_fetcher)
   end
 
-  @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
-  def run(issue, codex_update_recipient \\ nil, opts \\ []) do
-    # The orchestrator owns host retries so one worker lifetime never hops machines.
-    worker_host = selected_worker_host(Keyword.get(opts, :worker_host), Config.settings!().worker.ssh_hosts)
+  @spec run(Issue.t()) :: :ok
+  def run(%Issue{} = issue), do: run(issue, nil, [])
 
-    Logger.info("Starting agent run for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+  @spec run_context(ExecutionContext.t(), Issue.t()) :: result()
+  def run_context(%ExecutionContext{} = context, %Issue{} = issue),
+    do: run_context(context, issue, nil, [])
 
-    case run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-      :ok ->
-        :ok
+  @spec run(Issue.t(), pid() | nil) :: :ok
+  def run(%Issue{} = issue, codex_update_recipient),
+    do: run(issue, codex_update_recipient, [])
+
+  @spec run_context(ExecutionContext.t(), Issue.t(), pid() | nil) :: result()
+  def run_context(%ExecutionContext{} = context, %Issue{} = issue, codex_update_recipient),
+    do: run_context(context, issue, codex_update_recipient, [])
+
+  @spec run(Issue.t(), pid() | nil, keyword()) :: :ok
+  def run(%Issue{} = issue, codex_update_recipient, opts) when is_list(opts) do
+    admitted_issue = ensure_legacy_issue_id(issue)
+
+    case admit_execution_context(admitted_issue, opts) do
+      {:ok, context} ->
+        run_opts = legacy_context_run_options(opts, issue)
+
+        case run_context(context, admitted_issue, codex_update_recipient, run_opts) do
+          :ok ->
+            :ok
+
+          {:error, reason} ->
+            raise_agent_run_failure(issue, legacy_failure_reason(context, reason))
+        end
 
       {:error, reason} ->
         maybe_send_non_retryable_agent_blocker(codex_update_recipient, issue, reason)
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        raise_agent_run_failure(issue, reason)
     end
   end
 
-  defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
-    Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
+  @spec run_context(ExecutionContext.t(), Issue.t(), pid() | nil, keyword()) :: result()
+  def run_context(
+        %ExecutionContext{} = context,
+        %Issue{} = issue,
+        codex_update_recipient,
+        opts
+      )
+      when is_list(opts) do
+    with :ok <- validate_context_run(context, issue, opts) do
+      Logger.info("Starting agent run for #{issue_context(issue)} target_id=#{context.target.target_id} worker_host=#{worker_host_for_log(context.worker_host)}")
 
-    case Workspace.create_for_issue(issue, worker_host) do
+      case run_in_context(context, issue, codex_update_recipient, opts) do
+        :ok ->
+          :ok
+
+        {:error, reason} = error ->
+          maybe_send_non_retryable_agent_blocker(codex_update_recipient, issue, reason)
+          Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+          error
+      end
+    end
+  end
+
+  def run_context(%ExecutionContext{}, %Issue{}, _codex_update_recipient, _opts),
+    do: {:error, :invalid_agent_runner_options}
+
+  defp admit_execution_context(issue, opts) do
+    worker_host =
+      selected_worker_host(
+        Keyword.get(opts, :worker_host),
+        Config.settings!().worker.ssh_hosts
+      )
+
+    with {:ok, target} <- Legacy.build_at_process_start([]),
+         {:ok, policy} <- admission_policy(target, issue, opts) do
+      ExecutionContext.new(target, issue,
+        policy: policy,
+        worker_host: worker_host
+      )
+    end
+  end
+
+  defp admission_policy(target, issue, opts) do
+    case Keyword.get(opts, :policy) do
+      policy when is_map(policy) and map_size(policy) > 0 ->
+        {:ok, policy}
+
+      _no_override ->
+        profile = get_in(target.issue_policy_authority, ["profile"]) || "default"
+
+        case TargetContext.issue_policy(target, issue, profile: profile) do
+          {:ok, policy} ->
+            {:ok, policy}
+
+          {:error, reason}
+          when reason in [:forbidden_policy_broadening, :malformed_issue_metadata] ->
+            Config.issue_policy(issue)
+
+          {:error, _reason} = error ->
+            error
+        end
+    end
+  end
+
+  defp legacy_context_run_options(opts, %Issue{id: issue_id}) do
+    context_opts = context_run_options(opts)
+
+    if (is_nil(issue_id) or issue_id == "") and
+         not Keyword.has_key?(context_opts, :issue_state_fetcher) do
+      Keyword.put(context_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
+    else
+      context_opts
+    end
+  end
+
+  defp ensure_legacy_issue_id(%Issue{id: id} = issue)
+       when is_binary(id) and id != "",
+       do: issue
+
+  defp ensure_legacy_issue_id(%Issue{identifier: identifier} = issue)
+       when is_binary(identifier) and identifier != "",
+       do: %{issue | id: identifier}
+
+  defp ensure_legacy_issue_id(%Issue{} = issue), do: issue
+
+  defp legacy_failure_reason(
+         %ExecutionContext{worker_host: worker_host},
+         reason
+       )
+       when is_binary(worker_host) and
+              reason in [
+                :workspace_remote_operation_failed,
+                :workspace_remote_output_invalid,
+                :workspace_remote_timeout
+              ],
+       do: {:workspace_prepare_failed, worker_host, reason}
+
+  defp legacy_failure_reason(_context, reason), do: reason
+
+  defp raise_agent_run_failure(issue, reason) do
+    Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+    raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+  end
+
+  defp run_in_context(context, issue, codex_update_recipient, opts) do
+    Logger.info("Starting worker attempt for #{issue_context(issue)} target_id=#{context.target.target_id} worker_host=#{worker_host_for_log(context.worker_host)}")
+
+    workspace_opts = workspace_opts(opts)
+
+    case Workspace.create_for_issue(context, workspace_opts) do
       {:ok, workspace} ->
-        send_worker_runtime_info(codex_update_recipient, issue, worker_host, workspace)
+        send_worker_runtime_info(
+          codex_update_recipient,
+          issue,
+          context.worker_host,
+          workspace
+        )
 
         try do
-          with :ok <- Workspace.run_before_run_hook(workspace, issue, worker_host),
-               :ok <- run_capability_preflight(workspace, issue, codex_update_recipient, opts, worker_host) do
-            run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host)
+          with :ok <- Workspace.run_before_run_hook(context, issue, workspace_opts),
+               :ok <- run_capability_preflight(context, issue, codex_update_recipient, opts) do
+            run_agent_turns(context, issue, codex_update_recipient, opts)
           end
         after
-          Workspace.run_after_run_hook(workspace, issue, worker_host)
+          Workspace.run_after_run_hook(context, issue, workspace_opts)
         end
 
       {:error, reason} ->
@@ -155,23 +308,20 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_worker_runtime_info(_recipient, _issue, _worker_host, _workspace), do: :ok
 
-  defp run_capability_preflight(workspace, issue, recipient, opts, worker_host) do
-    with {:ok, policy} <- policy_for_issue(issue, opts) do
-      preflight =
-        CapabilityPreflight.run(
-          workspace,
-          policy,
-          capability_preflight_opts(opts, worker_host)
-        )
+  defp run_capability_preflight(context, issue, recipient, opts) do
+    case CapabilityPreflight.run(context, capability_preflight_opts(opts)) do
+      %{} = preflight ->
+        case CapabilityPreflight.blocker(preflight) do
+          nil ->
+            :ok
 
-      case CapabilityPreflight.blocker(preflight) do
-        nil ->
-          :ok
+          blocker ->
+            send_capability_blocker(recipient, issue, blocker, preflight)
+            {:error, {:capability_preflight_blocked, blocker}}
+        end
 
-        blocker ->
-          send_capability_blocker(recipient, issue, blocker, preflight)
-          {:error, {:capability_preflight_blocked, blocker}}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -187,34 +337,39 @@ defmodule SymphonyElixir.AgentRunner do
     })
   end
 
-  defp capability_preflight_opts(opts, worker_host) do
+  defp capability_preflight_opts(opts) do
     []
-    |> Keyword.put(:worker_host, worker_host)
+    |> maybe_put_opt(:adapter_registry, Keyword.get(opts, :adapter_registry))
     |> maybe_put_opt(:runner, Keyword.get(opts, :capability_preflight_runner))
     |> maybe_put_opt(:tcp_probe, Keyword.get(opts, :capability_tcp_probe))
+  end
+
+  defp workspace_opts(opts) do
+    []
+    |> maybe_put_opt(:command_runner, Keyword.get(opts, :workspace_command_runner))
+    |> maybe_put_opt(:ssh_runner, Keyword.get(opts, :workspace_ssh_runner))
+  end
+
+  defp runtime_start_opts(opts) do
+    []
+    |> maybe_put_opt(:adapter_registry, Keyword.get(opts, :adapter_registry))
   end
 
   defp maybe_put_opt(opts, _key, nil), do: opts
   defp maybe_put_opt(opts, key, value), do: Keyword.put(opts, key, value)
 
-  defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
-    max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
-    issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+  defp run_agent_turns(context, issue, codex_update_recipient, opts) do
+    issue_state_fetcher = issue_state_fetcher(opts)
 
-    with {:ok, policy} <- policy_for_issue(issue, opts),
+    with {:ok, max_turns} <- max_turns(context, opts),
          {:ok, session} <-
-           AgentRuntime.start_session(workspace, issue,
-             worker_host: worker_host,
-             policy: policy
-           ) do
-      opts = Keyword.put(opts, :policy, policy)
-
+           AgentRuntime.start_session(context, issue, runtime_start_opts(opts)) do
       run_result =
         try do
           {:returned,
-           do_run_codex_turns(
+           do_run_agent_turns(
+             context,
              session,
-             workspace,
              issue,
              codex_update_recipient,
              opts,
@@ -265,23 +420,9 @@ defmodule SymphonyElixir.AgentRunner do
     :erlang.raise(kind, reason, stacktrace)
   end
 
-  defp policy_for_issue(issue, opts) do
-    case Keyword.fetch(opts, :policy) do
-      {:ok, policy} when is_map(policy) -> {:ok, policy}
-      _ -> resolve_policy_for_issue(issue)
-    end
-  end
-
-  defp resolve_policy_for_issue(issue) do
-    case Config.issue_policy(issue) do
-      {:ok, policy} -> {:ok, policy}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp do_run_codex_turns(
+  defp do_run_agent_turns(
+         context,
          app_session,
-         workspace,
          issue,
          codex_update_recipient,
          opts,
@@ -289,67 +430,117 @@ defmodule SymphonyElixir.AgentRunner do
          turn_number,
          max_turns
        ) do
-    prompt_bundle = build_turn_prompt(issue, opts, turn_number, max_turns)
-    log_workflow_module_resolution(issue, prompt_bundle)
-    send_workflow_module_resolution(codex_update_recipient, issue, prompt_bundle.workflow_module_resolution)
-
-    with {:ok, turn_session} <-
+    with {:ok, prompt_bundle} <-
+           build_turn_prompt(context, issue, opts, turn_number, max_turns),
+         :ok <-
+           report_workflow_module_resolution(
+             context,
+             issue,
+             codex_update_recipient,
+             prompt_bundle
+           ),
+         {:ok, turn_session} <-
            AgentRuntime.send_turn(
              app_session,
              prompt_bundle.prompt,
              issue,
-             on_event: runtime_event_handler(codex_update_recipient, issue),
-             workflow_module_resolution: prompt_bundle.workflow_module_resolution
+             on_event: runtime_event_handler(codex_update_recipient, issue)
            ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{context.workspace_path} turn=#{turn_number}/#{max_turns}")
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
-
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
-
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
-
-          send_max_turns_exhausted(codex_update_recipient, refreshed_issue, turn_number, max_turns)
-
-          :ok
-
-        {:done, _refreshed_issue} ->
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
-      end
+      continue_agent_turns(
+        context,
+        app_session,
+        issue,
+        codex_update_recipient,
+        opts,
+        issue_state_fetcher,
+        turn_number,
+        max_turns
+      )
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt_bundle(issue, opts)
+  defp report_workflow_module_resolution(context, issue, recipient, prompt_bundle) do
+    log_workflow_module_resolution(issue, prompt_bundle)
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
-    %{
-      prompt: """
-      Continue turn #{turn_number} of #{max_turns}.
+    send_workflow_module_resolution(
+      recipient,
+      issue,
+      event_workflow_module_resolution(
+        context,
+        prompt_bundle.workflow_module_resolution
+      )
+    )
+  end
 
-      Goal: Finish the remaining ticket work and route the issue according to the original workflow contract.
+  defp continue_agent_turns(
+         context,
+         app_session,
+         issue,
+         codex_update_recipient,
+         opts,
+         issue_state_fetcher,
+         turn_number,
+         max_turns
+       ) do
+    case continue_with_issue?(context, issue, issue_state_fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
-      Resume from the current workspace, workpad, and thread context. Do not restate the task or repeat completed work unless later changes invalidate it.
+        do_run_agent_turns(
+          context,
+          app_session,
+          refreshed_issue,
+          codex_update_recipient,
+          opts,
+          issue_state_fetcher,
+          turn_number + 1,
+          max_turns
+        )
 
-      End the turn after reaching the workflow-defined handoff or terminal state.
-      Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition.
-      """,
-      workflow_module_resolution: nil
-    }
+      {:continue, refreshed_issue} ->
+        Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+
+        send_max_turns_exhausted(
+          codex_update_recipient,
+          refreshed_issue,
+          turn_number,
+          max_turns
+        )
+
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_turn_prompt(context, issue, opts, 1, _max_turns) do
+    case Keyword.get(opts, :attempt) do
+      nil -> PromptBuilder.build_prompt_bundle(context, issue, [])
+      attempt -> PromptBuilder.build_prompt_bundle(context, issue, attempt: attempt)
+    end
+  end
+
+  defp build_turn_prompt(_context, _issue, _opts, turn_number, max_turns) do
+    {:ok,
+     %{
+       prompt: """
+       Continue turn #{turn_number} of #{max_turns}.
+
+       Goal: Finish the remaining ticket work and route the issue according to the original workflow contract.
+
+       Resume from the current workspace, workpad, and thread context. Do not restate the task or repeat completed work unless later changes invalidate it.
+
+       End the turn after reaching the workflow-defined handoff or terminal state.
+       Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition.
+       """,
+       workflow_module_resolution: nil
+     }}
   end
 
   defp send_max_turns_exhausted(recipient, %Issue{} = issue, turn_number, max_turns) do
@@ -380,6 +571,8 @@ defmodule SymphonyElixir.AgentRunner do
     :ok
   end
 
+  defp event_workflow_module_resolution(_context, resolution), do: resolution
+
   defp send_workflow_module_resolution(recipient, %Issue{id: issue_id}, workflow_module_resolution)
        when is_binary(issue_id) and is_pid(recipient) and is_map(workflow_module_resolution) do
     send(recipient, {:workflow_module_resolution, issue_id, workflow_module_resolution})
@@ -388,37 +581,184 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp send_workflow_module_resolution(_recipient, _issue, _workflow_module_resolution), do: :ok
 
-  defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
-    case issue_state_fetcher.([issue_id]) do
-      {:ok, [%Issue{} = refreshed_issue | _]} ->
-        if active_issue_state?(refreshed_issue.state) and issue_routable?(refreshed_issue) do
+  defp continue_with_issue?(
+         %ExecutionContext{target: target} = context,
+         %Issue{id: issue_id} = issue,
+         issue_state_fetcher
+       )
+       when is_binary(issue_id) do
+    case issue_state_fetcher.(target, [issue_id]) do
+      {:ok,
+       [
+         %Issue{id: ^issue_id, identifier: identifier} = refreshed_issue
+         | _
+       ]}
+      when identifier == context.issue_identifier ->
+        if active_issue_state?(context, refreshed_issue.state) and
+             issue_routable?(context, refreshed_issue) do
           {:continue, refreshed_issue}
         else
           {:done, refreshed_issue}
         end
+
+      {:ok, [%Issue{} | _]} ->
+        {:error, {:issue_state_refresh_failed, :issue_mismatch}}
 
       {:ok, []} ->
         {:done, issue}
 
       {:error, reason} ->
         {:error, {:issue_state_refresh_failed, reason}}
+
+      _invalid ->
+        {:error, {:issue_state_refresh_failed, :invalid_tracker_result}}
     end
   end
 
-  defp continue_with_issue?(issue, _issue_state_fetcher), do: {:done, issue}
+  defp continue_with_issue?(_context, issue, _issue_state_fetcher), do: {:done, issue}
 
-  defp active_issue_state?(state_name) when is_binary(state_name) do
-    normalized_state = normalize_issue_state(state_name)
+  defp active_issue_state?(
+         %ExecutionContext{target: %TargetContext{run_target: run_target}},
+         state_name
+       )
+       when is_map(run_target) and is_binary(state_name) do
+    case Map.get(run_target, "active_states", []) do
+      active_states when is_list(active_states) ->
+        normalized_state = normalize_issue_state(state_name)
 
-    Config.settings!().tracker.active_states
-    |> Enum.any?(fn active_state -> normalize_issue_state(active_state) == normalized_state end)
+        Enum.any?(active_states, fn active_state ->
+          is_binary(active_state) and normalize_issue_state(active_state) == normalized_state
+        end)
+
+      _invalid ->
+        false
+    end
   end
 
-  defp active_issue_state?(_state_name), do: false
+  defp active_issue_state?(_context, _state_name), do: false
 
-  defp issue_routable?(%Issue{} = issue) do
-    Issue.routable?(issue, Config.settings!().tracker.required_labels)
+  defp issue_routable?(
+         %ExecutionContext{target: %TargetContext{run_target: run_target}},
+         %Issue{} = issue
+       )
+       when is_map(run_target) do
+    case Map.get(run_target, "required_labels", []) do
+      required_labels when is_list(required_labels) ->
+        Issue.routable?(issue, required_labels)
+
+      _invalid ->
+        false
+    end
   end
+
+  defp issue_routable?(_context, _issue), do: false
+
+  defp max_turns(context, opts) do
+    max_turns =
+      Keyword.get(
+        opts,
+        :max_turns,
+        Map.get(context.runner_config, "max_turns", @default_max_turns)
+      )
+
+    if is_integer(max_turns) and max_turns > 0,
+      do: {:ok, max_turns},
+      else: {:error, :invalid_agent_runner_max_turns}
+  end
+
+  defp issue_state_fetcher(opts) do
+    case Keyword.get(opts, :issue_state_fetcher) do
+      nil ->
+        &Tracker.fetch_issue_states_by_ids/2
+
+      fetcher when is_function(fetcher, 2) ->
+        fetcher
+
+      fetcher when is_function(fetcher, 1) ->
+        fn _target, issue_ids -> fetcher.(issue_ids) end
+    end
+  end
+
+  defp context_run_options(opts) do
+    Keyword.take(opts, [
+      :adapter_registry,
+      :attempt,
+      :capability_preflight_runner,
+      :capability_tcp_probe,
+      :issue_state_fetcher,
+      :max_turns,
+      :workspace_command_runner,
+      :workspace_ssh_runner
+    ])
+  end
+
+  defp validate_context_run(context, issue, opts) do
+    if Keyword.keyword?(opts) do
+      validate_context_run_options(context, issue, opts)
+    else
+      {:error, :invalid_agent_runner_options}
+    end
+  end
+
+  defp validate_context_run_options(context, issue, opts) do
+    with :ok <- validate_context_authority(context, issue),
+         :ok <- validate_context_option_keys(opts),
+         :ok <- validate_issue_state_fetcher(Keyword.get(opts, :issue_state_fetcher)),
+         :ok <- validate_max_turns_option(Keyword.get(opts, :max_turns)),
+         :ok <- validate_attempt_option(Keyword.get(opts, :attempt)) do
+      validate_adapter_registry(Keyword.get(opts, :adapter_registry))
+    end
+  end
+
+  defp validate_context_authority(context, issue) do
+    cond do
+      ExecutionContext.validate(context) != :ok ->
+        {:error, :invalid_agent_runner_context}
+
+      context.issue_id != issue.id or context.issue_identifier != issue.identifier ->
+        {:error, :agent_runner_issue_mismatch}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_context_option_keys(opts) do
+    allowed_keys = Keyword.keys(context_run_options(opts))
+    supplied_keys = Keyword.keys(opts)
+
+    if length(supplied_keys) == length(Enum.uniq(supplied_keys)) and
+         Enum.sort(allowed_keys) == Enum.sort(supplied_keys),
+       do: :ok,
+       else: {:error, :invalid_agent_runner_options}
+  end
+
+  defp validate_issue_state_fetcher(nil), do: :ok
+
+  defp validate_issue_state_fetcher(fetcher)
+       when is_function(fetcher, 1) or is_function(fetcher, 2),
+       do: :ok
+
+  defp validate_issue_state_fetcher(_fetcher),
+    do: {:error, :invalid_agent_runner_options}
+
+  defp validate_max_turns_option(nil), do: :ok
+  defp validate_max_turns_option(max_turns) when is_integer(max_turns) and max_turns > 0, do: :ok
+
+  defp validate_max_turns_option(_max_turns),
+    do: {:error, :invalid_agent_runner_options}
+
+  defp validate_attempt_option(nil), do: :ok
+  defp validate_attempt_option(attempt) when is_integer(attempt) and attempt >= 0, do: :ok
+
+  defp validate_attempt_option(_attempt),
+    do: {:error, :invalid_agent_runner_options}
+
+  defp validate_adapter_registry(nil), do: :ok
+  defp validate_adapter_registry(adapter_registry) when is_map(adapter_registry), do: :ok
+
+  defp validate_adapter_registry(_adapter_registry),
+    do: {:error, :invalid_agent_runner_options}
 
   defp selected_worker_host(nil, []), do: nil
 

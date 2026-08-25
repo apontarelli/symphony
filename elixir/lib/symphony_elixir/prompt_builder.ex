@@ -203,10 +203,11 @@ defmodule SymphonyElixir.PromptBuilder do
       }
       when is_binary(prompt_template) ->
         with true <- String.valid?(prompt_template),
+             modules when is_list(modules) <- Map.get(compiled_resolution, :modules),
              {:ok, compiled_projection} <-
                normalize_compiled_prompt_resolution(compiled_resolution),
              true <- compiled_projection == pinned_resolution do
-          {:ok, prompt_template, bundle_prompt_resolution(compiled_projection)}
+          {:ok, prompt_template, bundle_prompt_resolution(compiled_projection, modules)}
         else
           _invalid -> {:error, :invalid_prompt_context}
         end
@@ -299,8 +300,9 @@ defmodule SymphonyElixir.PromptBuilder do
   defp normalize_prompt_module_ref(_module_ref),
     do: {:error, :invalid_prompt_resolution}
 
-  defp bundle_prompt_resolution(resolution) do
+  defp bundle_prompt_resolution(resolution, modules) do
     %{
+      modules: modules,
       module_names: resolution["module_names"],
       module_refs:
         Enum.map(resolution["module_refs"], fn ref ->

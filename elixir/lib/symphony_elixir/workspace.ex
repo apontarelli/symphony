@@ -90,15 +90,16 @@ defmodule SymphonyElixir.Workspace do
   defp valid_context_runner?(runner, arity), do: is_function(runner, arity)
 
   defp context_workspace_path(%ExecutionContext{
-         target: %TargetContext{
-           target_id: target_id,
-           worktree_policy:
-             %{
-               "root" => root,
-               "strategy" => "per_issue",
-               "hooks" => hooks
-             } = worktree_policy
-         },
+         target:
+           %TargetContext{
+             target_id: target_id,
+             worktree_policy:
+               %{
+                 "root" => root,
+                 "strategy" => "per_issue",
+                 "hooks" => hooks
+               } = worktree_policy
+           } = target,
          issue_identifier: issue_identifier,
          workspace_path: pinned_workspace,
          worker_host: worker_host
@@ -111,10 +112,10 @@ defmodule SymphonyElixir.Workspace do
          true <- valid_context_worker_host?(worker_host),
          expanded_root = Path.expand(root),
          expected_workspace =
-           expected_context_workspace(expanded_root, target_id, issue_identifier),
-         true <- pinned_workspace == expected_workspace,
+           expected_context_workspace(expanded_root, target, issue_identifier),
          {:ok, validated_workspace} <-
-           validate_context_workspace_location(expanded_root, expected_workspace, worker_host) do
+           validate_context_workspace_location(expanded_root, expected_workspace, worker_host),
+         true <- pinned_workspace == validated_workspace do
       {:ok, validated_workspace}
     else
       _invalid -> {:error, :invalid_workspace_context}
@@ -129,8 +130,7 @@ defmodule SymphonyElixir.Workspace do
          {:ok, canonical_root} <- PathSafety.canonicalize(root),
          {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
          true <- strict_context_descendant?(canonical_root, canonical_parent),
-         true <- strict_context_descendant?(canonical_workspace, canonical_root),
-         true <- canonical_workspace == workspace do
+         true <- strict_context_descendant?(canonical_workspace, canonical_root) do
       {:ok, canonical_workspace}
     else
       _invalid -> {:error, :invalid_workspace_context}
@@ -187,10 +187,10 @@ defmodule SymphonyElixir.Workspace do
     match?({:ok, _target}, SSH.parse_target(worker_host))
   end
 
-  defp expected_context_workspace(root, target_id, issue_identifier) do
-    if Path.basename(root) == target_id,
+  defp expected_context_workspace(root, %TargetContext{} = target, issue_identifier) do
+    if is_map(target.issue_policy_authority) or Path.basename(root) == target.target_id,
       do: Path.join(root, issue_identifier),
-      else: Path.join([root, target_id, issue_identifier])
+      else: Path.join([root, target.target_id, issue_identifier])
   end
 
   defp reject_context_symlinks(root, workspace) do
@@ -1330,7 +1330,7 @@ defmodule SymphonyElixir.Workspace do
                "strategy" => "per_issue",
                "hooks" => hooks
              } = worktree_policy
-         },
+         } = target,
          identifier,
          worker_host
        ) do
@@ -1341,7 +1341,7 @@ defmodule SymphonyElixir.Workspace do
          true <- valid_context_hooks?(hooks),
          true <- valid_context_worker_host?(worker_host),
          expanded_root = Path.expand(root),
-         expected_workspace = expected_context_workspace(expanded_root, target_id, identifier),
+         expected_workspace = expected_context_workspace(expanded_root, target, identifier),
          {:ok, validated_workspace} <-
            validate_context_workspace_location(expanded_root, expected_workspace, worker_host) do
       {:ok, validated_workspace}
