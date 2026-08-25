@@ -1,15 +1,18 @@
-.PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps audit build fmt fmt-check lint test coverage ci dialyzer e2e
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, audit, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
 
 setup:
 	$(MIX) setup
 
 deps:
 	$(MIX) deps.get
+
+audit:
+	$(MIX) hex.audit
 
 build:
 	$(MIX) build
@@ -47,6 +50,7 @@ e2e:
 
 ci:
 	$(MAKE) setup
+	$(MAKE) audit
 	$(MAKE) build
 	$(MAKE) fmt-check
 	$(MAKE) lint
