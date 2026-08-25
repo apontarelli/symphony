@@ -120,8 +120,7 @@ defmodule SymphonyElixir.ExecutionContext do
 
     with {:ok, profile_name} <- select_child_profile(runner_config, :implementation, nil),
          {:ok, profile} <- resolve_profile(runner_config, profile_name),
-         {:ok, workspace_path} <-
-           workspace_path(target.worktree_policy["root"], target.target_id, issue.identifier) do
+         {:ok, workspace_path} <- workspace_path(target, issue.identifier, opts.worker_host) do
       {:ok,
        %__MODULE__{
          target: own_target(target),
@@ -180,7 +179,7 @@ defmodule SymphonyElixir.ExecutionContext do
          :ok <- validate_worker_host(context.worker_host),
          true <- context.role == :implementation or context.role in @review_roles,
          {:ok, expected_workspace_path} <-
-           workspace_path(target.worktree_policy["root"], target.target_id, context.issue_identifier),
+           workspace_path(target, context.issue_identifier, context.worker_host),
          true <- context.workspace_path == expected_workspace_path,
          true <- current_execution_consistent?(context, target) do
       :ok
@@ -528,18 +527,30 @@ defmodule SymphonyElixir.ExecutionContext do
 
   defp resolve_profile(_runner, _name), do: {:error, :invalid_runner_config}
 
-  defp workspace_path(root, target_id, issue_identifier) do
-    root = Path.expand(root)
+  defp workspace_path(%TargetContext{} = target, issue_identifier, worker_host) do
+    root = Path.expand(target.worktree_policy["root"])
 
     candidate =
-      if Path.basename(root) == target_id do
+      if legacy_target?(target) or Path.basename(root) == target.target_id do
         Path.join(root, issue_identifier)
       else
-        Path.join([root, target_id, issue_identifier])
+        Path.join([root, target.target_id, issue_identifier])
       end
 
-    canonical_workspace_path(root, candidate)
+    case worker_host do
+      nil -> canonical_workspace_path(root, candidate)
+      worker_host when is_binary(worker_host) -> remote_workspace_path(root, candidate)
+    end
   end
+
+  defp remote_workspace_path(root, candidate) do
+    if strict_descendant?(root, Path.dirname(root)) and strict_descendant?(candidate, root),
+      do: {:ok, candidate},
+      else: {:error, :invalid_workspace_path}
+  end
+
+  defp legacy_target?(%TargetContext{issue_policy_authority: authority}),
+    do: is_map(authority)
 
   defp canonical_workspace_path(root, candidate) do
     with :ok <- reject_workspace_symlinks(root, candidate),

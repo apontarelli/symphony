@@ -60,6 +60,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
            }
 
     assert context.capacity_limits["max_concurrent_agents"] == 4
+    assert get_in(context.runner_policy, ["runners", "codex", "max_turns"]) == 20
     assert context.tracker_connection["policy"]["api_key"] == "resolved-secret-one"
     assert Regex.match?(@hash_regex, context.registry_generation)
     assert Regex.match?(@hash_regex, context.policy_hash)
@@ -773,12 +774,17 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     refute changed_sandbox.registry_generation == first.registry_generation
   end
 
-  test "legacy construction rejects arbitrary nested runner policy maps with typed errors" do
+  test "legacy construction hashes nested approval policy maps and rejects unsafe sandbox maps" do
+    approval_policy = %{"selected" => %{"allow" => true}}
+
     write_workflow_file!(Workflow.workflow_file_path(),
-      codex_approval_policy: %{"selected" => %{"allow" => true}}
+      codex_approval_policy: approval_policy
     )
 
-    assert {:error, {:invalid_runner_policy, ["runners", "codex", "approval_policy"], :unsupported_map}} = Legacy.build_at_process_start([])
+    assert {:ok, context} = Legacy.build_at_process_start([])
+
+    assert get_in(context.runner_policy, ["runners", "codex", "approval_policy"]) ==
+             approval_policy
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_approval_policy: "never",

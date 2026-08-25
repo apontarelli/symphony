@@ -96,13 +96,13 @@ defmodule SymphonyElixir.Codex.Launch do
   defp valid_transport_starter?(starter, arity), do: is_function(starter, arity)
 
   defp context_launch_authority(%ExecutionContext{
-         target: %TargetContext{
-           target_id: target_id,
-           registry_generation: registry_generation,
-           policy_hash: policy_hash,
-           worktree_policy: worktree_policy,
-           runner_policy: runner_policy
-         },
+         target:
+           %TargetContext{
+             target_id: target_id,
+             registry_generation: registry_generation,
+             policy_hash: policy_hash,
+             runner_policy: runner_policy
+           } = target,
          issue_identifier: issue_identifier,
          workspace_path: workspace_path,
          runner_name: runner_name,
@@ -118,10 +118,10 @@ defmodule SymphonyElixir.Codex.Launch do
          true <- valid_launch_id?(runner_name),
          {:ok, workspace_authority} <-
            validate_context_workspace_authority(
-             worktree_policy,
-             target_id,
+             target,
              issue_identifier,
-             workspace_path
+             workspace_path,
+             worker_host
            ),
          true <- is_map(runner_policy) and not is_struct(runner_policy),
          allowed when is_list(allowed) <- Map.get(runner_policy, "allowed"),
@@ -176,19 +176,28 @@ defmodule SymphonyElixir.Codex.Launch do
   defp context_launch_authority(_context), do: {:error, :invalid_launch_context}
 
   defp validate_context_workspace_authority(
-         %{"root" => root, "strategy" => "per_issue", "hooks" => hooks} = worktree_policy,
-         target_id,
+         %TargetContext{
+           target_id: target_id,
+           worktree_policy:
+             %{"root" => root, "strategy" => "per_issue", "hooks" => hooks} =
+               worktree_policy
+         } = target,
          issue_identifier,
-         workspace_path
+         workspace_path,
+         worker_host
        ) do
     expanded_root = if is_binary(root), do: Path.expand(root), else: nil
 
     target_root =
-      if is_binary(expanded_root) and Path.basename(expanded_root) == target_id,
-        do: expanded_root,
-        else: context_workspace_join(expanded_root, target_id)
+      if is_binary(expanded_root) and
+           (is_map(target.issue_policy_authority) or
+              Path.basename(expanded_root) == target_id),
+         do: expanded_root,
+         else: context_workspace_join(expanded_root, target_id)
 
-    expected_workspace = context_workspace_join(target_root, issue_identifier)
+    authority_root = canonical_context_workspace(expanded_root, worker_host)
+    authority_target_root = canonical_context_workspace(target_root, worker_host)
+    expected_workspace = context_workspace_join(authority_target_root, issue_identifier)
 
     if valid_context_workspace_authority?(
          worktree_policy,
@@ -199,17 +208,17 @@ defmodule SymphonyElixir.Codex.Launch do
          workspace_path,
          expected_workspace
        ) do
-      {:ok, %{root: expanded_root, target_root: target_root}}
+      {:ok, %{root: authority_root, target_root: authority_target_root}}
     else
       {:error, :invalid_launch_context}
     end
   end
 
   defp validate_context_workspace_authority(
-         _worktree_policy,
-         _target_id,
+         _target,
          _issue_identifier,
-         _workspace_path
+         _workspace_path,
+         _worker_host
        ),
        do: {:error, :invalid_launch_context}
 
@@ -226,6 +235,17 @@ defmodule SymphonyElixir.Codex.Launch do
       valid_workspace_root?(root, expanded_root) and is_map(hooks) and not is_struct(hooks) and
       valid_issue_identifier?(issue_identifier) and workspace_path == expected_workspace
   end
+
+  defp canonical_context_workspace(workspace, nil) when is_binary(workspace) do
+    {:ok, canonical} = PathSafety.canonicalize(workspace)
+    canonical
+  end
+
+  defp canonical_context_workspace(workspace, worker_host)
+       when is_binary(workspace) and is_binary(worker_host),
+       do: workspace
+
+  defp canonical_context_workspace(_workspace, _worker_host), do: nil
 
   defp context_workspace_join(left, right) when is_binary(left) and is_binary(right),
     do: Path.join(left, right)
