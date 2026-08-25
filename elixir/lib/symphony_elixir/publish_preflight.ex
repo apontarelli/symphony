@@ -83,10 +83,16 @@ defmodule SymphonyElixir.PublishPreflight do
 
   @spec run(Path.t() | nil, map(), keyword()) :: result()
   def run(workspace, policy, opts \\ []) when is_map(policy) and is_list(opts) do
+    timeout_ms =
+      case Keyword.fetch(opts, :timeout_ms) do
+        {:ok, timeout_ms} -> timeout_ms
+        :error -> default_timeout_ms()
+      end
+
     context = %{
       workspace: workspace,
       worker_host: Keyword.get(opts, :worker_host),
-      timeout_ms: Keyword.get(opts, :timeout_ms, default_timeout_ms()),
+      timeout_ms: timeout_ms,
       runner: configured_runner(opts),
       env: Keyword.get(opts, :env, []),
       provenance: Keyword.get(opts, :provenance)

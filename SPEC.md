@@ -2071,6 +2071,42 @@ Note:
 
 - Workspaces are intentionally preserved after successful runs.
 
+### 10.8 Target-Scoped Execution Isolation
+
+Admission MUST resolve one immutable `TargetContext` and one issue-specific `ExecutionContext`.
+Reusable run-path modules MUST accept this context directly and MUST NOT reconstruct tracker,
+workspace, prompt, runner, model, check, publish, handoff, retry, or cleanup authority from the
+selected workflow or mutable process-global configuration.
+
+The context-first path includes:
+
+1. tracker candidate resolution, issue refresh, and tracker writes;
+2. workspace creation, hooks, removal, and worktree-root safety;
+3. compiled prompt and workflow-module resolution;
+4. runtime selection, execution profile, capability preflight, turn submission, and session cleanup;
+5. quality-gate planning, review and repair jobs, publish preflight, publish handoff, and route
+   recording;
+6. orchestrator active, blocked, retry, stall, crash, cancellation, and cleanup state; and
+7. durable review and handoff artifacts.
+
+Active-run identity MUST include both target ID and tracker issue ID. Artifact paths and provenance
+MUST include target identity when two targets can expose the same issue ID, identifier, or run ID.
+Status and logs MAY project target ID, registry generation, and policy hash, but MUST NOT expose
+tracker credentials, runner secrets, or unredacted policy data.
+
+Mutable workflow or registry changes after admission MUST affect later admissions only. Per-run
+stall timeout, retry policy, model, checks, delivery gates, and cleanup authority MUST remain pinned
+to the admitted context.
+
+Legacy `symphony run <saved-name>` and explicit workflow launches MAY read process-global workflow
+selection while constructing their single-target admission context. Legacy public workspace,
+prompt, quality, and publish entry points MAY remain single-context adapters where documented.
+After they delegate to a context-first entry point, no reusable run-path operation may return to
+ambient authority.
+
+This isolation contract does not require a durable control-plane store, multi-target activation,
+fair scheduling, leases, or fencing. Those are separate control-plane and scheduler capabilities.
+
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
 ### 11.1 REQUIRED Operations

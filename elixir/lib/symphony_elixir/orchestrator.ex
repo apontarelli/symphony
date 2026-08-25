@@ -1040,24 +1040,27 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp reconcile_stalled_running_issues(%State{running: running} = state)
+       when map_size(running) == 0,
+       do: state
+
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.runner_stall_timeout_ms()
+    now = DateTime.utc_now()
 
-    cond do
-      timeout_ms <= 0 ->
-        state
-
-      map_size(state.running) == 0 ->
-        state
-
-      true ->
-        now = DateTime.utc_now()
-
-        Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
-          maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
-        end)
-    end
+    Enum.reduce(state.running, state, fn running, state_acc ->
+      reconcile_stalled_running_entry(running, state_acc, now)
+    end)
   end
+
+  defp reconcile_stalled_running_entry(
+         {run_id, %{stall_timeout_ms: timeout_ms} = running_entry},
+         state,
+         now
+       )
+       when is_integer(timeout_ms) and timeout_ms > 0,
+       do: maybe_restart_stalled_issue(state, run_id, running_entry, now, timeout_ms)
+
+  defp reconcile_stalled_running_entry(_running, state, _now), do: state
 
   defp maybe_restart_stalled_issue(state, run_id, running_entry, now, timeout_ms) do
     if Map.has_key?(state.blocked, run_id) do
@@ -1842,6 +1845,7 @@ defmodule SymphonyElixir.Orchestrator do
             execution_context: context,
             worker_host: context.worker_host,
             workspace_path: context.workspace_path,
+            stall_timeout_ms: context.runner_config["stall_timeout_ms"],
             runtime: nil,
             session_id: nil,
             last_runtime_message: nil,

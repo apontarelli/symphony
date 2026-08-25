@@ -88,7 +88,12 @@ defmodule SymphonyElixir.QualityGate do
 
   @spec run(Path.t() | nil, map(), Issue.t() | map() | nil, term(), keyword()) :: result()
   def run(workspace, policy, issue, completion, opts) when is_map(completion) and is_list(opts) do
-    settings = Keyword.get(opts, :settings, Config.settings!().quality_gate)
+    settings =
+      case Keyword.fetch(opts, :settings) do
+        {:ok, settings} -> settings
+        :error -> Config.settings!().quality_gate
+      end
+
     runner = Keyword.get(opts, :runner, &default_runner/1)
     browser_preflight = Keyword.get(opts, :browser_preflight, &default_browser_preflight/1)
     host_visual_qa = Keyword.get(opts, :host_visual_qa, &HostVisualQa.run/1)

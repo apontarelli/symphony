@@ -223,6 +223,32 @@ scheduler integration, or automatic host-policy bootstrap. Existing `symphony ru
 unchanged and do not consume this registry. Initial host policy/bootstrap remains a direct, fully
 validated YAML operation.
 
+## Execution context isolation (Phase 2)
+
+Every accepted run now pins one immutable `TargetContext` and one issue-specific
+`ExecutionContext`. Tracker resolution, workspace paths and hooks, compiled prompts and modules,
+runner and model selection, capability preflight, quality checks, publish and handoff policy,
+tracker writes, retry state, and cleanup use that pinned authority. Reloading the selected workflow
+or changing process-global configuration affects later admissions only.
+
+Active-run identity is `{target_id, issue_id}`. Two targets can therefore retain overlapping Linear
+issue IDs and identifiers without sharing tracker cache entries, workspaces, runtime events, retry
+state, review records, publish decisions, handoff evidence, or cleanup. Safe status projections
+include target ID, registry generation, and policy hash, but do not include credentials or raw policy
+data.
+
+The public `symphony run <saved-name>` and `symphony run --workflow <path>` commands remain
+single-target admission adapters. After admission, they use the same context-first execution path.
+The current host still activates and polls one selected target. A durable control-plane store and a
+multi-target activation, fairness, or scheduling loop are deferred; Phase 2 provides isolation, not
+those later control-plane capabilities.
+
+The deterministic contract test is
+`test/symphony_elixir/two_target_isolation_test.exs`. It poisons mutable global configuration after
+admission and covers two target scopes through tracker resolution, workspace hooks, prompt and
+module resolution, runtime preflight, AgentRunner, quality gates, publish and handoff, tracker
+mutation, orchestrator stall/retry/crash/blocked state, artifacts, and cleanup.
+
 ## Configuration
 
 Target repos can use a committed `symphony.yml` manifest for setup and audit:

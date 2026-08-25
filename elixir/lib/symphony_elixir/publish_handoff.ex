@@ -104,10 +104,16 @@ defmodule SymphonyElixir.PublishHandoff do
       when is_map(policy) and is_map(completion) and is_list(opts) do
     env = Keyword.get(opts, :env, [])
 
+    timeout_ms =
+      case Keyword.fetch(opts, :timeout_ms) do
+        {:ok, timeout_ms} -> timeout_ms
+        :error -> default_timeout_ms()
+      end
+
     context = %{
       workspace: workspace,
       worker_host: Keyword.get(opts, :worker_host),
-      timeout_ms: Keyword.get(opts, :timeout_ms, default_timeout_ms()),
+      timeout_ms: timeout_ms,
       runner: configured_runner(opts),
       env: if(is_list(env), do: env, else: []),
       delivery_gates: Keyword.get(opts, :delivery_gates),

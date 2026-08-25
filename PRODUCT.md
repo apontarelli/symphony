@@ -60,6 +60,18 @@ Symphony should make autonomous engineering work:
 - Expose current runtime state through structured logs, the optional dashboard, and JSON API
   surfaces.
 
+## Execution Isolation Posture
+
+An admitted run owns an immutable target and execution context. All reusable run-path operations
+use that context, so workflow reloads and process-global configuration changes affect only later
+admissions. Active-run and artifact identity includes the target ID; identical Linear issue IDs or
+identifiers under two targets do not share tracker, filesystem, runner, check, delivery, retry,
+handoff, or cleanup state.
+
+This guarantee does not activate multiple targets on one host. Current saved-workflow and explicit
+workflow launches remain single-target admission paths. Durable control-plane storage is deferred,
+as is a multi-target scheduler with activation, fairness, leases, or fencing.
+
 ## Near-Term Horizon
 
 The near-term product horizon is operator-grade dogfood reliability for trusted repositories before
