@@ -337,8 +337,16 @@ and tracker issue ID. Each admission receives one immutable run ID and pins its 
 manifest, issue, workspace, runner/model, check, delivery-gate, and provenance authority. Repeated
 admission of the same envelope returns the original run ID; changed hashes or authority conflict
 without replacement. Only validated tracker and runner secret references are stored. Credential
-values resolve after a future fenced owner acquires the run; missing values return a blocked result.
-Lease ownership and lifecycle transitions are separate Phase 3 milestones.
+values resolve only after a fenced owner acquires the run.
+
+Each admitted run has one exclusive durable lease. A lease lasts 30 seconds and the owner should
+renew it every 10 seconds. Acquire, renew, transfer, release, and expiry use immediate SQLite
+transactions. Every new owner receives a fencing token greater than all prior tokens for that run;
+the current owner ID and token are required for renew, transfer, and release. A lease expires at its
+exact stored deadline. A backward wall-clock change of at most one second is tolerated without
+shortening the lease; larger clock changes and clock or store failures fail closed. Target-scoped
+runs lease independently when tracker issue IDs overlap. Durable lifecycle transitions remain a
+separate Phase 3 milestone.
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
 letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target

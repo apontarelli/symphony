@@ -5,7 +5,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ControlPlane
-  alias SymphonyElixir.ControlPlane.Error
+  alias SymphonyElixir.ControlPlane.{Error, Lease}
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetContext
@@ -20,7 +20,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert {:ok,
             %{
               path: ^database_path,
-              schema_version: 2,
+              schema_version: 3,
               status: :healthy
             }} = ControlPlane.health(server)
 
@@ -64,7 +64,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     on_exit(fn -> Enum.each(pids, &stop_process/1) end)
 
-    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 2}}, ControlPlane.health(pid)) end)
+    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 3}}, ControlPlane.health(pid)) end)
   end
 
   test "busy handling is bounded across local processes" do
@@ -235,6 +235,265 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert fetched_alpha.context.target.target_id == "alpha"
     assert fetched_beta.context.target.target_id == "beta"
     assert fetched_alpha.context.issue_identifier == fetched_beta.context.issue_identifier
+
+    assert {:ok, alpha_lease} =
+             ControlPlane.acquire_lease(
+               server,
+               alpha_admission.admitted_run_id,
+               "alpha-owner"
+             )
+
+    assert {:ok, beta_lease} =
+             ControlPlane.acquire_lease(
+               server,
+               beta_admission.admitted_run_id,
+               "beta-owner"
+             )
+
+    assert alpha_lease.target_id == "alpha"
+    assert beta_lease.target_id == "beta"
+    assert alpha_lease.fencing_token == beta_lease.fencing_token
+  end
+
+  test "concurrent owners cannot both acquire one admitted run" do
+    config_root = tmp_root!("control-plane-exclusive-lease")
+    {_clock, clock} = test_clock!(1_000_000)
+    first = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    second = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(first, context)
+
+    tasks = [
+      Task.async(fn ->
+        ControlPlane.acquire_lease(first, admission.admitted_run_id, "owner-a")
+      end),
+      Task.async(fn ->
+        ControlPlane.acquire_lease(second, admission.admitted_run_id, "owner-b")
+      end)
+    ]
+
+    results = Enum.map(tasks, &Task.await(&1, 5_000))
+
+    assert Enum.count(results, &match?({:ok, %Lease{}}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :lease_held})) == 1
+
+    assert {:error, :lease_held} =
+             ControlPlane.acquire_lease(
+               first,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+  end
+
+  test "ownership transfer and release permanently fence stale owners and tokens" do
+    config_root = tmp_root!("control-plane-fencing")
+    {clock_state, clock} = test_clock!(1_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+
+    assert {:ok, first} =
+             ControlPlane.acquire_lease(
+               server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    assert first.fencing_token == 1
+    set_clock!(clock_state, 1_010_000)
+    assert {:ok, renewed} = ControlPlane.renew_lease(server, first)
+    assert renewed.fencing_token == first.fencing_token
+    assert renewed.deadline_ms == 1_040_000
+
+    set_clock!(clock_state, 1_011_000)
+
+    assert {:ok, transferred} =
+             ControlPlane.transfer_lease(server, renewed, "owner-b")
+
+    assert transferred.owner_id == "owner-b"
+    assert transferred.fencing_token == 2
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(server, renewed)
+    assert {:error, :stale_lease} = ControlPlane.release_lease(server, renewed)
+
+    stale_token = %{transferred | fencing_token: renewed.fencing_token}
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(server, stale_token)
+    assert :ok = ControlPlane.release_lease(server, transferred)
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(server, transferred)
+
+    assert {:ok, reacquired} =
+             ControlPlane.acquire_lease(
+               server,
+               admission.admitted_run_id,
+               "owner-c"
+             )
+
+    assert reacquired.fencing_token == 3
+  end
+
+  test "durable deadlines survive restart and use exact expiry boundaries" do
+    config_root = tmp_root!("control-plane-lease-restart")
+    {clock_state, clock} = test_clock!(2_000_000)
+    first_server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(first_server, context)
+
+    assert {:ok, first_lease} =
+             ControlPlane.acquire_lease(
+               first_server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    stop_process(first_server)
+    set_clock!(clock_state, first_lease.deadline_ms - 1)
+    restarted = start_control_plane!(config_root, clock: clock)
+
+    assert {:error, :lease_active} =
+             ControlPlane.expire_lease(restarted, admission.admitted_run_id)
+
+    assert {:error, :lease_held} =
+             ControlPlane.acquire_lease(
+               restarted,
+               admission.admitted_run_id,
+               "owner-b"
+             )
+
+    set_clock!(clock_state, first_lease.deadline_ms)
+
+    assert {:error, :stale_lease} =
+             ControlPlane.renew_lease(restarted, first_lease)
+
+    assert {:ok, :expired} =
+             ControlPlane.expire_lease(restarted, admission.admitted_run_id)
+
+    assert {:ok, second_lease} =
+             ControlPlane.acquire_lease(
+               restarted,
+               admission.admitted_run_id,
+               "owner-b"
+             )
+
+    assert second_lease.fencing_token > first_lease.fencing_token
+  end
+
+  test "clock skew is bounded and clock failures cannot renew ownership" do
+    config_root = tmp_root!("control-plane-lease-clock")
+    {clock_state, clock} = test_clock!(3_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+
+    assert {:ok, lease} =
+             ControlPlane.acquire_lease(
+               server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    set_clock!(clock_state, 2_999_000)
+    assert {:ok, within_skew} = ControlPlane.renew_lease(server, lease)
+    assert within_skew.deadline_ms == lease.deadline_ms
+
+    set_clock!(clock_state, 2_998_999)
+
+    assert {:error, %Error{code: :clock_failed}} =
+             ControlPlane.renew_lease(server, within_skew)
+
+    set_clock!(clock_state, :unavailable)
+
+    assert {:error, %Error{code: :clock_failed}} =
+             ControlPlane.renew_lease(server, within_skew)
+
+    set_clock!(clock_state, 3_001_000)
+    assert {:ok, recovered} = ControlPlane.renew_lease(server, within_skew)
+    assert recovered.fencing_token == lease.fencing_token
+    set_clock!(clock_state, 3_000_000)
+    assert {:ok, transferred} = ControlPlane.transfer_lease(server, recovered, "owner-b")
+    assert transferred.deadline_ms == recovered.deadline_ms
+  end
+
+  test "lease decisions sample the clock after write lock acquisition" do
+    config_root = tmp_root!("control-plane-lease-clock-order")
+    parent = self()
+    {clock_state, base_clock} = test_clock!(4_000_000)
+
+    clock = fn ->
+      value = base_clock.()
+      send(parent, {:lease_clock_read, self(), value})
+      value
+    end
+
+    lock_server = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    lease_server = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(lock_server, context)
+
+    assert {:ok, lease} =
+             ControlPlane.acquire_lease(
+               lease_server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    assert_receive {:lease_clock_read, ^lease_server, 4_000_000}
+    holder = hold_write_lock(lock_server)
+    assert_receive {:write_lock_held, lock_owner}, 1_000
+
+    renewal =
+      Task.async(fn ->
+        send(parent, :renewal_started)
+        ControlPlane.renew_lease(lease_server, lease)
+      end)
+
+    assert_receive :renewal_started
+    refute_receive {:lease_clock_read, ^lease_server, _value}, 100
+    set_clock!(clock_state, lease.deadline_ms)
+    send(lock_owner, :release_write_lock)
+
+    assert_receive {:lease_clock_read, ^lease_server, deadline_ms}, 1_000
+    assert deadline_ms == lease.deadline_ms
+    assert {:ok, :released} = Task.await(holder, 1_000)
+    assert {:error, :stale_lease} = Task.await(renewal, 1_000)
+  end
+
+  test "store write failures cannot acquire or renew a lease" do
+    config_root = tmp_root!("control-plane-lease-store-failure")
+    {_clock, clock} = test_clock!(4_000_000)
+    lock_server = start_control_plane!(config_root, clock: clock, busy_timeout: 50)
+    lease_server = start_control_plane!(config_root, clock: clock, busy_timeout: 50)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-428")
+    assert {:ok, admission} = ControlPlane.admit_run(lock_server, context)
+
+    acquire_holder = hold_write_lock(lock_server)
+    assert_receive {:write_lock_held, acquire_owner}, 1_000
+
+    assert {:error, %Error{code: :transaction_failed}} =
+             ControlPlane.acquire_lease(
+               lease_server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    send(acquire_owner, :release_write_lock)
+    assert {:ok, :released} = Task.await(acquire_holder, 1_000)
+
+    assert {:ok, lease} =
+             ControlPlane.acquire_lease(
+               lease_server,
+               admission.admitted_run_id,
+               "owner-a"
+             )
+
+    renew_holder = hold_write_lock(lock_server)
+    assert_receive {:write_lock_held, renew_owner}, 1_000
+
+    assert {:error, %Error{code: :transaction_failed}} =
+             ControlPlane.renew_lease(lease_server, lease)
+
+    send(renew_owner, :release_write_lock)
+    assert {:ok, :released} = Task.await(renew_holder, 1_000)
+    assert {:ok, renewed} = ControlPlane.renew_lease(lease_server, lease)
+    assert renewed.fencing_token == lease.fencing_token
   end
 
   test "resolved tracker and runner credentials are rejected before persistence" do
@@ -263,7 +522,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
   end
 
-  test "version one stores migrate to the admission schema" do
+  test "version one stores migrate through admission and lease schemas" do
     config_root = tmp_root!("control-plane-version-one")
     database_path = ControlPlane.path(config_root: config_root)
 
@@ -281,14 +540,15 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     server = start_control_plane!(config_root)
 
-    assert {:ok, %{schema_version: 2, status: :healthy}} = ControlPlane.health(server)
+    assert {:ok, %{schema_version: 3, status: :healthy}} = ControlPlane.health(server)
+    assert scalar_query!(database_path, "SELECT count(*) FROM run_leases") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
   end
 
   test "a newer schema version stops startup with an actionable error" do
     config_root = tmp_root!("control-plane-newer-schema")
     database_path = ControlPlane.path(config_root: config_root)
-    seed_database!(database_path, "PRAGMA user_version = 3")
+    seed_database!(database_path, "PRAGMA user_version = 4")
 
     assert {:error,
             %Error{
@@ -297,7 +557,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
               message: message
             }} = start_unlinked(config_root: config_root, name: unique_name())
 
-    assert message =~ "schema version 3 is newer than supported version 2"
+    assert message =~ "schema version 4 is newer than supported version 3"
   end
 
   test "migration failure rolls back schema state and stops startup" do
@@ -500,6 +760,36 @@ defmodule SymphonyElixir.ControlPlaneTest do
   end
 
   defp unique_name, do: {:global, {__MODULE__, make_ref()}}
+
+  defp test_clock!(initial_value) do
+    clock_state =
+      start_supervised!(
+        {Agent, fn -> initial_value end},
+        id: {__MODULE__, :clock, make_ref()}
+      )
+
+    {clock_state, fn -> Agent.get(clock_state, & &1) end}
+  end
+
+  defp set_clock!(clock_state, value) do
+    Agent.update(clock_state, fn _current -> value end)
+  end
+
+  defp hold_write_lock(server) do
+    parent = self()
+
+    Task.async(fn ->
+      ControlPlane.transaction(server, fn _transaction ->
+        send(parent, {:write_lock_held, self()})
+
+        receive do
+          :release_write_lock -> {:ok, :released}
+        after
+          2_000 -> {:error, :release_timeout}
+        end
+      end)
+    end)
+  end
 
   defp tmp_root!(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")

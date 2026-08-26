@@ -13,9 +13,12 @@ defmodule SymphonyElixir.ControlPlane do
   alias SymphonyElixir.TargetContext
 
   @database_file "control-plane.sqlite3"
-  @schema_version 2
+  @schema_version 3
   @default_busy_timeout_ms 5_000
   @maximum_busy_timeout_ms 30_000
+  @lease_duration_ms 30_000
+  @lease_renewal_interval_ms 10_000
+  @maximum_clock_skew_ms 1_000
   @call_timeout_ms @maximum_busy_timeout_ms + 5_000
 
   defmodule Error do
@@ -70,6 +73,29 @@ defmodule SymphonyElixir.ControlPlane do
           }
   end
 
+  defmodule Lease do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :owner_id,
+      :fencing_token,
+      :deadline_ms
+    ]
+    defstruct @enforce_keys
+
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            target_id: String.t(),
+            tracker_issue_id: String.t(),
+            owner_id: String.t(),
+            fencing_token: pos_integer(),
+            deadline_ms: integer()
+          }
+  end
+
   @type health :: %{
           required(:path) => Path.t(),
           required(:schema_version) => pos_integer(),
@@ -80,6 +106,14 @@ defmodule SymphonyElixir.ControlPlane do
           :admission_conflict
           | :admission_not_found
           | :invalid_admission
+          | Error.t()
+  @type lease_error ::
+          :admission_not_found
+          | :invalid_lease
+          | :lease_active
+          | :lease_held
+          | :lease_not_found
+          | :stale_lease
           | Error.t()
 
   @type credential_resolution ::
@@ -119,6 +153,19 @@ defmodule SymphonyElixir.ControlPlane do
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema_version
 
+  @spec lease_policy() :: %{
+          duration_ms: pos_integer(),
+          renewal_interval_ms: pos_integer(),
+          maximum_clock_skew_ms: non_neg_integer()
+        }
+  def lease_policy do
+    %{
+      duration_ms: @lease_duration_ms,
+      renewal_interval_ms: @lease_renewal_interval_ms,
+      maximum_clock_skew_ms: @maximum_clock_skew_ms
+    }
+  end
+
   @spec health(GenServer.server()) :: {:ok, health()} | {:error, Error.t()}
   def health(server \\ __MODULE__) do
     GenServer.call(server, :health, @call_timeout_ms)
@@ -148,6 +195,63 @@ defmodule SymphonyElixir.ControlPlane do
           {:ok, Admission.t()} | {:error, admission_error()}
   def admit_run(server \\ __MODULE__, context) do
     GenServer.call(server, {:admit_run, context}, @call_timeout_ms)
+  end
+
+  @doc """
+  Atomically acquires the admitted run for one owner.
+
+  An active lease cannot be reacquired, including by the same owner. After
+  release or expiry, acquisition assigns a fencing token greater than every
+  token previously issued for the run.
+  """
+  @spec acquire_lease(GenServer.server(), String.t(), String.t()) ::
+          {:ok, Lease.t()} | {:error, lease_error()}
+  def acquire_lease(server \\ __MODULE__, admitted_run_id, owner_id) do
+    GenServer.call(
+      server,
+      {:acquire_lease, admitted_run_id, owner_id},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Renews a current lease without changing its fencing token.
+  """
+  @spec renew_lease(GenServer.server(), Lease.t()) ::
+          {:ok, Lease.t()} | {:error, lease_error()}
+  def renew_lease(server \\ __MODULE__, lease) do
+    GenServer.call(server, {:renew_lease, lease}, @call_timeout_ms)
+  end
+
+  @doc """
+  Transfers a current lease to a different owner and issues a new token.
+  """
+  @spec transfer_lease(GenServer.server(), Lease.t(), String.t()) ::
+          {:ok, Lease.t()} | {:error, lease_error()}
+  def transfer_lease(server \\ __MODULE__, lease, new_owner_id) do
+    GenServer.call(
+      server,
+      {:transfer_lease, lease, new_owner_id},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Releases a current lease. The issued token remains retired durably.
+  """
+  @spec release_lease(GenServer.server(), Lease.t()) ::
+          :ok | {:error, lease_error()}
+  def release_lease(server \\ __MODULE__, lease) do
+    GenServer.call(server, {:release_lease, lease}, @call_timeout_ms)
+  end
+
+  @doc """
+  Clears an expired lease while retaining its fencing-token history.
+  """
+  @spec expire_lease(GenServer.server(), String.t()) ::
+          {:ok, :expired} | {:error, lease_error()}
+  def expire_lease(server \\ __MODULE__, admitted_run_id) do
+    GenServer.call(server, {:expire_lease, admitted_run_id}, @call_timeout_ms)
   end
 
   @spec fetch_admission(GenServer.server(), String.t(), String.t()) ::
@@ -190,10 +294,11 @@ defmodule SymphonyElixir.ControlPlane do
     database_path = path(opts)
 
     with {:ok, busy_timeout_ms} <- busy_timeout(opts, database_path),
+         {:ok, clock} <- clock(opts, database_path),
          :ok <- prepare_store_path(database_path),
          {:ok, connection} <- open(database_path),
          {:ok, state} <- initialize_connection(connection, database_path, busy_timeout_ms) do
-      {:ok, state}
+      {:ok, Map.put(state, :clock, clock)}
     else
       {:error, %Error{} = error} -> {:stop, error}
     end
@@ -219,6 +324,54 @@ defmodule SymphonyElixir.ControlPlane do
 
   def handle_call({:fetch_admission, target_id, tracker_issue_id}, _from, state) do
     {:reply, load_admission(state.connection, state.path, target_id, tracker_issue_id), state}
+  end
+
+  def handle_call({:acquire_lease, admitted_run_id, owner_id}, _from, state) do
+    result =
+      acquire_run_lease(
+        state.connection,
+        state.path,
+        admitted_run_id,
+        owner_id,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:renew_lease, lease}, _from, state) do
+    result = renew_run_lease(state.connection, state.path, lease, state.clock)
+    {:reply, result, state}
+  end
+
+  def handle_call({:transfer_lease, lease, new_owner_id}, _from, state) do
+    result =
+      transfer_run_lease(
+        state.connection,
+        state.path,
+        lease,
+        new_owner_id,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:release_lease, lease}, _from, state) do
+    result = release_run_lease(state.connection, state.path, lease, state.clock)
+    {:reply, result, state}
+  end
+
+  def handle_call({:expire_lease, admitted_run_id}, _from, state) do
+    result =
+      expire_run_lease(
+        state.connection,
+        state.path,
+        admitted_run_id,
+        state.clock
+      )
+
+    {:reply, result, state}
   end
 
   @impl true
@@ -249,6 +402,55 @@ defmodule SymphonyElixir.ControlPlane do
          timeout_ms
        )}
     end
+  end
+
+  defp clock(opts, database_path) do
+    case Keyword.get(opts, :clock, fn -> System.system_time(:millisecond) end) do
+      clock when is_function(clock, 0) ->
+        {:ok, clock}
+
+      invalid ->
+        {:error,
+         error(
+           :invalid_clock,
+           database_path,
+           "control-plane clock must be a zero-arity function",
+           invalid
+         )}
+    end
+  end
+
+  defp wall_clock_ms(clock, database_path) do
+    case invoke_clock(clock) do
+      {:ok, now_ms} when is_integer(now_ms) and now_ms >= 0 ->
+        {:ok, now_ms}
+
+      {:ok, invalid} ->
+        {:error,
+         error(
+           :clock_failed,
+           database_path,
+           "control-plane wall clock returned an invalid millisecond timestamp",
+           invalid
+         )}
+
+      {:error, reason} ->
+        {:error,
+         error(
+           :clock_failed,
+           database_path,
+           "control-plane wall clock is unavailable",
+           reason
+         )}
+    end
+  end
+
+  defp invoke_clock(clock) do
+    {:ok, clock.()}
+  rescue
+    exception -> {:error, Exception.message(exception)}
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 
   defp prepare_store_path(database_path) do
@@ -545,6 +747,34 @@ defmodule SymphonyElixir.ControlPlane do
     PRAGMA user_version = 2;
     """
 
+    with :ok <- execute(connection, migration, database_path, :migration_failed) do
+      apply_migrations(connection, 2, database_path)
+    end
+  end
+
+  defp apply_migrations(connection, 2, database_path) do
+    migration = """
+    CREATE TABLE run_leases (
+      admitted_run_id TEXT PRIMARY KEY,
+      owner_id TEXT,
+      fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+      lease_deadline_ms INTEGER,
+      acquired_at_ms INTEGER NOT NULL,
+      renewed_at_ms INTEGER NOT NULL,
+      last_observed_at_ms INTEGER NOT NULL,
+      CHECK (
+        (owner_id IS NULL AND lease_deadline_ms IS NULL) OR
+        (length(owner_id) > 0 AND lease_deadline_ms IS NOT NULL)
+      ),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    INSERT INTO schema_migrations (version, applied_at)
+    VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    PRAGMA user_version = 3;
+    """
+
     execute(connection, migration, database_path, :migration_failed)
   end
 
@@ -577,7 +807,8 @@ defmodule SymphonyElixir.ControlPlane do
   defp validate_current_schema(connection, @schema_version, database_path) do
     with {:ok, [[@schema_version]]} <-
            query(connection, "SELECT max(version) FROM schema_migrations"),
-         :ok <- validate_admission_schema(connection, database_path) do
+         :ok <- validate_admission_schema(connection, database_path),
+         :ok <- validate_lease_schema(connection, database_path) do
       :ok
     else
       {:ok, rows} ->
@@ -640,6 +871,755 @@ defmodule SymphonyElixir.ControlPlane do
       {:error, reason} -> corrupt_store(database_path, {:invalid_admission_schema, reason})
     end
   end
+
+  defp validate_lease_schema(connection, database_path) do
+    sql = """
+    SELECT
+      lease.admitted_run_id,
+      lease.owner_id,
+      lease.fencing_token,
+      lease.lease_deadline_ms,
+      lease.acquired_at_ms,
+      lease.renewed_at_ms,
+      lease.last_observed_at_ms
+    FROM run_leases AS lease
+    JOIN run_admissions AS admission
+      ON admission.admitted_run_id = lease.admitted_run_id
+    LIMIT 0
+    """
+
+    case query(connection, sql) do
+      {:ok, []} -> :ok
+      {:ok, rows} -> corrupt_store(database_path, {:unexpected_lease_schema_rows, length(rows)})
+      {:error, reason} -> corrupt_store(database_path, {:invalid_lease_schema, reason})
+    end
+  end
+
+  defp acquire_run_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         clock
+       ) do
+    with :ok <- validate_admitted_run_id(admitted_run_id),
+         :ok <- validate_owner_id(owner_id) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        acquire_current_lease(
+          connection,
+          database_path,
+          admitted_run_id,
+          owner_id,
+          now_ms
+        )
+      end)
+    end
+  end
+
+  defp acquire_selected_lease(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _owner_id,
+         _now_ms,
+         nil
+       ),
+       do: {:error, :admission_not_found}
+
+  defp acquire_selected_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         now_ms,
+         [target_id, tracker_issue_id, nil, nil, nil, nil, nil, nil]
+       ) do
+    with :ok <-
+           insert_lease_record(
+             connection,
+             database_path,
+             admitted_run_id,
+             owner_id,
+             now_ms
+           ) do
+      {:ok,
+       build_lease(
+         admitted_run_id,
+         target_id,
+         tracker_issue_id,
+         owner_id,
+         1,
+         lease_deadline(now_ms)
+       )}
+    end
+  end
+
+  defp acquire_selected_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         now_ms,
+         [
+           target_id,
+           tracker_issue_id,
+           current_owner_id,
+           fencing_token,
+           deadline_ms,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           last_observed_at_ms
+         ]
+       )
+       when is_integer(fencing_token) and fencing_token > 0 and
+              is_integer(last_observed_at_ms) do
+    with :ok <- validate_clock_progress(now_ms, last_observed_at_ms, database_path),
+         :ok <- lease_available(current_owner_id, deadline_ms, now_ms),
+         next_token = fencing_token + 1,
+         next_deadline_ms = lease_deadline(now_ms),
+         :ok <-
+           activate_lease_record(
+             connection,
+             database_path,
+             admitted_run_id,
+             fencing_token,
+             owner_id,
+             next_token,
+             next_deadline_ms,
+             now_ms
+           ) do
+      {:ok,
+       build_lease(
+         admitted_run_id,
+         target_id,
+         tracker_issue_id,
+         owner_id,
+         next_token,
+         next_deadline_ms
+       )}
+    end
+  end
+
+  defp acquire_selected_lease(
+         _connection,
+         database_path,
+         _admitted_run_id,
+         _owner_id,
+         _now_ms,
+         _row
+       ),
+       do: corrupt_store(database_path, :invalid_run_lease)
+
+  defp renew_run_lease(connection, database_path, lease, clock) do
+    with :ok <- validate_lease(lease) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        renew_current_lease(connection, database_path, lease, now_ms)
+      end)
+    end
+  end
+
+  defp transfer_run_lease(
+         connection,
+         database_path,
+         lease,
+         new_owner_id,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         :ok <- validate_owner_id(new_owner_id),
+         :ok <- validate_new_owner(lease.owner_id, new_owner_id) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        transfer_current_lease(
+          connection,
+          database_path,
+          lease,
+          new_owner_id,
+          now_ms
+        )
+      end)
+    end
+  end
+
+  defp release_run_lease(connection, database_path, lease, clock) do
+    with :ok <- validate_lease(lease) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        release_current_lease(connection, database_path, lease, now_ms)
+      end)
+      |> release_result()
+    end
+  end
+
+  defp expire_run_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         clock
+       ) do
+    with :ok <- validate_admitted_run_id(admitted_run_id) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        expire_current_lease(
+          connection,
+          database_path,
+          admitted_run_id,
+          now_ms
+        )
+      end)
+    end
+  end
+
+  defp acquire_current_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         now_ms
+       ) do
+    with {:ok, row} <-
+           select_lease_record(connection, database_path, admitted_run_id) do
+      acquire_selected_lease(
+        connection,
+        database_path,
+        admitted_run_id,
+        owner_id,
+        now_ms,
+        row
+      )
+    end
+  end
+
+  defp renew_current_lease(connection, database_path, lease, now_ms) do
+    with {:ok, row} <-
+           select_lease_record(
+             connection,
+             database_path,
+             lease.admitted_run_id
+           ),
+         {:ok, current_deadline_ms} <-
+           authorize_lease(row, lease, now_ms, database_path),
+         next_deadline_ms = max(current_deadline_ms, lease_deadline(now_ms)),
+         :ok <-
+           renew_lease_record(
+             connection,
+             database_path,
+             lease,
+             next_deadline_ms,
+             now_ms
+           ) do
+      {:ok, %{lease | deadline_ms: next_deadline_ms}}
+    end
+  end
+
+  defp transfer_current_lease(
+         connection,
+         database_path,
+         lease,
+         new_owner_id,
+         now_ms
+       ) do
+    with {:ok, row} <-
+           select_lease_record(
+             connection,
+             database_path,
+             lease.admitted_run_id
+           ),
+         {:ok, current_deadline_ms} <-
+           authorize_lease(row, lease, now_ms, database_path),
+         next_token = lease.fencing_token + 1,
+         next_deadline_ms = max(current_deadline_ms, lease_deadline(now_ms)),
+         :ok <-
+           transfer_lease_record(
+             connection,
+             database_path,
+             lease,
+             new_owner_id,
+             next_token,
+             next_deadline_ms,
+             now_ms
+           ) do
+      {:ok,
+       %{
+         lease
+         | owner_id: new_owner_id,
+           fencing_token: next_token,
+           deadline_ms: next_deadline_ms
+       }}
+    end
+  end
+
+  defp release_current_lease(connection, database_path, lease, now_ms) do
+    with {:ok, row} <-
+           select_lease_record(
+             connection,
+             database_path,
+             lease.admitted_run_id
+           ),
+         {:ok, _current_deadline_ms} <-
+           authorize_lease(row, lease, now_ms, database_path),
+         :ok <-
+           clear_lease_record(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token,
+             now_ms
+           ) do
+      {:ok, :released}
+    end
+  end
+
+  defp expire_current_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         now_ms
+       ) do
+    with {:ok, row} <-
+           select_lease_record(connection, database_path, admitted_run_id) do
+      expire_selected_lease(
+        connection,
+        database_path,
+        admitted_run_id,
+        now_ms,
+        row
+      )
+    end
+  end
+
+  defp expire_selected_lease(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _now_ms,
+         nil
+       ),
+       do: {:error, :admission_not_found}
+
+  defp expire_selected_lease(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _now_ms,
+         [_target_id, _tracker_issue_id, nil, nil, nil, nil, nil, nil]
+       ),
+       do: {:error, :lease_not_found}
+
+  defp expire_selected_lease(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _now_ms,
+         [
+           _target_id,
+           _tracker_issue_id,
+           nil,
+           fencing_token,
+           nil,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           _last_observed_at_ms
+         ]
+       )
+       when is_integer(fencing_token) and fencing_token > 0,
+       do: {:error, :lease_not_found}
+
+  defp expire_selected_lease(
+         connection,
+         database_path,
+         admitted_run_id,
+         now_ms,
+         [
+           _target_id,
+           _tracker_issue_id,
+           owner_id,
+           fencing_token,
+           deadline_ms,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           last_observed_at_ms
+         ]
+       )
+       when is_binary(owner_id) and owner_id != "" and
+              is_integer(fencing_token) and fencing_token > 0 and
+              is_integer(deadline_ms) and is_integer(last_observed_at_ms) do
+    with :ok <- validate_clock_progress(now_ms, last_observed_at_ms, database_path),
+         :ok <- require_expired(deadline_ms, now_ms),
+         :ok <-
+           clear_lease_record(
+             connection,
+             database_path,
+             admitted_run_id,
+             fencing_token,
+             now_ms
+           ) do
+      {:ok, :expired}
+    end
+  end
+
+  defp expire_selected_lease(
+         _connection,
+         database_path,
+         _admitted_run_id,
+         _now_ms,
+         _row
+       ),
+       do: corrupt_store(database_path, :invalid_run_lease)
+
+  defp select_lease_record(connection, database_path, admitted_run_id) do
+    sql = """
+    SELECT
+      admission.target_id,
+      admission.tracker_issue_id,
+      lease.owner_id,
+      lease.fencing_token,
+      lease.lease_deadline_ms,
+      lease.acquired_at_ms,
+      lease.renewed_at_ms,
+      lease.last_observed_at_ms
+    FROM run_admissions AS admission
+    LEFT JOIN run_leases AS lease
+      ON lease.admitted_run_id = admission.admitted_run_id
+    WHERE admission.admitted_run_id = ?1
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [admitted_run_id],
+           database_path,
+           "cannot read run lease"
+         ) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, [row]} -> {:ok, row}
+      {:ok, _invalid_rows} -> corrupt_store(database_path, :duplicate_run_lease)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp insert_lease_record(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         now_ms
+       ) do
+    sql = """
+    INSERT INTO run_leases (
+      admitted_run_id,
+      owner_id,
+      fencing_token,
+      lease_deadline_ms,
+      acquired_at_ms,
+      renewed_at_ms,
+      last_observed_at_ms
+    ) VALUES (?1, ?2, 1, ?3, ?4, ?4, ?4)
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [admitted_run_id, owner_id, lease_deadline(now_ms), now_ms],
+      database_path,
+      "cannot acquire run lease"
+    )
+  end
+
+  defp activate_lease_record(
+         connection,
+         database_path,
+         admitted_run_id,
+         current_token,
+         owner_id,
+         next_token,
+         next_deadline_ms,
+         now_ms
+       ) do
+    sql = """
+    UPDATE run_leases
+    SET owner_id = ?1,
+        fencing_token = ?2,
+        lease_deadline_ms = ?3,
+        acquired_at_ms = ?4,
+        renewed_at_ms = ?4,
+        last_observed_at_ms = max(last_observed_at_ms, ?4)
+    WHERE admitted_run_id = ?5 AND fencing_token = ?6
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        owner_id,
+        next_token,
+        next_deadline_ms,
+        now_ms,
+        admitted_run_id,
+        current_token
+      ],
+      database_path,
+      "cannot acquire run lease"
+    )
+  end
+
+  defp renew_lease_record(
+         connection,
+         database_path,
+         lease,
+         next_deadline_ms,
+         now_ms
+       ) do
+    sql = """
+    UPDATE run_leases
+    SET lease_deadline_ms = ?1,
+        renewed_at_ms = ?2,
+        last_observed_at_ms = max(last_observed_at_ms, ?2)
+    WHERE admitted_run_id = ?3
+      AND owner_id = ?4
+      AND fencing_token = ?5
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        next_deadline_ms,
+        now_ms,
+        lease.admitted_run_id,
+        lease.owner_id,
+        lease.fencing_token
+      ],
+      database_path,
+      "cannot renew run lease"
+    )
+  end
+
+  defp transfer_lease_record(
+         connection,
+         database_path,
+         lease,
+         new_owner_id,
+         next_token,
+         next_deadline_ms,
+         now_ms
+       ) do
+    sql = """
+    UPDATE run_leases
+    SET owner_id = ?1,
+        fencing_token = ?2,
+        lease_deadline_ms = ?3,
+        acquired_at_ms = ?4,
+        renewed_at_ms = ?4,
+        last_observed_at_ms = max(last_observed_at_ms, ?4)
+    WHERE admitted_run_id = ?5
+      AND owner_id = ?6
+      AND fencing_token = ?7
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        new_owner_id,
+        next_token,
+        next_deadline_ms,
+        now_ms,
+        lease.admitted_run_id,
+        lease.owner_id,
+        lease.fencing_token
+      ],
+      database_path,
+      "cannot transfer run lease"
+    )
+  end
+
+  defp clear_lease_record(
+         connection,
+         database_path,
+         admitted_run_id,
+         fencing_token,
+         now_ms
+       ) do
+    sql = """
+    UPDATE run_leases
+    SET owner_id = NULL,
+        lease_deadline_ms = NULL,
+        renewed_at_ms = ?1,
+        last_observed_at_ms = max(last_observed_at_ms, ?1)
+    WHERE admitted_run_id = ?2 AND fencing_token = ?3
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [now_ms, admitted_run_id, fencing_token],
+      database_path,
+      "cannot clear run lease"
+    )
+  end
+
+  defp authorize_lease(nil, _lease, _now_ms, _database_path),
+    do: {:error, :admission_not_found}
+
+  defp authorize_lease(
+         [
+           target_id,
+           tracker_issue_id,
+           owner_id,
+           fencing_token,
+           deadline_ms,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           last_observed_at_ms
+         ],
+         lease,
+         now_ms,
+         database_path
+       )
+       when is_binary(owner_id) and owner_id != "" and
+              is_integer(fencing_token) and fencing_token > 0 and
+              is_integer(deadline_ms) and is_integer(last_observed_at_ms) do
+    with :ok <- validate_clock_progress(now_ms, last_observed_at_ms, database_path),
+         true <-
+           target_id == lease.target_id and
+             tracker_issue_id == lease.tracker_issue_id and
+             owner_id == lease.owner_id and
+             fencing_token == lease.fencing_token,
+         true <- now_ms < deadline_ms do
+      {:ok, deadline_ms}
+    else
+      false -> {:error, :stale_lease}
+      {:error, %Error{} = clock_error} -> {:error, clock_error}
+    end
+  end
+
+  defp authorize_lease(
+         [
+           _target_id,
+           _tracker_issue_id,
+           nil,
+           fencing_token,
+           nil,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           _last_observed_at_ms
+         ],
+         _lease,
+         _now_ms,
+         _database_path
+       )
+       when is_integer(fencing_token) and fencing_token > 0,
+       do: {:error, :stale_lease}
+
+  defp authorize_lease(_row, _lease, _now_ms, database_path),
+    do: corrupt_store(database_path, :invalid_run_lease)
+
+  defp lease_transaction(connection, database_path, clock, operation) do
+    with :ok <-
+           execute(
+             connection,
+             "BEGIN IMMEDIATE",
+             database_path,
+             :transaction_failed
+           ) do
+      result =
+        with {:ok, now_ms} <- wall_clock_ms(clock, database_path) do
+          operation.(now_ms)
+        end
+
+      finish_transaction(connection, database_path, result)
+    end
+  end
+
+  defp lease_available(nil, nil, _now_ms), do: :ok
+
+  defp lease_available(owner_id, deadline_ms, now_ms)
+       when is_binary(owner_id) and owner_id != "" and
+              is_integer(deadline_ms) do
+    if now_ms >= deadline_ms, do: :ok, else: {:error, :lease_held}
+  end
+
+  defp lease_available(_owner_id, _deadline_ms, _now_ms),
+    do: {:error, :invalid_lease}
+
+  defp require_expired(deadline_ms, now_ms) do
+    if now_ms >= deadline_ms, do: :ok, else: {:error, :lease_active}
+  end
+
+  defp validate_clock_progress(now_ms, last_observed_at_ms, database_path) do
+    if now_ms + @maximum_clock_skew_ms >= last_observed_at_ms do
+      :ok
+    else
+      {:error,
+       error(
+         :clock_failed,
+         database_path,
+         "control-plane wall clock moved backward beyond the allowed skew",
+         %{
+           maximum_clock_skew_ms: @maximum_clock_skew_ms,
+           last_observed_at_ms: last_observed_at_ms,
+           now_ms: now_ms
+         }
+       )}
+    end
+  end
+
+  defp validate_admitted_run_id(value)
+       when is_binary(value) and value != "" do
+    if String.valid?(value), do: :ok, else: {:error, :invalid_lease}
+  end
+
+  defp validate_admitted_run_id(_value), do: {:error, :invalid_lease}
+
+  defp validate_owner_id(value) when is_binary(value) and value != "" do
+    if String.valid?(value), do: :ok, else: {:error, :invalid_lease}
+  end
+
+  defp validate_owner_id(_value), do: {:error, :invalid_lease}
+
+  defp validate_new_owner(owner_id, owner_id), do: {:error, :invalid_lease}
+  defp validate_new_owner(_owner_id, _new_owner_id), do: :ok
+
+  defp validate_lease(%Lease{
+         admitted_run_id: admitted_run_id,
+         target_id: target_id,
+         tracker_issue_id: tracker_issue_id,
+         owner_id: owner_id,
+         fencing_token: fencing_token,
+         deadline_ms: deadline_ms
+       })
+       when is_binary(target_id) and target_id != "" and
+              is_binary(tracker_issue_id) and tracker_issue_id != "" and
+              is_integer(fencing_token) and fencing_token > 0 and
+              is_integer(deadline_ms) do
+    case validate_admitted_run_id(admitted_run_id) do
+      :ok -> validate_owner_id(owner_id)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_lease(_lease), do: {:error, :invalid_lease}
+
+  defp lease_deadline(now_ms), do: now_ms + @lease_duration_ms
+
+  defp build_lease(
+         admitted_run_id,
+         target_id,
+         tracker_issue_id,
+         owner_id,
+         fencing_token,
+         deadline_ms
+       ) do
+    %Lease{
+      admitted_run_id: admitted_run_id,
+      target_id: target_id,
+      tracker_issue_id: tracker_issue_id,
+      owner_id: owner_id,
+      fencing_token: fencing_token,
+      deadline_ms: deadline_ms
+    }
+  end
+
+  defp release_result({:ok, :released}), do: :ok
+  defp release_result({:error, _reason} = error), do: error
 
   defp prepare_admission(%ExecutionContext{} = context) do
     with :ok <- ExecutionContext.validate(context),
@@ -1421,7 +2401,7 @@ defmodule SymphonyElixir.ControlPlane do
      error(
        :corrupt_store,
        database_path,
-       "control-plane durable admission state is invalid",
+       "control-plane durable state is invalid",
        reason
      )}
   end

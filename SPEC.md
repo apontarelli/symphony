@@ -2126,6 +2126,28 @@ credential values MUST NOT enter database files, logs, errors, inspection output
 Current credentials MUST resolve only after a fenced owner starts or recovers the run. Missing
 credentials MUST produce an explicit blocked result for that run.
 
+### 10.10 Durable Run Leases and Fencing
+
+Each admitted run MUST have at most one active lease. The durable lease identity MUST use the
+immutable admitted run ID so target-scoped runs with overlapping tracker issue IDs lease
+independently.
+
+Lease acquisition, renewal, ownership transfer, release, and expiry MUST run in immediate store
+transactions. Acquisition MUST fail while an unexpired lease exists. Acquisition after release or
+expiry and direct ownership transfer MUST issue a fencing token greater than every token previously
+issued for that run. Released and expired tokens MUST remain retired durably.
+
+Renewal, transfer, and release MUST require the admitted run ID, target ID, tracker issue ID, owner
+ID, and fencing token of the current unexpired lease. A mismatched owner, mismatched token, released
+lease, or lease at its exact deadline MUST fail as stale. Durable run mutations after admission MUST
+validate the current owner and fencing token in the same transaction as the mutation.
+
+The local control plane uses a 30-second lease and a 10-second renewal cadence. Deadlines MUST use
+durable wall-clock milliseconds so they remain meaningful across process and host restart. The
+clock MUST be injectable for deterministic tests. A backward clock change of at most one second MAY
+retain the existing deadline but MUST NOT shorten it. A larger backward change, an invalid clock
+result, or a store error MUST prevent acquisition, renewal, transfer, release, and expiry.
+
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
 ### 11.1 REQUIRED Operations
