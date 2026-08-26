@@ -242,9 +242,9 @@ data.
 
 The public `symphony run <saved-name>` and `symphony run --workflow <path>` commands remain
 single-target admission adapters. After admission, they use the same context-first execution path.
-The current host still activates and polls one selected target. A durable control-plane store and a
-multi-target activation, fairness, or scheduling loop are deferred; Phase 2 provides isolation, not
-those later control-plane capabilities.
+The current host still activates and polls one selected target. The local durable control-plane
+store is now available for later durable admissions, leases, and recovery work. Multi-target
+activation, fairness, and scheduling remain deferred.
 
 The deterministic contract test is
 `test/symphony_elixir/two_target_isolation_test.exs`. It poisons mutable global configuration after
@@ -323,6 +323,15 @@ terminal states `Closed`, `Cancelled`, `Canceled`, `Duplicate`, and `Done`, poll
 
 Deployment ceilings default to 10 agents and 2 startups. A saved run setup may choose a named
 profile or an explicit capacity map, but the resolved capacity cannot exceed those ceilings.
+
+The runtime owns a local SQLite control-plane store at
+`~/.config/symphony/control-plane.sqlite3` (or the selected `SYMPHONY_CONFIG_ROOT` /
+`--config-root`). Startup creates and migrates the schema in one transaction, enables WAL mode,
+uses a bounded five-second busy timeout, and runs SQLite and schema health checks. The config root
+is mode `0700`; the database and SQLite auxiliary files are mode `0600`. An unsupported schema,
+failed migration, corrupt database, or unusable root stops runtime startup with the database path
+and failure reason. Preview and list commands do not start the runtime or create this database.
+Durable target, admission, lease, and run records are not part of this schema milestone.
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
 letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target

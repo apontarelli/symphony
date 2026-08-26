@@ -23,20 +23,32 @@ defmodule SymphonyElixir.Application do
   def start(_type, _args) do
     :ok = SymphonyElixir.LogFile.configure()
 
-    children = [
-      {Phoenix.PubSub, name: SymphonyElixir.PubSub},
-      {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
-      SymphonyElixir.WorkflowStore,
-      {SymphonyElixir.Orchestrator, validate_startup: Application.get_env(:symphony_elixir, :validate_startup, true)},
-      SymphonyElixir.HttpServer,
-      SymphonyElixir.StatusDashboard
+    orchestrator_options = [
+      validate_startup: Application.get_env(:symphony_elixir, :validate_startup, true)
     ]
+
+    children =
+      control_plane_children() ++
+        [
+          {Phoenix.PubSub, name: SymphonyElixir.PubSub},
+          {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
+          SymphonyElixir.WorkflowStore,
+          {SymphonyElixir.Orchestrator, orchestrator_options},
+          SymphonyElixir.HttpServer,
+          SymphonyElixir.StatusDashboard
+        ]
 
     Supervisor.start_link(
       children,
       strategy: :one_for_one,
       name: SymphonyElixir.Supervisor
     )
+  end
+
+  defp control_plane_children do
+    if Application.get_env(:symphony_elixir, :start_control_plane, true),
+      do: [SymphonyElixir.ControlPlane],
+      else: []
   end
 
   @impl true

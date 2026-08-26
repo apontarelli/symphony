@@ -33,7 +33,8 @@ defmodule SymphonyElixir.LocalConfig do
   @spec root(keyword()) :: Path.t()
   def root(opts \\ []) do
     opts
-    |> Keyword.get(:config_root, @default_config_root)
+    |> Keyword.get(:config_root)
+    |> then(&(&1 || System.get_env("SYMPHONY_CONFIG_ROOT") || @default_config_root))
     |> Path.expand()
   end
 

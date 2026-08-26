@@ -37,6 +37,7 @@ defmodule SymphonyElixir.LocalRun do
           required(:setup) => setup(),
           required(:resolved_setup) => RunSetup.t(),
           required(:workflow_path) => Path.t(),
+          required(:config_root) => Path.t(),
           required(:preview) => String.t(),
           required(:start?) => boolean(),
           required(:source) => :interactive | :issues,
@@ -67,6 +68,7 @@ defmodule SymphonyElixir.LocalRun do
          resolved_setup: resolved_setup,
          workflow_path: workflow_path,
          preview: preview,
+         config_root: config_root,
          start?: start?,
          source: source,
          saved_path: saved_path

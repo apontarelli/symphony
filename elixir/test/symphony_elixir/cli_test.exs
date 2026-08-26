@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.CLITest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{CLI, LocalConfig}
+  alias SymphonyElixir.{CLI, ControlPlane, LocalConfig}
   alias SymphonyElixir.Workflow.{Manifest, Renderer}
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
@@ -316,6 +316,7 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "side effects: none (preview is read-only)"
     refute File.exists?(LocalConfig.path(config_root: config_root))
     refute File.exists?(LocalConfig.runs_dir(config_root: config_root))
+    refute File.exists?(ControlPlane.path(config_root: config_root))
   end
 
   test "local run start applies restrictive overrides to runtime state" do
@@ -326,6 +327,10 @@ defmodule SymphonyElixir.CLITest do
 
     deps =
       cli_deps(%{
+        set_control_plane_root: fn root ->
+          send(parent, {:control_plane_root, root})
+          :ok
+        end,
         ensure_all_started: fn ->
           send(parent, :started)
           {:ok, [:symphony_elixir]}
@@ -359,6 +364,7 @@ defmodule SymphonyElixir.CLITest do
     assert setup.capacity.max_concurrent_startups == 1
     assert setup.issue_batch_limit == 1
     assert setup.restrictive_flags == [:human_review_only, :no_land]
+    assert_received {:control_plane_root, ^config_root}
     assert_received :started
   end
 

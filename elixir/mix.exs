@@ -18,6 +18,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRuntime.CodexAppServer,
           SymphonyElixir.AgentRuntime.OpenCodeServer,
           SymphonyElixir.Config,
+          SymphonyElixir.ControlPlane,
+          SymphonyElixir.ControlPlane.Error,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,
           SymphonyElixir.Workflow.Renderer,
@@ -88,6 +90,7 @@ defmodule SymphonyElixir.MixProject do
       {:yaml_elixir, "~> 2.12"},
       {:solid, "~> 1.3.3"},
       {:ecto, "~> 3.14.2"},
+      {:exqlite, "~> 0.40.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
     ]

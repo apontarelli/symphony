@@ -60,6 +60,7 @@ defmodule SymphonyElixir.CLI do
           required(:set_server_port_override) => (non_neg_integer() | nil -> :ok | {:error, term()}),
           required(:set_profile_override) => (String.t() | nil -> :ok | {:error, term()}),
           required(:ensure_all_started) => (-> ensure_started_result()),
+          optional(:set_control_plane_root) => (Path.t() -> :ok | {:error, term()}),
           optional(:cwd) => (-> String.t()),
           optional(:tty?) => (-> boolean()),
           optional(:confirm) => (String.t() -> boolean()),
@@ -327,6 +328,7 @@ defmodule SymphonyElixir.CLI do
       set_server_port_override: &set_server_port_override/1,
       set_profile_override: &SymphonyElixir.Config.set_profile_override/1,
       cwd: fn -> System.get_env("SYMPHONY_RUN_REPO_ROOT") || File.cwd!() end,
+      set_control_plane_root: &set_control_plane_root/1,
       ensure_all_started: fn -> Application.ensure_all_started(:symphony_elixir) end
     }
   end
@@ -439,10 +441,10 @@ defmodule SymphonyElixir.CLI do
   defp start_local_run(result, deps) do
     :ok = RunSetup.put_current(result.resolved_setup)
 
-    case run(result.workflow_path, [], deps) do
-      :ok ->
-        :ok
-
+    with :ok <- maybe_set_control_plane_root(result.config_root, deps),
+         :ok <- run(result.workflow_path, [], deps) do
+      :ok
+    else
       {:error, _reason} = error ->
         RunSetup.clear_current()
         error
@@ -650,6 +652,7 @@ defmodule SymphonyElixir.CLI do
          :ok <- maybe_set_logs_root(context.opts, context.deps),
          :ok <- maybe_set_server_port(context.opts, context.deps),
          :ok <- maybe_set_profile_override(context.opts, context.deps),
+         :ok <- maybe_set_control_plane_root(LocalConfig.root(context.config_opts), context.deps),
          {:ok, runtime_path} <-
            RunSetup.materialize_runtime_manifest(
              context.name,
@@ -734,6 +737,17 @@ defmodule SymphonyElixir.CLI do
       nil -> []
       root -> [config_root: root]
     end
+  end
+
+  defp maybe_set_control_plane_root(root, deps) do
+    case Map.get(deps, :set_control_plane_root) do
+      setter when is_function(setter, 1) -> setter.(root)
+      _other -> :ok
+    end
+  end
+
+  defp set_control_plane_root(root) do
+    Application.put_env(:symphony_elixir, :control_plane_config_root, Path.expand(root))
   end
 
   defp default_run_setup_name(repo) do
