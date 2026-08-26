@@ -90,10 +90,10 @@ defmodule SymphonyElixir.RunSetup do
     cwd = opts |> Keyword.get(:cwd, File.cwd!()) |> Path.expand()
     runtime_setup_path = Keyword.get(opts, :runtime_setup_path, "<in-memory>")
     runtime_source = Keyword.get(opts, :runtime_setup_source, "in-memory run setup")
-    opts = Keyword.put_new(opts, :mode, persisted_runtime_mode(manifest))
+    mode_opts = Keyword.put_new(opts, :mode, persisted_runtime_mode(manifest))
 
     with :ok <- reject_weakening_flags(opts),
-         {:ok, mode, issue_batch_limit} <- resolve_mode(opts),
+         {:ok, mode, issue_batch_limit} <- resolve_mode(mode_opts),
          {:ok, loaded} <- Manifest.load_map(manifest, repo_setup?: false),
          {:ok, setup} <-
            resolve_loaded(
@@ -126,8 +126,11 @@ defmodule SymphonyElixir.RunSetup do
          {:ok, settings} <- Schema.parse(config),
          {:ok, repo_setup_path, repo_source, repo_manifest} <-
            resolve_repo_setup(opts, cwd, runtime_setup_path),
-         {:ok, capacity} <- resolve_capacity(settings, opts) do
-      restrictive_flags = selected_flags(opts, @restrictive_flags)
+         {:ok, capacity} <- resolve_capacity(settings, opts),
+         {:ok, persisted_restrictive_flags} <- persisted_restrictive_flags(manifest) do
+      restrictive_flags =
+        Enum.uniq(persisted_restrictive_flags ++ selected_flags(opts, @restrictive_flags))
+
       profile = normalized_string(Keyword.get(opts, :profile)) || policy_profile(settings) || "default"
 
       {:ok,
@@ -338,6 +341,7 @@ defmodule SymphonyElixir.RunSetup do
       "marker intersection: #{marker_intersection(setup.repo_manifest || setup.manifest, tracker)}",
       "eligible states: #{Enum.join(tracker.active_states, ", ")}",
       "tracker status: not checked (offline preview)",
+      "side effects: none (preview is read-only)",
       "mode: #{mode_label(setup)}",
       "capacity:",
       "  max agents: #{capacity.max_concurrent_agents} (ceiling: #{capacity.max_concurrent_agents_ceiling})",
@@ -350,7 +354,7 @@ defmodule SymphonyElixir.RunSetup do
       "  server port: #{server_port_summary(settings)}",
       "workspace root: #{settings.workspace.root}",
       "restrictive flags: #{flags_summary(setup.restrictive_flags)}",
-      "safety/landing posture: #{safety_summary(settings)}",
+      "safety/landing posture: #{safety_summary(settings, setup.restrictive_flags)}",
       warning_section(setup.warnings),
       "source provenance:",
       "  repo setup: #{setup.source_provenance.repo_setup}",
@@ -698,7 +702,19 @@ defmodule SymphonyElixir.RunSetup do
 
   defp cli_overrides(opts) do
     opts
-    |> Keyword.take([:limit, :logs_root, :max_agents, :max_startups, :mode, :port, :profile])
+    |> Keyword.take([
+      :limit,
+      :logs_root,
+      :max_agents,
+      :max_startups,
+      :mode,
+      :port,
+      :profile,
+      :human_review_only,
+      :no_land,
+      :require_review,
+      :require_validation
+    ])
     |> Enum.reject(fn {_key, value} -> is_nil(value) end)
     |> Map.new()
   end
@@ -781,12 +797,30 @@ defmodule SymphonyElixir.RunSetup do
   defp server_port_summary(_settings), do: "disabled"
 
   defp flags_summary([]), do: "none"
-  defp flags_summary(flags), do: flags |> Enum.map(&to_string/1) |> Enum.sort() |> Enum.join(", ")
 
-  defp safety_summary(settings) do
+  defp flags_summary(flags) do
+    flags
+    |> Enum.map(&(to_string(&1) |> String.replace("_", "-")))
+    |> Enum.sort()
+    |> Enum.join(", ")
+  end
+
+  defp safety_summary(settings, flags) do
     posture = settings.auto_land.posture || "off"
     landing = if settings.auto_land.dry_run, do: "simulation only", else: "enabled"
-    "project=#{settings.project.criticality}/#{settings.project.deployment_coupling}; auto-land=#{posture} (#{landing})"
+    no_land? = :no_land in flags
+    human_review_only? = :human_review_only in flags
+
+    effective_landing =
+      cond do
+        no_land? -> "blocked"
+        human_review_only? -> "human review only"
+        true -> landing
+      end
+
+    "project=#{settings.project.criticality}/#{settings.project.deployment_coupling}; " <>
+      "auto-land=#{posture} (#{landing}); effective landing=#{effective_landing}; " <>
+      "no-land=#{no_land?}; human-review-only=#{human_review_only?}"
   end
 
   defp warning_section([]), do: "warnings: none"
@@ -797,7 +831,9 @@ defmodule SymphonyElixir.RunSetup do
   defp cli_override_summary(overrides) do
     overrides
     |> Enum.sort()
-    |> Enum.map_join(", ", fn {key, value} -> "#{key}=#{value}" end)
+    |> Enum.map_join(", ", fn {key, value} ->
+      "#{key |> to_string() |> String.replace("_", "-")}=#{value}"
+    end)
   end
 
   defp path_or_none(nil), do: "none"
@@ -851,6 +887,7 @@ defmodule SymphonyElixir.RunSetup do
       |> LocalConfig.deep_merge(%{"tracker" => legacy_target_tracker(setup)})
       |> LocalConfig.deep_merge(%{"target" => runtime_target(setup)})
       |> LocalConfig.deep_merge(%{"tracker" => restrictive_tracker_flags(setup)})
+      |> LocalConfig.deep_merge(runtime_restrictive_flags(setup))
 
     {:ok, runtime}
   end
@@ -889,6 +926,51 @@ defmodule SymphonyElixir.RunSetup do
       _ -> %{}
     end
   end
+
+  defp runtime_restrictive_flags(setup) do
+    flags =
+      case Map.get(setup, "restrictive_flags") do
+        values when is_map(values) ->
+          Enum.filter(@restrictive_flags, &Map.get(values, to_string(&1), false))
+
+        _other ->
+          []
+      end
+
+    if flags == [] do
+      %{}
+    else
+      %{"run_setup" => %{"restrictive_flags" => Enum.map(flags, &to_string/1)}}
+    end
+  end
+
+  defp persisted_restrictive_flags(manifest) do
+    case get_in(manifest, ["runtime", "run_setup", "restrictive_flags"]) do
+      nil ->
+        {:ok, []}
+
+      flags when is_list(flags) ->
+        normalize_persisted_restrictive_flags(flags)
+
+      _other ->
+        {:error, "runtime.run_setup.restrictive_flags must be a list"}
+    end
+  end
+
+  defp normalize_persisted_restrictive_flags(flags) do
+    normalized = Enum.map(flags, &persisted_restrictive_flag/1)
+
+    if nil in normalized do
+      {:error, "runtime.run_setup.restrictive_flags contains an unsupported value"}
+    else
+      {:ok, normalized}
+    end
+  end
+
+  defp persisted_restrictive_flag(flag) when is_binary(flag),
+    do: Enum.find(@restrictive_flags, &(to_string(&1) == flag))
+
+  defp persisted_restrictive_flag(_flag), do: nil
 
   defp validate_runtime_manifest(runtime_manifest) do
     runtime_path = Path.join(System.tmp_dir!(), "symphony-runtime-#{System.unique_integer([:positive])}.yml")

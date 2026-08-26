@@ -148,22 +148,76 @@ defmodule SymphonyElixir.LocalRunTest do
     refute Map.has_key?(persisted_setup, "runtime")
   end
 
-  test "--preview resolves an issue run without writing local configuration" do
+  test "--preview applies restrictive explicit-issue overrides without writing local configuration" do
     root = tmp_root!("local-run-read-only-preview")
     repo = tmp_repo!(root)
     config_root = Path.join(root, "config")
 
     assert {:ok, result} =
              LocalRun.evaluate(
-               ["SID-374", "--repo", repo, "--config-root", config_root, "--preview"],
+               [
+                 "SID-426",
+                 "--repo",
+                 repo,
+                 "--config-root",
+                 config_root,
+                 "--preview",
+                 "--max-agents",
+                 "1",
+                 "--max-startups",
+                 "1",
+                 "--no-land",
+                 "--human-review-only"
+               ],
                deps(root, prompt_answers: [])
              )
 
     refute result.start?
     assert result.saved_path == nil
     refute File.exists?(config_root)
-    assert result.setup["runtime"]["tracker"]["issue_ids"] == ["SID-374"]
-    assert result.preview =~ "Run preview"
+    assert result.setup["runtime"]["tracker"]["issue_ids"] == ["SID-426"]
+    assert result.setup["runtime"]["agent"]["max_concurrent_agents"] == 1
+    assert result.setup["runtime"]["agent"]["max_concurrent_startups"] == 1
+    assert get_in(result.setup, ["runtime", "run_setup", "restrictive_flags"]) == ["human_review_only", "no_land"]
+    assert result.resolved_setup.issue_batch_limit == 1
+    assert result.resolved_setup.restrictive_flags == [:human_review_only, :no_land]
+    assert result.preview =~ "mode: issue-batch (limit: 1)"
+    assert result.preview =~ "max agents: 1 (ceiling: 1)"
+    assert result.preview =~ "max startups: 1 (ceiling: 1)"
+    assert result.preview =~ "restrictive flags: human-review-only, no-land"
+    assert result.preview =~ "no-land=true; human-review-only=true"
+    assert result.preview =~ "CLI overrides: human-review-only=true, max-agents=1, max-startups=1, no-land=true"
+    assert result.preview =~ "side effects: none (preview is read-only)"
+  end
+
+  test "--preview applies restrictive overrides to interactive local runs" do
+    root = tmp_root!("local-run-interactive-overrides")
+    repo = tmp_repo!(root)
+    config_root = Path.join(root, "config")
+
+    assert {:ok, result} =
+             LocalRun.evaluate(
+               [
+                 "--repo",
+                 repo,
+                 "--config-root",
+                 config_root,
+                 "--preview",
+                 "--max-agents",
+                 "1",
+                 "--max-startups",
+                 "1",
+                 "--no-land",
+                 "--human-review-only"
+               ],
+               deps(root, prompt_answers: ["1", "SID-426", "2", ""])
+             )
+
+    refute File.exists?(config_root)
+    assert result.setup["runtime"]["tracker"]["issue_ids"] == ["SID-426"]
+    assert result.resolved_setup.capacity.max_concurrent_agents == 1
+    assert result.resolved_setup.capacity.max_concurrent_startups == 1
+    assert result.resolved_setup.restrictive_flags == [:human_review_only, :no_land]
   end
 
   test "explicit Linear UUID targets default to issue-batch mode" do
@@ -242,6 +296,32 @@ defmodule SymphonyElixir.LocalRunTest do
 
     assert {:error, message} = result
     assert message =~ "Custom capacity must be between 1 and 10"
+  end
+
+  test "explicit-issue capacity overrides cannot exceed selected or deployment ceilings" do
+    root = tmp_root!("local-run-override-capacity")
+    repo = tmp_repo!(root)
+    config_root = Path.join(root, "config")
+
+    assert {:error, selected_error} =
+             LocalRun.evaluate(
+               ["SID-426", "--repo", repo, "--config-root", config_root, "--preview", "--max-agents", "5"],
+               deps(root, prompt_answers: [])
+             )
+
+    assert selected_error =~ "cannot increase selected capacity"
+    assert selected_error =~ "max agents 5 > selected 4"
+    refute File.exists?(config_root)
+
+    assert {:error, deployment_error} =
+             LocalRun.evaluate(
+               ["SID-426", "--repo", repo, "--config-root", config_root, "--yes", "--max-agents", "11"],
+               deps(root, prompt_answers: [])
+             )
+
+    assert deployment_error =~ "exceeds deployment ceiling"
+    assert deployment_error =~ "max agents 11 > ceiling 10"
+    refute File.exists?(config_root)
   end
 
   defp deps(root, opts) do

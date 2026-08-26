@@ -148,7 +148,7 @@ defmodule SymphonyElixir.RunSetupTest do
     assert preview =~ "max startups: 1 (ceiling: 1)"
     assert preview =~ "worker: ssh hosts: worker-a"
     assert preview =~ "server port: 4000"
-    assert preview =~ "restrictive flags: no_land"
+    assert preview =~ "restrictive flags: no-land"
     assert preview =~ "repo marker labels not required by runtime target: frontend"
     assert preview =~ "runtime project project-id is outside repo allowed_projects: allowed-project"
   end

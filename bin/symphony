@@ -9,7 +9,7 @@ Usage:
   symphony setup migrate --repo <path> [--name <lowercase-slug>] [--config-root <path>] [--apply]
   symphony list [--repo <path>] [--config-root <path>] [--no-env-file]
   symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
-  symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
+  symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes] [restrictive options]
   symphony run --workflow /path/to/symphony.runtime.yml [options]
 
 Commands:

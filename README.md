@@ -106,12 +106,16 @@ export LINEAR_API_KEY=...
 ../bin/symphony run main --no-env-file                            # preview, confirm, start
 ../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --preview --no-env-file
 ../bin/symphony run SID-123 --repo /path/to/target-repo --save sid-123 --no-env-file
+../bin/symphony run SID-426 --repo /path/to/target-repo --preview --max-agents 1 --max-startups 1 --no-land --human-review-only --no-env-file
 ```
 
 Project, team, and query/file targets are selected by the interactive builder or stored in saved run
 setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,
-`target.tracker.query_file`, or `target.tracker.issue_ids`. Capacity belongs to the run setup or CLI
-launch override, never to the checked-in repo setup manifest.
+`target.tracker.query_file`, or `target.tracker.issue_ids`. Explicit issue and interactive local
+runs accept `--max-agents`, `--max-startups`, `--no-land`, and `--human-review-only`. Capacity
+overrides can only lower the selected capacity and cannot exceed local deployment ceilings.
+Capacity belongs to the run setup or CLI launch override, never to the checked-in repo setup
+manifest.
 
 `setup migrate` can convert an existing checked-in runtime setup into local config plus a saved
 workflow. It intentionally requires an explicit `--repo`. The command previews by default and

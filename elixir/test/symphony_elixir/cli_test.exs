@@ -288,16 +288,78 @@ defmodule SymphonyElixir.CLITest do
     assert {:ok, output} =
              assert_no_target_path_access(config_root, fn ->
                CLI.evaluate(
-                 ["run", "SID-374", "--repo", repo, "--config-root", config_root, "--preview"],
+                 [
+                   "run",
+                   "SID-426",
+                   "--repo",
+                   repo,
+                   "--config-root",
+                   config_root,
+                   "--preview",
+                   "--max-agents",
+                   "1",
+                   "--max-startups",
+                   "1",
+                   "--no-land",
+                   "--human-review-only"
+                 ],
                  deps
                )
              end)
 
     assert output =~ "Run preview"
-    assert output =~ "tracker: linear issues=SID-374"
-    assert output =~ "mode: issue-batch"
+    assert output =~ "tracker: linear issues=SID-426"
+    assert output =~ "mode: issue-batch (limit: 1)"
+    assert output =~ "max agents: 1"
+    assert output =~ "max startups: 1"
+    assert output =~ "restrictive flags: human-review-only, no-land"
+    assert output =~ "side effects: none (preview is read-only)"
     refute File.exists?(LocalConfig.path(config_root: config_root))
     refute File.exists?(LocalConfig.runs_dir(config_root: config_root))
+  end
+
+  test "local run start applies restrictive overrides to runtime state" do
+    repo = tmp_repo!("symphony-elixir-restricted-run")
+    write_cli_repo_manifest!(repo)
+    config_root = Path.join(repo, ".local-symphony")
+    parent = self()
+
+    deps =
+      cli_deps(%{
+        ensure_all_started: fn ->
+          send(parent, :started)
+          {:ok, [:symphony_elixir]}
+        end,
+        local_run_deps: %{home: fn -> repo end, cwd: fn -> repo end}
+      })
+
+    assert :ok =
+             CLI.evaluate(
+               [
+                 "run",
+                 "SID-426",
+                 "--repo",
+                 repo,
+                 "--config-root",
+                 config_root,
+                 "--yes",
+                 @ack_flag,
+                 "--max-agents",
+                 "1",
+                 "--max-startups",
+                 "1",
+                 "--no-land",
+                 "--human-review-only"
+               ],
+               deps
+             )
+
+    setup = SymphonyElixir.RunSetup.current()
+    assert setup.capacity.max_concurrent_agents == 1
+    assert setup.capacity.max_concurrent_startups == 1
+    assert setup.issue_batch_limit == 1
+    assert setup.restrictive_flags == [:human_review_only, :no_land]
+    assert_received :started
   end
 
   test "run command with only repo uses the interactive local setup builder" do

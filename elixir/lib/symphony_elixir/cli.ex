@@ -50,6 +50,7 @@ defmodule SymphonyElixir.CLI do
   @base_switch_keys Keyword.keys(@switches)
   @runtime_selection_switches @run_switch_keys -- (@base_switch_keys ++ [:repo])
   @shared_runtime_switches @base_switch_keys -- [@acknowledgement_switch]
+  @local_run_override_switches [:human_review_only, :max_agents, :max_startups, :no_land]
 
   @type ensure_started_result :: {:ok, [atom()]} | {:error, term()}
   @type deps :: %{
@@ -308,6 +309,7 @@ defmodule SymphonyElixir.CLI do
       symphony list [--repo <path>] [--config-root <path>]
       symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
       symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
+        [--max-agents <count>] [--max-startups <count>] [--no-land] [--human-review-only]
       symphony run --workflow <path> [--mode watch|drain|issue_batch] [options]
       symphony host target <add|import|plan|patch> [options]
     """
@@ -377,11 +379,25 @@ defmodule SymphonyElixir.CLI do
   defp runtime_run_args?(args) do
     case OptionParser.parse(args, strict: @run_switches) do
       {opts, [], []} ->
-        runtime_selection_switch?(opts) or shared_runtime_switch_without_repo?(opts)
+        if local_run_override_args?(opts) do
+          false
+        else
+          runtime_selection_switch?(opts) or shared_runtime_switch_without_repo?(opts)
+        end
 
       _ ->
         false
     end
+  end
+
+  defp local_run_override_args?(opts) do
+    Keyword.has_key?(opts, :repo) and
+      not Keyword.has_key?(opts, :workflow) and
+      Enum.any?(@local_run_override_switches, &Keyword.has_key?(opts, &1)) and
+      Enum.all?(
+        Keyword.keys(opts),
+        &(&1 in [:repo, :preview | @local_run_override_switches])
+      )
   end
 
   defp runtime_selection_switch?(opts) do
@@ -416,7 +432,20 @@ defmodule SymphonyElixir.CLI do
 
     with {:ok, result} <- LocalRun.evaluate(local_run_args, Map.get(deps, :local_run_deps, %{})),
          :ok <- maybe_acknowledge_local_run_start(result, args) do
-      if result.start?, do: run(result.workflow_path, [], deps), else: {:ok, result.preview}
+      if result.start?, do: start_local_run(result, deps), else: {:ok, result.preview}
+    end
+  end
+
+  defp start_local_run(result, deps) do
+    :ok = RunSetup.put_current(result.resolved_setup)
+
+    case run(result.workflow_path, [], deps) do
+      :ok ->
+        :ok
+
+      {:error, _reason} = error ->
+        RunSetup.clear_current()
+        error
     end
   end
 

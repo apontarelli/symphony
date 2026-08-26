@@ -149,13 +149,16 @@ export LINEAR_API_KEY=...
 ../bin/symphony run main --preview --no-env-file
 ../bin/symphony run main --no-env-file
 ../bin/symphony run SID-123 SID-124 --repo /path/to/repo --preview --no-env-file
+../bin/symphony run SID-426 --repo /path/to/repo --preview --max-agents 1 --max-startups 1 --no-land --human-review-only --no-env-file
 ```
 
 Creating a workflow writes `~/.config/symphony/config.yml` if missing, using
 `~/dev/symphony-workspaces` as the default workspace root and `light`, `normal`, and `swarm`
 capacity profiles. Saved names are lowercase slugs and live at
 `~/.config/symphony/runs/<name>.yml`; saving fails rather than overwriting an existing name.
-Explicit issue IDs use issue-batch mode by default.
+Explicit issue IDs use issue-batch mode with a limit of one by default. Explicit issue and
+interactive local runs accept `--max-agents`, `--max-startups`, `--no-land`, and
+`--human-review-only`. These options can only reduce selected capacity or add safety restrictions.
 
 Use `symphony list` for read-only catalog inspection:
 

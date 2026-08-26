@@ -25,7 +25,11 @@ defmodule SymphonyElixir.LocalRun do
     config_root: :string,
     save: :string,
     yes: :boolean,
-    preview: :boolean
+    preview: :boolean,
+    max_agents: :integer,
+    max_startups: :integer,
+    no_land: :boolean,
+    human_review_only: :boolean
   ]
 
   @type setup :: map()
@@ -48,6 +52,7 @@ defmodule SymphonyElixir.LocalRun do
     deps = Map.merge(runtime_deps(), deps)
 
     with {:ok, opts, rest} <- parse_args(args),
+         :ok <- validate_capacity_overrides_before_write(opts, rest, deps),
          {:ok, local_config, config_root} <- local_config(opts, deps),
          {:ok, setup, source, workflow_path} <- resolve_setup(rest, opts, local_config, config_root, deps),
          {:ok, resolved_setup} <- resolve_preview_setup(setup, workflow_path, opts),
@@ -72,11 +77,15 @@ defmodule SymphonyElixir.LocalRun do
   defp resolve_preview_setup(setup, workflow_path, opts) do
     repo = repo_root(opts)
 
-    RunSetup.resolve_manifest(setup,
-      cwd: repo,
-      repo: repo,
-      runtime_setup_path: workflow_path,
-      runtime_setup_source: "local run setup"
+    RunSetup.resolve_manifest(
+      setup,
+      run_setup_opts(opts) ++
+        [
+          cwd: repo,
+          repo: repo,
+          runtime_setup_path: workflow_path,
+          runtime_setup_source: "local run setup"
+        ]
     )
   end
 
@@ -89,6 +98,44 @@ defmodule SymphonyElixir.LocalRun do
       {_opts, _rest, _invalid} -> {:error, usage()}
     end
   end
+
+  defp validate_capacity_overrides_before_write(opts, rest, deps) do
+    if capacity_override?(opts),
+      do: validate_capacity_overrides(opts, rest, deps),
+      else: :ok
+  end
+
+  defp validate_capacity_overrides(opts, rest, deps) do
+    preview_opts = Keyword.put(opts, :preview, true)
+
+    with {:ok, local_config, _config_root} <- local_config(preview_opts, deps),
+         selected_capacity = preselected_capacity(rest, local_config),
+         max_agents =
+           Keyword.get(opts, :max_agents, selected_capacity_value(selected_capacity, :max_concurrent_agents)),
+         max_startups =
+           Keyword.get(opts, :max_startups, selected_capacity_value(selected_capacity, :max_concurrent_startups)),
+         :ok <- validate_positive_capacity(max_agents, max_startups),
+         :ok <- validate_deployment_capacity(max_agents, max_startups, local_config) do
+      validate_preselected_capacity(max_agents, max_startups, selected_capacity)
+    end
+  end
+
+  defp preselected_capacity(rest, local_config) do
+    if explicit_issue_ids?(rest),
+      do: capacity_profile(local_config, "normal"),
+      else: nil
+  end
+
+  defp capacity_override?(opts),
+    do: Keyword.has_key?(opts, :max_agents) or Keyword.has_key?(opts, :max_startups)
+
+  defp selected_capacity_value(nil, _key), do: 1
+  defp selected_capacity_value(capacity, key), do: Map.fetch!(capacity, key)
+
+  defp validate_preselected_capacity(_max_agents, _max_startups, nil), do: :ok
+
+  defp validate_preselected_capacity(max_agents, max_startups, capacity),
+    do: validate_selected_capacity(max_agents, max_startups, capacity)
 
   defp resolve_setup(rest, opts, local_config, config_root, deps) do
     cond do
@@ -106,6 +153,7 @@ defmodule SymphonyElixir.LocalRun do
   defp interactive_setup(opts, local_config, config_root, deps) do
     with {:ok, target} <- prompt_target(deps),
          {:ok, capacity} <- prompt_capacity(local_config, deps),
+         {:ok, capacity} <- apply_capacity_overrides(capacity, opts, local_config),
          {:ok, mode} <- prompt_mode(default_mode(target), deps),
          {:ok, setup} <- build_setup(opts, target, capacity, mode, local_config) do
       {:ok, setup, :interactive, current_setup_path(config_root)}
@@ -116,7 +164,8 @@ defmodule SymphonyElixir.LocalRun do
     capacity = capacity_profile(local_config, "normal")
     target = %{type: "issues", issue_ids: issue_ids}
 
-    with {:ok, setup} <- build_setup(opts, target, capacity, "issue-batch", local_config) do
+    with {:ok, capacity} <- apply_capacity_overrides(capacity, opts, local_config),
+         {:ok, setup} <- build_setup(opts, target, capacity, "issue-batch", local_config) do
       {:ok, setup, :issues, current_setup_path(config_root)}
     end
   end
@@ -146,6 +195,7 @@ defmodule SymphonyElixir.LocalRun do
       "mode" => mode,
       "capacity" => capacity_for_run_setup(capacity)
     }
+    |> maybe_put_restrictive_flags(opts)
   end
 
   defp run_setup_target(target) do
@@ -163,6 +213,89 @@ defmodule SymphonyElixir.LocalRun do
   end
 
   defp capacity_for_run_setup(capacity), do: capacity.name
+
+  defp apply_capacity_overrides(capacity, opts, local_config) do
+    max_agents = Keyword.get(opts, :max_agents, capacity.max_concurrent_agents)
+    max_startups = Keyword.get(opts, :max_startups, capacity.max_concurrent_startups)
+
+    with :ok <- validate_positive_capacity(max_agents, max_startups),
+         :ok <- validate_deployment_capacity(max_agents, max_startups, local_config),
+         :ok <- validate_selected_capacity(max_agents, max_startups, capacity) do
+      restricted_capacity(capacity, opts, max_agents, max_startups)
+    end
+  end
+
+  defp validate_positive_capacity(max_agents, max_startups) do
+    cond do
+      not (is_integer(max_agents) and max_agents > 0) ->
+        {:error, "--max-agents must be a positive integer"}
+
+      not (is_integer(max_startups) and max_startups > 0) ->
+        {:error, "--max-startups must be a positive integer"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_deployment_capacity(max_agents, max_startups, local_config) do
+    agent_ceiling = capacity_ceiling(local_config)
+    startup_ceiling = startup_capacity_ceiling(local_config)
+
+    cond do
+      max_agents > agent_ceiling ->
+        {:error, "capacity override exceeds deployment ceiling: max agents #{max_agents} > ceiling #{agent_ceiling}"}
+
+      max_startups > startup_ceiling ->
+        {:error, "capacity override exceeds deployment ceiling: max startups #{max_startups} > ceiling #{startup_ceiling}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_selected_capacity(max_agents, max_startups, capacity) do
+    cond do
+      max_agents > capacity.max_concurrent_agents ->
+        {:error, "capacity override cannot increase selected capacity: max agents #{max_agents} > selected #{capacity.max_concurrent_agents}"}
+
+      max_startups > capacity.max_concurrent_startups ->
+        {:error, "capacity override cannot increase selected capacity: max startups #{max_startups} > selected #{capacity.max_concurrent_startups}"}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp restricted_capacity(capacity, opts, max_agents, max_startups) do
+    if Keyword.has_key?(opts, :max_agents) or Keyword.has_key?(opts, :max_startups) do
+      {:ok,
+       %{
+         name: "custom",
+         max_concurrent_agents: max_agents,
+         max_concurrent_startups: max_startups
+       }}
+    else
+      {:ok, capacity}
+    end
+  end
+
+  defp maybe_put_restrictive_flags(setup, opts) do
+    flags =
+      opts
+      |> run_setup_opts()
+      |> Keyword.take([:no_land, :human_review_only])
+      |> Enum.filter(fn {_flag, enabled?} -> enabled? end)
+
+    if flags == [] do
+      setup
+    else
+      Map.put(setup, "restrictive_flags", Map.new(flags, fn {flag, _enabled?} -> {to_string(flag), true} end))
+    end
+  end
+
+  defp run_setup_opts(opts),
+    do: Keyword.take(opts, [:max_agents, :max_startups, :no_land, :human_review_only])
 
   defp put_run_target(runtime_manifest, run_target) do
     update_in(runtime_manifest, ["runtime"], fn runtime ->
@@ -292,6 +425,7 @@ defmodule SymphonyElixir.LocalRun do
       "mode" => Map.get(run_target, "mode", "watch"),
       "capacity" => runtime_capacity_for_run_setup(runtime, run_target)
     }
+    |> maybe_put_saved_restrictive_flags(runtime)
   end
 
   defp runtime_capacity_for_run_setup(runtime, %{"capacity" => "custom"}) do
@@ -302,6 +436,16 @@ defmodule SymphonyElixir.LocalRun do
 
   defp runtime_capacity_for_run_setup(_runtime, %{"capacity" => capacity}) when is_binary(capacity), do: capacity
   defp runtime_capacity_for_run_setup(_runtime, _run_target), do: "normal"
+
+  defp maybe_put_saved_restrictive_flags(setup, runtime) do
+    case get_in(runtime, ["run_setup", "restrictive_flags"]) do
+      flags when is_list(flags) and flags != [] ->
+        Map.put(setup, "restrictive_flags", Map.new(flags, &{&1, true}))
+
+      _other ->
+        setup
+    end
+  end
 
   defp save_name(source, opts, preview, deps) do
     case Keyword.get(opts, :save) do
@@ -639,6 +783,13 @@ defmodule SymphonyElixir.LocalRun do
     end
   end
 
+  defp startup_capacity_ceiling(local_config) do
+    case get_in(local_config, ["deployment", "ceilings", "max_concurrent_startups"]) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> get_in(default_local_config(), ["deployment", "ceilings", "max_concurrent_startups"])
+    end
+  end
+
   defp prompt_mode(default, deps) do
     with {:ok, answer} <- prompt(deps, "Run mode: watch, drain, or issue-batch [#{default}]: ") do
       mode =
@@ -878,6 +1029,7 @@ defmodule SymphonyElixir.LocalRun do
     """
     Usage:
       symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
+        [--max-agents <count>] [--max-startups <count>] [--no-land] [--human-review-only]
     """
     |> String.trim()
   end
