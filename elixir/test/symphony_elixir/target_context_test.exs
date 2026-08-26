@@ -105,6 +105,14 @@ defmodule SymphonyElixir.TargetContextTest do
     assert context.tracker_connection["policy"]["api_key"] == "credential"
   end
 
+  test "pins validated tracker references without resolving credentials" do
+    assert {:ok, %TargetContext{} = context} =
+             TargetContext.pin_from_registry(valid_snapshot(), "alpha")
+
+    assert get_in(context.tracker_connection, ["policy", "api_key"]) == "$TRACKER_KEY"
+    refute inspect(context) =~ "TRACKER_KEY"
+  end
+
   test "derives every runtime field from the real Phase 1 schema and composition pipeline" do
     assert {:ok, schema_snapshot} = Schema.validate(registry_document(), home: "/tmp")
     assert schema_snapshot.globally_valid?

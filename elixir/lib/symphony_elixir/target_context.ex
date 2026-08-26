@@ -66,7 +66,18 @@ defmodule SymphonyElixir.TargetContext do
 
   @spec from_registry(Snapshot.t(), String.t(), keyword()) ::
           {:ok, t()} | {:error, atom()}
-  def from_registry(snapshot, target_id, opts \\ []), do: build_context(snapshot, target_id, opts)
+  def from_registry(snapshot, target_id, opts \\ []),
+    do: build_context(snapshot, target_id, opts, :resolved)
+
+  @doc """
+  Builds a validated target context that retains credential references.
+
+  The returned context is safe to persist but must not be used for tracker or
+  runner I/O until a fenced owner resolves its current credentials.
+  """
+  @spec pin_from_registry(Snapshot.t(), String.t()) :: {:ok, t()} | {:error, atom()}
+  def pin_from_registry(snapshot, target_id),
+    do: build_context(snapshot, target_id, [], :pinned)
 
   @type issue_policy_error ::
           :forbidden_policy_broadening
@@ -744,8 +755,9 @@ defmodule SymphonyElixir.TargetContext do
 
   defp string_list?(_values), do: false
 
-  defp build_context(%Snapshot{} = snapshot, target_id, opts)
-       when is_binary(target_id) and is_list(opts) do
+  defp build_context(%Snapshot{} = snapshot, target_id, opts, credential_mode)
+       when is_binary(target_id) and is_list(opts) and
+              credential_mode in [:pinned, :resolved] do
     with :ok <- validate_options(opts),
          :ok <- validate_target_id(target_id),
          {:ok, generation, targets} <- validate_snapshot(snapshot),
@@ -760,7 +772,8 @@ defmodule SymphonyElixir.TargetContext do
          :ok <- validate_tracker_secret_reference(target.effective_policy),
          :ok <- Composition.verify_composed_target(snapshot, target_id),
          {:ok, policy} <- policy_projection(target.effective_policy, target.repo_manifest),
-         {:ok, tracker_connection} <- resolve_tracker_secret(policy.tracker_connection, opts) do
+         {:ok, tracker_connection} <-
+           project_tracker_secret(policy.tracker_connection, credential_mode, opts) do
       {:ok,
        struct!(__MODULE__,
          target_id: target_id,
@@ -784,11 +797,15 @@ defmodule SymphonyElixir.TargetContext do
     end
   end
 
-  defp build_context(%Snapshot{}, target_id, _opts) when is_binary(target_id),
-    do: {:error, :invalid_options}
+  defp build_context(%Snapshot{}, target_id, _opts, _credential_mode)
+       when is_binary(target_id),
+       do: {:error, :invalid_options}
 
-  defp build_context(%Snapshot{}, _target_id, _opts), do: {:error, :invalid_target_id}
-  defp build_context(_snapshot, _target_id, _opts), do: {:error, :invalid_snapshot}
+  defp build_context(%Snapshot{}, _target_id, _opts, _credential_mode),
+    do: {:error, :invalid_target_id}
+
+  defp build_context(_snapshot, _target_id, _opts, _credential_mode),
+    do: {:error, :invalid_snapshot}
 
   defp validate_options(opts) do
     if Keyword.keyword?(opts) and
@@ -962,6 +979,9 @@ defmodule SymphonyElixir.TargetContext do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp project_tracker_secret(connection, :pinned, _opts), do: {:ok, connection}
+  defp project_tracker_secret(connection, :resolved, opts), do: resolve_tracker_secret(connection, opts)
 
   defp resolve_tracker_secret(%{"policy" => %{"api_key" => reference} = tracker_policy} = connection, opts)
        when is_binary(reference) do

@@ -2104,8 +2104,27 @@ prompt, quality, and publish entry points MAY remain single-context adapters whe
 After they delegate to a context-first entry point, no reusable run-path operation may return to
 ambient authority.
 
-This isolation contract does not require a durable control-plane store, multi-target activation,
-fair scheduling, leases, or fencing. Those are separate control-plane and scheduler capabilities.
+The baseline isolation contract does not require a durable control-plane store, multi-target
+activation, fair scheduling, leases, or fencing. Implementations that provide durable admission
+MUST follow the additional contract below.
+
+### 10.9 Durable Run Admission
+
+A durable admission identity MUST contain target ID and tracker issue ID. The store MUST assign one
+immutable admitted run ID when it first admits that identity. Repeating admission with the same
+registry generation, policy hash, manifest hash, and pinned envelope MUST return the same admitted
+run ID. A conflicting generation, hash, or envelope MUST NOT replace the existing admission.
+
+The durable envelope MUST contain enough data to reconstruct and validate the admitted
+`ExecutionContext` without reading current registry or workflow policy. This includes issue
+identity, role and execution profile, workspace authority, runner and model policy, checks, delivery
+gates, and safe context provenance. Target ID MUST scope issue IDs and identifiers so different
+targets can retain overlapping tracker identities.
+
+Durable state MUST contain validated credential references only. Resolved tracker and runner
+credential values MUST NOT enter database files, logs, errors, inspection output, or fixtures.
+Current credentials MUST resolve only after a fenced owner starts or recovers the run. Missing
+credentials MUST produce an explicit blocked result for that run.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 

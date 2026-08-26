@@ -331,7 +331,14 @@ uses a bounded five-second busy timeout, and runs SQLite and schema health check
 is mode `0700`; the database and SQLite auxiliary files are mode `0600`. An unsupported schema,
 failed migration, corrupt database, or unusable root stops runtime startup with the database path
 and failure reason. Preview and list commands do not start the runtime or create this database.
-Durable target, admission, lease, and run records are not part of this schema milestone.
+
+The store retains immutable target generations and issue-specific admissions keyed by target ID
+and tracker issue ID. Each admission receives one immutable run ID and pins its registry, policy,
+manifest, issue, workspace, runner/model, check, delivery-gate, and provenance authority. Repeated
+admission of the same envelope returns the original run ID; changed hashes or authority conflict
+without replacement. Only validated tracker and runner secret references are stored. Credential
+values resolve after a future fenced owner acquires the run; missing values return a blocked result.
+Lease ownership and lifecycle transitions are separate Phase 3 milestones.
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
 letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target
