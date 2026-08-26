@@ -5,7 +5,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ControlPlane
-  alias SymphonyElixir.ControlPlane.{Error, Lease}
+  alias SymphonyElixir.ControlPlane.{Error, Lease, Lifecycle, LifecycleTransition}
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetContext
@@ -20,7 +20,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert {:ok,
             %{
               path: ^database_path,
-              schema_version: 3,
+              schema_version: 4,
               status: :healthy
             }} = ControlPlane.health(server)
 
@@ -64,7 +64,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     on_exit(fn -> Enum.each(pids, &stop_process/1) end)
 
-    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 3}}, ControlPlane.health(pid)) end)
+    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 4}}, ControlPlane.health(pid)) end)
   end
 
   test "busy handling is bounded across local processes" do
@@ -496,6 +496,404 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert renewed.fencing_token == lease.fencing_token
   end
 
+  test "retry and blocked lifecycle evidence survives reopen and remains target scoped" do
+    config_root = tmp_root!("control-plane-lifecycle-reopen")
+    {clock_state, clock} = test_clock!(5_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    alpha_context = execution_context!(config_root, "alpha", "shared-issue", "SID-429")
+    beta_context = execution_context!(config_root, "beta", "shared-issue", "SID-429")
+    assert {:ok, alpha_admission} = ControlPlane.admit_run(server, alpha_context)
+    assert {:ok, _beta_admission} = ControlPlane.admit_run(server, beta_context)
+
+    assert {:ok, %Lifecycle{state: :admitted, sequence: 1} = initial} =
+             ControlPlane.fetch_target_lifecycle(server, "alpha", "shared-issue")
+
+    assert ControlPlane.project_runtime_state(initial) == :claimed
+
+    assert {:ok, lease} =
+             ControlPlane.acquire_lease(
+               server,
+               alpha_admission.admitted_run_id,
+               "owner-a"
+             )
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2} = running} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               initial.sequence,
+               :admitted,
+               :running,
+               %{}
+             )
+
+    assert ControlPlane.project_runtime_state(running) == :running
+
+    failure = %{
+      code: "agent_failed",
+      message: "runtime exited",
+      details: %{phase: "turn"}
+    }
+
+    assert {:ok, %Lifecycle{state: :retrying, sequence: 3}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               running.sequence,
+               :running,
+               :retrying,
+               %{attempt: 2, due_at_ms: 5_050_000, failure: failure}
+             )
+
+    stop_process(server)
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:ok, retrying} =
+             ControlPlane.fetch_target_lifecycle(
+               reopened,
+               "alpha",
+               "shared-issue"
+             )
+
+    assert retrying.retry_attempt == 2
+    assert retrying.retry_due_at_ms == 5_050_000
+
+    assert retrying.failure == %{
+             "code" => "agent_failed",
+             "message" => "runtime exited",
+             "details" => %{"phase" => "turn"}
+           }
+
+    assert ControlPlane.project_runtime_state(retrying) == :retrying
+
+    assert {:ok, %Lifecycle{state: :admitted}} =
+             ControlPlane.fetch_target_lifecycle(
+               reopened,
+               "beta",
+               "shared-issue"
+             )
+
+    set_clock!(clock_state, 5_001_000)
+
+    assert {:ok, %Lifecycle{state: :blocked, sequence: 4}} =
+             ControlPlane.transition_run(
+               reopened,
+               lease,
+               retrying.sequence,
+               :retrying,
+               :blocked,
+               %{reason: "operator input required"}
+             )
+
+    stop_process(reopened)
+    reopened_again = start_control_plane!(config_root, clock: clock)
+    assert {:ok, blocked} = ControlPlane.fetch_lifecycle(reopened_again, lease.admitted_run_id)
+    assert blocked.blocked_reason == "operator input required"
+    assert ControlPlane.project_runtime_state(blocked) == :blocked
+
+    assert {:ok,
+            [
+              %LifecycleTransition{sequence: 1, from_state: nil, to_state: :admitted},
+              %LifecycleTransition{sequence: 2, from_state: :admitted, to_state: :running},
+              %LifecycleTransition{sequence: 3, from_state: :running, to_state: :retrying},
+              %LifecycleTransition{sequence: 4, from_state: :retrying, to_state: :blocked}
+            ]} = ControlPlane.lifecycle_history(reopened_again, lease.admitted_run_id)
+  end
+
+  test "stale same-state observations cannot mutate a later lifecycle cycle" do
+    config_root = tmp_root!("control-plane-lifecycle-sequence")
+    {_clock_state, clock} = test_clock!(5_500_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-429")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %Lifecycle{state: :retrying, sequence: 3}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :retrying,
+               %{
+                 attempt: 1,
+                 due_at_ms: 5_501_000,
+                 failure: %{code: "failed", message: "boom"}
+               }
+             )
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 4}} =
+             ControlPlane.transition_run(server, lease, 3, :retrying, :running, %{})
+
+    assert {:error, :out_of_order_transition} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :blocked,
+               %{reason: "stale observation"}
+             )
+  end
+
+  test "fencing and ordering reject partial writes while terminal duplicates are idempotent" do
+    config_root = tmp_root!("control-plane-lifecycle-fencing")
+    {_clock_state, clock} = test_clock!(6_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-429")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    stale_lease = %{lease | fencing_token: lease.fencing_token + 1}
+
+    assert {:error, :stale_lease} =
+             ControlPlane.transition_run(
+               server,
+               stale_lease,
+               2,
+               :running,
+               :retrying,
+               %{
+                 attempt: 1,
+                 due_at_ms: 6_001_000,
+                 failure: %{code: "failed", message: "boom"}
+               }
+             )
+
+    assert {:error, :duplicate_transition} =
+             ControlPlane.transition_run(server, lease, 2, :running, :running, %{})
+
+    assert {:error, :illegal_transition} =
+             ControlPlane.transition_run(server, lease, 2, :running, :cleaned, %{})
+
+    assert {:error, :out_of_order_transition} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :blocked,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:error, :invalid_transition} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :retrying,
+               %{attempt: 1}
+             )
+
+    assert {:error, :invalid_transition} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :retrying,
+               %{
+                 attempt: 1,
+                 due_at_ms: 6_001_000,
+                 failure: %{1 => "invalid key", code: "failed", message: "boom"}
+               }
+             )
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.fetch_lifecycle(server, admission.admitted_run_id)
+
+    assert {:ok, history_before_completion} =
+             ControlPlane.lifecycle_history(server, admission.admitted_run_id)
+
+    assert length(history_before_completion) == 2
+
+    assert {:error, :duplicate_transition} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %Lifecycle{state: :completed, sequence: 3} = completed} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert completed.completed_at
+    assert ControlPlane.project_runtime_state(completed) == :completed
+
+    assert {:error, :stale_lease} =
+             ControlPlane.transition_run(
+               server,
+               stale_lease,
+               2,
+               :running,
+               :completed,
+               %{"disposition" => "succeeded"}
+             )
+
+    assert {:ok, ^completed} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :completed,
+               %{"disposition" => "succeeded"}
+             )
+
+    assert {:error, :duplicate_transition} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :completed,
+               %{disposition: :failed}
+             )
+
+    assert {:ok, %Lifecycle{state: :cleanup_pending, sequence: 4} = cleanup_pending} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    assert cleanup_pending.cleanup_authority["workspace_path"] == context.workspace_path
+    assert cleanup_pending.cleanup_pending_at
+
+    assert {:error, :stale_lease} =
+             ControlPlane.transition_run(
+               server,
+               stale_lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    assert {:ok, ^cleanup_pending} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    assert {:ok, %Lifecycle{state: :cleaned, sequence: 5} = cleaned} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               4,
+               :cleanup_pending,
+               :cleaned,
+               %{}
+             )
+
+    assert cleaned.cleaned_at
+    assert :ok = ControlPlane.release_lease(server, lease)
+
+    assert {:ok, ^cleaned} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               4,
+               :cleanup_pending,
+               :cleaned,
+               %{}
+             )
+
+    assert {:ok, ^cleaned} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:ok, ^cleaned} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    assert {:ok, transitions} =
+             ControlPlane.lifecycle_history(server, admission.admitted_run_id)
+
+    assert Enum.map(transitions, & &1.to_state) ==
+             [:admitted, :running, :completed, :cleanup_pending, :cleaned]
+  end
+
+  test "transition history failure rolls back current lifecycle state" do
+    config_root = tmp_root!("control-plane-lifecycle-rollback")
+    {_clock_state, clock} = test_clock!(7_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-429")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    stop_process(server)
+    database_path = ControlPlane.path(config_root: config_root)
+
+    execute_sql!(
+      database_path,
+      """
+      CREATE TRIGGER fail_retry_history
+      BEFORE INSERT ON run_lifecycle_transitions
+      WHEN NEW.to_state = 'retrying'
+      BEGIN
+        SELECT RAISE(ABORT, 'fixture transition failure');
+      END;
+      """
+    )
+
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:error, %Error{code: :transaction_failed}} =
+             ControlPlane.transition_run(
+               reopened,
+               lease,
+               2,
+               :running,
+               :retrying,
+               %{
+                 attempt: 1,
+                 due_at_ms: 7_001_000,
+                 failure: %{code: "failed", message: "boom"}
+               }
+             )
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.fetch_lifecycle(reopened, admission.admitted_run_id)
+
+    assert {:ok, transitions} =
+             ControlPlane.lifecycle_history(reopened, admission.admitted_run_id)
+
+    assert Enum.map(transitions, & &1.to_state) == [:admitted, :running]
+  end
+
   test "resolved tracker and runner credentials are rejected before persistence" do
     config_root = tmp_root!("control-plane-secret-rejection")
     server = start_control_plane!(config_root)
@@ -522,7 +920,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
   end
 
-  test "version one stores migrate through admission and lease schemas" do
+  test "version one stores migrate through admission, lease, and lifecycle schemas" do
     config_root = tmp_root!("control-plane-version-one")
     database_path = ControlPlane.path(config_root: config_root)
 
@@ -540,15 +938,17 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     server = start_control_plane!(config_root)
 
-    assert {:ok, %{schema_version: 3, status: :healthy}} = ControlPlane.health(server)
+    assert {:ok, %{schema_version: 4, status: :healthy}} = ControlPlane.health(server)
     assert scalar_query!(database_path, "SELECT count(*) FROM run_leases") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
+    assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycles") == 0
+    assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycle_transitions") == 0
   end
 
   test "a newer schema version stops startup with an actionable error" do
     config_root = tmp_root!("control-plane-newer-schema")
     database_path = ControlPlane.path(config_root: config_root)
-    seed_database!(database_path, "PRAGMA user_version = 4")
+    seed_database!(database_path, "PRAGMA user_version = 5")
 
     assert {:error,
             %Error{
@@ -557,7 +957,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
               message: message
             }} = start_unlinked(config_root: config_root, name: unique_name())
 
-    assert message =~ "schema version 4 is newer than supported version 3"
+    assert message =~ "schema version 5 is newer than supported version 4"
   end
 
   test "migration failure rolls back schema state and stops startup" do
@@ -737,6 +1137,12 @@ defmodule SymphonyElixir.ControlPlaneTest do
     :ok = Sqlite3.execute(connection, sql)
     :ok = Sqlite3.close(connection)
     File.chmod!(database_path, 0o600)
+  end
+
+  defp execute_sql!(database_path, sql) do
+    {:ok, connection} = Sqlite3.open(database_path)
+    :ok = Sqlite3.execute(connection, sql)
+    :ok = Sqlite3.close(connection)
   end
 
   defp read_user_version!(database_path) do

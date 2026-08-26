@@ -345,8 +345,18 @@ transactions. Every new owner receives a fencing token greater than all prior to
 the current owner ID and token are required for renew, transfer, and release. A lease expires at its
 exact stored deadline. A backward wall-clock change of at most one second is tolerated without
 shortening the lease; larger clock changes and clock or store failures fail closed. Target-scoped
-runs lease independently when tracker issue IDs overlap. Durable lifecycle transitions remain a
-separate Phase 3 milestone.
+runs lease independently when tracker issue IDs overlap.
+
+Each admission also owns an authoritative durable lifecycle: admitted, running, retrying, blocked,
+completed, cleanup pending, and cleaned. A transition atomically updates current state and appends
+its evidence to immutable history. Each mutation names the observed state and sequence, so a stale
+observation cannot mutate a later cycle that returned to the same state. New transitions require
+the current owner and fencing token. Retry attempt, durable due time, normalized failure, blocked
+reason, completion disposition, and pinned cleanup authority survive reopen. Exact completion and
+cleanup duplicates remain idempotent after later transitions or lease release when their original
+owner, token, sequence, and evidence match. Illegal, conflicting duplicate, stale-token, and
+out-of-order transitions leave both records unchanged. Completed, cleanup-pending, and cleaned
+timestamps provide later retention boundaries.
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
 letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target

@@ -13,13 +13,24 @@ defmodule SymphonyElixir.ControlPlane do
   alias SymphonyElixir.TargetContext
 
   @database_file "control-plane.sqlite3"
-  @schema_version 3
+  @schema_version 4
   @default_busy_timeout_ms 5_000
   @maximum_busy_timeout_ms 30_000
   @lease_duration_ms 30_000
   @lease_renewal_interval_ms 10_000
   @maximum_clock_skew_ms 1_000
   @call_timeout_ms @maximum_busy_timeout_ms + 5_000
+  @lifecycle_states [:admitted, :running, :retrying, :blocked, :completed, :cleanup_pending, :cleaned]
+  @idempotent_lifecycle_states [:completed, :cleanup_pending, :cleaned]
+  @legal_lifecycle_transitions %{
+    admitted: [:running, :completed],
+    running: [:retrying, :blocked, :completed],
+    retrying: [:running, :blocked, :completed],
+    blocked: [:running, :completed],
+    completed: [:cleanup_pending],
+    cleanup_pending: [:cleaned],
+    cleaned: []
+  }
 
   defmodule Error do
     @moduledoc false
@@ -96,6 +107,102 @@ defmodule SymphonyElixir.ControlPlane do
           }
   end
 
+  defmodule Lifecycle do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :state,
+      :sequence,
+      :admitted_at,
+      :updated_at
+    ]
+    defstruct [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :state,
+      :sequence,
+      :retry_attempt,
+      :retry_due_at_ms,
+      :failure,
+      :blocked_reason,
+      :completion_disposition,
+      :cleanup_authority,
+      :admitted_at,
+      :started_at,
+      :completed_at,
+      :cleanup_pending_at,
+      :cleaned_at,
+      :updated_at
+    ]
+
+    @type state ::
+            :admitted
+            | :running
+            | :retrying
+            | :blocked
+            | :completed
+            | :cleanup_pending
+            | :cleaned
+
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            target_id: String.t(),
+            tracker_issue_id: String.t(),
+            state: state(),
+            sequence: pos_integer(),
+            retry_attempt: pos_integer() | nil,
+            retry_due_at_ms: non_neg_integer() | nil,
+            failure: map() | nil,
+            blocked_reason: String.t() | nil,
+            completion_disposition: String.t() | nil,
+            cleanup_authority: map() | nil,
+            admitted_at: String.t(),
+            started_at: String.t() | nil,
+            completed_at: String.t() | nil,
+            cleanup_pending_at: String.t() | nil,
+            cleaned_at: String.t() | nil,
+            updated_at: String.t()
+          }
+  end
+
+  defmodule LifecycleTransition do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :sequence,
+      :from_state,
+      :to_state,
+      :occurred_at,
+      :evidence
+    ]
+    defstruct [
+      :admitted_run_id,
+      :sequence,
+      :from_state,
+      :to_state,
+      :owner_id,
+      :fencing_token,
+      :occurred_at,
+      :evidence
+    ]
+
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            sequence: pos_integer(),
+            from_state: Lifecycle.state() | nil,
+            to_state: Lifecycle.state(),
+            owner_id: String.t() | nil,
+            fencing_token: pos_integer() | nil,
+            occurred_at: String.t(),
+            evidence: map()
+          }
+  end
+
   @type health :: %{
           required(:path) => Path.t(),
           required(:schema_version) => pos_integer(),
@@ -113,6 +220,15 @@ defmodule SymphonyElixir.ControlPlane do
           | :lease_active
           | :lease_held
           | :lease_not_found
+          | :stale_lease
+          | Error.t()
+  @type lifecycle_error ::
+          :admission_not_found
+          | :duplicate_transition
+          | :illegal_transition
+          | :invalid_lease
+          | :invalid_transition
+          | :out_of_order_transition
           | :stale_lease
           | Error.t()
 
@@ -254,6 +370,81 @@ defmodule SymphonyElixir.ControlPlane do
     GenServer.call(server, {:expire_lease, admitted_run_id}, @call_timeout_ms)
   end
 
+  @doc """
+  Returns the authoritative lifecycle for one admitted run.
+  """
+  @spec fetch_lifecycle(GenServer.server(), String.t()) ::
+          {:ok, Lifecycle.t()} | {:error, lifecycle_error()}
+  def fetch_lifecycle(server \\ __MODULE__, admitted_run_id) do
+    GenServer.call(server, {:fetch_lifecycle, admitted_run_id}, @call_timeout_ms)
+  end
+
+  @doc """
+  Returns the lifecycle scoped by target and tracker issue identity.
+  """
+  @spec fetch_target_lifecycle(GenServer.server(), String.t(), String.t()) ::
+          {:ok, Lifecycle.t()} | {:error, lifecycle_error()}
+  def fetch_target_lifecycle(server \\ __MODULE__, target_id, tracker_issue_id) do
+    GenServer.call(
+      server,
+      {:fetch_target_lifecycle, target_id, tracker_issue_id},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Applies one fenced lifecycle transition.
+
+  The caller supplies the sequence and state it observed. A changed current
+  sequence or state fails as out of order. Exact duplicate completion and
+  cleanup messages return the current lifecycle without appending history.
+  """
+  @spec transition_run(
+          GenServer.server(),
+          Lease.t(),
+          pos_integer(),
+          Lifecycle.state(),
+          Lifecycle.state(),
+          map()
+        ) :: {:ok, Lifecycle.t()} | {:error, lifecycle_error()}
+  def transition_run(
+        server \\ __MODULE__,
+        lease,
+        expected_sequence,
+        expected_state,
+        next_state,
+        evidence
+      ) do
+    GenServer.call(
+      server,
+      {:transition_run, lease, expected_sequence, expected_state, next_state, evidence},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Returns the append-only lifecycle transition history in sequence order.
+  """
+  @spec lifecycle_history(GenServer.server(), String.t()) ::
+          {:ok, [LifecycleTransition.t()]} | {:error, lifecycle_error()}
+  def lifecycle_history(server \\ __MODULE__, admitted_run_id) do
+    GenServer.call(server, {:lifecycle_history, admitted_run_id}, @call_timeout_ms)
+  end
+
+  @doc """
+  Projects durable lifecycle state into the existing orchestrator state slots.
+  """
+  @spec project_runtime_state(Lifecycle.t()) ::
+          :claimed | :running | :retrying | :blocked | :completed
+  def project_runtime_state(%Lifecycle{state: :admitted}), do: :claimed
+  def project_runtime_state(%Lifecycle{state: :running}), do: :running
+  def project_runtime_state(%Lifecycle{state: :retrying}), do: :retrying
+  def project_runtime_state(%Lifecycle{state: :blocked}), do: :blocked
+
+  def project_runtime_state(%Lifecycle{state: state})
+      when state in [:completed, :cleanup_pending, :cleaned],
+      do: :completed
+
   @spec fetch_admission(GenServer.server(), String.t(), String.t()) ::
           {:ok, Admission.t()} | {:error, admission_error()}
   def fetch_admission(server \\ __MODULE__, target_id, tracker_issue_id) do
@@ -372,6 +563,46 @@ defmodule SymphonyElixir.ControlPlane do
       )
 
     {:reply, result, state}
+  end
+
+  def handle_call({:fetch_lifecycle, admitted_run_id}, _from, state) do
+    {:reply, load_lifecycle(state.connection, state.path, admitted_run_id), state}
+  end
+
+  def handle_call({:fetch_target_lifecycle, target_id, tracker_issue_id}, _from, state) do
+    result =
+      load_target_lifecycle(
+        state.connection,
+        state.path,
+        target_id,
+        tracker_issue_id
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:transition_run, lease, expected_sequence, expected_state, next_state, evidence},
+        _from,
+        state
+      ) do
+    result =
+      persist_lifecycle_transition(
+        state.connection,
+        state.path,
+        lease,
+        expected_sequence,
+        expected_state,
+        next_state,
+        evidence,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:lifecycle_history, admitted_run_id}, _from, state) do
+    {:reply, load_lifecycle_history(state.connection, state.path, admitted_run_id), state}
   end
 
   @impl true
@@ -775,6 +1006,126 @@ defmodule SymphonyElixir.ControlPlane do
     PRAGMA user_version = 3;
     """
 
+    with :ok <- execute(connection, migration, database_path, :migration_failed) do
+      apply_migrations(connection, 3, database_path)
+    end
+  end
+
+  defp apply_migrations(connection, 3, database_path) do
+    migration = """
+    CREATE TABLE run_lifecycles (
+      admitted_run_id TEXT PRIMARY KEY,
+      state TEXT NOT NULL CHECK (
+        state IN (
+          'admitted',
+          'running',
+          'retrying',
+          'blocked',
+          'completed',
+          'cleanup_pending',
+          'cleaned'
+        )
+      ),
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      retry_attempt INTEGER CHECK (retry_attempt > 0),
+      retry_due_at_ms INTEGER CHECK (retry_due_at_ms >= 0),
+      failure_json TEXT,
+      blocked_reason TEXT CHECK (blocked_reason IS NULL OR length(blocked_reason) > 0),
+      completion_disposition TEXT CHECK (
+        completion_disposition IS NULL OR length(completion_disposition) > 0
+      ),
+      cleanup_authority_json TEXT,
+      admitted_at TEXT NOT NULL,
+      started_at TEXT,
+      completed_at TEXT,
+      cleanup_pending_at TEXT,
+      cleaned_at TEXT,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        state != 'retrying' OR
+        (retry_attempt IS NOT NULL AND retry_due_at_ms IS NOT NULL AND failure_json IS NOT NULL)
+      ),
+      CHECK (state != 'blocked' OR blocked_reason IS NOT NULL),
+      CHECK (
+        state NOT IN ('completed', 'cleanup_pending', 'cleaned') OR
+        (completion_disposition IS NOT NULL AND completed_at IS NOT NULL)
+      ),
+      CHECK (
+        state NOT IN ('cleanup_pending', 'cleaned') OR
+        (cleanup_authority_json IS NOT NULL AND cleanup_pending_at IS NOT NULL)
+      ),
+      CHECK (state != 'cleaned' OR cleaned_at IS NOT NULL),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    CREATE TABLE run_lifecycle_transitions (
+      admitted_run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      from_state TEXT CHECK (
+        from_state IS NULL OR
+        from_state IN (
+          'admitted',
+          'running',
+          'retrying',
+          'blocked',
+          'completed',
+          'cleanup_pending',
+          'cleaned'
+        )
+      ),
+      to_state TEXT NOT NULL CHECK (
+        to_state IN (
+          'admitted',
+          'running',
+          'retrying',
+          'blocked',
+          'completed',
+          'cleanup_pending',
+          'cleaned'
+        )
+      ),
+      owner_id TEXT CHECK (owner_id IS NULL OR length(owner_id) > 0),
+      fencing_token INTEGER CHECK (fencing_token > 0),
+      occurred_at TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      PRIMARY KEY (admitted_run_id, sequence),
+      CHECK (
+        (owner_id IS NULL AND fencing_token IS NULL) OR
+        (owner_id IS NOT NULL AND fencing_token IS NOT NULL)
+      ),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    INSERT INTO run_lifecycles (
+      admitted_run_id,
+      state,
+      sequence,
+      admitted_at,
+      updated_at
+    )
+    SELECT admitted_run_id, 'admitted', 1, admitted_at, admitted_at
+    FROM run_admissions;
+
+    INSERT INTO run_lifecycle_transitions (
+      admitted_run_id,
+      sequence,
+      from_state,
+      to_state,
+      owner_id,
+      fencing_token,
+      occurred_at,
+      evidence_json
+    )
+    SELECT admitted_run_id, 1, NULL, 'admitted', NULL, NULL, admitted_at, '{}'
+    FROM run_admissions;
+
+    INSERT INTO schema_migrations (version, applied_at)
+    VALUES (4, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    PRAGMA user_version = 4;
+    """
+
     execute(connection, migration, database_path, :migration_failed)
   end
 
@@ -808,7 +1159,8 @@ defmodule SymphonyElixir.ControlPlane do
     with {:ok, [[@schema_version]]} <-
            query(connection, "SELECT max(version) FROM schema_migrations"),
          :ok <- validate_admission_schema(connection, database_path),
-         :ok <- validate_lease_schema(connection, database_path) do
+         :ok <- validate_lease_schema(connection, database_path),
+         :ok <- validate_lifecycle_schema(connection, database_path) do
       :ok
     else
       {:ok, rows} ->
@@ -892,6 +1244,45 @@ defmodule SymphonyElixir.ControlPlane do
       {:ok, []} -> :ok
       {:ok, rows} -> corrupt_store(database_path, {:unexpected_lease_schema_rows, length(rows)})
       {:error, reason} -> corrupt_store(database_path, {:invalid_lease_schema, reason})
+    end
+  end
+
+  defp validate_lifecycle_schema(connection, database_path) do
+    sql = """
+    SELECT
+      lifecycle.admitted_run_id,
+      lifecycle.state,
+      lifecycle.sequence,
+      lifecycle.retry_attempt,
+      lifecycle.retry_due_at_ms,
+      lifecycle.failure_json,
+      lifecycle.blocked_reason,
+      lifecycle.completion_disposition,
+      lifecycle.cleanup_authority_json,
+      lifecycle.admitted_at,
+      lifecycle.started_at,
+      lifecycle.completed_at,
+      lifecycle.cleanup_pending_at,
+      lifecycle.cleaned_at,
+      lifecycle.updated_at,
+      transition.from_state,
+      transition.to_state,
+      transition.owner_id,
+      transition.fencing_token,
+      transition.occurred_at,
+      transition.evidence_json
+    FROM run_lifecycles AS lifecycle
+    JOIN run_admissions AS admission
+      ON admission.admitted_run_id = lifecycle.admitted_run_id
+    LEFT JOIN run_lifecycle_transitions AS transition
+      ON transition.admitted_run_id = lifecycle.admitted_run_id
+    LIMIT 0
+    """
+
+    case query(connection, sql) do
+      {:ok, []} -> :ok
+      {:ok, rows} -> corrupt_store(database_path, {:unexpected_lifecycle_schema_rows, length(rows)})
+      {:error, reason} -> corrupt_store(database_path, {:invalid_lifecycle_schema, reason})
     end
   end
 
@@ -1621,6 +2012,935 @@ defmodule SymphonyElixir.ControlPlane do
   defp release_result({:ok, :released}), do: :ok
   defp release_result({:error, _reason} = error), do: error
 
+  defp load_lifecycle(connection, database_path, admitted_run_id)
+       when is_binary(admitted_run_id) and admitted_run_id != "" do
+    with {:ok, {lifecycle, _cleanup_authority}} <-
+           select_lifecycle_by_run_id(connection, database_path, admitted_run_id) do
+      {:ok, lifecycle}
+    end
+  end
+
+  defp load_lifecycle(_connection, _database_path, _admitted_run_id),
+    do: {:error, :invalid_transition}
+
+  defp load_target_lifecycle(connection, database_path, target_id, tracker_issue_id)
+       when is_binary(target_id) and target_id != "" and
+              is_binary(tracker_issue_id) and tracker_issue_id != "" do
+    with {:ok, {lifecycle, _cleanup_authority}} <-
+           select_target_lifecycle(
+             connection,
+             database_path,
+             target_id,
+             tracker_issue_id
+           ) do
+      {:ok, lifecycle}
+    end
+  end
+
+  defp load_target_lifecycle(_connection, _database_path, _target_id, _tracker_issue_id),
+    do: {:error, :invalid_transition}
+
+  defp persist_lifecycle_transition(
+         connection,
+         database_path,
+         lease,
+         expected_sequence,
+         expected_state,
+         next_state,
+         evidence,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         :ok <-
+           validate_lifecycle_transition(
+             expected_sequence,
+             expected_state,
+             next_state,
+             evidence
+           ) do
+      request = %{
+        lease: lease,
+        expected_sequence: expected_sequence,
+        expected_state: expected_state,
+        next_state: next_state,
+        evidence: evidence
+      }
+
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        transition_current_lifecycle(connection, database_path, request, now_ms)
+      end)
+    end
+  end
+
+  defp transition_current_lifecycle(connection, database_path, request, now_ms) do
+    with {:ok, lifecycle_record} <-
+           select_lifecycle_by_run_id(
+             connection,
+             database_path,
+             request.lease.admitted_run_id
+           ) do
+      transition_lifecycle(
+        connection,
+        database_path,
+        lifecycle_record,
+        request,
+        now_ms
+      )
+    end
+  end
+
+  defp validate_lifecycle_transition(expected_sequence, expected_state, next_state, evidence)
+       when is_integer(expected_sequence) and expected_sequence > 0 and
+              expected_state in @lifecycle_states and
+              next_state in @lifecycle_states and
+              is_map(evidence),
+       do: :ok
+
+  defp validate_lifecycle_transition(
+         _expected_sequence,
+         _expected_state,
+         _next_state,
+         _evidence
+       ),
+       do: {:error, :invalid_transition}
+
+  defp transition_lifecycle(
+         connection,
+         database_path,
+         {lifecycle, cleanup_authority},
+         request,
+         now_ms
+       ) do
+    cond do
+      lifecycle.sequence > request.expected_sequence ->
+        replay_lifecycle_transition(
+          connection,
+          database_path,
+          lifecycle,
+          cleanup_authority,
+          request
+        )
+
+      lifecycle.sequence < request.expected_sequence ->
+        {:error, :out_of_order_transition}
+
+      lifecycle.state != request.expected_state ->
+        {:error, :out_of_order_transition}
+
+      lifecycle.state == request.next_state ->
+        {:error, :duplicate_transition}
+
+      request.next_state not in Map.fetch!(@legal_lifecycle_transitions, lifecycle.state) ->
+        {:error, :illegal_transition}
+
+      true ->
+        apply_lifecycle_transition(
+          connection,
+          database_path,
+          {lifecycle, cleanup_authority},
+          request,
+          now_ms
+        )
+    end
+  end
+
+  defp replay_lifecycle_transition(
+         connection,
+         database_path,
+         lifecycle,
+         cleanup_authority,
+         request
+       ) do
+    with {:ok, normalized_evidence} <-
+           normalize_transition_evidence(
+             request.next_state,
+             request.evidence,
+             cleanup_authority
+           ),
+         {:ok, transition} <-
+           select_lifecycle_transition(
+             connection,
+             database_path,
+             lifecycle.admitted_run_id,
+             request.expected_sequence + 1
+           ) do
+      classify_replayed_transition(
+        lifecycle,
+        transition,
+        request,
+        normalized_evidence
+      )
+    end
+  end
+
+  defp classify_replayed_transition(lifecycle, transition, request, normalized_evidence) do
+    cond do
+      transition.from_state != request.expected_state or
+          transition.to_state != request.next_state ->
+        {:error, :out_of_order_transition}
+
+      transition.owner_id != request.lease.owner_id or
+          transition.fencing_token != request.lease.fencing_token ->
+        {:error, :stale_lease}
+
+      transition.evidence !== normalized_evidence ->
+        {:error, :duplicate_transition}
+
+      request.next_state in @idempotent_lifecycle_states ->
+        {:ok, lifecycle}
+
+      true ->
+        {:error, :duplicate_transition}
+    end
+  end
+
+  defp apply_lifecycle_transition(
+         connection,
+         database_path,
+         {lifecycle, cleanup_authority},
+         request,
+         now_ms
+       ) do
+    with {:ok, lease_row} <-
+           select_lease_record(
+             connection,
+             database_path,
+             request.lease.admitted_run_id
+           ),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, request.lease, now_ms, database_path),
+         {:ok, normalized_evidence} <-
+           normalize_transition_evidence(
+             request.next_state,
+             request.evidence,
+             cleanup_authority
+           ),
+         {:ok, occurred_at} <- timestamp_from_ms(now_ms, database_path),
+         next_lifecycle =
+           next_lifecycle(
+             lifecycle,
+             request.next_state,
+             normalized_evidence,
+             occurred_at
+           ),
+         :ok <-
+           update_lifecycle_record(
+             connection,
+             database_path,
+             lifecycle,
+             next_lifecycle
+           ),
+         :ok <-
+           insert_lifecycle_transition(
+             connection,
+             database_path,
+             lifecycle,
+             next_lifecycle,
+             request.lease,
+             normalized_evidence,
+             occurred_at
+           ),
+         {:ok, {stored, _cleanup_authority}} <-
+           select_lifecycle_by_run_id(
+             connection,
+             database_path,
+             lifecycle.admitted_run_id
+           ) do
+      {:ok, stored}
+    end
+  end
+
+  defp normalize_transition_evidence(:running, evidence, _cleanup_authority) do
+    if map_size(evidence) == 0, do: {:ok, %{}}, else: {:error, :invalid_transition}
+  end
+
+  defp normalize_transition_evidence(:retrying, evidence, _cleanup_authority) do
+    with true <- evidence_keys?(evidence, [:attempt, :due_at_ms, :failure]),
+         {:ok, attempt} <- fetch_evidence(evidence, :attempt),
+         true <- is_integer(attempt) and attempt > 0,
+         {:ok, due_at_ms} <- fetch_evidence(evidence, :due_at_ms),
+         true <- is_integer(due_at_ms) and due_at_ms >= 0,
+         {:ok, failure} <- fetch_evidence(evidence, :failure),
+         {:ok, normalized_failure} <- normalize_failure(failure) do
+      {:ok,
+       %{
+         "attempt" => attempt,
+         "due_at_ms" => due_at_ms,
+         "failure" => normalized_failure
+       }}
+    else
+      _invalid -> {:error, :invalid_transition}
+    end
+  end
+
+  defp normalize_transition_evidence(:blocked, evidence, _cleanup_authority) do
+    with true <- evidence_keys?(evidence, [:reason]),
+         {:ok, reason} <- fetch_evidence(evidence, :reason),
+         true <- valid_non_empty_string?(reason) do
+      {:ok, %{"reason" => reason}}
+    else
+      _invalid -> {:error, :invalid_transition}
+    end
+  end
+
+  defp normalize_transition_evidence(:completed, evidence, _cleanup_authority) do
+    with true <- evidence_keys?(evidence, [:disposition]),
+         {:ok, disposition} <- fetch_evidence(evidence, :disposition),
+         {:ok, normalized_disposition} <- normalize_disposition(disposition) do
+      {:ok, %{"disposition" => normalized_disposition}}
+    else
+      _invalid -> {:error, :invalid_transition}
+    end
+  end
+
+  defp normalize_transition_evidence(:cleanup_pending, evidence, cleanup_authority) do
+    if map_size(evidence) == 0 and is_map(cleanup_authority) do
+      {:ok, %{"cleanup_authority" => cleanup_authority}}
+    else
+      {:error, :invalid_transition}
+    end
+  end
+
+  defp normalize_transition_evidence(:cleaned, evidence, _cleanup_authority) do
+    if map_size(evidence) == 0, do: {:ok, %{}}, else: {:error, :invalid_transition}
+  end
+
+  defp normalize_transition_evidence(_state, _evidence, _cleanup_authority),
+    do: {:error, :invalid_transition}
+
+  defp evidence_keys?(evidence, expected_keys) do
+    actual_keys =
+      Enum.map(Map.keys(evidence), fn
+        key when is_atom(key) -> key
+        key when is_binary(key) -> Enum.find(expected_keys, &(Atom.to_string(&1) == key))
+        _key -> nil
+      end)
+
+    MapSet.new(actual_keys) == MapSet.new(expected_keys) and
+      length(actual_keys) == length(expected_keys)
+  end
+
+  defp fetch_evidence(evidence, key) do
+    case {Map.fetch(evidence, key), Map.fetch(evidence, Atom.to_string(key))} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      _missing_or_duplicate -> :error
+    end
+  end
+
+  defp normalize_failure(failure) when is_map(failure) do
+    with :ok <- validate_json_keys(failure),
+         {:ok, json} <- encode_json(failure),
+         {:ok, normalized} <- decode_json_map(json),
+         true <- valid_non_empty_string?(Map.get(normalized, "code")),
+         true <- valid_non_empty_string?(Map.get(normalized, "message")) do
+      {:ok, normalized}
+    else
+      _invalid -> {:error, :invalid_transition}
+    end
+  end
+
+  defp normalize_failure(_failure), do: {:error, :invalid_transition}
+
+  defp validate_json_keys(map) when is_map(map) do
+    normalized_keys =
+      Enum.map(Map.keys(map), fn
+        key when is_atom(key) -> Atom.to_string(key)
+        key when is_binary(key) -> key
+        _key -> nil
+      end)
+
+    valid_keys? =
+      Enum.all?(normalized_keys, &is_binary/1) and
+        MapSet.size(MapSet.new(normalized_keys)) == map_size(map)
+
+    valid_values? =
+      Enum.all?(Map.values(map), &(validate_json_keys(&1) == :ok))
+
+    if valid_keys? and valid_values?, do: :ok, else: :error
+  end
+
+  defp validate_json_keys(list) when is_list(list) do
+    if Enum.all?(list, &(validate_json_keys(&1) == :ok)), do: :ok, else: :error
+  end
+
+  defp validate_json_keys(_value), do: :ok
+
+  defp normalize_disposition(disposition) when is_atom(disposition),
+    do: normalize_disposition(Atom.to_string(disposition))
+
+  defp normalize_disposition(disposition) when is_binary(disposition) do
+    if valid_non_empty_string?(disposition),
+      do: {:ok, disposition},
+      else: {:error, :invalid_transition}
+  end
+
+  defp normalize_disposition(_disposition), do: {:error, :invalid_transition}
+
+  defp valid_non_empty_string?(value) when is_binary(value) and value != "",
+    do: String.valid?(value)
+
+  defp valid_non_empty_string?(_value), do: false
+
+  defp next_lifecycle(lifecycle, :running, _evidence, occurred_at) do
+    %{
+      lifecycle
+      | state: :running,
+        sequence: lifecycle.sequence + 1,
+        retry_attempt: nil,
+        retry_due_at_ms: nil,
+        failure: nil,
+        blocked_reason: nil,
+        started_at: lifecycle.started_at || occurred_at,
+        updated_at: occurred_at
+    }
+  end
+
+  defp next_lifecycle(
+         lifecycle,
+         :retrying,
+         %{
+           "attempt" => attempt,
+           "due_at_ms" => due_at_ms,
+           "failure" => failure
+         },
+         occurred_at
+       ) do
+    %{
+      lifecycle
+      | state: :retrying,
+        sequence: lifecycle.sequence + 1,
+        retry_attempt: attempt,
+        retry_due_at_ms: due_at_ms,
+        failure: failure,
+        blocked_reason: nil,
+        updated_at: occurred_at
+    }
+  end
+
+  defp next_lifecycle(
+         lifecycle,
+         :blocked,
+         %{"reason" => reason},
+         occurred_at
+       ) do
+    %{
+      lifecycle
+      | state: :blocked,
+        sequence: lifecycle.sequence + 1,
+        retry_attempt: nil,
+        retry_due_at_ms: nil,
+        failure: nil,
+        blocked_reason: reason,
+        updated_at: occurred_at
+    }
+  end
+
+  defp next_lifecycle(
+         lifecycle,
+         :completed,
+         %{"disposition" => disposition},
+         occurred_at
+       ) do
+    %{
+      lifecycle
+      | state: :completed,
+        sequence: lifecycle.sequence + 1,
+        retry_attempt: nil,
+        retry_due_at_ms: nil,
+        failure: nil,
+        blocked_reason: nil,
+        completion_disposition: disposition,
+        completed_at: lifecycle.completed_at || occurred_at,
+        updated_at: occurred_at
+    }
+  end
+
+  defp next_lifecycle(
+         lifecycle,
+         :cleanup_pending,
+         %{"cleanup_authority" => cleanup_authority},
+         occurred_at
+       ) do
+    %{
+      lifecycle
+      | state: :cleanup_pending,
+        sequence: lifecycle.sequence + 1,
+        cleanup_authority: cleanup_authority,
+        cleanup_pending_at: lifecycle.cleanup_pending_at || occurred_at,
+        updated_at: occurred_at
+    }
+  end
+
+  defp next_lifecycle(lifecycle, :cleaned, %{}, occurred_at) do
+    %{
+      lifecycle
+      | state: :cleaned,
+        sequence: lifecycle.sequence + 1,
+        cleaned_at: lifecycle.cleaned_at || occurred_at,
+        updated_at: occurred_at
+    }
+  end
+
+  defp update_lifecycle_record(
+         connection,
+         database_path,
+         current,
+         next
+       ) do
+    sql = """
+    UPDATE run_lifecycles
+    SET state = ?1,
+        sequence = ?2,
+        retry_attempt = ?3,
+        retry_due_at_ms = ?4,
+        failure_json = ?5,
+        blocked_reason = ?6,
+        completion_disposition = ?7,
+        cleanup_authority_json = ?8,
+        started_at = ?9,
+        completed_at = ?10,
+        cleanup_pending_at = ?11,
+        cleaned_at = ?12,
+        updated_at = ?13
+    WHERE admitted_run_id = ?14
+      AND state = ?15
+      AND sequence = ?16
+    RETURNING admitted_run_id
+    """
+
+    with {:ok, failure_json} <- encode_optional_json(next.failure),
+         {:ok, cleanup_authority_json} <-
+           encode_optional_json(next.cleanup_authority),
+         {:ok, [[admitted_run_id]]} <-
+           domain_query(
+             connection,
+             sql,
+             [
+               Atom.to_string(next.state),
+               next.sequence,
+               next.retry_attempt,
+               next.retry_due_at_ms,
+               failure_json,
+               next.blocked_reason,
+               next.completion_disposition,
+               cleanup_authority_json,
+               next.started_at,
+               next.completed_at,
+               next.cleanup_pending_at,
+               next.cleaned_at,
+               next.updated_at,
+               current.admitted_run_id,
+               Atom.to_string(current.state),
+               current.sequence
+             ],
+             database_path,
+             "cannot persist current run lifecycle"
+           ),
+         true <- admitted_run_id == current.admitted_run_id do
+      :ok
+    else
+      {:ok, _rows} -> {:error, :out_of_order_transition}
+      false -> corrupt_store(database_path, :mismatched_lifecycle_update)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp insert_lifecycle_transition(
+         connection,
+         database_path,
+         current,
+         next,
+         lease,
+         evidence,
+         occurred_at
+       ) do
+    sql = """
+    INSERT INTO run_lifecycle_transitions (
+      admitted_run_id,
+      sequence,
+      from_state,
+      to_state,
+      owner_id,
+      fencing_token,
+      occurred_at,
+      evidence_json
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+    """
+
+    with {:ok, evidence_json} <- encode_json(evidence) do
+      expect_no_rows(
+        connection,
+        sql,
+        [
+          current.admitted_run_id,
+          next.sequence,
+          Atom.to_string(current.state),
+          Atom.to_string(next.state),
+          lease.owner_id,
+          lease.fencing_token,
+          occurred_at,
+          evidence_json
+        ],
+        database_path,
+        "cannot append run lifecycle transition"
+      )
+    end
+  end
+
+  defp select_lifecycle_by_run_id(
+         connection,
+         database_path,
+         admitted_run_id
+       ) do
+    select_lifecycle(
+      connection,
+      database_path,
+      "admission.admitted_run_id = ?1",
+      [admitted_run_id]
+    )
+  end
+
+  defp select_target_lifecycle(
+         connection,
+         database_path,
+         target_id,
+         tracker_issue_id
+       ) do
+    select_lifecycle(
+      connection,
+      database_path,
+      "admission.target_id = ?1 AND admission.tracker_issue_id = ?2",
+      [target_id, tracker_issue_id]
+    )
+  end
+
+  defp select_lifecycle(connection, database_path, predicate, params) do
+    sql = """
+    SELECT
+      admission.target_id,
+      admission.tracker_issue_id,
+      admission.workspace_authority_json,
+      lifecycle.admitted_run_id,
+      lifecycle.state,
+      lifecycle.sequence,
+      lifecycle.retry_attempt,
+      lifecycle.retry_due_at_ms,
+      lifecycle.failure_json,
+      lifecycle.blocked_reason,
+      lifecycle.completion_disposition,
+      lifecycle.cleanup_authority_json,
+      lifecycle.admitted_at,
+      lifecycle.started_at,
+      lifecycle.completed_at,
+      lifecycle.cleanup_pending_at,
+      lifecycle.cleaned_at,
+      lifecycle.updated_at
+    FROM run_admissions AS admission
+    JOIN run_lifecycles AS lifecycle
+      ON lifecycle.admitted_run_id = admission.admitted_run_id
+    WHERE #{predicate}
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           params,
+           database_path,
+           "cannot read run lifecycle"
+         ) do
+      {:ok, []} -> {:error, :admission_not_found}
+      {:ok, [row]} -> decode_lifecycle_row(row, database_path)
+      {:ok, _rows} -> corrupt_store(database_path, :duplicate_run_lifecycle)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_lifecycle_row(
+         [
+           target_id,
+           tracker_issue_id,
+           workspace_authority_json,
+           admitted_run_id,
+           state,
+           sequence,
+           retry_attempt,
+           retry_due_at_ms,
+           failure_json,
+           blocked_reason,
+           completion_disposition,
+           cleanup_authority_json,
+           admitted_at,
+           started_at,
+           completed_at,
+           cleanup_pending_at,
+           cleaned_at,
+           updated_at
+         ],
+         database_path
+       ) do
+    record = %{
+      target_id: target_id,
+      tracker_issue_id: tracker_issue_id,
+      admitted_run_id: admitted_run_id,
+      sequence: sequence,
+      retry_attempt: retry_attempt,
+      retry_due_at_ms: retry_due_at_ms,
+      blocked_reason: blocked_reason,
+      completion_disposition: completion_disposition,
+      admitted_at: admitted_at,
+      started_at: started_at,
+      completed_at: completed_at,
+      cleanup_pending_at: cleanup_pending_at,
+      cleaned_at: cleaned_at,
+      updated_at: updated_at
+    }
+
+    with :ok <- validate_lifecycle_record(record),
+         {:ok, lifecycle_state} <- decode_lifecycle_state(state),
+         {:ok, workspace_authority} <-
+           decode_json_map(workspace_authority_json),
+         {:ok, failure} <- decode_optional_json(failure_json),
+         {:ok, cleanup_authority} <-
+           decode_optional_json(cleanup_authority_json) do
+      lifecycle =
+        build_lifecycle(
+          record,
+          lifecycle_state,
+          failure,
+          cleanup_authority
+        )
+
+      {:ok, {lifecycle, workspace_authority}}
+    else
+      _invalid -> corrupt_store(database_path, :invalid_run_lifecycle)
+    end
+  end
+
+  defp decode_lifecycle_row(_row, database_path),
+    do: corrupt_store(database_path, :invalid_run_lifecycle)
+
+  defp validate_lifecycle_record(record) do
+    with :ok <- validate_lifecycle_identity(record),
+         :ok <- validate_lifecycle_sequence(record) do
+      validate_lifecycle_timestamps(record)
+    end
+  end
+
+  defp validate_lifecycle_identity(%{
+         target_id: target_id,
+         tracker_issue_id: tracker_issue_id,
+         admitted_run_id: admitted_run_id
+       })
+       when is_binary(target_id) and target_id != "" and
+              is_binary(tracker_issue_id) and tracker_issue_id != "" and
+              is_binary(admitted_run_id) and admitted_run_id != "",
+       do: :ok
+
+  defp validate_lifecycle_identity(_record), do: {:error, :invalid_run_lifecycle}
+
+  defp validate_lifecycle_sequence(%{sequence: sequence})
+       when is_integer(sequence) and sequence > 0,
+       do: :ok
+
+  defp validate_lifecycle_sequence(_record), do: {:error, :invalid_run_lifecycle}
+
+  defp validate_lifecycle_timestamps(%{
+         admitted_at: admitted_at,
+         updated_at: updated_at
+       })
+       when is_binary(admitted_at) and is_binary(updated_at),
+       do: :ok
+
+  defp validate_lifecycle_timestamps(_record), do: {:error, :invalid_run_lifecycle}
+
+  defp decode_json_map(json) do
+    case decode_json(json) do
+      {:ok, decoded} when is_map(decoded) -> {:ok, decoded}
+      _invalid -> {:error, :invalid_json_map}
+    end
+  end
+
+  defp build_lifecycle(record, lifecycle_state, failure, cleanup_authority) do
+    %Lifecycle{
+      admitted_run_id: record.admitted_run_id,
+      target_id: record.target_id,
+      tracker_issue_id: record.tracker_issue_id,
+      state: lifecycle_state,
+      sequence: record.sequence,
+      retry_attempt: record.retry_attempt,
+      retry_due_at_ms: record.retry_due_at_ms,
+      failure: failure,
+      blocked_reason: record.blocked_reason,
+      completion_disposition: record.completion_disposition,
+      cleanup_authority: cleanup_authority,
+      admitted_at: record.admitted_at,
+      started_at: record.started_at,
+      completed_at: record.completed_at,
+      cleanup_pending_at: record.cleanup_pending_at,
+      cleaned_at: record.cleaned_at,
+      updated_at: record.updated_at
+    }
+  end
+
+  defp select_lifecycle_transition(
+         connection,
+         database_path,
+         admitted_run_id,
+         sequence
+       ) do
+    sql = """
+    SELECT
+      admitted_run_id,
+      sequence,
+      from_state,
+      to_state,
+      owner_id,
+      fencing_token,
+      occurred_at,
+      evidence_json
+    FROM run_lifecycle_transitions
+    WHERE admitted_run_id = ?1 AND sequence = ?2
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [admitted_run_id, sequence],
+           database_path,
+           "cannot read run lifecycle transition"
+         ) do
+      {:ok, []} -> corrupt_store(database_path, :missing_lifecycle_transition)
+      {:ok, [row]} -> decode_lifecycle_transition(row, database_path)
+      {:ok, _rows} -> corrupt_store(database_path, :duplicate_lifecycle_transition)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp load_lifecycle_history(connection, database_path, admitted_run_id)
+       when is_binary(admitted_run_id) and admitted_run_id != "" do
+    with {:ok, _lifecycle} <-
+           load_lifecycle(connection, database_path, admitted_run_id) do
+      sql = """
+      SELECT
+        admitted_run_id,
+        sequence,
+        from_state,
+        to_state,
+        owner_id,
+        fencing_token,
+        occurred_at,
+        evidence_json
+      FROM run_lifecycle_transitions
+      WHERE admitted_run_id = ?1
+      ORDER BY sequence
+      """
+
+      case domain_query(
+             connection,
+             sql,
+             [admitted_run_id],
+             database_path,
+             "cannot read run lifecycle history"
+           ) do
+        {:ok, rows} -> decode_lifecycle_history(rows, database_path)
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp load_lifecycle_history(_connection, _database_path, _admitted_run_id),
+    do: {:error, :invalid_transition}
+
+  defp decode_lifecycle_history(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, transitions} ->
+      case decode_lifecycle_transition(row, database_path) do
+        {:ok, transition} ->
+          {:cont, {:ok, [transition | transitions]}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, transitions} -> {:ok, Enum.reverse(transitions)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_lifecycle_transition(
+         [
+           admitted_run_id,
+           sequence,
+           from_state,
+           to_state,
+           owner_id,
+           fencing_token,
+           occurred_at,
+           evidence_json
+         ],
+         database_path
+       )
+       when is_binary(admitted_run_id) and admitted_run_id != "" and
+              is_integer(sequence) and sequence > 0 and
+              is_binary(occurred_at) do
+    with {:ok, decoded_from_state} <- decode_optional_lifecycle_state(from_state),
+         {:ok, decoded_to_state} <- decode_lifecycle_state(to_state),
+         {:ok, evidence} <- decode_json(evidence_json),
+         true <- is_map(evidence) do
+      {:ok,
+       %LifecycleTransition{
+         admitted_run_id: admitted_run_id,
+         sequence: sequence,
+         from_state: decoded_from_state,
+         to_state: decoded_to_state,
+         owner_id: owner_id,
+         fencing_token: fencing_token,
+         occurred_at: occurred_at,
+         evidence: evidence
+       }}
+    else
+      _invalid -> corrupt_store(database_path, :invalid_lifecycle_transition)
+    end
+  end
+
+  defp decode_lifecycle_transition(_row, database_path),
+    do: corrupt_store(database_path, :invalid_lifecycle_transition)
+
+  defp decode_lifecycle_state("admitted"), do: {:ok, :admitted}
+  defp decode_lifecycle_state("running"), do: {:ok, :running}
+  defp decode_lifecycle_state("retrying"), do: {:ok, :retrying}
+  defp decode_lifecycle_state("blocked"), do: {:ok, :blocked}
+  defp decode_lifecycle_state("completed"), do: {:ok, :completed}
+  defp decode_lifecycle_state("cleanup_pending"), do: {:ok, :cleanup_pending}
+  defp decode_lifecycle_state("cleaned"), do: {:ok, :cleaned}
+  defp decode_lifecycle_state(_state), do: {:error, :invalid_lifecycle_state}
+
+  defp decode_optional_lifecycle_state(nil), do: {:ok, nil}
+  defp decode_optional_lifecycle_state(state), do: decode_lifecycle_state(state)
+
+  defp encode_optional_json(nil), do: {:ok, nil}
+  defp encode_optional_json(value), do: encode_json(value)
+
+  defp decode_optional_json(nil), do: {:ok, nil}
+  defp decode_optional_json(value), do: decode_json(value)
+
+  defp timestamp_from_ms(now_ms, database_path) do
+    case DateTime.from_unix(now_ms, :millisecond) do
+      {:ok, timestamp} ->
+        {:ok, DateTime.to_iso8601(timestamp)}
+
+      {:error, reason} ->
+        {:error,
+         error(
+           :clock_failed,
+           database_path,
+           "control-plane wall clock cannot be represented as a timestamp",
+           reason
+         )}
+    end
+  end
+
   defp prepare_admission(%ExecutionContext{} = context) do
     with :ok <- ExecutionContext.validate(context),
          {:ok, references} <- credential_references(context),
@@ -1757,6 +3077,7 @@ defmodule SymphonyElixir.ControlPlane do
 
   defp persist_or_reuse_admission(connection, database_path, record, nil) do
     with :ok <- insert_admission(connection, database_path, record),
+         :ok <- insert_initial_lifecycle(connection, database_path, record),
          {:ok, row} <-
            select_admission(
              connection,
@@ -1826,6 +3147,48 @@ defmodule SymphonyElixir.ControlPlane do
       database_path,
       "cannot persist run admission"
     )
+  end
+
+  defp insert_initial_lifecycle(connection, database_path, record) do
+    lifecycle_sql = """
+    INSERT INTO run_lifecycles (
+      admitted_run_id,
+      state,
+      sequence,
+      admitted_at,
+      updated_at
+    ) VALUES (?1, 'admitted', 1, ?2, ?2)
+    """
+
+    transition_sql = """
+    INSERT INTO run_lifecycle_transitions (
+      admitted_run_id,
+      sequence,
+      from_state,
+      to_state,
+      owner_id,
+      fencing_token,
+      occurred_at,
+      evidence_json
+    ) VALUES (?1, 1, NULL, 'admitted', NULL, NULL, ?2, '{}')
+    """
+
+    with :ok <-
+           expect_no_rows(
+             connection,
+             lifecycle_sql,
+             [record.admitted_run_id, record.admitted_at],
+             database_path,
+             "cannot persist initial run lifecycle"
+           ) do
+      expect_no_rows(
+        connection,
+        transition_sql,
+        [record.admitted_run_id, record.admitted_at],
+        database_path,
+        "cannot persist initial run transition"
+      )
+    end
   end
 
   defp load_admission(connection, database_path, target_id, tracker_issue_id)
