@@ -5,7 +5,16 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ControlPlane
-  alias SymphonyElixir.ControlPlane.{Error, Lease, Lifecycle, LifecycleTransition}
+
+  alias SymphonyElixir.ControlPlane.{
+    Error,
+    Lease,
+    Lifecycle,
+    LifecycleTransition,
+    ProcessOwnership,
+    SideEffect
+  }
+
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetContext
@@ -20,7 +29,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert {:ok,
             %{
               path: ^database_path,
-              schema_version: 4,
+              schema_version: 5,
               status: :healthy
             }} = ControlPlane.health(server)
 
@@ -64,7 +73,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     on_exit(fn -> Enum.each(pids, &stop_process/1) end)
 
-    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 4}}, ControlPlane.health(pid)) end)
+    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 5}}, ControlPlane.health(pid)) end)
   end
 
   test "busy handling is bounded across local processes" do
@@ -894,6 +903,367 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert Enum.map(transitions, & &1.to_state) == [:admitted, :running]
   end
 
+  test "stale leases are rejected before every covered side effect" do
+    config_root = tmp_root!("control-plane-side-effect-fencing")
+    {_clock_state, clock} = test_clock!(8_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-1", "SID-430", side_effect_gates: all_side_effect_gates())
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, first_lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, first_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, _second_lease} = ControlPlane.transfer_lease(server, first_lease, "owner-b")
+
+    for kind <- [
+          :tracker_write,
+          :publish_preflight,
+          :publish_handoff,
+          :handoff_route,
+          :workspace_cleanup
+        ] do
+      assert {:error, :stale_lease} =
+               ControlPlane.run_side_effect(
+                 server,
+                 first_lease,
+                 kind,
+                 "completion-#{kind}",
+                 %{message: "completion"},
+                 fn ->
+                   send(self(), {:side_effect_called, kind})
+                   {:ok, %{status: "done"}}
+                 end
+               )
+    end
+
+    refute_receive {:side_effect_called, _kind}
+    assert {:ok, []} = ControlPlane.list_side_effects(server, admission.admitted_run_id)
+  end
+
+  test "pinned delivery gates and cleanup lifecycle authority fail closed" do
+    config_root = tmp_root!("control-plane-side-effect-gates")
+    {_clock_state, clock} = test_clock!(8_050_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-430")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    for kind <- [:publish_preflight, :publish_handoff, :workspace_cleanup] do
+      assert {:error, :side_effect_not_allowed} =
+               ControlPlane.run_side_effect(
+                 server,
+                 lease,
+                 kind,
+                 "denied-#{kind}",
+                 %{},
+                 fn ->
+                   send(self(), {:denied_side_effect_called, kind})
+                   {:ok, %{}}
+                 end
+               )
+    end
+
+    assert {:error, :invalid_side_effect} =
+             ControlPlane.begin_side_effect(
+               server,
+               lease,
+               :tracker_write,
+               "invalid-evidence",
+               %{{:invalid, :key} => "unsafe"}
+             )
+
+    assert {:ok, %{status: :healthy}} = ControlPlane.health(server)
+
+    refute_receive {:denied_side_effect_called, _kind}
+    assert {:ok, []} = ControlPlane.list_side_effects(server, admission.admitted_run_id)
+  end
+
+  test "known completion side effects execute once across duplicate messages" do
+    config_root = tmp_root!("control-plane-side-effect-idempotency")
+    {_clock_state, clock} = test_clock!(8_100_000)
+    server = start_control_plane!(config_root, clock: clock)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-1", "SID-430", side_effect_gates: all_side_effect_gates())
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    for kind <- [:tracker_write, :publish_preflight, :publish_handoff, :handoff_route] do
+      operation = fn ->
+        send(self(), {:side_effect_called, kind})
+        {:ok, %{status: "done"}}
+      end
+
+      assert {:ok, %SideEffect{state: :succeeded} = first} =
+               ControlPlane.run_side_effect(
+                 server,
+                 lease,
+                 kind,
+                 "completion-1",
+                 %{message: "completion"},
+                 operation
+               )
+
+      assert_receive {:side_effect_called, ^kind}
+
+      assert {:ok, ^first} =
+               ControlPlane.run_side_effect(
+                 server,
+                 lease,
+                 kind,
+                 "completion-1",
+                 %{message: "completion"},
+                 operation
+               )
+
+      refute_receive {:side_effect_called, ^kind}
+    end
+
+    assert {:ok, %Lifecycle{state: :completed, sequence: 3}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               2,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:ok, %Lifecycle{state: :cleanup_pending, sequence: 4}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    cleanup = fn ->
+      send(self(), :workspace_cleanup_called)
+      {:ok, %{removed: true}}
+    end
+
+    assert {:ok, %SideEffect{state: :succeeded} = cleaned} =
+             ControlPlane.run_side_effect(
+               server,
+               lease,
+               :workspace_cleanup,
+               "completion-1",
+               %{workspace: "pinned"},
+               cleanup
+             )
+
+    assert_receive :workspace_cleanup_called
+
+    assert {:ok, ^cleaned} =
+             ControlPlane.run_side_effect(
+               server,
+               lease,
+               :workspace_cleanup,
+               "completion-1",
+               %{workspace: "pinned"},
+               cleanup
+             )
+
+    refute_receive :workspace_cleanup_called
+    assert {:ok, side_effects} = ControlPlane.list_side_effects(server, admission.admitted_run_id)
+    assert length(side_effects) == 5
+  end
+
+  test "ambiguous external outcomes survive reopen and block automatic replay" do
+    config_root = tmp_root!("control-plane-side-effect-reconciliation")
+    {_clock_state, clock} = test_clock!(8_200_000)
+    server = start_control_plane!(config_root, clock: clock)
+    database_path = ControlPlane.path(config_root: config_root)
+    secret = "side-effect-secret-value"
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-430")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    assert {:blocked,
+            %SideEffect{
+              state: :reconciliation_required,
+              outcome: %{
+                "authorization" => "<redacted:secret>",
+                "detail" => "timeout"
+              }
+            } = blocked} =
+             ControlPlane.run_side_effect(
+               server,
+               lease,
+               :tracker_write,
+               "comment-1",
+               %{body_sha256: hash("comment")},
+               fn ->
+                 {:ambiguous, %{authorization: secret, detail: "timeout"}}
+               end
+             )
+
+    assert {:ok, %SideEffect{state: :pending}} =
+             ControlPlane.begin_side_effect(
+               server,
+               lease,
+               :tracker_write,
+               "comment-2",
+               %{body_sha256: hash("interrupted-comment")}
+             )
+
+    refute database_bytes(database_path) =~ secret
+    stop_process(server)
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:blocked, ^blocked} =
+             ControlPlane.run_side_effect(
+               reopened,
+               lease,
+               :tracker_write,
+               "comment-1",
+               %{body_sha256: hash("comment")},
+               fn ->
+                 send(self(), :ambiguous_side_effect_replayed)
+                 {:ok, %{status: "done"}}
+               end
+             )
+
+    refute_receive :ambiguous_side_effect_replayed
+
+    assert {:blocked,
+            %SideEffect{
+              state: :reconciliation_required,
+              outcome: %{
+                "operator_action_required" => true,
+                "reason" => "prior_external_outcome_unknown"
+              }
+            }} =
+             ControlPlane.run_side_effect(
+               reopened,
+               lease,
+               :tracker_write,
+               "comment-2",
+               %{body_sha256: hash("interrupted-comment")},
+               fn ->
+                 send(self(), :interrupted_side_effect_replayed)
+                 {:ok, %{status: "done"}}
+               end
+             )
+
+    refute_receive :interrupted_side_effect_replayed
+  end
+
+  test "side-effect identities and artifact paths remain target scoped" do
+    config_root = tmp_root!("control-plane-side-effect-isolation")
+    {_clock_state, clock} = test_clock!(8_300_000)
+    server = start_control_plane!(config_root, clock: clock)
+    alpha = execution_context!(config_root, "alpha", "shared-issue", "SID-430")
+    beta = execution_context!(config_root, "beta", "shared-issue", "SID-430")
+    assert {:ok, alpha_admission} = ControlPlane.admit_run(server, alpha)
+    assert {:ok, beta_admission} = ControlPlane.admit_run(server, beta)
+    assert {:ok, alpha_lease} = ControlPlane.acquire_lease(server, alpha_admission.admitted_run_id, "alpha-owner")
+    assert {:ok, beta_lease} = ControlPlane.acquire_lease(server, beta_admission.admitted_run_id, "beta-owner")
+
+    assert {:ok, %SideEffect{} = alpha_effect} =
+             ControlPlane.begin_side_effect(
+               server,
+               alpha_lease,
+               :tracker_write,
+               "comment-1",
+               %{body_sha256: hash("same-comment")}
+             )
+
+    assert {:ok, %SideEffect{} = beta_effect} =
+             ControlPlane.begin_side_effect(
+               server,
+               beta_lease,
+               :tracker_write,
+               "comment-1",
+               %{body_sha256: hash("same-comment")}
+             )
+
+    refute alpha_effect.admitted_run_id == beta_effect.admitted_run_id
+    refute alpha_effect.target_id == beta_effect.target_id
+    refute alpha_effect.artifact_path == beta_effect.artifact_path
+    assert alpha_effect.tracker_issue_id == beta_effect.tracker_issue_id
+  end
+
+  test "lease transfer waits for verified process-group termination" do
+    config_root = tmp_root!("control-plane-process-transfer")
+    {_clock_state, clock} = test_clock!(8_400_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-430")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %ProcessOwnership{state: :running, process_group_id: 41_001}} =
+             ControlPlane.register_process_group(server, lease, 41_001)
+
+    assert {:error, :process_termination_unverified} =
+             ControlPlane.transfer_lease(server, lease, "owner-b")
+
+    assert {:error, :process_termination_unverified} =
+             ControlPlane.release_lease(server, lease)
+
+    assert {:ok, %ProcessOwnership{state: :unverifiable}} =
+             ControlPlane.record_process_group_termination(
+               server,
+               lease,
+               41_001,
+               {:unverifiable, %{reason: "group inspection failed"}}
+             )
+
+    assert {:ok, %Lifecycle{state: :blocked, blocked_reason: blocked_reason}} =
+             ControlPlane.fetch_lifecycle(server, admission.admitted_run_id)
+
+    assert blocked_reason == "process group termination is unverifiable"
+
+    assert {:error, :process_termination_unverified} =
+             ControlPlane.transfer_lease(server, lease, "owner-b")
+
+    assert {:ok, %ProcessOwnership{state: :stopped}} =
+             ControlPlane.record_process_group_termination(
+               server,
+               lease,
+               41_001,
+               {:stopped, %{verified_by: "process_supervisor"}}
+             )
+
+    assert {:error, :process_ownership_conflict} =
+             ControlPlane.record_process_group_termination(
+               server,
+               lease,
+               41_001,
+               {:unverifiable, %{reason: "late ambiguous observation"}}
+             )
+
+    assert {:ok, transferred} = ControlPlane.transfer_lease(server, lease, "owner-b")
+    assert transferred.fencing_token > lease.fencing_token
+
+    assert {:error, :stale_lease} =
+             ControlPlane.record_process_group_termination(
+               server,
+               lease,
+               41_001,
+               {:stopped, %{verified_by: "late-owner"}}
+             )
+  end
+
   test "resolved tracker and runner credentials are rejected before persistence" do
     config_root = tmp_root!("control-plane-secret-rejection")
     server = start_control_plane!(config_root)
@@ -920,7 +1290,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
   end
 
-  test "version one stores migrate through admission, lease, and lifecycle schemas" do
+  test "version one stores migrate through admission, lease, lifecycle, and side-effect schemas" do
     config_root = tmp_root!("control-plane-version-one")
     database_path = ControlPlane.path(config_root: config_root)
 
@@ -938,17 +1308,19 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     server = start_control_plane!(config_root)
 
-    assert {:ok, %{schema_version: 4, status: :healthy}} = ControlPlane.health(server)
+    assert {:ok, %{schema_version: 5, status: :healthy}} = ControlPlane.health(server)
     assert scalar_query!(database_path, "SELECT count(*) FROM run_leases") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycles") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycle_transitions") == 0
+    assert scalar_query!(database_path, "SELECT count(*) FROM side_effect_intents") == 0
+    assert scalar_query!(database_path, "SELECT count(*) FROM run_process_ownership") == 0
   end
 
   test "a newer schema version stops startup with an actionable error" do
     config_root = tmp_root!("control-plane-newer-schema")
     database_path = ControlPlane.path(config_root: config_root)
-    seed_database!(database_path, "PRAGMA user_version = 5")
+    seed_database!(database_path, "PRAGMA user_version = 6")
 
     assert {:error,
             %Error{
@@ -957,7 +1329,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
               message: message
             }} = start_unlinked(config_root: config_root, name: unique_name())
 
-    assert message =~ "schema version 5 is newer than supported version 4"
+    assert message =~ "schema version 6 is newer than supported version 5"
   end
 
   test "migration failure rolls back schema state and stops startup" do
@@ -1066,10 +1438,11 @@ defmodule SymphonyElixir.ControlPlaneTest do
         effective_checks: %{
           "pre_handoff" => [Keyword.get(opts, :check, "mix test")]
         },
-        external_side_effect_gates: %{
-          "tracker_write" => "allow",
-          "vcs_publish" => "deny"
-        },
+        external_side_effect_gates:
+          Keyword.get(opts, :side_effect_gates, %{
+            "tracker_write" => "allow",
+            "vcs_publish" => "deny"
+          }),
         capacity_limits: %{"max_concurrent_agents" => 1},
         budget_limits: %{}
       }
@@ -1090,6 +1463,14 @@ defmodule SymphonyElixir.ControlPlaneTest do
              )
 
     context
+  end
+
+  defp all_side_effect_gates do
+    %{
+      "tracker_write" => "allow",
+      "vcs_publish" => "allow",
+      "pull_request_write" => "allow"
+    }
   end
 
   defp maybe_put_runner_password(runner, nil), do: runner

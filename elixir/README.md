@@ -243,8 +243,9 @@ data.
 The public `symphony run <saved-name>` and `symphony run --workflow <path>` commands remain
 single-target admission adapters. After admission, they use the same context-first execution path.
 The current host still activates and polls one selected target. The local durable control-plane
-store is now available for later durable admissions, leases, and recovery work. Multi-target
-activation, fairness, and scheduling remain deferred.
+store now supports pinned admissions, leases, fenced lifecycle transitions, side-effect intents,
+and local process ownership. Restart recovery and autonomous multi-target activation, fairness, and
+scheduling remain deferred.
 
 The deterministic contract test is
 `test/symphony_elixir/two_target_isolation_test.exs`. It poisons mutable global configuration after
@@ -357,6 +358,18 @@ cleanup duplicates remain idempotent after later transitions or lease release wh
 owner, token, sequence, and evidence match. Illegal, conflicting duplicate, stale-token, and
 out-of-order transitions leave both records unchanged. Completed, cleanup-pending, and cleaned
 timestamps provide later retention boundaries.
+Delivery and cleanup calls can use the same control plane as a fenced side-effect seam. Before a
+tracker write, publish preflight, publish handoff, handoff-route record, or workspace cleanup starts,
+the current lease records a target-scoped intent with a stable idempotency key and derived artifact
+path. Known success and failure outcomes are idempotent. A pending intent found after interruption
+or an explicitly ambiguous external result becomes reconciliation-required and is not replayed
+automatically. Intent and outcome evidence is secret-redacted. New intents also enforce the pinned
+delivery gates; cleanup requires cleanup-pending lifecycle authority.
+
+Local process-group ownership is stored with its lease token. Transfer, release, and later
+acquisition remain blocked until that process group has a verified stopped result. An unverifiable
+termination blocks a running or retrying lifecycle for operator reconciliation.
+
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
 letters, digits, and interior dashes; collisions fail without overwriting. A setup stores the target

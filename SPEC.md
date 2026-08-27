@@ -2148,6 +2148,30 @@ clock MUST be injectable for deterministic tests. A backward clock change of at 
 retain the existing deadline but MUST NOT shorten it. A larger backward change, an invalid clock
 result, or a store error MUST prevent acquisition, renewal, transfer, release, and expiry.
 
+### 10.11 Durable Side-Effect Fencing and Process Ownership
+
+Tracker writes, publish preflight, publish handoff, handoff-route recording, and workspace cleanup
+MUST pass through a durable side-effect intent before the external call starts. The intent identity
+MUST contain the immutable admitted run ID, target ID, tracker issue ID, side-effect kind, and a
+stable idempotency key. The store MUST derive a target-scoped artifact path from the pinned workspace
+authority and that identity. It MUST validate the current owner and fencing token in the same
+transaction that creates or classifies the intent.
+
+A known successful or failed outcome MUST be durable and idempotent. Repeating the same identity and
+intent MUST return the stored outcome without another external call. A changed intent under the same
+identity MUST conflict. A pending intent observed after interruption, an external exception, or any
+outcome that cannot be proven MUST become reconciliation-required and MUST NOT replay automatically.
+Stored intent and outcome evidence MUST be JSON-safe and secret-redacted. Pinned delivery gates MUST
+be checked before creating a new intent; workspace cleanup additionally requires the durable
+cleanup-pending lifecycle and pinned cleanup authority.
+
+A fenced owner that starts a local process group MUST record its process-group identity durably.
+Lease transfer, release, and later acquisition MUST fail while the prior token has a running or
+unverifiable process group. Verified termination MUST be recorded before ownership can change.
+Unverifiable termination MUST move a running or retrying lifecycle to blocked in the same
+transaction; later verified termination may permit ownership transfer, but MUST NOT silently clear
+the blocked lifecycle.
+
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
 ### 11.1 REQUIRED Operations

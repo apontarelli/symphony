@@ -10,10 +10,11 @@ defmodule SymphonyElixir.ControlPlane do
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.LocalConfig
+  alias SymphonyElixir.ReviewRecords.Redaction
   alias SymphonyElixir.TargetContext
 
   @database_file "control-plane.sqlite3"
-  @schema_version 4
+  @schema_version 5
   @default_busy_timeout_ms 5_000
   @maximum_busy_timeout_ms 30_000
   @lease_duration_ms 30_000
@@ -22,6 +23,14 @@ defmodule SymphonyElixir.ControlPlane do
   @call_timeout_ms @maximum_busy_timeout_ms + 5_000
   @lifecycle_states [:admitted, :running, :retrying, :blocked, :completed, :cleanup_pending, :cleaned]
   @idempotent_lifecycle_states [:completed, :cleanup_pending, :cleaned]
+  @side_effect_kinds [
+    :tracker_write,
+    :publish_preflight,
+    :publish_handoff,
+    :handoff_route,
+    :workspace_cleanup
+  ]
+  @side_effect_states [:pending, :succeeded, :failed, :reconciliation_required]
   @legal_lifecycle_transitions %{
     admitted: [:running, :completed],
     running: [:retrying, :blocked, :completed],
@@ -203,6 +212,97 @@ defmodule SymphonyElixir.ControlPlane do
           }
   end
 
+  defmodule SideEffect do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :kind,
+      :idempotency_key,
+      :artifact_path,
+      :state,
+      :owner_id,
+      :fencing_token,
+      :intent,
+      :started_at,
+      :updated_at
+    ]
+    defstruct [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :kind,
+      :idempotency_key,
+      :artifact_path,
+      :state,
+      :owner_id,
+      :fencing_token,
+      :intent,
+      :outcome,
+      :started_at,
+      :completed_at,
+      :updated_at
+    ]
+
+    @type kind ::
+            :tracker_write
+            | :publish_preflight
+            | :publish_handoff
+            | :handoff_route
+            | :workspace_cleanup
+    @type state :: :pending | :succeeded | :failed | :reconciliation_required
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            target_id: String.t(),
+            tracker_issue_id: String.t(),
+            kind: kind(),
+            idempotency_key: String.t(),
+            artifact_path: Path.t(),
+            state: state(),
+            owner_id: String.t(),
+            fencing_token: pos_integer(),
+            intent: map(),
+            outcome: map() | nil,
+            started_at: String.t(),
+            completed_at: String.t() | nil,
+            updated_at: String.t()
+          }
+  end
+
+  defmodule ProcessOwnership do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :target_id,
+      :tracker_issue_id,
+      :owner_id,
+      :fencing_token,
+      :process_group_id,
+      :state,
+      :evidence,
+      :started_at,
+      :updated_at
+    ]
+    defstruct @enforce_keys
+
+    @type state :: :running | :stopped | :unverifiable
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            target_id: String.t(),
+            tracker_issue_id: String.t(),
+            owner_id: String.t(),
+            fencing_token: pos_integer(),
+            process_group_id: pos_integer(),
+            state: state(),
+            evidence: map(),
+            started_at: String.t(),
+            updated_at: String.t()
+          }
+  end
+
   @type health :: %{
           required(:path) => Path.t(),
           required(:schema_version) => pos_integer(),
@@ -220,6 +320,7 @@ defmodule SymphonyElixir.ControlPlane do
           | :lease_active
           | :lease_held
           | :lease_not_found
+          | :process_termination_unverified
           | :stale_lease
           | Error.t()
   @type lifecycle_error ::
@@ -229,6 +330,29 @@ defmodule SymphonyElixir.ControlPlane do
           | :invalid_lease
           | :invalid_transition
           | :out_of_order_transition
+          | :stale_lease
+          | Error.t()
+  @type side_effect_error ::
+          :admission_not_found
+          | :invalid_lease
+          | :invalid_side_effect
+          | :side_effect_conflict
+          | :side_effect_not_allowed
+          | :side_effect_not_found
+          | :stale_lease
+          | Error.t()
+  @type side_effect_claim ::
+          {:ok, SideEffect.t()}
+          | {:completed, SideEffect.t()}
+          | {:failed, SideEffect.t()}
+          | {:blocked, SideEffect.t()}
+          | {:error, side_effect_error()}
+  @type process_ownership_error ::
+          :admission_not_found
+          | :invalid_lease
+          | :invalid_process_ownership
+          | :process_ownership_conflict
+          | :process_termination_unverified
           | :stale_lease
           | Error.t()
 
@@ -432,6 +556,151 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   @doc """
+  Starts one fenced side effect before its external call.
+
+  The durable identity is target-scoped by the admitted run, effect kind, and
+  idempotency key. A repeated pending intent becomes reconciliation-required;
+  a known terminal outcome is returned without authorizing another call.
+  """
+  @spec begin_side_effect(
+          GenServer.server(),
+          Lease.t(),
+          SideEffect.kind(),
+          String.t(),
+          map()
+        ) :: side_effect_claim()
+  def begin_side_effect(server \\ __MODULE__, lease, kind, idempotency_key, intent) do
+    GenServer.call(
+      server,
+      {:begin_side_effect, lease, kind, idempotency_key, intent},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Records the fenced outcome of a previously started side effect.
+  """
+  @spec finish_side_effect(
+          GenServer.server(),
+          Lease.t(),
+          SideEffect.kind(),
+          String.t(),
+          {:succeeded | :failed | :ambiguous, map()}
+        ) ::
+          {:ok, SideEffect.t()}
+          | {:failed, SideEffect.t()}
+          | {:blocked, SideEffect.t()}
+          | {:error, side_effect_error()}
+  def finish_side_effect(server \\ __MODULE__, lease, kind, idempotency_key, outcome) do
+    GenServer.call(
+      server,
+      {:finish_side_effect, lease, kind, idempotency_key, outcome},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Runs an external call only after its durable fenced intent is committed.
+
+  The callback returns `{:ok, outcome}`, `{:failed, outcome}`, or
+  `{:ambiguous, outcome}`. Exceptions, exits, and other return values are
+  recorded as reconciliation-required.
+  """
+  @spec run_side_effect(
+          GenServer.server(),
+          Lease.t(),
+          SideEffect.kind(),
+          String.t(),
+          map(),
+          (-> {:ok, map()} | {:failed, map()} | {:ambiguous, map()})
+        ) :: {:ok, SideEffect.t()} | {:blocked, SideEffect.t()} | {:error, term()}
+  def run_side_effect(
+        server \\ __MODULE__,
+        lease,
+        kind,
+        idempotency_key,
+        intent,
+        operation
+      )
+      when is_function(operation, 0) do
+    case begin_side_effect(server, lease, kind, idempotency_key, intent) do
+      {:ok, _side_effect} ->
+        outcome = invoke_side_effect(operation)
+
+        case finish_side_effect(server, lease, kind, idempotency_key, outcome) do
+          {:failed, side_effect} -> {:error, {:side_effect_failed, side_effect}}
+          result -> result
+        end
+
+      {:completed, side_effect} ->
+        {:ok, side_effect}
+
+      {:failed, side_effect} ->
+        {:error, {:side_effect_failed, side_effect}}
+
+      {:blocked, side_effect} ->
+        {:blocked, side_effect}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  @spec fetch_side_effect(GenServer.server(), String.t(), SideEffect.kind(), String.t()) ::
+          {:ok, SideEffect.t()} | {:error, side_effect_error()}
+  def fetch_side_effect(server \\ __MODULE__, admitted_run_id, kind, idempotency_key) do
+    GenServer.call(
+      server,
+      {:fetch_side_effect, admitted_run_id, kind, idempotency_key},
+      @call_timeout_ms
+    )
+  end
+
+  @spec list_side_effects(GenServer.server(), String.t()) ::
+          {:ok, [SideEffect.t()]} | {:error, side_effect_error()}
+  def list_side_effects(server \\ __MODULE__, admitted_run_id) do
+    GenServer.call(server, {:list_side_effects, admitted_run_id}, @call_timeout_ms)
+  end
+
+  @doc """
+  Registers the local process group owned by the current fenced lease.
+  """
+  @spec register_process_group(GenServer.server(), Lease.t(), pos_integer()) ::
+          {:ok, ProcessOwnership.t()} | {:error, process_ownership_error()}
+  def register_process_group(server \\ __MODULE__, lease, process_group_id) do
+    GenServer.call(
+      server,
+      {:register_process_group, lease, process_group_id},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Records verified termination or an unverifiable process-group outcome.
+
+  An unverifiable outcome also moves a running lifecycle to `blocked` in the
+  same transaction.
+  """
+  @spec record_process_group_termination(
+          GenServer.server(),
+          Lease.t(),
+          pos_integer(),
+          {:stopped | :unverifiable, map()}
+        ) :: {:ok, ProcessOwnership.t()} | {:error, process_ownership_error()}
+  def record_process_group_termination(
+        server \\ __MODULE__,
+        lease,
+        process_group_id,
+        outcome
+      ) do
+    GenServer.call(
+      server,
+      {:record_process_group_termination, lease, process_group_id, outcome},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
   Projects durable lifecycle state into the existing orchestrator state slots.
   """
   @spec project_runtime_state(Lifecycle.t()) ::
@@ -603,6 +872,92 @@ defmodule SymphonyElixir.ControlPlane do
 
   def handle_call({:lifecycle_history, admitted_run_id}, _from, state) do
     {:reply, load_lifecycle_history(state.connection, state.path, admitted_run_id), state}
+  end
+
+  def handle_call(
+        {:begin_side_effect, lease, kind, idempotency_key, intent},
+        _from,
+        state
+      ) do
+    result =
+      persist_side_effect_intent(
+        state.connection,
+        state.path,
+        lease,
+        kind,
+        idempotency_key,
+        intent,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:finish_side_effect, lease, kind, idempotency_key, outcome},
+        _from,
+        state
+      ) do
+    result =
+      persist_side_effect_outcome(
+        state.connection,
+        state.path,
+        lease,
+        kind,
+        idempotency_key,
+        outcome,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:fetch_side_effect, admitted_run_id, kind, idempotency_key}, _from, state) do
+    result =
+      load_side_effect(
+        state.connection,
+        state.path,
+        admitted_run_id,
+        kind,
+        idempotency_key
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:list_side_effects, admitted_run_id}, _from, state) do
+    {:reply, load_side_effects(state.connection, state.path, admitted_run_id), state}
+  end
+
+  def handle_call({:register_process_group, lease, process_group_id}, _from, state) do
+    result =
+      persist_process_group(
+        state.connection,
+        state.path,
+        lease,
+        process_group_id,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:record_process_group_termination, lease, process_group_id, outcome},
+        _from,
+        state
+      ) do
+    result =
+      persist_process_group_termination(
+        state.connection,
+        state.path,
+        lease,
+        process_group_id,
+        outcome,
+        state.clock
+      )
+
+    {:reply, result, state}
   end
 
   @impl true
@@ -1126,6 +1481,71 @@ defmodule SymphonyElixir.ControlPlane do
     PRAGMA user_version = 4;
     """
 
+    with :ok <- execute(connection, migration, database_path, :migration_failed) do
+      apply_migrations(connection, 4, database_path)
+    end
+  end
+
+  defp apply_migrations(connection, 4, database_path) do
+    migration = """
+    CREATE TABLE side_effect_intents (
+      admitted_run_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      tracker_issue_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (
+        kind IN (
+          'tracker_write',
+          'publish_preflight',
+          'publish_handoff',
+          'handoff_route',
+          'workspace_cleanup'
+        )
+      ),
+      idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) > 0),
+      artifact_path TEXT NOT NULL CHECK (length(artifact_path) > 0),
+      state TEXT NOT NULL CHECK (
+        state IN ('pending', 'succeeded', 'failed', 'reconciliation_required')
+      ),
+      owner_id TEXT NOT NULL CHECK (length(owner_id) > 0),
+      fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+      intent_json TEXT NOT NULL,
+      outcome_json TEXT,
+      started_at TEXT NOT NULL,
+      completed_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (admitted_run_id, kind, idempotency_key),
+      UNIQUE (artifact_path),
+      CHECK (
+        (state = 'pending' AND outcome_json IS NULL AND completed_at IS NULL) OR
+        (state = 'reconciliation_required' AND outcome_json IS NOT NULL AND completed_at IS NULL) OR
+        (state IN ('succeeded', 'failed') AND outcome_json IS NOT NULL AND completed_at IS NOT NULL)
+      ),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    CREATE TABLE run_process_ownership (
+      admitted_run_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      tracker_issue_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL CHECK (length(owner_id) > 0),
+      fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+      process_group_id INTEGER NOT NULL CHECK (process_group_id > 0),
+      state TEXT NOT NULL CHECK (state IN ('running', 'stopped', 'unverifiable')),
+      evidence_json TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (admitted_run_id, fencing_token),
+      UNIQUE (admitted_run_id, process_group_id),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    INSERT INTO schema_migrations (version, applied_at)
+    VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    PRAGMA user_version = 5;
+    """
+
     execute(connection, migration, database_path, :migration_failed)
   end
 
@@ -1160,7 +1580,8 @@ defmodule SymphonyElixir.ControlPlane do
            query(connection, "SELECT max(version) FROM schema_migrations"),
          :ok <- validate_admission_schema(connection, database_path),
          :ok <- validate_lease_schema(connection, database_path),
-         :ok <- validate_lifecycle_schema(connection, database_path) do
+         :ok <- validate_lifecycle_schema(connection, database_path),
+         :ok <- validate_side_effect_schema(connection, database_path) do
       :ok
     else
       {:ok, rows} ->
@@ -1286,6 +1707,45 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
+  defp validate_side_effect_schema(connection, database_path) do
+    sql = """
+    SELECT
+      effect.admitted_run_id,
+      effect.target_id,
+      effect.tracker_issue_id,
+      effect.kind,
+      effect.idempotency_key,
+      effect.artifact_path,
+      effect.state,
+      effect.owner_id,
+      effect.fencing_token,
+      effect.intent_json,
+      effect.outcome_json,
+      effect.started_at,
+      effect.completed_at,
+      effect.updated_at,
+      process.owner_id,
+      process.fencing_token,
+      process.process_group_id,
+      process.state,
+      process.evidence_json,
+      process.started_at,
+      process.updated_at
+    FROM side_effect_intents AS effect
+    JOIN run_admissions AS admission
+      ON admission.admitted_run_id = effect.admitted_run_id
+    LEFT JOIN run_process_ownership AS process
+      ON process.admitted_run_id = effect.admitted_run_id
+    LIMIT 0
+    """
+
+    case query(connection, sql) do
+      {:ok, []} -> :ok
+      {:ok, rows} -> corrupt_store(database_path, {:unexpected_side_effect_schema_rows, length(rows)})
+      {:error, reason} -> corrupt_store(database_path, {:invalid_side_effect_schema, reason})
+    end
+  end
+
   defp acquire_run_lease(
          connection,
          database_path,
@@ -1366,6 +1826,13 @@ defmodule SymphonyElixir.ControlPlane do
               is_integer(last_observed_at_ms) do
     with :ok <- validate_clock_progress(now_ms, last_observed_at_ms, database_path),
          :ok <- lease_available(current_owner_id, deadline_ms, now_ms),
+         :ok <-
+           ensure_process_group_stopped(
+             connection,
+             database_path,
+             admitted_run_id,
+             fencing_token
+           ),
          next_token = fencing_token + 1,
          next_deadline_ms = lease_deadline(now_ms),
          :ok <-
@@ -1515,6 +1982,13 @@ defmodule SymphonyElixir.ControlPlane do
            ),
          {:ok, current_deadline_ms} <-
            authorize_lease(row, lease, now_ms, database_path),
+         :ok <-
+           ensure_process_group_stopped(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ),
          next_token = lease.fencing_token + 1,
          next_deadline_ms = max(current_deadline_ms, lease_deadline(now_ms)),
          :ok <-
@@ -1546,6 +2020,13 @@ defmodule SymphonyElixir.ControlPlane do
            ),
          {:ok, _current_deadline_ms} <-
            authorize_lease(row, lease, now_ms, database_path),
+         :ok <-
+           ensure_process_group_stopped(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ),
          :ok <-
            clear_lease_record(
              connection,
@@ -1916,9 +2397,20 @@ defmodule SymphonyElixir.ControlPlane do
           operation.(now_ms)
         end
 
-      finish_transaction(connection, database_path, result)
+      finish_lease_transaction(connection, database_path, result)
     end
   end
+
+  defp finish_lease_transaction(connection, database_path, {tag, _value} = result)
+       when tag in [:completed, :failed, :blocked] do
+    case finish_transaction(connection, database_path, {:ok, result}) do
+      {:ok, ^result} -> result
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp finish_lease_transaction(connection, database_path, result),
+    do: finish_transaction(connection, database_path, result)
 
   defp lease_available(nil, nil, _now_ms), do: :ok
 
@@ -2940,6 +3432,1256 @@ defmodule SymphonyElixir.ControlPlane do
          )}
     end
   end
+
+  defp persist_side_effect_intent(
+         connection,
+         database_path,
+         lease,
+         kind,
+         idempotency_key,
+         intent,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         :ok <- validate_side_effect_identity(kind, idempotency_key, intent),
+         {:ok, normalized_intent} <- normalize_durable_evidence(intent),
+         {:ok, intent_json} <- encode_json(normalized_intent) do
+      request = %{
+        lease: lease,
+        kind: kind,
+        idempotency_key: idempotency_key,
+        intent: normalized_intent,
+        intent_json: intent_json
+      }
+
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        begin_current_side_effect(connection, database_path, request, now_ms)
+      end)
+    else
+      _invalid -> {:error, :invalid_side_effect}
+    end
+  end
+
+  defp begin_current_side_effect(connection, database_path, request, now_ms) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, request.lease.admitted_run_id),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, request.lease, now_ms, database_path),
+         {:ok, admission} <-
+           load_admission(
+             connection,
+             database_path,
+             request.lease.target_id,
+             request.lease.tracker_issue_id
+           ),
+         true <- admission.admitted_run_id == request.lease.admitted_run_id,
+         artifact_path =
+           side_effect_artifact_path(admission, request.kind, request.idempotency_key),
+         {:ok, existing} <-
+           select_side_effect(
+             connection,
+             database_path,
+             request.lease.admitted_run_id,
+             request.kind,
+             request.idempotency_key
+           ) do
+      case existing do
+        nil ->
+          insert_new_side_effect(
+            connection,
+            database_path,
+            Map.merge(request, %{admission: admission, artifact_path: artifact_path}),
+            now_ms
+          )
+
+        %SideEffect{} = side_effect ->
+          classify_repeated_side_effect(
+            connection,
+            database_path,
+            side_effect,
+            request.intent,
+            artifact_path,
+            now_ms
+          )
+      end
+    else
+      false -> {:error, :stale_lease}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp insert_new_side_effect(connection, database_path, request, now_ms) do
+    with :ok <-
+           authorize_new_side_effect(
+             connection,
+             database_path,
+             request.admission,
+             request.kind
+           ),
+         {:ok, started_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           insert_side_effect(
+             connection,
+             database_path,
+             request,
+             started_at
+           ),
+         {:ok, %SideEffect{} = stored} <-
+           select_side_effect(
+             connection,
+             database_path,
+             request.lease.admitted_run_id,
+             request.kind,
+             request.idempotency_key
+           ) do
+      {:ok, stored}
+    end
+  end
+
+  defp classify_repeated_side_effect(
+         connection,
+         database_path,
+         side_effect,
+         intent,
+         artifact_path,
+         now_ms
+       ) do
+    if side_effect.intent === intent and side_effect.artifact_path == artifact_path do
+      case side_effect.state do
+        :pending ->
+          mark_side_effect_reconciliation(
+            connection,
+            database_path,
+            side_effect,
+            %{
+              "reason" => "prior_external_outcome_unknown",
+              "operator_action_required" => true
+            },
+            now_ms
+          )
+
+        :succeeded ->
+          {:completed, side_effect}
+
+        :failed ->
+          {:failed, side_effect}
+
+        :reconciliation_required ->
+          {:blocked, side_effect}
+      end
+    else
+      {:error, :side_effect_conflict}
+    end
+  end
+
+  defp persist_side_effect_outcome(
+         connection,
+         database_path,
+         lease,
+         kind,
+         idempotency_key,
+         outcome,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         :ok <- validate_side_effect_identity(kind, idempotency_key, %{}),
+         {:ok, state, normalized_outcome} <- normalize_side_effect_outcome(outcome),
+         {:ok, outcome_json} <- encode_json(normalized_outcome) do
+      request = %{
+        lease: lease,
+        kind: kind,
+        idempotency_key: idempotency_key,
+        state: state,
+        outcome: normalized_outcome,
+        outcome_json: outcome_json
+      }
+
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        finish_current_side_effect(connection, database_path, request, now_ms)
+      end)
+    else
+      _invalid -> {:error, :invalid_side_effect}
+    end
+  end
+
+  defp finish_current_side_effect(connection, database_path, request, now_ms) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, request.lease.admitted_run_id),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, request.lease, now_ms, database_path),
+         {:ok, side_effect} <-
+           select_side_effect(
+             connection,
+             database_path,
+             request.lease.admitted_run_id,
+             request.kind,
+             request.idempotency_key
+           ) do
+      finish_selected_side_effect(
+        connection,
+        database_path,
+        side_effect,
+        request.lease,
+        request.state,
+        request.outcome,
+        request.outcome_json,
+        now_ms
+      )
+    end
+  end
+
+  defp finish_selected_side_effect(
+         _connection,
+         _database_path,
+         nil,
+         _lease,
+         _state,
+         _normalized_outcome,
+         _outcome_json,
+         _now_ms
+       ),
+       do: {:error, :side_effect_not_found}
+
+  defp finish_selected_side_effect(
+         connection,
+         database_path,
+         side_effect,
+         lease,
+         state,
+         normalized_outcome,
+         outcome_json,
+         now_ms
+       ) do
+    cond do
+      side_effect.owner_id != lease.owner_id or
+          side_effect.fencing_token != lease.fencing_token ->
+        {:error, :stale_lease}
+
+      side_effect.state == :pending ->
+        store_side_effect_outcome(
+          connection,
+          database_path,
+          side_effect,
+          state,
+          outcome_json,
+          now_ms
+        )
+
+      side_effect.state == state and side_effect.outcome === normalized_outcome ->
+        side_effect_outcome_result(side_effect)
+
+      true ->
+        {:error, :side_effect_conflict}
+    end
+  end
+
+  defp store_side_effect_outcome(
+         connection,
+         database_path,
+         side_effect,
+         :reconciliation_required,
+         outcome_json,
+         now_ms
+       ) do
+    mark_side_effect_reconciliation(
+      connection,
+      database_path,
+      side_effect,
+      outcome_json,
+      now_ms,
+      :encoded
+    )
+  end
+
+  defp store_side_effect_outcome(
+         connection,
+         database_path,
+         side_effect,
+         state,
+         outcome_json,
+         now_ms
+       )
+       when state in [:succeeded, :failed] do
+    with {:ok, completed_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_side_effect_outcome(
+             connection,
+             database_path,
+             side_effect,
+             state,
+             outcome_json,
+             completed_at
+           ),
+         {:ok, %SideEffect{} = stored} <-
+           select_side_effect(
+             connection,
+             database_path,
+             side_effect.admitted_run_id,
+             side_effect.kind,
+             side_effect.idempotency_key
+           ) do
+      side_effect_outcome_result(stored)
+    end
+  end
+
+  defp mark_side_effect_reconciliation(
+         connection,
+         database_path,
+         side_effect,
+         outcome,
+         now_ms,
+         encoding \\ :encode
+       ) do
+    with {:ok, outcome_json} <- maybe_encode_side_effect_outcome(outcome, encoding),
+         {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_side_effect_reconciliation(
+             connection,
+             database_path,
+             side_effect,
+             outcome_json,
+             updated_at
+           ),
+         {:ok, %SideEffect{} = stored} <-
+           select_side_effect(
+             connection,
+             database_path,
+             side_effect.admitted_run_id,
+             side_effect.kind,
+             side_effect.idempotency_key
+           ) do
+      {:blocked, stored}
+    end
+  end
+
+  defp maybe_encode_side_effect_outcome(outcome_json, :encoded), do: {:ok, outcome_json}
+  defp maybe_encode_side_effect_outcome(outcome, :encode), do: encode_json(outcome)
+
+  defp side_effect_outcome_result(%SideEffect{state: :succeeded} = side_effect),
+    do: {:ok, side_effect}
+
+  defp side_effect_outcome_result(%SideEffect{state: :failed} = side_effect),
+    do: {:failed, side_effect}
+
+  defp side_effect_outcome_result(%SideEffect{state: :reconciliation_required} = side_effect),
+    do: {:blocked, side_effect}
+
+  defp authorize_new_side_effect(connection, database_path, admission, :workspace_cleanup) do
+    with {:ok, lifecycle} <-
+           load_lifecycle(connection, database_path, admission.admitted_run_id),
+         true <- lifecycle.state == :cleanup_pending do
+      :ok
+    else
+      _not_allowed -> {:error, :side_effect_not_allowed}
+    end
+  end
+
+  defp authorize_new_side_effect(_connection, _database_path, admission, kind) do
+    gates = admission.context.target.external_side_effect_gates
+
+    allowed? =
+      case kind do
+        kind when kind in [:tracker_write, :handoff_route] ->
+          gates["tracker_write"] == "allow"
+
+        kind when kind in [:publish_preflight, :publish_handoff] ->
+          gates["vcs_publish"] == "allow" and gates["pull_request_write"] == "allow"
+      end
+
+    if allowed?, do: :ok, else: {:error, :side_effect_not_allowed}
+  end
+
+  defp validate_side_effect_identity(kind, idempotency_key, intent)
+       when kind in @side_effect_kinds and is_binary(idempotency_key) and
+              idempotency_key != "" and byte_size(idempotency_key) <= 512 and is_map(intent) do
+    if String.valid?(idempotency_key), do: :ok, else: {:error, :invalid_side_effect}
+  end
+
+  defp validate_side_effect_identity(_kind, _idempotency_key, _intent),
+    do: {:error, :invalid_side_effect}
+
+  defp normalize_side_effect_outcome({status, outcome})
+       when status in [:succeeded, :failed, :ambiguous] and is_map(outcome) do
+    with {:ok, normalized} <- normalize_durable_evidence(outcome) do
+      state = if status == :ambiguous, do: :reconciliation_required, else: status
+      {:ok, state, normalized}
+    end
+  end
+
+  defp normalize_side_effect_outcome(_outcome), do: {:error, :invalid_side_effect}
+
+  defp invoke_side_effect(operation) do
+    case operation.() do
+      {:ok, outcome} when is_map(outcome) -> {:succeeded, outcome}
+      {:failed, outcome} when is_map(outcome) -> {:failed, outcome}
+      {:ambiguous, outcome} when is_map(outcome) -> {:ambiguous, outcome}
+      {:error, reason} -> {:ambiguous, opaque_external_failure(reason)}
+      other -> {:ambiguous, opaque_external_failure(other)}
+    end
+  rescue
+    exception ->
+      {:ambiguous, %{"reason" => "external_call_raised", "class" => inspect(exception.__struct__)}}
+  catch
+    kind, _reason ->
+      {:ambiguous, %{"reason" => "external_call_stopped", "class" => Atom.to_string(kind)}}
+  end
+
+  defp opaque_external_failure(reason) when is_map(reason) do
+    case normalize_durable_evidence(reason) do
+      {:ok, normalized} -> normalized
+      {:error, :invalid_durable_evidence} -> %{"reason" => "external_call_outcome_unknown"}
+    end
+  end
+
+  defp opaque_external_failure(_reason),
+    do: %{"reason" => "external_call_outcome_unknown"}
+
+  defp normalize_durable_evidence(evidence) when is_map(evidence) do
+    case Redaction.json_ready(evidence) do
+      normalized when is_map(normalized) -> {:ok, normalized}
+      _invalid -> {:error, :invalid_durable_evidence}
+    end
+  rescue
+    _exception -> {:error, :invalid_durable_evidence}
+  catch
+    _kind, _reason -> {:error, :invalid_durable_evidence}
+  end
+
+  defp normalize_durable_evidence(_evidence), do: {:error, :invalid_durable_evidence}
+
+  defp insert_side_effect(connection, database_path, request, started_at) do
+    sql = """
+    INSERT INTO side_effect_intents (
+      admitted_run_id,
+      target_id,
+      tracker_issue_id,
+      kind,
+      idempotency_key,
+      artifact_path,
+      state,
+      owner_id,
+      fencing_token,
+      intent_json,
+      started_at,
+      updated_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'pending', ?7, ?8, ?9, ?10, ?10)
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        request.admission.admitted_run_id,
+        request.admission.target_id,
+        request.admission.tracker_issue_id,
+        Atom.to_string(request.kind),
+        request.idempotency_key,
+        request.artifact_path,
+        request.lease.owner_id,
+        request.lease.fencing_token,
+        request.intent_json,
+        started_at
+      ],
+      database_path,
+      "cannot persist side-effect intent"
+    )
+  end
+
+  defp update_side_effect_outcome(
+         connection,
+         database_path,
+         side_effect,
+         state,
+         outcome_json,
+         completed_at
+       ) do
+    sql = """
+    UPDATE side_effect_intents
+    SET state = ?1,
+        outcome_json = ?2,
+        completed_at = ?3,
+        updated_at = ?3
+    WHERE admitted_run_id = ?4
+      AND kind = ?5
+      AND idempotency_key = ?6
+      AND state = 'pending'
+      AND owner_id = ?7
+      AND fencing_token = ?8
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        Atom.to_string(state),
+        outcome_json,
+        completed_at,
+        side_effect.admitted_run_id,
+        Atom.to_string(side_effect.kind),
+        side_effect.idempotency_key,
+        side_effect.owner_id,
+        side_effect.fencing_token
+      ],
+      database_path,
+      "cannot persist side-effect outcome"
+    )
+  end
+
+  defp update_side_effect_reconciliation(
+         connection,
+         database_path,
+         side_effect,
+         outcome_json,
+         updated_at
+       ) do
+    sql = """
+    UPDATE side_effect_intents
+    SET state = 'reconciliation_required',
+        outcome_json = ?1,
+        updated_at = ?2
+    WHERE admitted_run_id = ?3
+      AND kind = ?4
+      AND idempotency_key = ?5
+      AND state = 'pending'
+      AND owner_id = ?6
+      AND fencing_token = ?7
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        outcome_json,
+        updated_at,
+        side_effect.admitted_run_id,
+        Atom.to_string(side_effect.kind),
+        side_effect.idempotency_key,
+        side_effect.owner_id,
+        side_effect.fencing_token
+      ],
+      database_path,
+      "cannot mark side effect for reconciliation"
+    )
+  end
+
+  defp load_side_effect(connection, database_path, admitted_run_id, kind, idempotency_key) do
+    with :ok <- validate_admitted_run_id(admitted_run_id),
+         :ok <- validate_side_effect_identity(kind, idempotency_key, %{}),
+         {:ok, side_effect} <-
+           select_side_effect(
+             connection,
+             database_path,
+             admitted_run_id,
+             kind,
+             idempotency_key
+           ) do
+      case side_effect do
+        %SideEffect{} -> {:ok, side_effect}
+        nil -> {:error, :side_effect_not_found}
+      end
+    end
+  end
+
+  defp load_side_effects(connection, database_path, admitted_run_id) do
+    with :ok <- validate_admitted_run_id(admitted_run_id),
+         {:ok, _lifecycle} <- load_lifecycle(connection, database_path, admitted_run_id) do
+      sql = side_effect_select_sql() <> " WHERE admitted_run_id = ?1 ORDER BY kind, idempotency_key"
+
+      case domain_query(
+             connection,
+             sql,
+             [admitted_run_id],
+             database_path,
+             "cannot list side effects"
+           ) do
+        {:ok, rows} -> decode_side_effects(rows, database_path)
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp select_side_effect(connection, database_path, admitted_run_id, kind, idempotency_key) do
+    sql =
+      side_effect_select_sql() <>
+        " WHERE admitted_run_id = ?1 AND kind = ?2 AND idempotency_key = ?3"
+
+    case domain_query(
+           connection,
+           sql,
+           [admitted_run_id, Atom.to_string(kind), idempotency_key],
+           database_path,
+           "cannot read side effect"
+         ) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, [row]} -> decode_side_effect(row, database_path)
+      {:ok, _rows} -> corrupt_store(database_path, :duplicate_side_effect)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp side_effect_select_sql do
+    """
+    SELECT
+      admitted_run_id,
+      target_id,
+      tracker_issue_id,
+      kind,
+      idempotency_key,
+      artifact_path,
+      state,
+      owner_id,
+      fencing_token,
+      intent_json,
+      outcome_json,
+      started_at,
+      completed_at,
+      updated_at
+    FROM side_effect_intents
+    """
+  end
+
+  defp decode_side_effects(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, side_effects} ->
+      case decode_side_effect(row, database_path) do
+        {:ok, side_effect} -> {:cont, {:ok, [side_effect | side_effects]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, side_effects} -> {:ok, Enum.reverse(side_effects)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_side_effect(
+         [
+           admitted_run_id,
+           target_id,
+           tracker_issue_id,
+           kind,
+           idempotency_key,
+           artifact_path,
+           state,
+           owner_id,
+           fencing_token,
+           intent_json,
+           outcome_json,
+           started_at,
+           completed_at,
+           updated_at
+         ],
+         database_path
+       ) do
+    fields = %{
+      admitted_run_id: admitted_run_id,
+      target_id: target_id,
+      tracker_issue_id: tracker_issue_id,
+      kind: kind,
+      idempotency_key: idempotency_key,
+      artifact_path: artifact_path,
+      state: state,
+      owner_id: owner_id,
+      fencing_token: fencing_token,
+      intent_json: intent_json,
+      outcome_json: outcome_json,
+      started_at: started_at,
+      completed_at: completed_at,
+      updated_at: updated_at
+    }
+
+    with true <- valid_side_effect_row?(fields),
+         {:ok, decoded_kind} <- decode_side_effect_kind(kind),
+         {:ok, decoded_state} <- decode_side_effect_state(state),
+         {:ok, intent} <- decode_json(intent_json),
+         {:ok, outcome} <- decode_optional_json(outcome_json),
+         true <- is_map(intent) and (is_nil(outcome) or is_map(outcome)) do
+      {:ok,
+       %SideEffect{
+         admitted_run_id: admitted_run_id,
+         target_id: target_id,
+         tracker_issue_id: tracker_issue_id,
+         kind: decoded_kind,
+         idempotency_key: idempotency_key,
+         artifact_path: artifact_path,
+         state: decoded_state,
+         owner_id: owner_id,
+         fencing_token: fencing_token,
+         intent: intent,
+         outcome: outcome,
+         started_at: started_at,
+         completed_at: completed_at,
+         updated_at: updated_at
+       }}
+    else
+      _invalid -> corrupt_store(database_path, :invalid_side_effect)
+    end
+  end
+
+  defp decode_side_effect(_row, database_path),
+    do: corrupt_store(database_path, :invalid_side_effect)
+
+  defp valid_side_effect_row?(fields) do
+    strings = [
+      fields.admitted_run_id,
+      fields.target_id,
+      fields.tracker_issue_id,
+      fields.idempotency_key,
+      fields.artifact_path,
+      fields.owner_id,
+      fields.started_at,
+      fields.updated_at
+    ]
+
+    Enum.all?(strings, &valid_non_empty_string?/1) and
+      is_integer(fields.fencing_token) and fields.fencing_token > 0 and
+      (is_nil(fields.completed_at) or is_binary(fields.completed_at))
+  end
+
+  defp decode_side_effect_kind(value) when is_binary(value) do
+    case Enum.find(@side_effect_kinds, &(Atom.to_string(&1) == value)) do
+      nil -> {:error, :invalid_side_effect_kind}
+      kind -> {:ok, kind}
+    end
+  end
+
+  defp decode_side_effect_kind(_value), do: {:error, :invalid_side_effect_kind}
+
+  defp decode_side_effect_state(value) when is_binary(value) do
+    case Enum.find(@side_effect_states, &(Atom.to_string(&1) == value)) do
+      nil -> {:error, :invalid_side_effect_state}
+      state -> {:ok, state}
+    end
+  end
+
+  defp decode_side_effect_state(_value), do: {:error, :invalid_side_effect_state}
+
+  defp side_effect_artifact_path(admission, kind, idempotency_key) do
+    digest =
+      :crypto.hash(:sha256, idempotency_key)
+      |> Base.url_encode64(padding: false)
+
+    Path.join([
+      admission.context.workspace_path,
+      ".symphony",
+      "side-effects",
+      admission.admitted_run_id,
+      Atom.to_string(kind),
+      digest <> ".json"
+    ])
+  end
+
+  defp persist_process_group(connection, database_path, lease, process_group_id, clock) do
+    with :ok <- validate_lease(lease),
+         true <- is_integer(process_group_id) and process_group_id > 0 do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        register_current_process_group(
+          connection,
+          database_path,
+          lease,
+          process_group_id,
+          now_ms
+        )
+      end)
+    else
+      _invalid -> {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp register_current_process_group(
+         connection,
+         database_path,
+         lease,
+         process_group_id,
+         now_ms
+       ) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <- authorize_lease(lease_row, lease, now_ms, database_path),
+         {:ok, lifecycle} <-
+           load_lifecycle(connection, database_path, lease.admitted_run_id),
+         true <- lifecycle.state == :running,
+         {:ok, existing} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ) do
+      case existing do
+        nil ->
+          insert_process_ownership(
+            connection,
+            database_path,
+            lease,
+            process_group_id,
+            now_ms
+          )
+
+        %ProcessOwnership{
+          process_group_id: ^process_group_id,
+          owner_id: owner_id,
+          state: :running
+        } = ownership
+        when owner_id == lease.owner_id ->
+          {:ok, ownership}
+
+        %ProcessOwnership{} ->
+          {:error, :process_ownership_conflict}
+      end
+    else
+      false -> {:error, :invalid_process_ownership}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp persist_process_group_termination(
+         connection,
+         database_path,
+         lease,
+         process_group_id,
+         outcome,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         true <- is_integer(process_group_id) and process_group_id > 0,
+         {:ok, next_state, evidence} <- normalize_process_termination(outcome),
+         {:ok, evidence_json} <- encode_json(evidence) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        terminate_current_process_group(
+          connection,
+          database_path,
+          lease,
+          process_group_id,
+          next_state,
+          evidence,
+          evidence_json,
+          now_ms
+        )
+      end)
+    else
+      _invalid -> {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp terminate_current_process_group(
+         connection,
+         database_path,
+         lease,
+         process_group_id,
+         next_state,
+         evidence,
+         evidence_json,
+         now_ms
+       ) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <- authorize_lease(lease_row, lease, now_ms, database_path),
+         {:ok, ownership} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ),
+         :ok <-
+           validate_process_termination_identity(
+             ownership,
+             lease,
+             process_group_id
+           ) do
+      apply_process_termination(
+        connection,
+        database_path,
+        ownership,
+        lease,
+        next_state,
+        evidence,
+        evidence_json,
+        now_ms
+      )
+    end
+  end
+
+  defp apply_process_termination(
+         _connection,
+         _database_path,
+         %ProcessOwnership{state: state, evidence: stored_evidence} = ownership,
+         _lease,
+         state,
+         evidence,
+         _evidence_json,
+         _now_ms
+       )
+       when stored_evidence === evidence,
+       do: {:ok, ownership}
+
+  defp apply_process_termination(
+         _connection,
+         _database_path,
+         %ProcessOwnership{state: :stopped},
+         _lease,
+         _next_state,
+         _evidence,
+         _evidence_json,
+         _now_ms
+       ),
+       do: {:error, :process_ownership_conflict}
+
+  defp apply_process_termination(
+         connection,
+         database_path,
+         ownership,
+         lease,
+         next_state,
+         _evidence,
+         evidence_json,
+         now_ms
+       ) do
+    with {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_process_ownership(
+             connection,
+             database_path,
+             ownership,
+             next_state,
+             evidence_json,
+             updated_at
+           ),
+         :ok <-
+           maybe_block_unverifiable_process(
+             connection,
+             database_path,
+             lease,
+             next_state,
+             now_ms
+           ),
+         {:ok, %ProcessOwnership{} = stored} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             ownership.admitted_run_id,
+             ownership.fencing_token
+           ) do
+      {:ok, stored}
+    end
+  end
+
+  defp maybe_block_unverifiable_process(
+         connection,
+         database_path,
+         lease,
+         :unverifiable,
+         now_ms
+       ) do
+    with {:ok, {lifecycle, cleanup_authority}} <-
+           select_lifecycle_by_run_id(connection, database_path, lease.admitted_run_id) do
+      block_unverifiable_lifecycle(
+        connection,
+        database_path,
+        lease,
+        lifecycle,
+        cleanup_authority,
+        now_ms
+      )
+    end
+  end
+
+  defp maybe_block_unverifiable_process(
+         _connection,
+         _database_path,
+         _lease,
+         :stopped,
+         _now_ms
+       ),
+       do: :ok
+
+  defp block_unverifiable_lifecycle(
+         _connection,
+         _database_path,
+         _lease,
+         %Lifecycle{state: :blocked},
+         _cleanup_authority,
+         _now_ms
+       ),
+       do: :ok
+
+  defp block_unverifiable_lifecycle(
+         connection,
+         database_path,
+         lease,
+         %Lifecycle{state: state} = lifecycle,
+         cleanup_authority,
+         now_ms
+       )
+       when state in [:running, :retrying] do
+    request = %{
+      lease: lease,
+      expected_sequence: lifecycle.sequence,
+      expected_state: state,
+      next_state: :blocked,
+      evidence: %{reason: "process group termination is unverifiable"}
+    }
+
+    case transition_lifecycle(
+           connection,
+           database_path,
+           {lifecycle, cleanup_authority},
+           request,
+           now_ms
+         ) do
+      {:ok, _blocked} -> :ok
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp block_unverifiable_lifecycle(
+         _connection,
+         _database_path,
+         _lease,
+         _lifecycle,
+         _cleanup_authority,
+         _now_ms
+       ),
+       do: {:error, :invalid_process_ownership}
+
+  defp normalize_process_termination({state, evidence})
+       when state in [:stopped, :unverifiable] and is_map(evidence) do
+    case normalize_durable_evidence(evidence) do
+      {:ok, normalized} ->
+        {:ok, state, Map.put(normalized, "result", Atom.to_string(state))}
+
+      {:error, :invalid_durable_evidence} ->
+        {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp normalize_process_termination(_outcome),
+    do: {:error, :invalid_process_ownership}
+
+  defp validate_process_termination_identity(
+         %ProcessOwnership{
+           owner_id: owner_id,
+           process_group_id: process_group_id
+         },
+         lease,
+         process_group_id
+       )
+       when owner_id == lease.owner_id,
+       do: :ok
+
+  defp validate_process_termination_identity(nil, _lease, _process_group_id),
+    do: {:error, :invalid_process_ownership}
+
+  defp validate_process_termination_identity(_ownership, _lease, _process_group_id),
+    do: {:error, :process_ownership_conflict}
+
+  defp ensure_process_group_stopped(connection, database_path, admitted_run_id, fencing_token) do
+    with {:ok, ownership} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             admitted_run_id,
+             fencing_token
+           ) do
+      case ownership do
+        nil ->
+          :ok
+
+        %ProcessOwnership{state: :stopped} ->
+          :ok
+
+        %ProcessOwnership{state: state} when state in [:running, :unverifiable] ->
+          {:error, :process_termination_unverified}
+      end
+    end
+  end
+
+  defp insert_process_ownership(
+         connection,
+         database_path,
+         lease,
+         process_group_id,
+         now_ms
+       ) do
+    with {:ok, started_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           expect_no_rows(
+             connection,
+             """
+             INSERT INTO run_process_ownership (
+               admitted_run_id,
+               target_id,
+               tracker_issue_id,
+               owner_id,
+               fencing_token,
+               process_group_id,
+               state,
+               evidence_json,
+               started_at,
+               updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', '{}', ?7, ?7)
+             """,
+             [
+               lease.admitted_run_id,
+               lease.target_id,
+               lease.tracker_issue_id,
+               lease.owner_id,
+               lease.fencing_token,
+               process_group_id,
+               started_at
+             ],
+             database_path,
+             "cannot persist process-group ownership"
+           ),
+         {:ok, %ProcessOwnership{} = stored} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ) do
+      {:ok, stored}
+    end
+  end
+
+  defp update_process_ownership(
+         connection,
+         database_path,
+         ownership,
+         state,
+         evidence_json,
+         updated_at
+       ) do
+    expect_no_rows(
+      connection,
+      """
+      UPDATE run_process_ownership
+      SET state = ?1, evidence_json = ?2, updated_at = ?3
+      WHERE admitted_run_id = ?4
+        AND fencing_token = ?5
+        AND owner_id = ?6
+        AND process_group_id = ?7
+      """,
+      [
+        Atom.to_string(state),
+        evidence_json,
+        updated_at,
+        ownership.admitted_run_id,
+        ownership.fencing_token,
+        ownership.owner_id,
+        ownership.process_group_id
+      ],
+      database_path,
+      "cannot persist process-group termination"
+    )
+  end
+
+  defp select_process_ownership(
+         connection,
+         database_path,
+         admitted_run_id,
+         fencing_token
+       ) do
+    sql = """
+    SELECT
+      admitted_run_id,
+      target_id,
+      tracker_issue_id,
+      owner_id,
+      fencing_token,
+      process_group_id,
+      state,
+      evidence_json,
+      started_at,
+      updated_at
+    FROM run_process_ownership
+    WHERE admitted_run_id = ?1 AND fencing_token = ?2
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [admitted_run_id, fencing_token],
+           database_path,
+           "cannot read process-group ownership"
+         ) do
+      {:ok, []} -> {:ok, nil}
+      {:ok, [row]} -> decode_process_ownership(row, database_path)
+      {:ok, _rows} -> corrupt_store(database_path, :duplicate_process_ownership)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_process_ownership(
+         [
+           admitted_run_id,
+           target_id,
+           tracker_issue_id,
+           owner_id,
+           fencing_token,
+           process_group_id,
+           state,
+           evidence_json,
+           started_at,
+           updated_at
+         ],
+         database_path
+       ) do
+    fields = %{
+      admitted_run_id: admitted_run_id,
+      target_id: target_id,
+      tracker_issue_id: tracker_issue_id,
+      owner_id: owner_id,
+      fencing_token: fencing_token,
+      process_group_id: process_group_id,
+      started_at: started_at,
+      updated_at: updated_at
+    }
+
+    with true <- valid_process_ownership_row?(fields),
+         {:ok, decoded_state} <- decode_process_ownership_state(state),
+         {:ok, evidence} <- decode_json(evidence_json),
+         true <- is_map(evidence) do
+      {:ok,
+       %ProcessOwnership{
+         admitted_run_id: admitted_run_id,
+         target_id: target_id,
+         tracker_issue_id: tracker_issue_id,
+         owner_id: owner_id,
+         fencing_token: fencing_token,
+         process_group_id: process_group_id,
+         state: decoded_state,
+         evidence: evidence,
+         started_at: started_at,
+         updated_at: updated_at
+       }}
+    else
+      _invalid -> corrupt_store(database_path, :invalid_process_ownership)
+    end
+  end
+
+  defp decode_process_ownership(_row, database_path),
+    do: corrupt_store(database_path, :invalid_process_ownership)
+
+  defp valid_process_ownership_row?(fields) do
+    strings = [
+      fields.admitted_run_id,
+      fields.target_id,
+      fields.tracker_issue_id,
+      fields.owner_id,
+      fields.started_at,
+      fields.updated_at
+    ]
+
+    Enum.all?(strings, &valid_non_empty_string?/1) and
+      is_integer(fields.fencing_token) and fields.fencing_token > 0 and
+      is_integer(fields.process_group_id) and fields.process_group_id > 0
+  end
+
+  defp decode_process_ownership_state("running"), do: {:ok, :running}
+  defp decode_process_ownership_state("stopped"), do: {:ok, :stopped}
+  defp decode_process_ownership_state("unverifiable"), do: {:ok, :unverifiable}
+  defp decode_process_ownership_state(_state), do: {:error, :invalid_process_ownership_state}
 
   defp prepare_admission(%ExecutionContext{} = context) do
     with :ok <- ExecutionContext.validate(context),
