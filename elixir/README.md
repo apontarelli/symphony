@@ -248,8 +248,12 @@ state, review records, publish decisions, handoff evidence, or cleanup. Safe sta
 include target ID, registry generation, and policy hash, but do not include credentials or raw policy
 data.
 
-The public `symphony run <saved-name>` and `symphony run --workflow <path>` commands remain
-single-target admission adapters. After admission, they use the same context-first execution path.
+The public `symphony run <saved-name>`, `symphony run --workflow <path>`, and explicit-issue
+commands are single-target admission forms. They build the canonical `TargetContext` before polling.
+After admission, tracker, workspace, AgentRunner, runtime, quality, publish, handoff, cleanup, and
+orchestrator operations accept only the pinned target or execution context. They do not expose
+ambient-config or workspace-only runtime entry points.
+
 The current host still activates and polls one selected target. The local durable control-plane
 store supports pinned admissions, leases, fenced lifecycle transitions, side-effect intents, local
 process ownership, and restart recovery. Autonomous multi-target activation, fairness, and
@@ -261,13 +265,8 @@ lease before it resolves current credentials or revalidates tracker state. It re
 retrying, blocked, completion, and cleanup transitions. Publish preflight, publish handoff,
 handoff-route tracker writes, and workspace cleanup start only through the current fenced side-effect
 intent. Startup recovery fences the prior owner, verifies or terminates its recorded process group,
-releases the legacy coordinator lease, and retries from the pinned admission.
+releases the target-scoped coordinator lease, and retries from the pinned admission.
 
-The deterministic contract test is
-`test/symphony_elixir/two_target_isolation_test.exs`. It poisons mutable global configuration after
-admission and covers two target scopes through tracker resolution, workspace hooks, prompt and
-module resolution, runtime preflight, AgentRunner, quality gates, publish and handoff, tracker
-mutation, orchestrator stall/retry/crash/blocked state, artifacts, and cleanup.
 The Phase 3 crash/restart contract is
 `test/symphony_elixir/control_plane_test.exs` test
 `two-target crash recovery preserves pinned authority and fenced side effects`. It admits two
@@ -499,6 +498,9 @@ For migration, `setup migrate` requires an explicit `--repo`, reads that repo's 
 ./bin/symphony setup migrate --repo /path/to/repo --name my-project --apply
 ```
 
+`setup migrate` is an offline compatibility reader. It does not supply runtime authority and is not
+called after admission.
+
 Preview a saved workflow before side effects. Explicit local runtime paths are start-only:
 
 ```bash
@@ -563,6 +565,9 @@ so the shared `review-retrospective` workflow can mine Symphony quality-gate rec
 `review-records/parallel-review/<project-slug>/<run-id>/` sidecars are legacy input only; run
 `./bin/symphony review-records backfill-review --logs-root /path/to/logs-root` once to copy them
 into canonical `review/` records while preserving the original legacy path in metadata provenance.
+
+Historical review-record backfill is an offline artifact conversion. It does not participate in
+runtime compatibility or execution authority.
 
 The preferred `symphony.yml` file is a thin YAML repo setup manifest that selects Symphony-owned
 workflow modules. The manifest compiles into the policy/config fragment and prompt shape consumed by

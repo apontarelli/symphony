@@ -41,10 +41,11 @@ defmodule SymphonyElixir.TargetContext do
     :capacity_limits,
     :budget_limits
   ]
-  defstruct @enforce_keys ++ [issue_policy_authority: nil]
+  defstruct @enforce_keys ++ [issue_policy_authority: nil, workspace_layout: :target_scoped]
 
   @type state :: :paused | :active | :draining | :retired
   @type dispatch_mode :: :explicit | :watch | nil
+  @type workspace_layout :: :flat | :target_scoped
   @type t :: %__MODULE__{
           target_id: String.t(),
           state: state(),
@@ -57,6 +58,7 @@ defmodule SymphonyElixir.TargetContext do
           tracker_connection: map(),
           run_target: map(),
           worktree_policy: map(),
+          workspace_layout: workspace_layout(),
           runner_policy: map(),
           effective_checks: map(),
           external_side_effect_gates: map(),
@@ -781,6 +783,7 @@ defmodule SymphonyElixir.TargetContext do
          dispatch_mode: target.dispatch_mode,
          registry_generation: generation,
          policy_hash: target.policy_hash,
+         workspace_layout: registry_workspace_layout(policy.worktree_policy, target_id),
          repo_manifest_hash: repo_manifest_hash,
          repo_policy: policy.repo_policy,
          tracker_connection: tracker_connection,
@@ -806,6 +809,11 @@ defmodule SymphonyElixir.TargetContext do
 
   defp build_context(_snapshot, _target_id, _opts, _credential_mode),
     do: {:error, :invalid_snapshot}
+
+  defp registry_workspace_layout(%{"root" => root}, target_id)
+       when is_binary(root) and is_binary(target_id) do
+    if Path.basename(Path.expand(root)) == target_id, do: :flat, else: :target_scoped
+  end
 
   defp validate_options(opts) do
     if Keyword.keyword?(opts) and

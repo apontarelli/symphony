@@ -2,16 +2,14 @@ defmodule SymphonyElixir.AgentRuntime do
   @moduledoc """
   Runtime seam consumed by orchestration code.
 
-  `AgentRuntime` selects an adapter from a pinned execution context or the configured legacy default runner kind.
-  Adapters own native protocol translation and emit
-  `SymphonyElixir.AgentRuntime.Event` values to orchestration through the
-  callback options they support.
+  `AgentRuntime` selects an adapter from a pinned execution context. Adapters own
+  native protocol translation and emit `SymphonyElixir.AgentRuntime.Event`
+  values to orchestration through the callback options they support.
   """
   require Logger
 
   alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OpenCodeServer}
-  alias SymphonyElixir.{Config, ExecutionContext, ProcessSupervisor}
-  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.{ExecutionContext, ProcessSupervisor}
 
   @type adapter_config :: term()
   @type capabilities :: map()
@@ -36,7 +34,7 @@ defmodule SymphonyElixir.AgentRuntime do
             runner_name: String.t(),
             runner_kind: String.t(),
             runner_config: map(),
-            context: ExecutionContext.t() | nil
+            context: ExecutionContext.t()
           }
   end
 
@@ -45,7 +43,7 @@ defmodule SymphonyElixir.AgentRuntime do
 
   Adapters should return after the native session is ready to receive a turn.
   """
-  @callback start(ExecutionContext.t() | Path.t(), issue(), [start_option()]) ::
+  @callback start(ExecutionContext.t(), issue(), [start_option()]) ::
               {:ok, session()} | {:error, reason()}
 
   @doc """
@@ -69,12 +67,12 @@ defmodule SymphonyElixir.AgentRuntime do
   Returns adapter capabilities that orchestration can use for policy decisions.
   """
   @callback capabilities(adapter_config()) :: capabilities()
-  @spec run(ExecutionContext.t() | Path.t(), String.t(), map()) ::
+  @spec run(ExecutionContext.t(), String.t(), map()) ::
           {:ok, map()} | {:error, term()}
-  def run(context_or_workspace, prompt, issue),
-    do: run(context_or_workspace, prompt, issue, [])
+  def run(%ExecutionContext{} = context, prompt, issue),
+    do: run(context, prompt, issue, [])
 
-  @spec run(ExecutionContext.t() | Path.t(), String.t(), map(), keyword()) ::
+  @spec run(ExecutionContext.t(), String.t(), map(), keyword()) ::
           {:ok, map()} | {:error, term()}
   def run(%ExecutionContext{} = context, prompt, issue, opts) do
     with {:ok, opts} <- validate_context_options(opts, context_run_options()) do
@@ -88,11 +86,8 @@ defmodule SymphonyElixir.AgentRuntime do
     end
   end
 
-  def run(workspace, prompt, issue, opts),
-    do: run_with_session(workspace, prompt, issue, opts, opts)
-
-  defp run_with_session(context_or_workspace, prompt, issue, start_opts, turn_opts) do
-    with {:ok, session} <- start_session(context_or_workspace, issue, start_opts) do
+  defp run_with_session(%ExecutionContext{} = context, prompt, issue, start_opts, turn_opts) do
+    with {:ok, session} <- start_session(context, issue, start_opts) do
       turn_result =
         try do
           {:returned, send_turn(session, prompt, issue, turn_opts)}
@@ -139,12 +134,12 @@ defmodule SymphonyElixir.AgentRuntime do
     :erlang.raise(kind, reason, stacktrace)
   end
 
-  @spec start_session(ExecutionContext.t() | Path.t(), map()) ::
+  @spec start_session(ExecutionContext.t(), map()) ::
           {:ok, Session.t()} | {:error, term()}
-  def start_session(context_or_workspace, issue),
-    do: start_session(context_or_workspace, issue, [])
+  def start_session(%ExecutionContext{} = context, issue),
+    do: start_session(context, issue, [])
 
-  @spec start_session(ExecutionContext.t() | Path.t(), map(), keyword()) ::
+  @spec start_session(ExecutionContext.t(), map(), keyword()) ::
           {:ok, Session.t()} | {:error, term()}
   def start_session(%ExecutionContext{} = context, issue, opts) do
     with {:ok, opts} <- validate_context_options(opts, [:adapter_registry]),
@@ -159,25 +154,6 @@ defmodule SymphonyElixir.AgentRuntime do
          runner_kind: runner_kind,
          runner_config: context.runner_config,
          context: context
-       }}
-    end
-  end
-
-  def start_session(workspace, issue, opts) do
-    with {:ok, adapter, runner_name, runner_config, settings} <- resolve_dispatch(opts),
-         {:ok, adapter_session} <-
-           adapter.start(
-             workspace,
-             issue,
-             start_adapter_opts(opts, runner_name, runner_config, settings)
-           ) do
-      {:ok,
-       %Session{
-         adapter: adapter,
-         adapter_session: adapter_session,
-         runner_name: runner_name,
-         runner_kind: runner_config["kind"],
-         runner_config: runner_config
        }}
     end
   end
@@ -206,25 +182,6 @@ defmodule SymphonyElixir.AgentRuntime do
     end
   end
 
-  def send_turn(
-        %Session{
-          adapter: adapter,
-          adapter_session: adapter_session,
-          runner_name: runner_name,
-          runner_config: runner_config
-        },
-        prompt,
-        issue,
-        opts
-      ) do
-    adapter.send_turn(
-      adapter_session,
-      prompt,
-      issue,
-      adapter_opts(opts, runner_name, runner_config)
-    )
-  end
-
   def send_turn(_session, _prompt, _issue, _opts),
     do: {:error, :invalid_agent_runtime_session}
 
@@ -239,25 +196,10 @@ defmodule SymphonyElixir.AgentRuntime do
     end
   end
 
-  def stop_session(%Session{adapter: adapter, adapter_session: adapter_session}) do
-    adapter.stop(adapter_session)
-  end
-
   def stop_session(_session), do: {:error, :invalid_agent_runtime_session}
 
-  @spec capabilities() :: map() | {:error, term()}
-  def capabilities, do: capabilities([])
-
-  @spec capabilities(ExecutionContext.t() | keyword()) :: map() | {:error, term()}
+  @spec capabilities(ExecutionContext.t()) :: map() | {:error, term()}
   def capabilities(%ExecutionContext{} = context), do: capabilities(context, [])
-
-  def capabilities(opts) when is_list(opts) do
-    with {:ok, adapter, _runner_name, runner_config, _settings} <- resolve_dispatch(opts) do
-      adapter.capabilities(runner_config)
-    end
-  end
-
-  def capabilities(_invalid), do: {:error, :invalid_agent_runtime_options}
 
   @spec capabilities(ExecutionContext.t(), keyword()) :: map() | {:error, term()}
   def capabilities(%ExecutionContext{} = context, opts) do
@@ -268,20 +210,6 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   def capabilities(_context, _opts), do: {:error, :invalid_agent_runtime_context}
-
-  @doc false
-  @spec resolve_adapter(Schema.t(), %{optional(String.t()) => module()}) ::
-          {:ok, module(), String.t(), map()} | {:error, term()}
-  def resolve_adapter(%Schema{} = settings, adapter_registry \\ default_adapter_registry())
-      when is_map(adapter_registry) do
-    runner_name = Schema.default_runner_name(settings)
-
-    with {:ok, runner_config} <- Schema.default_runner_config(settings),
-         {:ok, runner_kind} <- runner_kind(runner_name, runner_config),
-         {:ok, adapter} <- fetch_adapter(adapter_registry, runner_name, runner_kind) do
-      {:ok, adapter, runner_name, runner_config}
-    end
-  end
 
   defp resolve_context_dispatch(context, opts) do
     adapter_registry = Keyword.get(opts, :adapter_registry, default_adapter_registry())
@@ -324,15 +252,6 @@ defmodule SymphonyElixir.AgentRuntime do
   defp context_turn_options,
     do: [:on_event, :tool_executor, :on_turn_task_result_sent]
 
-  defp resolve_dispatch(opts) do
-    settings = Keyword.get_lazy(opts, :settings, &Config.settings!/0)
-    adapter_registry = Keyword.get(opts, :adapter_registry, default_adapter_registry())
-
-    with {:ok, adapter, runner_name, runner_config} <- resolve_adapter(settings, adapter_registry) do
-      {:ok, adapter, runner_name, runner_config, settings}
-    end
-  end
-
   defp runner_kind(_runner_name, %{"kind" => kind}) when is_binary(kind) and kind != "",
     do: {:ok, kind}
 
@@ -360,19 +279,4 @@ defmodule SymphonyElixir.AgentRuntime do
   defp default_adapter_registry do
     %{"codex_app_server" => CodexAppServer, "opencode_server" => OpenCodeServer}
   end
-
-  defp start_adapter_opts(opts, runner_name, runner_config, settings) do
-    opts
-    |> adapter_opts(runner_name, runner_config)
-    |> Keyword.put(:runtime_settings, settings)
-  end
-
-  defp adapter_opts(opts, runner_name, runner_config) do
-    opts
-    |> strip_dispatch_opts()
-    |> Keyword.put(:runner_name, runner_name)
-    |> Keyword.put(:runner_config, runner_config)
-  end
-
-  defp strip_dispatch_opts(opts), do: Keyword.drop(opts, [:settings, :adapter_registry])
 end

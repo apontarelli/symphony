@@ -339,18 +339,6 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
     assert %{status: :passed} =
              QualityGate.run_context(default_settings, issue, %{}, runner: runner)
 
-    legacy_invalid =
-      QualityGate.run(
-        alpha.workspace_path,
-        alpha.policy,
-        issue,
-        %{changed_files: ["lib/source.ex"]},
-        execution_context: :invalid,
-        runner: runner
-      )
-
-    assert legacy_invalid.status == :blocked
-
     assert PublishPreflight.run_context(:invalid) ==
              {:error, :invalid_publish_preflight_context}
 
@@ -404,6 +392,33 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
              handoff_route: :invalid
            }) ==
              {:error, :review_record_context_mismatch}
+  end
+
+  test "invalid pinned reviewer profile blocks the quality gate", %{
+    issue: issue,
+    alpha: alpha
+  } do
+    context =
+      replace_runner(alpha, fn runner ->
+        Map.update!(runner, "execution_profiles", fn profiles ->
+          Map.put(profiles, "runtime_qa", "invalid")
+        end)
+      end)
+
+    result =
+      QualityGate.run_context(
+        context,
+        issue,
+        %{changed_surfaces: [:runtime]},
+        runner: fn _payload -> flunk("invalid reviewer context reached the runner") end
+      )
+
+    assert result.status == :blocked
+
+    assert Enum.any?(
+             result.unresolved_human_review_reasons,
+             &String.contains?(&1, "invalid_review_context")
+           )
   end
 
   test "reviewers derive target-scoped child contexts from pinned authority", %{
@@ -542,15 +557,6 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
 
     assert_receive {:publish, "alpha", :git_remote_get_url}
     assert_receive {:publish, "alpha", :pr_create}
-
-    assert %{status: :blocked, failure: %{reason: :delivery_not_allowed}} =
-             PublishHandoff.run(
-               alpha.workspace_path,
-               alpha.policy,
-               issue,
-               %{},
-               delivery_gates: :invalid
-             )
 
     assert %{status: :blocked, failure: %{reason: :change_manifest_missing}} =
              PublishHandoff.run_context(
@@ -793,6 +799,7 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
 
     target = %TargetContext{
       target_id: target_id,
+      workspace_layout: :flat,
       state: :active,
       dispatch_mode: :explicit,
       registry_generation: @hash,

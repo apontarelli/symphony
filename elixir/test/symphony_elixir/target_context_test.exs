@@ -156,6 +156,7 @@ defmodule SymphonyElixir.TargetContextTest do
              policy_hash: target.policy_hash,
              repo_manifest_hash: repo_manifest_hash,
              issue_policy_authority: nil,
+             workspace_layout: :flat,
              repo_policy: target.effective_policy["repo_policy"],
              tracker_connection: expected_tracker,
              run_target: target.effective_policy["run_target"],

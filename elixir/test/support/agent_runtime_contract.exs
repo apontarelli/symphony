@@ -45,7 +45,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         runtime_context = @agent_runtime_fake.install!(runtime_context, :start_only)
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         try do
           assert @agent_runtime_fake.session_thread_id(session) == "thread-contract-start"
@@ -67,7 +67,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         on_event = fn event -> send(test_pid, {:runtime_event, event}) end
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         try do
           assert {:ok, %{session_id: "thread-contract-success-turn-contract-success"}} =
@@ -107,7 +107,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         end
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         try do
           assert {:ok, _result} =
@@ -151,7 +151,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         end
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         try do
           assert {:ok, _result} =
@@ -180,7 +180,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         on_event = fn event -> send(test_pid, {:runtime_event, event}) end
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         try do
           assert {:error, {:turn_input_required, input_payload}} =
@@ -211,7 +211,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         runtime_context = @agent_runtime_fake.install!(runtime_context, :startup_timeout)
 
         assert {:error, {:startup_failed, {:timeout, 80}}} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 80)
+                 start_runtime(runtime_context, startup_timeout_ms: 80)
       end
 
       test "stops the runtime process and descendant processes where supported", %{runtime_context: runtime_context} do
@@ -226,7 +226,7 @@ defmodule SymphonyElixir.AgentRuntimeContract do
         runtime_context = @agent_runtime_fake.install!(runtime_context, :descendant_cleanup)
 
         assert {:ok, session} =
-                 @agent_runtime_adapter.start(runtime_context.workspace, runtime_issue(runtime_context), startup_timeout_ms: 1_000)
+                 start_runtime(runtime_context)
 
         child_pid =
           try do
@@ -254,6 +254,48 @@ defmodule SymphonyElixir.AgentRuntimeContract do
           url: "https://example.org/issues/#{runtime_context.issue_identifier}",
           labels: ["runtime"]
         }
+      end
+
+      defp start_runtime(runtime_context, opts \\ []) do
+        issue = runtime_issue(runtime_context)
+
+        assert {:ok, target} = SymphonyElixir.TargetAdmission.build_target([])
+        target = with_startup_timeout(target, opts[:startup_timeout_ms])
+
+        assert {:ok, context} =
+                 SymphonyElixir.ExecutionContext.new(
+                   target,
+                   issue,
+                   policy: %{
+                     "policy_ref" => "runtime-contract",
+                     "policy_metadata" => %{"profile" => "default"}
+                   }
+                 )
+
+        assert {:ok, canonical_workspace} =
+                 SymphonyElixir.PathSafety.canonicalize(runtime_context.workspace)
+
+        assert context.workspace_path == canonical_workspace
+        @agent_runtime_adapter.start(context, issue, [])
+      end
+
+      defp with_startup_timeout(target, nil), do: target
+
+      defp with_startup_timeout(target, timeout_ms) do
+        runner_name = target.runner_policy["default"]
+
+        runner_policy =
+          update_in(
+            target.runner_policy,
+            ["runners", runner_name],
+            fn runner ->
+              runner
+              |> Map.put("startup_timeout_ms", timeout_ms)
+              |> Map.put("read_timeout_ms", timeout_ms)
+            end
+          )
+
+        %{target | runner_policy: runner_policy}
       end
 
       defp received_runtime_events do

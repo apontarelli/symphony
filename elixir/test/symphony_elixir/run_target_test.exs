@@ -4,8 +4,7 @@ defmodule SymphonyElixir.RunTargetTest do
   alias Ecto.Changeset
   alias SymphonyElixir.Config.Schema.IssueMarkers
   alias SymphonyElixir.Linear.Filter
-  alias SymphonyElixir.RunTarget
-  alias SymphonyElixir.Tracker.Memory
+  alias SymphonyElixir.{RunTarget, TargetAdmission, Tracker}
 
   test "runtime target envelope parses without legacy tracker project scope" do
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -274,9 +273,14 @@ defmodule SymphonyElixir.RunTargetTest do
 
     target = %RunTarget{tracker: "memory", type: :issues, issue_ids: ["issue-2", "issue-1"]}
 
-    assert {:ok, %RunTarget.Resolution{issues: [^issue_2, ^issue_1], ordering: :target}} =
-             Memory.resolve_candidate_issues(target)
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      target: %{tracker: "memory", type: "issues", issue_ids: target.issue_ids}
+    )
 
-    assert {:ok, [^issue_1, ^issue_2]} = Memory.fetch_candidate_issues()
+    assert {:ok, context} = TargetAdmission.build_target([])
+
+    assert {:ok, %RunTarget.Resolution{issues: [^issue_2, ^issue_1], ordering: :target}} =
+             Tracker.resolve_candidate_issues_uncached(context, target)
   end
 end

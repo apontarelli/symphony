@@ -1,12 +1,12 @@
-defmodule SymphonyElixir.TargetContextLegacyTest do
+defmodule SymphonyElixir.TargetAdmissionTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.RunSetup
+  alias SymphonyElixir.TargetAdmission
   alias SymphonyElixir.TargetContext
-  alias SymphonyElixir.TargetContext.Legacy
   alias SymphonyElixir.Workflow
 
   @hash_regex ~r/^sha256:[0-9a-f]{64}$/
@@ -16,8 +16,8 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     :ok
   end
 
-  test "build_at_process_start snapshots the selected workflow and saved run without secret-derived hashes" do
-    workspace_root = Path.join(System.tmp_dir!(), "legacy-context-workspaces")
+  test "build_target snapshots the selected workflow and saved run without secret-derived hashes" do
+    workspace_root = Path.join(System.tmp_dir!(), "target-admission-workspaces")
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: "resolved-secret-one",
@@ -42,7 +42,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       restrictive_flags: [:no_land]
     })
 
-    assert {:ok, %TargetContext{} = context} = Legacy.build_at_process_start([])
+    assert {:ok, %TargetContext{} = context} = TargetAdmission.build_target([])
     assert context.target_id == "saved-run"
     assert context.state == :active
     assert context.dispatch_mode == :explicit
@@ -99,7 +99,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       profiles: %{default: %{delivery: %{pr_target: "main"}}}
     )
 
-    assert {:ok, changed_secret} = Legacy.build_at_process_start([])
+    assert {:ok, changed_secret} = TargetAdmission.build_target([])
     assert changed_secret.tracker_connection["policy"]["api_key"] == "resolved-secret-two"
     assert changed_secret.registry_generation == context.registry_generation
     assert changed_secret.policy_hash == context.policy_hash
@@ -119,7 +119,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     refute inspect(context) =~ "poisoned-secret"
   end
 
-  test "legacy authority pins configured credential references instead of resolved values" do
+  test "target admission pins configured credential references instead of resolved values" do
     System.put_env("LEGACY_TRACKER_KEY", "resolved-tracker-value")
     System.put_env("LEGACY_RUNNER_PASSWORD", "resolved-runner-value")
 
@@ -134,7 +134,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       "env:LEGACY_RUNNER_PASSWORD"
     )
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     assert get_in(context.tracker_connection, ["policy", "api_key"]) ==
              "$LEGACY_TRACKER_KEY"
@@ -148,7 +148,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     refute inspect(context) =~ "resolved-runner-value"
   end
 
-  test "legacy authority preserves hooks, expands worktree root, and tracks manifest source" do
+  test "target admission preserves hooks, expands worktree root, and tracks manifest source" do
     relative_root = "tmp/legacy-context-relative-workspaces"
     hook_sentinel = "printf 'token=sk-test-legacy-hook'\nprintf done"
     source_path = Workflow.workflow_file_path()
@@ -162,7 +162,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       hook_timeout_ms: 12_345
     )
 
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     assert first.worktree_policy == %{
              "root" => Path.expand(relative_root),
@@ -187,7 +187,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     File.cp!(source_path, nested_path)
     Workflow.set_workflow_file_path(nested_path)
 
-    assert {:ok, moved} = Legacy.build_at_process_start([])
+    assert {:ok, moved} = TargetAdmission.build_target([])
     assert moved.repo_policy["manifest_source_dir"] == Path.expand(nested_dir)
     assert moved.repo_manifest_hash == first.repo_manifest_hash
     refute moved.policy_hash == first.policy_hash
@@ -205,7 +205,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
         %{state | workflow: Map.delete(state.workflow, :manifest_source_dir)}
       end)
 
-      assert Legacy.build_at_process_start([]) == {:error, :invalid_manifest_source_dir}
+      assert TargetAdmission.build_target([]) == {:error, :invalid_manifest_source_dir}
     after
       if Process.alive?(workflow_store) do
         :sys.replace_state(workflow_store, fn _state -> original_state end)
@@ -237,7 +237,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
              Config.issue_policy(settings, issue, profile_override: "strict")
 
     RunSetup.put_current(%{saved_run_name: "strict-run", profile: "strict"})
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
@@ -289,7 +289,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     )
 
     RunSetup.put_current(%{saved_run_name: "strict-runners", profile: "strict"})
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
@@ -307,7 +307,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       }
     )
 
-    assert {:ok, changed_context} = Legacy.build_at_process_start([])
+    assert {:ok, changed_context} = TargetAdmission.build_target([])
     refute changed_context.policy_hash == context.policy_hash
     refute changed_context.registry_generation == context.registry_generation
 
@@ -337,7 +337,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
            }
   end
 
-  test "legacy authority returns typed errors for malformed profile runner restrictions" do
+  test "target admission returns typed errors for malformed profile runner restrictions" do
     malformed_sandboxes = [
       {%{"type" => 1}, ["type"], :expected_string},
       {%{"networkAccess" => 1}, ["networkAccess"], :expected_boolean},
@@ -361,11 +361,11 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       path = ["runners", "codex", "turn_sandbox_policy" | suffix]
 
       assert {:error, {:invalid_issue_policy_authority, ^path, ^reason}} =
-               Legacy.build_at_process_start([])
+               TargetAdmission.build_target([])
     end
   end
 
-  test "legacy authority recursively projects secret-safe approval policy lists" do
+  test "target admission recursively projects secret-safe approval policy lists" do
     secret = "profile-list-secret"
 
     write_workflow_file!(Workflow.workflow_file_path(),
@@ -388,7 +388,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       }
     )
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert {:ok, policy} = issue_policy(context)
 
     expected_steps = [%{"action" => "read"}, ["nested", %{"enabled" => true}]]
@@ -405,7 +405,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     refute inspect(policy) =~ secret
   end
 
-  test "legacy authority returns typed errors for malformed recursive runner values" do
+  test "target admission returns typed errors for malformed recursive runner values" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
         default: %{
@@ -416,7 +416,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     )
 
     assert {:error, {:invalid_issue_policy_authority, ["runners"], :expected_map}} =
-             Legacy.build_at_process_start([])
+             TargetAdmission.build_target([])
 
     malformed_approval_policies = [
       {%{custom: %{rules: ["safe", "__non_json_value__"]}}, ["custom", "rules", 1]},
@@ -445,11 +445,11 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       error_path = ["runners", "codex", "approval_policy" | suffix]
 
       assert {:error, {:invalid_issue_policy_authority, ^error_path, :expected_json_value}} =
-               Legacy.build_at_process_start([])
+               TargetAdmission.build_target([])
     end
   end
 
-  test "legacy authority and hashes exclude nested profile runner secrets" do
+  test "target admission and hashes exclude nested profile runner secrets" do
     build_with_secret = fn secret ->
       write_workflow_file!(Workflow.workflow_file_path(),
         profiles: %{
@@ -475,7 +475,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
         }
       )
 
-      assert {:ok, context} = Legacy.build_at_process_start([])
+      assert {:ok, context} = TargetAdmission.build_target([])
       context
     end
 
@@ -519,7 +519,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
         }
       )
 
-      assert {:ok, context} = Legacy.build_at_process_start([])
+      assert {:ok, context} = TargetAdmission.build_target([])
       assert {:ok, policy} = issue_policy(context)
       {context, policy}
     end
@@ -544,7 +544,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     end
   end
 
-  test "build_at_process_start accepts a valid policy without a publish target" do
+  test "build_target accepts a valid policy without a publish target" do
     write_workflow_file!(Workflow.workflow_file_path(),
       profiles: %{
         default: %{
@@ -560,12 +560,12 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
     RunSetup.put_current(%{profile: "strict"})
     assert :ok = WorkflowStore.force_reload()
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     refute Map.has_key?(context.issue_policy_authority["policy"], "publish_target")
   end
 
   test "legacy canonical gates preserve unrestricted issue auto-land posture" do
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     assert context.external_side_effect_gates == %{
              "tracker_write" => "allow",
@@ -597,11 +597,11 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
   test "legacy restrictive settings reduce the canonical merge gate" do
     RunSetup.put_current(%{restrictive_flags: [:no_land]})
-    assert {:ok, denied} = Legacy.build_at_process_start([])
+    assert {:ok, denied} = TargetAdmission.build_target([])
     assert denied.external_side_effect_gates["merge"] == "deny"
 
     RunSetup.put_current(%{restrictive_flags: [:human_review_only]})
-    assert {:ok, manual} = Legacy.build_at_process_start([])
+    assert {:ok, manual} = TargetAdmission.build_target([])
     assert manual.external_side_effect_gates["merge"] == "manual_approval"
 
     assert Map.drop(manual.external_side_effect_gates, ["merge"]) ==
@@ -611,7 +611,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
   test "no-land overrides human-review-only merge approval" do
     RunSetup.put_current(%{restrictive_flags: [:no_land, :human_review_only]})
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert context.external_side_effect_gates["merge"] == "deny"
   end
 
@@ -627,7 +627,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
     RunSetup.put_current(%{restrictive_flags: [:no_land]})
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert context.external_side_effect_gates["merge"] == "deny"
   end
 
@@ -644,7 +644,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       }
     )
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     assert context.run_target["tracker"] == "linear"
     assert context.run_target["type"] == "query"
@@ -662,35 +662,26 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       target: %{tracker: "linear", type: "query", filter: %{priority: %{lte: 2}}}
     )
 
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_slug: nil,
       target: %{tracker: "linear", type: "query", filter: %{priority: %{lte: 1}}}
     )
 
-    assert {:ok, second} = Legacy.build_at_process_start([])
+    assert {:ok, second} = TargetAdmission.build_target([])
     refute second.run_target == first.run_target
     refute second.policy_hash == first.policy_hash
   end
 
-  test "legacy hashes include the tracker kind" do
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "linear",
-      tracker_endpoint: "https://tracker.example.invalid/graphql"
-    )
-
-    assert {:ok, first} = Legacy.build_at_process_start([])
-
+  test "target admission rejects unsupported tracker kinds" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "linear-enterprise",
       tracker_endpoint: "https://tracker.example.invalid/graphql"
     )
 
-    assert {:ok, second} = Legacy.build_at_process_start([])
-    refute second.tracker_connection == first.tracker_connection
-    refute second.policy_hash == first.policy_hash
-    refute second.registry_generation == first.registry_generation
+    assert {:error, {:unsupported_tracker_kind, "linear-enterprise"}} =
+             TargetAdmission.build_target([])
   end
 
   test "legacy hashes include the tracker endpoint" do
@@ -698,13 +689,13 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       tracker_endpoint: "https://tracker-one.example.invalid/graphql"
     )
 
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_endpoint: "https://tracker-two.example.invalid/graphql"
     )
 
-    assert {:ok, second} = Legacy.build_at_process_start([])
+    assert {:ok, second} = TargetAdmission.build_target([])
     refute second.tracker_connection == first.tracker_connection
     refute second.policy_hash == first.policy_hash
     refute second.registry_generation == first.registry_generation
@@ -718,7 +709,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       %{"config_path" => "/tmp/opencode-one.json"}
     )
 
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_secret_workflow!(
       "tracker-secret",
@@ -727,7 +718,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       %{"config_path" => "/tmp/opencode-two.json"}
     )
 
-    assert {:ok, second} = Legacy.build_at_process_start([])
+    assert {:ok, second} = TargetAdmission.build_target([])
     refute second.runner_policy == first.runner_policy
     refute second.policy_hash == first.policy_hash
     refute second.registry_generation == first.registry_generation
@@ -752,7 +743,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
         %{"permissions" => permissions}
       )
 
-      assert {:ok, context} = Legacy.build_at_process_start([])
+      assert {:ok, context} = TargetAdmission.build_target([])
       context
     end
 
@@ -782,14 +773,14 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       codex_turn_sandbox_policy: sandbox
     )
 
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_approval_policy: "unless-trusted",
       codex_turn_sandbox_policy: sandbox
     )
 
-    assert {:ok, changed_approval} = Legacy.build_at_process_start([])
+    assert {:ok, changed_approval} = TargetAdmission.build_target([])
     refute changed_approval.policy_hash == first.policy_hash
     refute changed_approval.registry_generation == first.registry_generation
 
@@ -798,7 +789,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       codex_turn_sandbox_policy: Map.put(sandbox, "networkAccess", true)
     )
 
-    assert {:ok, changed_sandbox} = Legacy.build_at_process_start([])
+    assert {:ok, changed_sandbox} = TargetAdmission.build_target([])
     refute changed_sandbox.policy_hash == first.policy_hash
     refute changed_sandbox.registry_generation == first.registry_generation
   end
@@ -810,7 +801,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       codex_approval_policy: approval_policy
     )
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
 
     assert get_in(context.runner_policy, ["runners", "codex", "approval_policy"]) ==
              approval_policy
@@ -823,7 +814,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       }
     )
 
-    assert {:error, {:invalid_runner_policy, ["runners", "codex", "turn_sandbox_policy", "credentials"], :unsupported_field}} = Legacy.build_at_process_start([])
+    assert {:error, {:invalid_runner_policy, ["runners", "codex", "turn_sandbox_policy", "credentials"], :unsupported_field}} = TargetAdmission.build_target([])
   end
 
   test "legacy construction returns typed errors for malformed nested runner sandbox fields" do
@@ -841,7 +832,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       path = ["runners", "codex", "turn_sandbox_policy" | suffix]
 
       assert {:error, {:invalid_runner_policy, ^path, ^reason}} =
-               Legacy.build_at_process_start([])
+               TargetAdmission.build_target([])
     end
   end
 
@@ -853,16 +844,16 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       }
     )
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert Regex.match?(@hash_regex, context.policy_hash)
   end
 
   test "legacy hashes exclude tracker, target, and runner secret content" do
     write_secret_workflow!("tracker-secret-one", "target-secret-one", "runner-secret-one")
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_secret_workflow!("tracker-secret-two", "target-secret-two", "runner-secret-two")
-    assert {:ok, second} = Legacy.build_at_process_start([])
+    assert {:ok, second} = TargetAdmission.build_target([])
 
     assert second.policy_hash == first.policy_hash
     assert second.registry_generation == first.registry_generation
@@ -893,10 +884,10 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
   test "legacy hashes project nested target filters and execution profiles" do
     write_nested_hash_workflow!("nested-secret-one", 2, "review/model-one")
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_nested_hash_workflow!("nested-secret-two", 2, "review/model-one")
-    assert {:ok, rotated_secret} = Legacy.build_at_process_start([])
+    assert {:ok, rotated_secret} = TargetAdmission.build_target([])
 
     assert rotated_secret.policy_hash == first.policy_hash
     assert rotated_secret.registry_generation == first.registry_generation
@@ -914,12 +905,12 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
              )
 
     write_nested_hash_workflow!("nested-secret-two", 1, "review/model-one")
-    assert {:ok, changed_filter} = Legacy.build_at_process_start([])
+    assert {:ok, changed_filter} = TargetAdmission.build_target([])
     refute changed_filter.policy_hash == first.policy_hash
     refute changed_filter.registry_generation == first.registry_generation
 
     write_nested_hash_workflow!("nested-secret-two", 2, "review/model-two")
-    assert {:ok, changed_profile} = Legacy.build_at_process_start([])
+    assert {:ok, changed_profile} = TargetAdmission.build_target([])
     refute changed_profile.policy_hash == first.policy_hash
     refute changed_profile.registry_generation == first.registry_generation
   end
@@ -947,7 +938,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
         }
       )
 
-      assert {:ok, context} = Legacy.build_at_process_start([])
+      assert {:ok, context} = TargetAdmission.build_target([])
       context
     end
 
@@ -988,16 +979,16 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     error_path = ["run_target", "filter", "future_predicate"]
 
     assert {:error, {:invalid_run_target_policy, ^error_path, :expected_json_value}} =
-             Legacy.build_at_process_start([])
+             TargetAdmission.build_target([])
   end
 
-  test "legacy authority projects nested policy semantics without secret-derived identity" do
+  test "target admission projects nested policy semantics without secret-derived identity" do
     write_policy_hash_workflow!("nested-policy-secret-one")
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
     assert {:ok, first_issue_policy} = issue_policy(first)
 
     write_policy_hash_workflow!("nested-policy-secret-two")
-    assert {:ok, rotated_secrets} = Legacy.build_at_process_start([])
+    assert {:ok, rotated_secrets} = TargetAdmission.build_target([])
     assert {:ok, rotated_issue_policy} = issue_policy(rotated_secrets)
 
     assert rotated_secrets.policy_hash == first.policy_hash
@@ -1028,7 +1019,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
           %{review: %{mode: "strict", command: ["review", "--source"]}}
         ] do
       write_policy_hash_workflow!("nested-policy-secret-two", overrides)
-      assert {:ok, changed_behavior} = Legacy.build_at_process_start([])
+      assert {:ok, changed_behavior} = TargetAdmission.build_target([])
       refute changed_behavior.policy_hash == first.policy_hash
       refute changed_behavior.registry_generation == first.registry_generation
     end
@@ -1055,7 +1046,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
       write_policy_hash_workflow!("private", overrides)
 
       assert {:error, {:invalid_issue_policy_authority, ^path, ^reason}} =
-               Legacy.build_at_process_start([])
+               TargetAdmission.build_target([])
     end
   end
 
@@ -1068,16 +1059,16 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     )
 
     RunSetup.put_current(%{saved_run_name: "generation-run", mode: :watch, profile: "default"})
-    assert {:ok, watch_default} = Legacy.build_at_process_start([])
+    assert {:ok, watch_default} = TargetAdmission.build_target([])
 
     RunSetup.put_current(%{saved_run_name: "generation-run", mode: :drain, profile: "default"})
-    assert {:ok, drain_default} = Legacy.build_at_process_start([])
+    assert {:ok, drain_default} = TargetAdmission.build_target([])
 
     RunSetup.put_current(%{saved_run_name: "generation-run", mode: :issue_batch, profile: "default"})
-    assert {:ok, batch_default} = Legacy.build_at_process_start([])
+    assert {:ok, batch_default} = TargetAdmission.build_target([])
 
     RunSetup.put_current(%{saved_run_name: "generation-run", mode: :watch, profile: "strict"})
-    assert {:ok, watch_strict} = Legacy.build_at_process_start([])
+    assert {:ok, watch_strict} = TargetAdmission.build_target([])
 
     assert drain_default.dispatch_mode == watch_default.dispatch_mode
     assert batch_default.state == watch_default.state
@@ -1101,41 +1092,41 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
   test "legacy policy hash follows complete JSON filter semantics without secrets" do
     write_filter_hash_workflow!("private-filter-one", 2)
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_filter_hash_workflow!("private-filter-two", 2)
-    assert {:ok, rotated_sensitive_values} = Legacy.build_at_process_start([])
+    assert {:ok, rotated_sensitive_values} = TargetAdmission.build_target([])
     assert rotated_sensitive_values.policy_hash == first.policy_hash
 
     write_filter_hash_workflow!("private-filter-two", 1)
-    assert {:ok, changed_operator_value} = Legacy.build_at_process_start([])
+    assert {:ok, changed_operator_value} = TargetAdmission.build_target([])
     refute changed_operator_value.policy_hash == first.policy_hash
 
     write_filter_hash_workflow!("private-filter-two", 1)
-    assert {:ok, map_filter} = Legacy.build_at_process_start([])
+    assert {:ok, map_filter} = TargetAdmission.build_target([])
 
     write_filter_hash_workflow!("private-filter-two", 1, filter: 1)
-    assert {:ok, first_scalar_filter} = Legacy.build_at_process_start([])
+    assert {:ok, first_scalar_filter} = TargetAdmission.build_target([])
 
     write_filter_hash_workflow!("private-filter-two", 1, filter: 2)
-    assert {:ok, second_scalar_filter} = Legacy.build_at_process_start([])
+    assert {:ok, second_scalar_filter} = TargetAdmission.build_target([])
     refute second_scalar_filter.policy_hash == first_scalar_filter.policy_hash
     refute first_scalar_filter.policy_hash == map_filter.policy_hash
 
     write_filter_hash_workflow!("private-filter-two", 1, filter: "priority <= 2")
-    assert {:ok, first_string_filter} = Legacy.build_at_process_start([])
+    assert {:ok, first_string_filter} = TargetAdmission.build_target([])
 
     write_filter_hash_workflow!("private-filter-two", 1, filter: "priority <= 1")
-    assert {:ok, second_string_filter} = Legacy.build_at_process_start([])
+    assert {:ok, second_string_filter} = TargetAdmission.build_target([])
     refute second_string_filter.policy_hash == first_string_filter.policy_hash
   end
 
   test "legacy policy hash includes supported execution profile controls" do
     write_execution_profile_hash_workflow!("private-profile-one")
-    assert {:ok, first} = Legacy.build_at_process_start([])
+    assert {:ok, first} = TargetAdmission.build_target([])
 
     write_execution_profile_hash_workflow!("private-profile-two")
-    assert {:ok, rotated_private_values} = Legacy.build_at_process_start([])
+    assert {:ok, rotated_private_values} = TargetAdmission.build_target([])
     assert rotated_private_values.policy_hash == first.policy_hash
 
     for changed <- [
@@ -1144,7 +1135,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
           %{"command" => "review --strict"}
         ] do
       write_execution_profile_hash_workflow!("private-profile-two", changed)
-      assert {:ok, changed_context} = Legacy.build_at_process_start([])
+      assert {:ok, changed_context} = TargetAdmission.build_target([])
       refute changed_context.policy_hash == first.policy_hash
     end
   end
@@ -1153,36 +1144,36 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     RunSetup.put_current(%{saved_run_name: "saved-run"})
 
     assert {:ok, explicit} =
-             Legacy.build_at_process_start(saved_run_name: "explicit-run")
+             TargetAdmission.build_target(saved_run_name: "explicit-run")
 
     assert explicit.target_id == "explicit-run"
 
     assert {:error, {:invalid_run_setup_name, "../private"}} =
-             Legacy.build_at_process_start(saved_run_name: "../private")
+             TargetAdmission.build_target(saved_run_name: "../private")
 
     RunSetup.put_current(%{saved_run_name: "../poisoned"})
 
     assert {:error, {:invalid_run_setup_name, "../poisoned"}} =
-             Legacy.build_at_process_start([])
+             TargetAdmission.build_target([])
 
     RunSetup.clear_current()
-    assert {:ok, legacy} = Legacy.build_at_process_start([])
-    assert legacy.target_id == "legacy"
+    assert {:ok, default} = TargetAdmission.build_target([])
+    assert default.target_id == "default"
   end
 
-  test "build_at_process_start rejects malformed options and target names without raising" do
-    assert Legacy.build_at_process_start(%{}) == {:error, :invalid_options}
+  test "build_target rejects malformed options and target names without raising" do
+    assert TargetAdmission.build_target(%{}) == {:error, :invalid_options}
 
-    assert Legacy.build_at_process_start(saved_run_name: :not_a_name) ==
+    assert TargetAdmission.build_target(saved_run_name: :not_a_name) ==
              {:error, :invalid_target_id}
 
     RunSetup.put_current(%{"saved_run_name" => "string-key-run"})
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert context.target_id == "string-key-run"
   end
 
-  test "legacy context projects nested target scope and profile limits in drain mode" do
+  test "target admission projects nested target scope and profile limits in drain mode" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_project_id: nil,
       tracker_project_slug: nil,
@@ -1203,7 +1194,7 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
 
     RunSetup.put_current(%{mode: :drain})
 
-    assert {:ok, context} = Legacy.build_at_process_start([])
+    assert {:ok, context} = TargetAdmission.build_target([])
     assert context.state == :draining
     assert context.dispatch_mode == :watch
     assert context.run_target["project"] == %{"id" => "project-id", "slug" => "project-slug"}

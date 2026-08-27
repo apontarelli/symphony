@@ -54,24 +54,57 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     publish_handoff: [:publish_handoff, "publish_handoff", :publishHandoff, "publishHandoff"]
   }
 
-  @spec classify_completion(term()) :: HandoffRoute.Decision.t()
-  def classify_completion(completion), do: classify_completion(completion, nil, nil, nil, %{}, nil)
+  @doc false
+  @spec classify_completion_for_test(
+          term(),
+          map() | nil,
+          Path.t() | nil,
+          String.t() | nil,
+          map() | keyword(),
+          Issue.t() | nil
+        ) :: HandoffRoute.Decision.t()
+  def classify_completion_for_test(
+        completion,
+        blocker \\ nil,
+        workspace \\ nil,
+        worker_host \\ nil,
+        routing_context \\ %{},
+        issue \\ nil
+      ) do
+    routing_context =
+      if context_field(routing_context, :workflow_module_resolution, nil) ||
+           context_field(routing_context, :product_visual_review_config, nil) do
+        routing_context
+      else
+        cond do
+          is_map(routing_context) ->
+            Map.put(
+              routing_context,
+              :product_visual_review_config,
+              Config.settings!().workflow_modules.product_visual_review
+            )
 
-  @spec classify_completion(term(), map() | nil) :: HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker), do: classify_completion(completion, blocker, nil, nil, %{}, nil)
+          Keyword.keyword?(routing_context) ->
+            routing_context
+            |> Map.new()
+            |> Map.put(
+              :product_visual_review_config,
+              Config.settings!().workflow_modules.product_visual_review
+            )
 
-  @spec classify_completion(term(), map() | nil, Path.t() | nil) :: HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker, workspace), do: classify_completion(completion, blocker, workspace, nil, %{}, nil)
+          true ->
+            routing_context
+        end
+      end
 
-  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil) :: HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker, workspace, worker_host) do
-    classify_completion(completion, blocker, workspace, worker_host, %{}, nil)
-  end
-
-  @spec classify_completion(term(), map() | nil, Path.t() | nil, String.t() | nil, map() | keyword()) ::
-          HandoffRoute.Decision.t()
-  def classify_completion(completion, blocker, workspace, worker_host, routing_context) do
-    classify_completion(completion, blocker, workspace, worker_host, routing_context, nil)
+    classify_completion(
+      completion,
+      blocker,
+      workspace,
+      worker_host,
+      routing_context,
+      issue
+    )
   end
 
   @spec classify_completion(
@@ -83,14 +116,14 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
           Issue.t() | nil
         ) ::
           HandoffRoute.Decision.t()
-  def classify_completion(
-        completion,
-        blocker,
-        workspace,
-        worker_host,
-        routing_context,
-        issue
-      ) do
+  defp classify_completion(
+         completion,
+         blocker,
+         workspace,
+         worker_host,
+         routing_context,
+         issue
+       ) do
     completion = if is_map(completion), do: completion, else: %{}
 
     manifest_check = handoff_manifest_check_for_completion(completion, workspace, worker_host)
@@ -192,13 +225,6 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
              context_comment(decision, provenance)
            ) do
       Tracker.update_issue_state(context, context.issue_id, decision.target_state)
-    end
-  end
-
-  @spec record(String.t(), HandoffRoute.Decision.t()) :: :ok | {:error, term()}
-  def record(issue_id, %HandoffRoute.Decision{} = decision) when is_binary(issue_id) do
-    with :ok <- Tracker.create_comment(issue_id, HandoffRoute.format_comment(decision)) do
-      Tracker.update_issue_state(issue_id, decision.target_state)
     end
   end
 
@@ -480,12 +506,8 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
         config
 
       nil ->
-        if is_nil(workflow_module_resolution) do
-          Config.settings!().workflow_modules.product_visual_review
-        else
-          product_visual_review_config_from_resolution(workflow_module_resolution) ||
-            disabled_product_visual_review_config()
-        end
+        product_visual_review_config_from_resolution(workflow_module_resolution) ||
+          disabled_product_visual_review_config()
     end
   end
 

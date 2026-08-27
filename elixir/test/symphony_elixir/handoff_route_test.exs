@@ -633,7 +633,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/symphony_elixir/orchestrator.ex"]), "defmodule Orchestrator, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -659,7 +659,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     )
 
     decision =
-      HandoffRouteRecorder.classify_completion(%{
+      HandoffRouteRecorder.classify_completion_for_test(%{
         "checks" => [
           123,
           %{"name" => "change_manifest", "status" => :passed, "metadata" => %{"changed_files" => "not a list"}}
@@ -691,7 +691,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [
               %{
@@ -736,7 +736,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -809,7 +809,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -874,7 +874,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -937,7 +937,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -970,7 +970,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert summary =~ "Job summary says host visual QA infrastructure failed"
 
       reason_only_decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1024,7 +1024,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1218,16 +1218,16 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.map(rejected_artifacts, & &1.label) == ["Workspace screenshot", "Repo screenshot"]
   end
 
-  test "recorder classify_completion public arities preserve default routing behavior" do
+  test "recorder test helper preserves default routing behavior" do
     completion = %{"checks" => [%{"name" => "all", "status" => "passed"}], "review" => %{"status" => "clean"}}
     blocker = %{reason: "Missing token", required_action: "Restore token."}
 
-    assert HandoffRouteRecorder.classify_completion(completion).route == :rework
-    assert HandoffRouteRecorder.classify_completion(%{}, blocker).route == :blocked
-    assert HandoffRouteRecorder.classify_completion(completion, nil, nil).route == :rework
-    assert HandoffRouteRecorder.classify_completion(completion, nil, nil, "worker-a").route == :rework
+    assert HandoffRouteRecorder.classify_completion_for_test(completion).route == :rework
+    assert HandoffRouteRecorder.classify_completion_for_test(%{}, blocker).route == :blocked
+    assert HandoffRouteRecorder.classify_completion_for_test(completion, nil, nil).route == :rework
+    assert HandoffRouteRecorder.classify_completion_for_test(completion, nil, nil, "worker-a").route == :rework
 
-    assert HandoffRouteRecorder.classify_completion(
+    assert HandoffRouteRecorder.classify_completion_for_test(
              completion,
              nil,
              nil,
@@ -1333,7 +1333,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1387,7 +1387,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       }
 
       explicit_struct =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion,
           nil,
           workspace,
@@ -1396,7 +1396,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       nested_map =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion,
           nil,
           workspace,
@@ -1411,7 +1411,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       string_key_resolution =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion,
           nil,
           workspace,
@@ -1436,7 +1436,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       end
 
       invalid_resolution =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion,
           nil,
           workspace,
@@ -1452,7 +1452,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       malformed_resolution =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion,
           nil,
           workspace,
@@ -1487,7 +1487,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib/example_web/live/dashboard_live.ex"]), "defmodule DashboardLive, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "all", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1597,7 +1597,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib", "view.ex"]), "defmodule View, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1613,7 +1613,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.rm_rf(test_root)
     end
 
-    malformed = HandoffRouteRecorder.classify_completion("not completion metadata")
+    malformed = HandoffRouteRecorder.classify_completion_for_test("not completion metadata")
 
     assert malformed.route == :human_review
     assert Enum.any?(malformed.evidence, &(&1.kind == :check and &1.status == :missing))
@@ -1644,7 +1644,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       }
 
       host_dry_run =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion_claims_real_land,
           nil,
           workspace,
@@ -1659,7 +1659,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       host_force_review_label =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion_claims_real_land,
           nil,
           workspace,
@@ -1679,7 +1679,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert host_force_review_label.target_state == "Human Review"
 
       keyword_context_force_review_label =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion_claims_real_land,
           nil,
           workspace,
@@ -1692,7 +1692,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         )
 
       invalid_context_uses_completion_policy =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           completion_claims_real_land,
           nil,
           workspace,
@@ -1706,7 +1706,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
         |> Map.put("prFeedback", clean_pr_feedback())
 
       camel_feedback =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           camel_feedback_completion,
           nil,
           workspace,
@@ -1733,7 +1733,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "publish preflight failures route as structured blockers" do
     decision =
-      HandoffRouteRecorder.classify_completion(%{
+      HandoffRouteRecorder.classify_completion_for_test(%{
         "checks" => [%{"name" => "tests", "status" => "passed"}],
         "publish_preflight" => %{
           "status" => "blocked",
@@ -1773,7 +1773,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "legacy publish preflight classes map to specific capability reasons" do
     decision =
-      HandoffRouteRecorder.classify_completion(%{
+      HandoffRouteRecorder.classify_completion_for_test(%{
         checks: [%{name: "tests", status: :passed}],
         publish_preflight: %{
           status: :blocked,
@@ -1802,7 +1802,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "capability preflight blocker surfaces all missing capability reasons" do
     decision =
-      HandoffRouteRecorder.classify_completion(%{}, %{
+      HandoffRouteRecorder.classify_completion_for_test(%{}, %{
         reason: "sandbox_tcp_denied, git_metadata_denied, github_publish_unavailable",
         required_action:
           "Run trusted-local validation with localhost TCP enabled. Run trusted-local validation or host-owned delivery with permission to write Git metadata. Authenticate GitHub CLI/API access and remote publish permission."
@@ -1833,7 +1833,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib", "safe.ex"]), "defmodule Safe, do: nil\n")
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "tests", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1950,7 +1950,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.mkdir_p!(workspace)
 
       missing =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"}
@@ -1963,7 +1963,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert manifest_failure_reason?(missing, :missing_changed_files)
 
       malformed =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1977,7 +1977,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert manifest_failure_reason?(malformed, :invalid_manifest)
 
       duplicate_alias =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -1992,7 +1992,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert manifest_failure_reason?(duplicate_alias, :duplicate_changed_file_aliases)
 
       duplicate_manifest_alias =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             :change_manifest => %{"changed_files" => ["lib/safe.ex"]},
             "change_manifest" => %{"changed_files" => ["lib/safe.ex"]},
@@ -2007,7 +2007,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert manifest_failure_reason?(duplicate_manifest_alias, :duplicate_change_manifest_aliases)
 
       conflicting_sources =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -2040,7 +2040,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.mkdir_p!(workspace)
 
       decision =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -2080,7 +2080,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       File.write!(Path.join([workspace, "lib", "nested.ex"]), "defmodule Nested, do: nil\n")
 
       valid =
-        HandoffRouteRecorder.classify_completion(
+        HandoffRouteRecorder.classify_completion_for_test(
           %{
             "checks" => [%{"name" => "mix test", "status" => "passed"}],
             "review" => %{"status" => "clean"},
@@ -2105,7 +2105,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
              end)
 
       missing_workspace =
-        HandoffRouteRecorder.classify_completion(%{
+        HandoffRouteRecorder.classify_completion_for_test(%{
           "changed_files" => ["lib/nested.ex"],
           "checks" => [%{"name" => "mix test", "status" => "passed"}],
           "review" => %{"status" => "clean"}
@@ -2124,7 +2124,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "recorder fails closed for remote workspace manifests" do
     remote =
-      HandoffRouteRecorder.classify_completion(
+      HandoffRouteRecorder.classify_completion_for_test(
         %{
           "changed_files" => ["lib/remote.ex"],
           "checks" => [%{"name" => "mix test", "status" => "passed"}],
@@ -2142,24 +2142,6 @@ defmodule SymphonyElixir.HandoffRouteTest do
              evidence.kind == :check and
                get_in(evidence.metadata, [:failures, Access.at(0), :metadata, :worker_host]) == "worker-a"
            end)
-  end
-
-  test "recorder writes the route comment and moves the selected state" do
-    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
-    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
-
-    decision =
-      HandoffRoute.classify(%{
-        checks: [%{name: "route gate", status: :failed, summary: "PR checks failed"}],
-        review: %{status: :clean}
-      })
-
-    assert decision.route == :rework
-    assert :ok = HandoffRouteRecorder.record("issue-1", decision)
-    assert_receive {:memory_tracker_comment, "issue-1", comment}
-    assert comment =~ "### Handoff Route"
-    assert comment =~ "rework"
-    assert_receive {:memory_tracker_state_update, "issue-1", "Rework"}
   end
 
   defp auto_land_checks(extra_checks \\ []) do

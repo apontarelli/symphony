@@ -2,7 +2,7 @@ defmodule SymphonyElixir.LiveE2ETest do
   use SymphonyElixir.TestSupport
 
   require Logger
-  alias SymphonyElixir.SSH
+  alias SymphonyElixir.{ExecutionContext, SSH, TargetAdmission, TargetContext}
 
   @moduletag :live_e2e
   @moduletag timeout: 300_000
@@ -493,7 +493,15 @@ defmodule SymphonyElixir.LiveE2ETest do
         prompt: live_prompt(project["slugId"])
       )
 
-      assert :ok = AgentRunner.run(issue, self(), max_turns: 3)
+      assert {:ok, target} = TargetAdmission.build_target([])
+      profile = get_in(target.issue_policy_authority, ["profile"]) || "default"
+      assert {:ok, policy} = TargetContext.issue_policy(target, issue, profile: profile)
+      worker_host = List.first(worker_setup.ssh_worker_hosts)
+
+      assert {:ok, context} =
+               ExecutionContext.new(target, issue, policy: policy, worker_host: worker_host)
+
+      assert :ok = AgentRunner.run_context(context, issue, self(), max_turns: 3)
 
       runtime_info = receive_runtime_info!(issue.id)
 

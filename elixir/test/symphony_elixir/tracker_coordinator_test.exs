@@ -55,6 +55,22 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
     assert :ok = TrackerCoordinator.claim_issue(beta, shared_issue, "daemon-beta", opts)
 
     assert :ok =
+             TrackerCoordinator.claim_issue(
+               alpha,
+               shared_issue,
+               "daemon-alpha",
+               Keyword.put(opts, :now_ms, 1_500)
+             )
+
+    assert {:error, :missing} =
+             TrackerCoordinator.refresh_issue_lease(
+               beta,
+               "missing-issue",
+               "daemon-beta",
+               Keyword.put(opts, :now_ms, 1_500)
+             )
+
+    assert :ok =
              TrackerCoordinator.refresh_issue_lease(
                alpha,
                shared_issue.id,
@@ -79,6 +95,64 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
 
     assert [%{target_id: "beta", owner_id: "daemon-beta"}] =
              TrackerCoordinator.snapshot(state_path: state_path, now_ms: 2_000).leases
+  end
+
+  test "target lease operations derive state storage from the pinned root", %{
+    state_root: state_root
+  } do
+    previous_state_path =
+      Application.get_env(:symphony_elixir, :tracker_coordinator_state_path)
+
+    original_workflow_path = Workflow.workflow_file_path()
+    target_root = Path.join(state_root, "pinned-target")
+    expected_state_path = Path.join(target_root, ".symphony/tracker_coordinator.state")
+    target = %{target_context("pinned") | worktree_policy: %{"root" => target_root}}
+    issue = issue("pinned-issue", "SID-PINNED")
+
+    on_exit(fn ->
+      Workflow.set_workflow_file_path(original_workflow_path)
+
+      case previous_state_path do
+        nil -> Application.delete_env(:symphony_elixir, :tracker_coordinator_state_path)
+        path -> Application.put_env(:symphony_elixir, :tracker_coordinator_state_path, path)
+      end
+    end)
+
+    Application.delete_env(:symphony_elixir, :tracker_coordinator_state_path)
+
+    Workflow.set_workflow_file_path(Path.join(state_root, "missing-pinned-coordinator-workflow.yml"))
+
+    assert_raise ArgumentError, fn -> Config.settings!() end
+
+    assert :ok =
+             TrackerCoordinator.claim_issue(
+               target,
+               issue,
+               "pinned-owner",
+               lease_ttl_ms: 60_000,
+               now_ms: 1_000
+             )
+
+    assert File.regular?(expected_state_path)
+
+    assert :ok =
+             TrackerCoordinator.refresh_issue_lease(
+               target,
+               issue.id,
+               "pinned-owner",
+               now_ms: 2_000
+             )
+
+    assert :ok =
+             TrackerCoordinator.release_issue(
+               target,
+               issue.id,
+               "pinned-owner",
+               now_ms: 3_000
+             )
+
+    assert TrackerCoordinator.snapshot(state_path: expected_state_path, now_ms: 3_000).leases ==
+             []
   end
 
   test "different cache keys do not share candidate results", %{state_path: state_path} do
@@ -153,21 +227,21 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
     issue = issue("issue-lease", "MT-LEASE")
 
     assert :ok =
-             TrackerCoordinator.claim_issue(issue, "daemon-a",
+             claim_issue(issue, "daemon-a",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 1_000
              )
 
     assert {:error, :leased} =
-             TrackerCoordinator.claim_issue(issue, "daemon-b",
+             claim_issue(issue, "daemon-b",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 2_000
              )
 
     assert :ok =
-             TrackerCoordinator.claim_issue(issue, "daemon-b",
+             claim_issue(issue, "daemon-b",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 7_000
@@ -183,28 +257,28 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
     issue = issue("issue-refresh", "MT-REFRESH")
 
     assert :ok =
-             TrackerCoordinator.claim_issue(issue, "daemon-a",
+             claim_issue(issue, "daemon-a",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 1_000
              )
 
     assert :ok =
-             TrackerCoordinator.refresh_issue_lease(issue.id, "daemon-a",
+             refresh_issue_lease(issue.id, "daemon-a",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 4_000
              )
 
     assert {:error, :leased} =
-             TrackerCoordinator.claim_issue(issue, "daemon-b",
+             claim_issue(issue, "daemon-b",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 7_000
              )
 
     assert :ok =
-             TrackerCoordinator.claim_issue(issue, "daemon-b",
+             claim_issue(issue, "daemon-b",
                state_path: state_path,
                lease_ttl_ms: 5_000,
                now_ms: 10_000
@@ -234,7 +308,7 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
     File.mkdir_p!(state_path <> ".tmp")
 
     assert {:error, {:coordinator_write_failed, reason}} =
-             TrackerCoordinator.claim_issue(issue("issue-write-error", "MT-WRITE"), "daemon-a", state_path: state_path)
+             claim_issue(issue("issue-write-error", "MT-WRITE"), "daemon-a", state_path: state_path)
 
     assert reason in [:eisdir, :eacces]
   end
@@ -294,16 +368,16 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
   test "refresh and release respect lease ownership", %{state_path: state_path} do
     issue = issue("issue-release", "MT-RELEASE")
 
-    assert :ok = TrackerCoordinator.claim_issue(issue, "daemon-a", state_path: state_path)
-    assert {:error, :leased} = TrackerCoordinator.refresh_issue_lease(issue.id, "daemon-b", state_path: state_path)
-    assert :ok = TrackerCoordinator.release_issue(issue.id, "daemon-b", state_path: state_path)
+    assert :ok = claim_issue(issue, "daemon-a", state_path: state_path)
+    assert {:error, :leased} = refresh_issue_lease(issue.id, "daemon-b", state_path: state_path)
+    assert :ok = release_issue(issue.id, "daemon-b", state_path: state_path)
     assert [%{owner_id: "daemon-a"}] = TrackerCoordinator.snapshot(state_path: state_path).leases
 
-    assert :ok = TrackerCoordinator.release_issue(issue.id, "daemon-a", state_path: state_path)
+    assert :ok = release_issue(issue.id, "daemon-a", state_path: state_path)
     assert [] = TrackerCoordinator.snapshot(state_path: state_path).leases
 
-    assert :ok = TrackerCoordinator.claim_issue(issue, "daemon-a", state_path: state_path)
-    assert :ok = TrackerCoordinator.release_issue(issue.id, nil, state_path: state_path)
+    assert :ok = claim_issue(issue, "daemon-a", state_path: state_path)
+    assert :ok = release_issue(issue.id, nil, state_path: state_path)
     assert [] = TrackerCoordinator.snapshot(state_path: state_path).leases
   end
 
@@ -409,6 +483,15 @@ defmodule SymphonyElixir.TrackerCoordinatorTest do
 
     assert TrackerCoordinator.rate_limit(state_path: state_path) == nil
   end
+
+  defp claim_issue(issue, owner_id, opts),
+    do: TrackerCoordinator.claim_issue(target_context("test"), issue, owner_id, opts)
+
+  defp refresh_issue_lease(issue_id, owner_id, opts),
+    do: TrackerCoordinator.refresh_issue_lease(target_context("test"), issue_id, owner_id, opts)
+
+  defp release_issue(issue_id, owner_id, opts),
+    do: TrackerCoordinator.release_issue(target_context("test"), issue_id, owner_id, opts)
 
   defp target_context(target_id) do
     hash = "sha256:" <> String.duplicate("a", 64)

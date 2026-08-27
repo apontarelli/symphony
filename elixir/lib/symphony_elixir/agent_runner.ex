@@ -8,7 +8,6 @@ defmodule SymphonyElixir.AgentRunner do
   alias SymphonyElixir.{
     AgentRuntime,
     CapabilityPreflight,
-    Config,
     ExecutionContext,
     Linear.Issue,
     PromptBuilder,
@@ -18,7 +17,6 @@ defmodule SymphonyElixir.AgentRunner do
   }
 
   alias SymphonyElixir.AgentRuntime.Event
-  alias SymphonyElixir.TargetContext.Legacy
 
   @default_max_turns 20
   @type worker_host :: String.t() | nil
@@ -40,42 +38,13 @@ defmodule SymphonyElixir.AgentRunner do
     continue_with_issue?(context, issue, issue_state_fetcher)
   end
 
-  @spec run(Issue.t()) :: :ok
-  def run(%Issue{} = issue), do: run(issue, nil, [])
-
   @spec run_context(ExecutionContext.t(), Issue.t()) :: result()
   def run_context(%ExecutionContext{} = context, %Issue{} = issue),
     do: run_context(context, issue, nil, [])
 
-  @spec run(Issue.t(), pid() | nil) :: :ok
-  def run(%Issue{} = issue, codex_update_recipient),
-    do: run(issue, codex_update_recipient, [])
-
   @spec run_context(ExecutionContext.t(), Issue.t(), pid() | nil) :: result()
   def run_context(%ExecutionContext{} = context, %Issue{} = issue, codex_update_recipient),
     do: run_context(context, issue, codex_update_recipient, [])
-
-  @spec run(Issue.t(), pid() | nil, keyword()) :: :ok
-  def run(%Issue{} = issue, codex_update_recipient, opts) when is_list(opts) do
-    admitted_issue = ensure_legacy_issue_id(issue)
-
-    case admit_execution_context(admitted_issue, opts) do
-      {:ok, context} ->
-        run_opts = legacy_context_run_options(opts, issue)
-
-        case run_context(context, admitted_issue, codex_update_recipient, run_opts) do
-          :ok ->
-            :ok
-
-          {:error, reason} ->
-            raise_agent_run_failure(issue, legacy_failure_reason(context, reason))
-        end
-
-      {:error, reason} ->
-        maybe_send_non_retryable_agent_blocker(codex_update_recipient, issue, reason)
-        raise_agent_run_failure(issue, reason)
-    end
-  end
 
   @spec run_context(ExecutionContext.t(), Issue.t(), pid() | nil, keyword()) :: result()
   def run_context(
@@ -102,84 +71,6 @@ defmodule SymphonyElixir.AgentRunner do
 
   def run_context(%ExecutionContext{}, %Issue{}, _codex_update_recipient, _opts),
     do: {:error, :invalid_agent_runner_options}
-
-  defp admit_execution_context(issue, opts) do
-    worker_host =
-      selected_worker_host(
-        Keyword.get(opts, :worker_host),
-        Config.settings!().worker.ssh_hosts
-      )
-
-    with {:ok, target} <- Legacy.build_at_process_start([]),
-         {:ok, policy} <- admission_policy(target, issue, opts) do
-      ExecutionContext.new(target, issue,
-        policy: policy,
-        worker_host: worker_host
-      )
-    end
-  end
-
-  defp admission_policy(target, issue, opts) do
-    case Keyword.get(opts, :policy) do
-      policy when is_map(policy) and map_size(policy) > 0 ->
-        {:ok, policy}
-
-      _no_override ->
-        profile = get_in(target.issue_policy_authority, ["profile"]) || "default"
-
-        case TargetContext.issue_policy(target, issue, profile: profile) do
-          {:ok, policy} ->
-            {:ok, policy}
-
-          {:error, reason}
-          when reason in [:forbidden_policy_broadening, :malformed_issue_metadata] ->
-            Config.issue_policy(issue)
-
-          {:error, _reason} = error ->
-            error
-        end
-    end
-  end
-
-  defp legacy_context_run_options(opts, %Issue{id: issue_id}) do
-    context_opts = context_run_options(opts)
-
-    if (is_nil(issue_id) or issue_id == "") and
-         not Keyword.has_key?(context_opts, :issue_state_fetcher) do
-      Keyword.put(context_opts, :issue_state_fetcher, fn _issue_ids -> {:ok, []} end)
-    else
-      context_opts
-    end
-  end
-
-  defp ensure_legacy_issue_id(%Issue{id: id} = issue)
-       when is_binary(id) and id != "",
-       do: issue
-
-  defp ensure_legacy_issue_id(%Issue{identifier: identifier} = issue)
-       when is_binary(identifier) and identifier != "",
-       do: %{issue | id: identifier}
-
-  defp ensure_legacy_issue_id(%Issue{} = issue), do: issue
-
-  defp legacy_failure_reason(
-         %ExecutionContext{worker_host: worker_host},
-         reason
-       )
-       when is_binary(worker_host) and
-              reason in [
-                :workspace_remote_operation_failed,
-                :workspace_remote_output_invalid,
-                :workspace_remote_timeout
-              ],
-       do: {:workspace_prepare_failed, worker_host, reason}
-
-  defp legacy_failure_reason(_context, reason), do: reason
-
-  defp raise_agent_run_failure(issue, reason) do
-    Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-    raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
-  end
 
   defp run_in_context(context, issue, codex_update_recipient, opts) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} target_id=#{context.target.target_id} worker_host=#{worker_host_for_log(context.worker_host)}")
@@ -234,12 +125,6 @@ defmodule SymphonyElixir.AgentRunner do
   defp send_codex_update(recipient, %ExecutionContext{} = context, message)
        when is_pid(recipient) do
     send(recipient, {:runtime_event, ExecutionContext.run_id(context), message})
-    :ok
-  end
-
-  defp send_codex_update(recipient, %Issue{id: issue_id}, message)
-       when is_binary(issue_id) and is_pid(recipient) do
-    send(recipient, {:runtime_event, issue_id, message})
     :ok
   end
 
@@ -806,22 +691,6 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp validate_adapter_registry(_adapter_registry),
     do: {:error, :invalid_agent_runner_options}
-
-  defp selected_worker_host(nil, []), do: nil
-
-  defp selected_worker_host(preferred_host, configured_hosts) when is_list(configured_hosts) do
-    hosts =
-      configured_hosts
-      |> Enum.map(&String.trim/1)
-      |> Enum.reject(&(&1 == ""))
-      |> Enum.uniq()
-
-    case preferred_host do
-      host when is_binary(host) and host != "" -> host
-      _ when hosts == [] -> nil
-      _ -> List.first(hosts)
-    end
-  end
 
   defp worker_host_for_log(nil), do: "local"
   defp worker_host_for_log(worker_host), do: worker_host

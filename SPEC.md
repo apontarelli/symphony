@@ -2056,8 +2056,8 @@ An `AgentRuntime` wraps a concrete coding-agent runtime behind a small orchestra
 The session retains the validated execution context supplied at start. Adapter selection, execution
 profile, model, worker host, runtime timeouts, and target policy MUST come from that pinned context.
 Turn submission and cleanup MUST use the session's retained context and MUST NOT reread process-global
-runtime configuration. Context-first options MUST NOT override pinned authority. Implementations MAY
-retain legacy workspace/config entry points as single-context compatibility adapters.
+runtime configuration. Context-first options MUST NOT override pinned authority. Runtime adapters
+MUST NOT expose workspace-only or ambient-config execution entry points.
 
 Behavior:
 
@@ -2098,11 +2098,11 @@ Mutable workflow or registry changes after admission MUST affect later admission
 stall timeout, retry policy, model, checks, delivery gates, and cleanup authority MUST remain pinned
 to the admitted context.
 
-Legacy `symphony run <saved-name>` and explicit workflow launches MAY read process-global workflow
-selection while constructing their single-target admission context. Legacy public workspace,
-prompt, quality, and publish entry points MAY remain single-context adapters where documented.
-After they delegate to a context-first entry point, no reusable run-path operation may return to
-ambient authority.
+`symphony run <saved-name>`, `symphony run --workflow <path>`, and explicit-issue launches MAY read
+the selected workflow while constructing their canonical single-target admission. This admission
+boundary MUST build the immutable `TargetContext` before polling. Every reusable operation after
+that boundary MUST receive the pinned target or execution context and durable run ownership
+directly; it MUST NOT return to ambient authority.
 
 The baseline isolation contract does not require a durable control-plane store, multi-target
 activation, fair scheduling, leases, or fencing. Implementations that provide durable admission
@@ -2203,14 +2203,14 @@ cleanup authority and must remain blocked if prior process ownership is unverifi
 
 An implementation MUST support these tracker adapter operations:
 
-1. `fetch_candidate_issues()`
-   - Return issues in configured active states for the resolved run target.
+1. `resolve_candidate_issues(target_context, run_target)`
+   - Return issues in the target context's pinned active states and resolved run target.
 
-2. `fetch_issues_by_states(state_names)`
-   - Used for startup terminal cleanup.
+2. `fetch_issues_by_states(target_context, state_names)`
+   - Used for target-scoped reconciliation and inspection.
 
-3. `fetch_issue_states_by_ids(issue_ids)`
-   - Used for active-run reconciliation.
+3. `fetch_issue_states_by_ids(target_context, issue_ids)`
+   - Used for active-run and retry reconciliation.
 
 ### 11.2 Query Semantics (Linear)
 
@@ -3062,32 +3062,33 @@ treat harness hardening as part of the core safety model rather than an optional
 ### 16.1 Service Startup
 
 ```text
-function start_service():
+function start_service(admission_form):
   configure_logging()
-  start_observability_outputs()
-  start_manifest_watch(on_change=recompile_and_reapply_workflow)
-  start_module_watch(on_change=recompile_and_reapply_workflow)
-
-  state = {
-    poll_interval_ms: get_config_poll_interval_ms(),
-    max_concurrent_agents: get_config_max_concurrent_agents(),
-    running: {},
-    claimed: set(),
-    retry_attempts: {},
-    completed: set(),
-    runtime_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    runtime_rate_limits: null,
-    tracker_rate_limit: null
-  }
 
   validation = validate_dispatch_config()
   if validation is not ok:
     log_validation_error(validation)
     fail_startup(validation)
 
-  startup_terminal_workspace_cleanup()
-  schedule_tick(delay_ms=0)
+  target_context = construct_single_target_admission(admission_form)
+  control_plane = start_durable_control_plane()
 
+  state = {
+    target_context: target_context,
+    poll_interval_ms: target_context.capacity_limits.poll_interval_ms,
+    max_concurrent_agents: target_context.capacity_limits.max_concurrent_agents,
+    running: {},
+    claimed: set(),
+    retry_attempts: {},
+    completed: set(),
+    runtime_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    runtime_rate_limits: null,
+    tracker_rate_limit: null,
+    control_plane: control_plane
+  }
+
+  state = recover_durable_runs(state)
+  schedule_tick(delay_ms=0)
   event_loop(state)
 ```
 
@@ -3097,14 +3098,7 @@ function start_service():
 on_tick(state):
   state = reconcile_running_issues(state)
 
-  validation = validate_dispatch_config()
-  if validation is not ok:
-    log_validation_error(validation)
-    notify_observers()
-    schedule_tick(state.poll_interval_ms)
-    return state
-
-  issues = tracker.fetch_candidate_issues()
+  issues = tracker.resolve_candidate_issues(state.target_context)
   if issues failed:
     log_tracker_error()
     notify_observers()
@@ -3195,51 +3189,49 @@ function dispatch_issue(issue, state, attempt):
 ### 16.5 Worker Attempt (Workspace + Prompt + Agent)
 
 ```text
-function run_agent_attempt(issue, attempt, orchestrator_channel):
-  workspace = workspace_manager.create_for_issue(issue.identifier)
+function run_agent_attempt(execution_context, issue, attempt, orchestrator_channel):
+  workspace = workspace_manager.create_for_issue(execution_context)
   if workspace failed:
     fail_worker("workspace error")
 
-  if run_hook("before_run", workspace.path) failed:
+  if run_hook("before_run", execution_context, issue) failed:
     fail_worker("before_run hook error")
 
-  runner = agent_runtime.resolve(compiled_workflow.runtime.agent.default_runner)
   session = agent_runtime.start(
-    runner=runner,
-    workspace=workspace.path,
+    execution_context=execution_context,
     issue=issue,
-    opts=compiled_workflow.runtime.runners[runner.name]
+    opts={}
   )
   if session failed:
-    run_hook_best_effort("after_run", workspace.path)
+    run_hook_best_effort("after_run", execution_context, issue)
     fail_worker("agent session startup error")
 
-  max_turns = compiled_workflow.runtime.agent.max_turns
+  max_turns = execution_context.runner_config.max_turns
   turn_number = 1
 
   while true:
-    prompt = build_turn_prompt(compiled_workflow.prompt_template, issue, attempt, turn_number, max_turns)
+    prompt = build_turn_prompt(execution_context, issue, attempt, turn_number, max_turns)
     if prompt failed:
       agent_runtime.stop(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", execution_context, issue)
       fail_worker("prompt error")
 
     turn_result = agent_runtime.send_turn(
       session=session,
       prompt=prompt,
       issue=issue,
-      on_event=(event) -> send(orchestrator_channel, {runtime_event, issue.id, event})
+      on_event=(event) -> send(orchestrator_channel, {runtime_event, execution_context.run_id, event})
     )
 
     if turn_result failed:
       agent_runtime.stop(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", execution_context, issue)
       fail_worker("agent turn error")
 
-    refreshed_issue = tracker.fetch_issue_states_by_ids([issue.id])
+    refreshed_issue = tracker.fetch_issue_states_by_ids(execution_context.target, [issue.id])
     if refreshed_issue failed:
       agent_runtime.stop(session)
-      run_hook_best_effort("after_run", workspace.path)
+      run_hook_best_effort("after_run", execution_context, issue)
       fail_worker("issue state refresh error")
 
     issue = refreshed_issue[0] or issue
@@ -3261,18 +3253,22 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
 ### 16.6 Worker Exit and Retry Handling
 
 ```text
-on_worker_exit(issue_id, reason, state):
-  running_entry = state.running.remove(issue_id)
+on_worker_exit(run_id, reason, state):
+  running_entry = state.running.remove(run_id)
   state = add_runtime_seconds_to_totals(state, running_entry)
 
   if reason == normal:
-    state.completed.add(issue_id)  # bookkeeping only
-    state = schedule_retry(state, issue_id, 1, {
+    state.completed.add(run_id)  # bookkeeping only
+    state = schedule_retry(state, run_id, 1, {
+      execution_context: running_entry.execution_context,
+      durable_authority: running_entry.durable_authority,
       identifier: running_entry.identifier,
       delay_type: continuation
     })
   else:
-    state = schedule_retry(state, issue_id, next_attempt_from(running_entry), {
+    state = schedule_retry(state, run_id, next_attempt_from(running_entry), {
+      execution_context: running_entry.execution_context,
+      durable_authority: running_entry.durable_authority,
       identifier: running_entry.identifier,
       error: format("worker exited: %reason")
     })
@@ -3282,30 +3278,37 @@ on_worker_exit(issue_id, reason, state):
 ```
 
 ```text
-on_retry_timer(issue_id, state):
-  retry_entry = state.retry_attempts.pop(issue_id)
+on_retry_timer(run_id, state):
+  retry_entry = state.retry_attempts.pop(run_id)
   if missing:
     return state
 
-  candidates = tracker.fetch_candidate_issues()
+  issue = tracker.fetch_issue_states_by_ids(
+    retry_entry.execution_context.target,
+    [retry_entry.execution_context.issue_id]
+  )
   if fetch failed:
-    return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
+    return schedule_retry(state, run_id, retry_entry.attempt + 1, {
+      execution_context: retry_entry.execution_context,
+      durable_authority: retry_entry.durable_authority,
       identifier: retry_entry.identifier,
       error: "retry poll failed"
     })
 
-  issue = find_by_id(candidates, issue_id)
   if issue is null:
-    state.claimed.remove(issue_id)
+    state.claimed.remove(run_id)
     return state
 
   if available_slots(state) == 0:
-    return schedule_retry(state, issue_id, retry_entry.attempt + 1, {
-      identifier: issue.identifier,
-      error: "no available orchestrator slots"
-    })
+    return schedule_retry(state, run_id, retry_entry.attempt + 1, retry_entry)
 
-  return dispatch_issue(issue, state, attempt=retry_entry.attempt)
+  return dispatch_issue(
+    issue,
+    state,
+    attempt=retry_entry.attempt,
+    execution_context=retry_entry.execution_context,
+    durable_authority=retry_entry.durable_authority
+  )
 ```
 
 ## 17. Test and Validation Matrix

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.QualityGateTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.AgentRuntime.Event
   alias SymphonyElixir.Codex.ExecutionProfile
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.HandoffRouteRecorder
@@ -190,7 +191,7 @@ defmodule SymphonyElixir.QualityGateTest do
     end
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -252,7 +253,7 @@ defmodule SymphonyElixir.QualityGateTest do
     end
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -277,7 +278,7 @@ defmodule SymphonyElixir.QualityGateTest do
     nested_parent = self()
 
     nested =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -318,7 +319,7 @@ defmodule SymphonyElixir.QualityGateTest do
     noop_parent = self()
 
     noop =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -750,7 +751,7 @@ defmodule SymphonyElixir.QualityGateTest do
     on_exit(fn -> File.rm_rf(workspace) end)
 
     fix_required =
-      HandoffRouteRecorder.classify_completion(
+      HandoffRouteRecorder.classify_completion_for_test(
         %{
           quality_gate: %{
             status: :fix_required,
@@ -770,7 +771,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(fix_required.evidence, &(&1.kind == :check and &1.status == :fix_required and &1.summary =~ "Quality gate"))
 
     blocked =
-      HandoffRouteRecorder.classify_completion(
+      HandoffRouteRecorder.classify_completion_for_test(
         %{
           quality_gate: %{
             status: :blocked,
@@ -783,336 +784,6 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert blocked.route == :blocked
     assert blocked.recommendation =~ "browser credentials"
-  end
-
-  test "orchestrator runs host quality gate before handoff routing" do
-    parent = self()
-    previous_runner = Application.get_env(:symphony_elixir, :quality_gate_runner)
-    write_workflow_file!(Workflow.workflow_file_path(), quality_gate_enabled: true)
-
-    on_exit(fn ->
-      case previous_runner do
-        nil -> Application.delete_env(:symphony_elixir, :quality_gate_runner)
-        runner -> Application.put_env(:symphony_elixir, :quality_gate_runner, runner)
-      end
-    end)
-
-    Application.put_env(:symphony_elixir, :quality_gate_runner, fn
-      %{kind: :review, job: %{category: category}} ->
-        send(parent, {:quality_gate_review, category})
-        {:ok, %{status: :passed, findings: []}}
-    end)
-
-    workspace =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-quality-gate-orchestrator-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-    on_exit(fn -> File.rm_rf(workspace) end)
-
-    issue_id = "issue-quality-gate"
-    ref = make_ref()
-    orchestrator_name = Module.concat(__MODULE__, :QualityGateOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    initial_state = :sys.get_state(pid)
-
-    running_entry = %{
-      pid: self(),
-      ref: ref,
-      identifier: "SID-319",
-      issue: %Issue{id: issue_id, identifier: "SID-319", title: "Quality gate", state: "In Progress"},
-      session_id: nil,
-      workspace_path: workspace,
-      policy: %{},
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(pid, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue_id]))
-    end)
-
-    send(
-      pid,
-      {:runtime_event, issue_id,
-       %{
-         event: :turn_completed,
-         timestamp: DateTime.utc_now(),
-         completion: %{
-           checks: [%{name: "mix test", status: :passed}],
-           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "mix test", status: "passed"}]}
-         }
-       }}
-    )
-
-    send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
-
-    assert_receive {:quality_gate_review, :source_correctness}
-    assert_receive {:quality_gate_review, :test_quality}
-
-    assert Enum.any?(state.handoff_routes[issue_id].evidence, fn evidence ->
-             evidence.kind == "check" and evidence.status == "passed" and evidence.summary =~ "quality_gate"
-           end)
-  end
-
-  test "orchestrator writes a quality gate review record after handoff routing" do
-    parent = self()
-    previous_runner = Application.get_env(:symphony_elixir, :quality_gate_runner)
-    previous_log_file = Application.get_env(:symphony_elixir, :log_file)
-    logs_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-records-#{System.unique_integer([:positive])}")
-
-    write_workflow_file!(Workflow.workflow_file_path(), quality_gate_enabled: true)
-    Application.put_env(:symphony_elixir, :log_file, SymphonyElixir.LogFile.default_log_file(logs_root))
-
-    on_exit(fn ->
-      case previous_runner do
-        nil -> Application.delete_env(:symphony_elixir, :quality_gate_runner)
-        runner -> Application.put_env(:symphony_elixir, :quality_gate_runner, runner)
-      end
-
-      case previous_log_file do
-        nil -> Application.delete_env(:symphony_elixir, :log_file)
-        log_file -> Application.put_env(:symphony_elixir, :log_file, log_file)
-      end
-
-      File.rm_rf(logs_root)
-    end)
-
-    Application.put_env(:symphony_elixir, :quality_gate_runner, fn
-      %{kind: :review, job: %{category: category}} ->
-        send(parent, {:quality_gate_review, category})
-        {:ok, %{status: :passed, findings: []}}
-    end)
-
-    workspace =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-quality-gate-record-orchestrator-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-    on_exit(fn -> File.rm_rf(workspace) end)
-
-    issue_id = "issue-quality-gate-record"
-    ref = make_ref()
-    orchestrator_name = Module.concat(__MODULE__, :QualityGateRecordOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    initial_state = :sys.get_state(pid)
-
-    running_entry = %{
-      pid: self(),
-      ref: ref,
-      identifier: "SID-320",
-      issue: %Issue{
-        id: issue_id,
-        identifier: "SID-320",
-        title: "Persist quality-gate records",
-        state: "In Progress",
-        url: "https://linear.app/example/issue/SID-320/example"
-      },
-      session_id: "session-320",
-      workspace_path: workspace,
-      policy: %{
-        "policy_metadata" => %{"profile" => "default", "project_slug" => "symphony"},
-        "policy_ref" => "640c639998cf",
-        "delivery" => %{"pr_target" => "main"},
-        "project" => %{"slug" => "symphony", "repository" => "https://github.com/apontarelli/symphony"}
-      },
-      started_at: DateTime.from_naive!(~N[2026-06-11 16:00:00], "Etc/UTC")
-    }
-
-    :sys.replace_state(pid, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue_id]))
-    end)
-
-    send(
-      pid,
-      {:runtime_event, issue_id,
-       %{
-         event: :turn_completed,
-         timestamp: DateTime.from_naive!(~N[2026-06-11 16:05:00], "Etc/UTC"),
-         session_id: "session-320",
-         completion: %{
-           checks: [%{name: "mix test", status: :passed}],
-           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "mix test", status: "passed"}]}
-         }
-       }}
-    )
-
-    send(pid, {:DOWN, ref, :process, self(), :normal})
-    :sys.get_state(pid, 5_000)
-
-    assert_receive {:quality_gate_review, :source_correctness}
-    assert_receive {:quality_gate_review, :test_quality}
-
-    assert {:ok, record} =
-             eventually(fn ->
-               case SymphonyElixir.ReviewRecords.show(logs_root, "session-320") do
-                 {:ok, record} -> {:ok, record}
-                 {:error, :not_found} -> nil
-               end
-             end)
-
-    assert record.metadata["issue"]["identifier"] == "SID-320"
-    assert record.metadata["workflow"]["policy_ref"] == "640c639998cf"
-    assert record.quality_gate["status"] == "passed"
-    assert record.handoff_route["route"]["target_state"] == "Human Review"
-  end
-
-  test "orchestrator host quality gate overrides worker gate and blocks publish side effects" do
-    parent = self()
-    previous_quality_runner = Application.get_env(:symphony_elixir, :quality_gate_runner)
-    previous_preflight_runner = Application.get_env(:symphony_elixir, :publish_preflight_runner)
-    previous_publish_runner = Application.get_env(:symphony_elixir, :publish_handoff_runner)
-
-    write_workflow_file!(Workflow.workflow_file_path(), quality_gate_enabled: true, quality_gate_max_repair_passes: 0)
-
-    on_exit(fn ->
-      case previous_quality_runner do
-        nil -> Application.delete_env(:symphony_elixir, :quality_gate_runner)
-        runner -> Application.put_env(:symphony_elixir, :quality_gate_runner, runner)
-      end
-
-      case previous_preflight_runner do
-        nil -> Application.delete_env(:symphony_elixir, :publish_preflight_runner)
-        runner -> Application.put_env(:symphony_elixir, :publish_preflight_runner, runner)
-      end
-
-      case previous_publish_runner do
-        nil -> Application.delete_env(:symphony_elixir, :publish_handoff_runner)
-        runner -> Application.put_env(:symphony_elixir, :publish_handoff_runner, runner)
-      end
-    end)
-
-    Application.put_env(:symphony_elixir, :quality_gate_runner, fn
-      %{kind: :review, job: %{category: :source_correctness}} ->
-        send(parent, {:quality_gate_review, :source_correctness})
-
-        {:ok,
-         %{
-           status: :fix_required,
-           findings: [
-             %{
-               category: :source_correctness,
-               evidence: "Host review found a blocker.",
-               recommended_disposition: :fix_required
-             }
-           ]
-         }}
-
-      %{kind: :review, job: %{category: category}} ->
-        send(parent, {:quality_gate_review, category})
-        {:ok, %{status: :passed, findings: []}}
-    end)
-
-    Application.put_env(:symphony_elixir, :publish_preflight_runner, fn %{step: step} ->
-      send(parent, {:publish_preflight_called, step})
-      {:ok, %{status: 0, output: "ok"}}
-    end)
-
-    Application.put_env(:symphony_elixir, :publish_handoff_runner, fn %{step: step, command: command, args: args} ->
-      send(parent, {:publish_handoff_command, step, command, args})
-      {:ok, %{status: 0, output: "ok"}}
-    end)
-
-    workspace =
-      Path.join(
-        System.tmp_dir!(),
-        "symphony-quality-gate-publish-block-#{System.unique_integer([:positive])}"
-      )
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-    on_exit(fn -> File.rm_rf(workspace) end)
-
-    issue_id = "issue-quality-gate-publish-block"
-    ref = make_ref()
-    orchestrator_name = Module.concat(__MODULE__, :QualityGatePublishBlockOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    initial_state = :sys.get_state(pid)
-
-    running_entry = %{
-      pid: self(),
-      ref: ref,
-      identifier: "SID-319",
-      issue: %Issue{id: issue_id, identifier: "SID-319", title: "Quality gate publish", state: "In Progress"},
-      session_id: nil,
-      workspace_path: workspace,
-      worker_host: nil,
-      policy: %{
-        "publish_target" => %{
-          "repository" => "https://github.com/example/project",
-          "pr_target" => "main",
-          "github_repository" => "example/project",
-          "display" => "example/project:main"
-        },
-        "manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}},
-        "delivery" => %{"pr_target" => "main"}
-      },
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(pid, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue_id]))
-    end)
-
-    send(
-      pid,
-      {:runtime_event, issue_id,
-       %{
-         event: :turn_completed,
-         timestamp: DateTime.utc_now(),
-         completion: %{
-           quality_gate: %{status: :passed},
-           checks: [%{name: "tests", status: :passed}],
-           change_manifest: %{changed_files: ["lib/source.ex"], validation: [%{name: "tests", status: "passed"}]}
-         }
-       }}
-    )
-
-    send(pid, {:DOWN, ref, :process, self(), :normal})
-    Process.sleep(50)
-    state = :sys.get_state(pid)
-
-    assert_receive {:quality_gate_review, :source_correctness}
-    assert_receive {:quality_gate_review, :test_quality}
-    refute_receive {:publish_preflight_called, _step}, 50
-    refute_receive {:publish_handoff_command, _step, _command, _args}, 50
-
-    assert %{route: route, target_state: "Rework"} = state.handoff_routes[issue_id]
-    assert route in ["rework", :rework]
   end
 
   test "planner handles nested manifests and conservative runtime isolation modes" do
@@ -1261,7 +932,7 @@ defmodule SymphonyElixir.QualityGateTest do
   end
 
   test "quality gate public helpers normalize alternate result states" do
-    assert %{status: :passed} = QualityGate.run(nil, %{}, nil, "not metadata")
+    assert %{status: :passed} = QualityGate.run_for_test(nil, %{}, nil, "not metadata")
     assert QualityGate.normalize_result("bad") == nil
     assert QualityGate.check(nil) == nil
     assert QualityGate.review(nil, %{status: :clean}) == %{status: :clean}
@@ -1308,7 +979,7 @@ defmodule SymphonyElixir.QualityGateTest do
     issue = %Issue{identifier: "SID-319", title: "Quality gate"}
 
     blocked_runtime =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1320,7 +991,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(blocked_runtime.jobs, &(&1.blocked_reason =~ "runtime_review_blocked_by_policy"))
 
     isolated_runtime =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1334,7 +1005,7 @@ defmodule SymphonyElixir.QualityGateTest do
     parent = self()
 
     read_only =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{"runners" => %{"codex" => %{"turn_sandbox_policy" => %{"type" => "workspaceWrite"}}}},
         issue,
@@ -1350,7 +1021,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:review_policy, policy}
     assert get_in(policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
-    QualityGate.run(
+    QualityGate.run_for_test(
       "/tmp/symphony-workspace",
       "not a policy",
       issue,
@@ -1365,7 +1036,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert_receive {:review_policy_from_non_map, non_map_policy}
     assert get_in(non_map_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
-    QualityGate.run(
+    QualityGate.run_for_test(
       "/tmp/symphony-workspace",
       %{"runners" => %{"codex" => "not a map"}},
       issue,
@@ -1381,7 +1052,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert get_in(malformed_codex_policy, ["runners", "codex", "turn_sandbox_policy", "type"]) == "readOnly"
 
     browser_policy =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1412,7 +1083,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert get_in(visual_policy, ["runners", "codex", "turn_sandbox_policy", "networkAccess"]) == true
 
     preflight_blocked =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1445,7 +1116,7 @@ defmodule SymphonyElixir.QualityGateTest do
     end
 
     malformed =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1459,7 +1130,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(malformed.jobs, &(&1.summary == nil and &1.findings == []))
 
     invalid =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1538,7 +1209,7 @@ defmodule SymphonyElixir.QualityGateTest do
     parent = self()
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1589,7 +1260,7 @@ defmodule SymphonyElixir.QualityGateTest do
     parent = self()
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1629,7 +1300,7 @@ defmodule SymphonyElixir.QualityGateTest do
     parent = self()
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/remote/workspaces/SID-319",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1670,7 +1341,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
   test "product visual review handles malformed host visual QA callbacks" do
     invalid_callback =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1686,7 +1357,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(invalid_callback.jobs, &(&1.blocked_reason =~ "invalid_host_visual_qa"))
 
     invalid_result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1702,7 +1373,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(invalid_result.jobs, &(&1.blocked_reason =~ "invalid_result"))
 
     raised =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1718,7 +1389,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(raised.jobs, &(&1.blocked_reason =~ "visual qa exploded"))
 
     thrown =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1738,7 +1409,7 @@ defmodule SymphonyElixir.QualityGateTest do
     parent = self()
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1768,7 +1439,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
   test "browser preflight blocks malformed callbacks and invalid results" do
     invalid_callback =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1782,7 +1453,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(invalid_callback.jobs, &(&1.blocked_reason =~ "invalid_browser_preflight"))
 
     invalid_result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -1858,7 +1529,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     killed =
       try do
-        QualityGate.run(
+        QualityGate.run_for_test(
           "/tmp/symphony-workspace",
           %{},
           issue,
@@ -1880,7 +1551,7 @@ defmodule SymphonyElixir.QualityGateTest do
 
     killed_docs =
       try do
-        QualityGate.run(
+        QualityGate.run_for_test(
           "/tmp/symphony-workspace",
           %{},
           issue,
@@ -1907,7 +1578,7 @@ defmodule SymphonyElixir.QualityGateTest do
            )
 
     raised =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1919,7 +1590,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert Enum.any?(raised.jobs, &(&1.blocked_reason =~ "review exploded"))
 
     thrown =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1950,7 +1621,7 @@ defmodule SymphonyElixir.QualityGateTest do
     end
 
     errored =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1966,7 +1637,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert repair_failed_reason =~ "repair_failed"
 
     raised =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1981,7 +1652,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert raised_reason =~ "repair exploded"
 
     thrown =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -1996,7 +1667,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert thrown_reason =~ "repair_thrown"
 
     invalid =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -2015,7 +1686,7 @@ defmodule SymphonyElixir.QualityGateTest do
     issue = %Issue{identifier: "SID-319", title: "Quality gate"}
 
     empty_prompt =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -2045,7 +1716,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert [%{status: :fix_required, rerun_categories: [:scenario_qa]}] = empty_prompt.repair_passes
 
     summary_only =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -2073,7 +1744,7 @@ defmodule SymphonyElixir.QualityGateTest do
     assert summary_only.unresolved_human_review_reasons |> hd() == "Repair still needs work."
 
     malformed_settings =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         %{},
         issue,
@@ -2103,101 +1774,6 @@ defmodule SymphonyElixir.QualityGateTest do
 
     assert malformed_settings.status == :passed
     assert [%{attempt: 1}] = malformed_settings.repair_passes
-  end
-
-  test "quality gate default runner handles missing workspace and app-server failures" do
-    issue = %Issue{identifier: "SID-319", title: "Quality gate"}
-
-    missing_workspace = QualityGate.run(nil, %{}, issue, %{changed_files: ["lib/source.ex"]})
-    assert missing_workspace.status == :blocked
-    assert Enum.any?(missing_workspace.jobs, &(&1.raw_output.blocked_reason == :workspace_unavailable))
-
-    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-app-failure-#{System.unique_integer([:positive])}")
-    workspace_root = Path.join(test_root, "workspaces")
-    workspace = Path.join(workspace_root, "SID-319")
-    fake_codex = Path.join(test_root, "fake-codex")
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-    File.write!(fake_codex, "#!/bin/sh\nexit 1\n")
-    File.chmod!(fake_codex, 0o755)
-
-    try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "#{fake_codex} app-server",
-        quality_gate_enabled: true
-      )
-
-      failed = QualityGate.run(workspace, %{}, issue, %{changed_files: ["lib/source.ex"]})
-      assert failed.status == :blocked
-
-      assert Enum.any?(failed.jobs, fn job ->
-               match?({:codex_app_server_unavailable, _reason}, job.raw_output.blocked_reason)
-             end)
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "quality gate default runner retries app-server launch failures from reviewer profile" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-app-retry-#{System.unique_integer([:positive])}")
-    workspace_root = Path.join(test_root, "workspaces")
-    workspace = Path.join(workspace_root, "SID-319")
-    fake_codex = Path.join(test_root, "fake-codex")
-    count_file = Path.join(test_root, "attempt-count")
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-
-    File.write!(fake_codex, """
-    #!/bin/sh
-    count_file="#{count_file}"
-    count=$(cat "$count_file" 2>/dev/null || echo 0)
-    count=$((count + 1))
-    printf '%s' "$count" > "$count_file"
-
-    if [ "$count" -eq 1 ]; then
-      exit 1
-    fi
-
-    while IFS= read -r line; do
-      if printf '%s' "$line" | grep -q '"method":"initialize"'; then
-        printf '%s\\n' '{"id":1,"result":{}}'
-      elif printf '%s' "$line" | grep -q '"method":"thread/start"'; then
-        printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality"}}}'
-      elif printf '%s' "$line" | grep -q '"method":"turn/start"'; then
-        printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality"}}}'
-        printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
-        exit 0
-      fi
-    done
-    """)
-
-    File.chmod!(fake_codex, 0o755)
-
-    try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "#{fake_codex} app-server",
-        quality_gate_enabled: true,
-        quality_gate_source_max_concurrency: 1,
-        quality_gate_reviewer_max_retries: 1
-      )
-
-      result =
-        QualityGate.run(
-          workspace,
-          %{},
-          %Issue{identifier: "SID-319", title: "Retry runner"},
-          %{changed_files: ["lib/source.ex"]}
-        )
-
-      assert result.status == :passed
-      assert count_file |> File.read!() |> String.to_integer() >= 2
-    after
-      File.rm_rf(test_root)
-    end
   end
 
   test "execution profile fallbacks cover command and malformed profile inputs" do
@@ -2305,231 +1881,40 @@ defmodule SymphonyElixir.QualityGateTest do
     refute changeset.valid?
   end
 
-  test "default app-server runner records reviewer and repair output" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-default-runner-#{System.unique_integer([:positive])}")
-    workspace_root = Path.join(test_root, "workspaces")
-    workspace = Path.join(workspace_root, "SID-319")
-    fake_codex = Path.join(test_root, "fake-codex")
+  test "normalized reviewer completion parsing handles supported payload boundaries" do
+    reviewer = %{status: :passed, findings: []}
 
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
+    nested = %Event{
+      payload: %{
+        payload: %{"params" => %{"completion" => %{"quality_gate_reviewer" => reviewer}}}
+      }
+    }
 
-    File.write!(fake_codex, """
-    #!/bin/sh
-    while IFS= read -r line; do
-      if printf '%s' "$line" | grep -q '"method":"initialize"'; then
-        printf '%s\\n' '{"id":1,"result":{}}'
-      elif printf '%s' "$line" | grep -q '"method":"thread/start"'; then
-        printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality"}}}'
-      elif printf '%s' "$line" | grep -q '"method":"turn/start"'; then
-        printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality"}}}'
+    assert QualityGate.quality_gate_completion_for_test([nested]) == reviewer
 
-        if printf '%s' "$line" | grep -qi 'repair pass'; then
-          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
-        else
-          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"fix_required","findings":[{"category":"source_correctness","evidence":"Needs repair","recommended_disposition":"fix_required"}]}}}}'
-        fi
+    turn_nested = %Event{
+      payload: %{
+        "params" => %{
+          "turn" => %{"completion" => %{"quality_gate_reviewer" => reviewer}}
+        }
+      }
+    }
 
-        exit 0
-      fi
-    done
-    """)
+    assert QualityGate.quality_gate_completion_for_test([turn_nested]) == reviewer
 
-    File.chmod!(fake_codex, 0o755)
+    direct = %Event{payload: %{"params" => %{"completion" => reviewer}}}
+    assert QualityGate.quality_gate_completion_for_test([direct]) == reviewer
 
-    try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "#{fake_codex} app-server",
-        quality_gate_enabled: true
-      )
-
-      result =
-        QualityGate.run(
-          workspace,
-          %{},
-          %Issue{identifier: "SID-319", title: "Default runner"},
-          %{changed_files: ["lib/source.ex"]}
-        )
-
-      assert [%{repair_result: %{status: :passed}}] = result.repair_passes
-      assert Enum.any?(result.jobs, &(&1.raw_output[:session_id] || &1.raw_output["session_id"]))
-    after
-      File.rm_rf(test_root)
-    end
-  end
-
-  test "default app-server runner launches review and repair on worker host" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-remote-runner-#{System.unique_integer([:positive])}")
-    fake_bin = Path.join(test_root, "bin")
-    fake_ssh = Path.join(fake_bin, "ssh")
-    trace_file = Path.join(test_root, "ssh.trace")
-    count_file = Path.join(test_root, "turn-count")
-    remote_workspace = "/remote/workspaces/SID-319"
-    previous_path = System.get_env("PATH")
-    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
-    previous_count = System.get_env("SYMP_TEST_SSH_COUNT")
-    previous_ssh_config = System.get_env("SYMPHONY_SSH_CONFIG")
-
-    on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
-      restore_env("SYMP_TEST_SSH_COUNT", previous_count)
-      restore_env("SYMPHONY_SSH_CONFIG", previous_ssh_config)
-      File.rm_rf(test_root)
-    end)
-
-    File.mkdir_p!(fake_bin)
-    System.put_env("PATH", fake_bin <> ":" <> (previous_path || ""))
-    System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-    System.put_env("SYMP_TEST_SSH_COUNT", count_file)
-    System.delete_env("SYMPHONY_SSH_CONFIG")
-
-    File.write!(fake_ssh, """
-    #!/bin/sh
-    trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-quality-gate-remote.trace}"
-    count_file="${SYMP_TEST_SSH_COUNT:-/tmp/symphony-quality-gate-remote.count}"
-    printf 'ARGV:%s\\n' "$*" >> "$trace_file"
-
-    while IFS= read -r line; do
-      printf 'JSON:%s\\n' "$line" >> "$trace_file"
-
-      case "$line" in
-        *initialize*)
-          printf '%s\\n' '{"id":1,"result":{}}'
-          ;;
-        *thread/start*)
-          printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality-remote"}}}'
-          ;;
-        *turn/start*)
-          lock_dir="${count_file}.lock"
-          while ! mkdir "$lock_dir" 2>/dev/null; do
-            sleep 0.01
-          done
-
-          count=0
-          if [ -f "$count_file" ]; then
-            IFS= read -r count < "$count_file" || count=0
-          fi
-          count=$((count + 1))
-          printf '%s\\n' "$count" > "$count_file"
-          rmdir "$lock_dir"
-
-          printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality-remote"}}}'
-
-          if [ "$count" -eq 1 ]; then
-            printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"fix_required","findings":[{"category":"source_correctness","evidence":"Needs repair","recommended_disposition":"fix_required"}]}}}}'
-          else
-            printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"quality_gate_reviewer":{"status":"passed","findings":[]}}}}'
-          fi
-
-          exit 0
-          ;;
-      esac
-    done
-    """)
-
-    File.chmod!(fake_ssh, 0o755)
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      workspace_root: "/remote/workspaces",
-      codex_command: "fake-remote-codex app-server",
-      quality_gate_enabled: true
-    )
-
-    result =
-      QualityGate.run(
-        remote_workspace,
-        %{},
-        %Issue{identifier: "SID-319", title: "Remote default runner"},
-        %{changed_files: ["lib/source.ex"]},
-        worker_host: "worker-01:2200"
-      )
-
-    assert result.status == :passed
-    assert [%{repair_result: %{status: :passed}}] = result.repair_passes
-    assert count_file |> File.read!() |> String.trim() |> String.to_integer() >= 3
-
-    argv_lines =
-      trace_file
-      |> File.read!()
-      |> String.split("\n", trim: true)
-      |> Enum.filter(&String.starts_with?(&1, "ARGV:"))
-
-    assert length(argv_lines) >= 3
-    assert Enum.all?(argv_lines, &(&1 =~ "-T -p 2200 worker-01 bash -lc"))
-    assert Enum.all?(argv_lines, &(&1 =~ remote_workspace))
-  end
-
-  test "default app-server runner accepts direct and missing completion payloads" do
-    test_root = Path.join(System.tmp_dir!(), "symphony-quality-gate-direct-runner-#{System.unique_integer([:positive])}")
-    workspace_root = Path.join(test_root, "workspaces")
-    workspace = Path.join(workspace_root, "SID-319")
-    fake_codex = Path.join(test_root, "fake-codex")
-
-    File.mkdir_p!(Path.join(workspace, "lib"))
-    File.write!(Path.join(workspace, "lib/source.ex"), "defmodule Source do\nend\n")
-
-    File.write!(fake_codex, """
-    #!/bin/sh
-    while IFS= read -r line; do
-      if printf '%s' "$line" | grep -q '"method":"initialize"'; then
-        printf '%s\\n' '{"id":1,"result":{}}'
-      elif printf '%s' "$line" | grep -q '"method":"thread/start"'; then
-        printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-quality"}}}'
-      elif printf '%s' "$line" | grep -q '"method":"turn/start"'; then
-        printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-quality"}}}'
-
-        if printf '%s' "$line" | grep -q 'missing-completion'; then
-          printf '%s\\n' '{"method":"turn/completed","params":{}}'
-        else
-          printf '%s\\n' '{"method":"turn/completed","params":{"completion":{"status":"passed","findings":[]}}}'
-        fi
-
-        exit 0
-      fi
-    done
-    """)
-
-    File.chmod!(fake_codex, 0o755)
-
-    try do
-      write_workflow_file!(Workflow.workflow_file_path(),
-        workspace_root: workspace_root,
-        codex_command: "#{fake_codex} app-server",
-        quality_gate_enabled: true
-      )
-
-      direct =
-        QualityGate.run(
-          workspace,
-          %{},
-          %Issue{identifier: "SID-319", title: "Direct completion"},
-          %{changed_files: ["lib/source.ex"]}
-        )
-
-      assert direct.status == :passed
-
-      missing =
-        QualityGate.run(
-          workspace,
-          %{},
-          %Issue{identifier: "SID-319", title: "missing-completion"},
-          %{changed_files: ["lib/source.ex"]}
-        )
-
-      assert missing.status == :blocked
-      assert Enum.any?(missing.jobs, &(&1.raw_output.blocked_reason == :reviewer_output_missing))
-    after
-      File.rm_rf(test_root)
-    end
+    non_map = %Event{payload: %{"params" => %{"completion" => "invalid"}}}
+    assert QualityGate.quality_gate_completion_for_test([non_map]) == nil
+    assert QualityGate.quality_gate_completion_for_test([%Event{payload: %{}}]) == nil
   end
 
   defp capture_visual_review_policy(policy) do
     parent = self()
 
     result =
-      QualityGate.run(
+      QualityGate.run_for_test(
         "/tmp/symphony-workspace",
         policy,
         %Issue{identifier: "SID-319", title: "Quality gate"},
@@ -2547,7 +1932,7 @@ defmodule SymphonyElixir.QualityGateTest do
   end
 
   defp run_default_visual_preflight(opts \\ []) do
-    QualityGate.run(
+    QualityGate.run_for_test(
       "/tmp/symphony-workspace",
       %{},
       %Issue{identifier: "SID-319", title: "Quality gate"},

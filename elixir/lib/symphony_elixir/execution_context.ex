@@ -337,7 +337,8 @@ defmodule SymphonyElixir.ExecutionContext do
         _invalid -> false
       end
 
-    if valid_dispatch_mode? and Enum.all?(maps, &(is_map(&1) and json_safe?(&1))) and
+    if valid_dispatch_mode? and target.workspace_layout in [:flat, :target_scoped] and
+         Enum.all?(maps, &(is_map(&1) and json_safe?(&1))) and
          valid_repo_policy?(target.repo_policy),
        do: :ok,
        else: {:error, :invalid_target}
@@ -558,10 +559,9 @@ defmodule SymphonyElixir.ExecutionContext do
     root = Path.expand(target.worktree_policy["root"])
 
     candidate =
-      if legacy_target?(target) or Path.basename(root) == target.target_id do
-        Path.join(root, issue_identifier)
-      else
-        Path.join([root, target.target_id, issue_identifier])
+      case target.workspace_layout do
+        :flat -> Path.join(root, issue_identifier)
+        :target_scoped -> Path.join([root, target.target_id, issue_identifier])
       end
 
     case worker_host do
@@ -575,9 +575,6 @@ defmodule SymphonyElixir.ExecutionContext do
       do: {:ok, candidate},
       else: {:error, :invalid_workspace_path}
   end
-
-  defp legacy_target?(%TargetContext{issue_policy_authority: authority}),
-    do: is_map(authority)
 
   defp canonical_workspace_path(root, candidate) do
     with :ok <- reject_workspace_symlinks(root, candidate),

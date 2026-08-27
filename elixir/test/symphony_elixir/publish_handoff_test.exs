@@ -13,7 +13,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     policy = publish_policy(vcs_mode: "jj", repository: "https://github.com/apontarelli/symphony", github_repository: "apontarelli/symphony")
 
     result =
-      PublishHandoff.run(workspace, policy, issue, completion,
+      PublishHandoff.run_for_test(workspace, policy, issue, completion,
         runner: fn %{step: step, command: command, args: args} ->
           send(parent, {:publish_command, step, command, args})
 
@@ -80,7 +80,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -163,7 +163,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
       Enum.each(["jj", "gh"], &File.chmod!(Path.join(fake_bin, &1), 0o755))
 
       result =
-        PublishHandoff.run(
+        PublishHandoff.run_for_test(
           workspace,
           publish_policy(vcs_mode: "jj"),
           issue("SID-309"),
@@ -190,7 +190,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "git", repository: "https://github.com/example/project", github_repository: "example/project"),
         issue("SID-309"),
@@ -242,7 +242,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "git", repository: "https://github.com/example/project", github_repository: "example/project"),
         issue("SID-309"),
@@ -274,7 +274,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     status_failure =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "git", repository: "https://github.com/example/project", github_repository: "example/project"),
         issue("SID-309"),
@@ -298,7 +298,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert status_failure.failure.details == nil
 
     command_error =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "git", repository: "https://github.com/example/project", github_repository: "example/project"),
         issue("SID-309"),
@@ -330,27 +330,27 @@ defmodule SymphonyElixir.PublishHandoffTest do
       |> Map.put(:publish_preflight, %{status: :blocked, repository: "https://github.com/example/project", base_branch: "main", failures: []})
 
     assert %{status: :blocked, failure: %{reason: :publish_preflight_not_passed}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), preflight_blocked, runner: runner)
+             PublishHandoff.run_for_test(workspace, publish_policy(), issue("SID-309"), preflight_blocked, runner: runner)
 
     invalid_manifest =
       completion_for(["../secret.txt"])
 
     assert %{status: :blocked, failure: %{reason: :change_manifest_failed}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), invalid_manifest, runner: runner)
+             PublishHandoff.run_for_test(workspace, publish_policy(), issue("SID-309"), invalid_manifest, runner: runner)
 
     ambiguous_manifest =
       completion_for(["lib/source.ex"])
       |> Map.put("change_manifest", %{changed_files: ["lib/source.ex"]})
 
     assert %{status: :blocked, failure: %{reason: :change_manifest_failed}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), ambiguous_manifest, runner: runner)
+             PublishHandoff.run_for_test(workspace, publish_policy(), issue("SID-309"), ambiguous_manifest, runner: runner)
 
     invalid_pr_body =
       completion_for(["lib/source.ex"])
       |> Map.put(:checks, [%{name: "all", status: :passed, summary: "<!-- pending -->"}])
 
     assert %{status: :blocked, failure: %{reason: :pr_body_invalid, details: details}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), invalid_pr_body, runner: runner)
+             PublishHandoff.run_for_test(workspace, publish_policy(), issue("SID-309"), invalid_pr_body, runner: runner)
 
     assert details =~ "PR description still contains template placeholder comments"
 
@@ -361,16 +361,21 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :remote_publish_unavailable}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), completion_for(["lib/source.ex"]), worker_host: "worker.example")
+             PublishHandoff.run_for_test(workspace, publish_policy(), issue("SID-309"), completion_for(["lib/source.ex"]), worker_host: "worker.example")
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :workspace_unavailable}} =
-             PublishHandoff.run(nil, publish_policy(), issue("SID-309"), completion_for(["lib/source.ex"]))
+             PublishHandoff.run_for_test(nil, publish_policy(), issue("SID-309"), completion_for(["lib/source.ex"]))
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :publish_preflight_missing}} =
-             PublishHandoff.run(workspace, publish_policy(), issue("SID-309"), %{change_manifest: %{changed_files: ["lib/source.ex"]}})
+             PublishHandoff.run_for_test(
+               workspace,
+               publish_policy(),
+               issue("SID-309"),
+               %{change_manifest: %{changed_files: ["lib/source.ex"]}}
+             )
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :change_manifest_missing}} =
-             PublishHandoff.run(
+             PublishHandoff.run_for_test(
                workspace,
                publish_policy(),
                issue("SID-309"),
@@ -378,7 +383,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
              )
 
     assert %{status: :blocked, branch: "ticket/sid-map", linear_issue: %{id: "issue-map", identifier: "SID-MAP", url: "https://linear.example/SID-MAP"}} =
-             PublishHandoff.run(
+             PublishHandoff.run_for_test(
                nil,
                publish_policy(),
                %{"id" => "issue-map", "identifier" => "SID-MAP", "url" => "https://linear.example/SID-MAP"},
@@ -386,7 +391,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
              )
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :publish_preflight_not_passed}} =
-             PublishHandoff.run(
+             PublishHandoff.run_for_test(
                workspace,
                publish_policy(),
                issue("SID-309"),
@@ -394,7 +399,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
              )
 
     assert %{status: :blocked, attempted: false, failure: %{reason: :publish_preflight_not_passed}} =
-             PublishHandoff.run(
+             PublishHandoff.run_for_test(
                workspace,
                publish_policy(),
                issue("SID-309"),
@@ -407,7 +412,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         %{"manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}}, "delivery" => %{"pr_target" => "main"}},
         issue("SID-309"),
@@ -429,7 +434,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "hg"),
         issue("SID-309"),
@@ -450,7 +455,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj", repository: "https://github.com/example/project", github_repository: "example/project"),
         issue("SID-309"),
@@ -471,7 +476,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     missing_origin =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -483,7 +488,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert missing_origin.failure.reason == :origin_remote_missing
 
     command_failure =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -496,7 +501,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert command_failure.failure.details == "remote failed"
 
     command_error =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -514,7 +519,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -544,7 +549,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -573,7 +578,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         issue("SID-309"),
@@ -599,7 +604,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     parent = self()
 
     result =
-      PublishHandoff.run(
+      PublishHandoff.run_for_test(
         workspace,
         publish_policy(vcs_mode: "jj"),
         nil,
@@ -647,7 +652,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
       File.chmod!(Path.join(fake_bin, "jj"), 0o755)
 
       fast_failure =
-        PublishHandoff.run(
+        PublishHandoff.run_for_test(
           workspace,
           publish_policy(vcs_mode: "jj"),
           issue("SID-309"),
@@ -663,7 +668,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
       File.write!(Path.join(fake_bin, "jj"), "#!/bin/sh\nexec #{shell_quote(sleep_executable!())} 1\n")
 
       result =
-        PublishHandoff.run(
+        PublishHandoff.run_for_test(
           workspace,
           publish_policy(vcs_mode: "jj"),
           issue("SID-309"),
@@ -688,7 +693,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
       System.put_env("PATH", "")
 
       result =
-        PublishHandoff.run(
+        PublishHandoff.run_for_test(
           workspace,
           publish_policy(vcs_mode: "jj"),
           issue("SID-309"),
@@ -755,7 +760,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     workspace = workspace_with_file!("lib/source.ex", "defmodule Source do\nend\n")
 
     decision =
-      HandoffRouteRecorder.classify_completion(
+      HandoffRouteRecorder.classify_completion_for_test(
         completion_for(["lib/source.ex"])
         |> Map.put(:changed_surfaces, ["workflow"])
         |> Map.put(:publish_handoff, %{
@@ -788,7 +793,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
              "publish/passed: Published PR https://github.com/apontarelli/symphony/pull/309 targeting apontarelli/symphony:main."
 
     blocked =
-      HandoffRouteRecorder.classify_completion(
+      HandoffRouteRecorder.classify_completion_for_test(
         completion_for(["lib/source.ex"])
         |> Map.put(:publish_handoff, %{
           status: :blocked,

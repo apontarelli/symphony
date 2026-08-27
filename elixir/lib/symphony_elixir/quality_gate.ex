@@ -5,7 +5,6 @@ defmodule SymphonyElixir.QualityGate do
 
   alias SymphonyElixir.{AgentRuntime, Config, ExecutionContext, Linear.Issue, SSH}
   alias SymphonyElixir.AgentRuntime.Event
-  alias SymphonyElixir.Codex.ExecutionProfile
   alias SymphonyElixir.Config.Schema.QualityGate, as: QualityGateSettings
   alias SymphonyElixir.QualityGate.{HostVisualQa, Planner, Synthesis}
   alias SymphonyElixir.ReviewRecords.Redaction
@@ -53,9 +52,6 @@ defmodule SymphonyElixir.QualityGate do
     "success" => :passed
   }
 
-  @spec run(Path.t() | nil, map(), Issue.t() | map() | nil, term()) :: result()
-  def run(workspace, policy, issue, completion), do: run(workspace, policy, issue, completion, [])
-
   @spec run_context(ExecutionContext.t(), Issue.t(), term()) ::
           result() | {:error, atom()}
   def run_context(%ExecutionContext{} = context, %Issue{} = issue, completion),
@@ -70,7 +66,7 @@ defmodule SymphonyElixir.QualityGate do
          {:ok, settings} <- pinned_quality_gate_settings(context),
          {:ok, provenance} <- ExecutionContext.safe_provenance(context) do
       context.workspace_path
-      |> run(
+      |> run_gate(
         context.policy,
         issue,
         completion,
@@ -86,13 +82,18 @@ defmodule SymphonyElixir.QualityGate do
   def run_context(%ExecutionContext{}, %Issue{}, _completion, _opts),
     do: {:error, :invalid_quality_gate_options}
 
-  @spec run(Path.t() | nil, map(), Issue.t() | map() | nil, term(), keyword()) :: result()
-  def run(workspace, policy, issue, completion, opts) when is_map(completion) and is_list(opts) do
-    settings =
-      case Keyword.fetch(opts, :settings) do
-        {:ok, settings} -> settings
-        :error -> Config.settings!().quality_gate
-      end
+  @doc false
+  @spec run_for_test(Path.t() | nil, map(), Issue.t() | map() | nil, term(), keyword()) ::
+          result()
+  def run_for_test(workspace, policy, issue, completion, opts \\ []) do
+    completion = if is_map(completion), do: completion, else: %{}
+    opts = Keyword.put_new(opts, :settings, Config.settings!().quality_gate)
+    run_gate(workspace, policy, issue, completion, opts)
+  end
+
+  defp run_gate(workspace, policy, issue, completion, opts)
+       when is_map(completion) and is_list(opts) do
+    settings = Keyword.fetch!(opts, :settings)
 
     runner = Keyword.get(opts, :runner, &default_runner/1)
     browser_preflight = Keyword.get(opts, :browser_preflight, &default_browser_preflight/1)
@@ -155,10 +156,6 @@ defmodule SymphonyElixir.QualityGate do
       repair_passes: repair_passes,
       unresolved_human_review_reasons: final_synthesis.unresolved_human_review_reasons
     }
-  end
-
-  def run(workspace, policy, issue, _completion, opts) do
-    run(workspace, policy, issue, %{}, opts)
   end
 
   @spec normalize_result(term()) :: map() | nil
@@ -430,8 +427,11 @@ defmodule SymphonyElixir.QualityGate do
 
   defp run_review_job(job, plan, context, phase) do
     case prepare_review_job(job, plan, context.execution_context) do
-      {:ok, prepared_job} -> do_run_review_job(prepared_job, plan, context, phase)
-      {:error, reason} -> blocked_job_result(job, phase, {:invalid_review_context, reason})
+      {:ok, prepared_job} ->
+        do_run_review_job(prepared_job, plan, context, phase)
+
+      {:error, reason} ->
+        blocked_job_result(job, phase, {:invalid_review_context, reason})
     end
   end
 
@@ -450,8 +450,6 @@ defmodule SymphonyElixir.QualityGate do
        |> Map.put(:provenance, provenance)}
     end
   end
-
-  defp prepare_review_job(_job, _plan, _context), do: {:error, :invalid_context}
 
   defp review_role(category), do: Map.fetch(@review_roles, category)
 
@@ -568,16 +566,16 @@ defmodule SymphonyElixir.QualityGate do
 
   defp read_only_review_job(
          %{execution_context: %ExecutionContext{} = execution_context} = job,
-         _legacy_policy
+         _policy
        ) do
     policy = read_only_review_policy(execution_context.policy, execution_context.runner_name)
     execution_context = %{execution_context | policy: policy}
     {Map.put(job, :execution_context, execution_context), policy}
   end
 
-  defp read_only_review_job(job, legacy_policy) do
-    policy = read_only_review_policy(legacy_policy, Config.default_runner_name())
-    {job, policy}
+  defp read_only_review_job(job, policy) do
+    review_policy = read_only_review_policy(policy, Config.default_runner_name())
+    {job, review_policy}
   end
 
   defp host_visual_qa_prompt(host_visual_qa) do
@@ -606,11 +604,8 @@ defmodule SymphonyElixir.QualityGate do
        ),
        do: execution_context.policy
 
-  defp review_policy_for_job(job, plan, policy), do: review_policy_for(job, plan, policy)
-
-  defp review_policy_for(job, plan, policy) do
-    review_policy_for(job, plan, policy, Config.default_runner_name())
-  end
+  defp review_policy_for_job(job, plan, policy),
+    do: review_policy_for(job, plan, policy, Config.default_runner_name())
 
   defp review_policy_for(%{category: category}, plan, policy, runner_name)
        when category in @browser_review_categories do
@@ -800,36 +795,6 @@ defmodule SymphonyElixir.QualityGate do
     run_codex(context, prompt, issue, Map.get(runner_context, :adapter_registry))
   end
 
-  defp default_runner(%{
-         kind: :review,
-         workspace: workspace,
-         worker_host: worker_host,
-         job: job,
-         policy: policy,
-         issue: issue,
-         settings: settings
-       })
-       when is_binary(workspace) do
-    run_codex(workspace, job.prompt, issue, policy, job.execution_profile, settings, worker_host)
-  end
-
-  defp default_runner(%{kind: :review}) do
-    {:ok, %{status: :blocked, blocked_reason: :workspace_unavailable, findings: []}}
-  end
-
-  defp default_runner(%{
-         kind: :repair,
-         workspace: workspace,
-         worker_host: worker_host,
-         prompt: prompt,
-         policy: policy,
-         issue: issue,
-         settings: settings
-       })
-       when is_binary(workspace) do
-    run_codex(workspace, prompt, issue, policy, "implementation", settings, worker_host)
-  end
-
   defp run_codex(%ExecutionContext{} = context, prompt, issue, adapter_registry) do
     opts_base =
       []
@@ -842,27 +807,6 @@ defmodule SymphonyElixir.QualityGate do
       opts_base,
       1,
       context.max_retries + 1
-    )
-  end
-
-  defp run_codex(workspace, prompt, issue, policy, execution_profile, _settings, worker_host) do
-    profile = ExecutionProfile.resolve(Config.settings!(), execution_profile)
-
-    opts_base =
-      [
-        policy: policy,
-        execution_profile: execution_profile,
-        turn_timeout_ms: profile.timeout_ms
-      ]
-      |> maybe_put_worker_host(worker_host)
-
-    run_codex_attempt(
-      workspace,
-      prompt,
-      issue || %Issue{identifier: "QUALITY-GATE", title: "Quality gate review"},
-      opts_base,
-      1,
-      max_codex_attempts(profile)
     )
   end
 
@@ -913,61 +857,9 @@ defmodule SymphonyElixir.QualityGate do
     end
   end
 
-  defp run_codex_attempt(workspace, prompt, issue, opts_base, attempt, max_attempts) do
-    caller = self()
-    ref = make_ref()
-
-    on_event = fn event ->
-      send(caller, {ref, event})
-      :ok
-    end
-
-    opts = Keyword.put(opts_base, :on_event, on_event)
-
-    case AgentRuntime.run(workspace, prompt, issue, opts) do
-      {:ok, session} ->
-        completion = quality_gate_completion(drain_messages(ref))
-
-        if is_map(completion) do
-          {:ok, completion |> Map.put(:session_id, session[:session_id]) |> Map.put(:attempt, attempt)}
-        else
-          {:ok,
-           %{
-             status: :blocked,
-             blocked_reason: :reviewer_output_missing,
-             summary: "Reviewer completed without structured quality_gate_reviewer output.",
-             session_id: session[:session_id],
-             attempt: attempt,
-             findings: []
-           }}
-        end
-
-      {:error, _reason} when attempt < max_attempts ->
-        drain_messages(ref)
-        run_codex_attempt(workspace, prompt, issue, opts_base, attempt + 1, max_attempts)
-
-      {:error, reason} ->
-        {:ok,
-         %{
-           status: :blocked,
-           blocked_reason: {:codex_app_server_unavailable, reason},
-           attempt: attempt,
-           findings: []
-         }}
-    end
-  end
-
-  defp max_codex_attempts(%{max_retries: max_retries}) when is_integer(max_retries) and max_retries > 0 do
-    max_retries + 1
-  end
-
-  defp max_codex_attempts(_profile), do: 1
-
-  defp maybe_put_worker_host(opts, worker_host) when is_binary(worker_host) and worker_host != "" do
-    Keyword.put(opts, :worker_host, worker_host)
-  end
-
-  defp maybe_put_worker_host(opts, _worker_host), do: opts
+  @doc false
+  @spec quality_gate_completion_for_test([Event.t()]) :: map() | nil
+  def quality_gate_completion_for_test(messages), do: quality_gate_completion(messages)
 
   defp drain_messages(ref, acc \\ []) do
     receive do

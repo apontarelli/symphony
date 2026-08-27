@@ -52,7 +52,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   @secret_ref_pattern ~r/^env:([A-Z][A-Z0-9_]*)$/
 
   @impl true
-  @spec start(ExecutionContext.t() | Path.t(), map(), keyword()) ::
+  @spec start(ExecutionContext.t(), map(), keyword()) ::
           {:ok, session()} | {:error, term()}
   def start(%ExecutionContext{} = context, issue, opts) do
     with :ok <- validate_context_start_options(opts),
@@ -86,30 +86,6 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
       {:error, :invalid_context} -> {:error, :invalid_agent_runtime_context}
       {:error, _reason} = error -> error
       _invalid -> {:error, :invalid_agent_runtime_context}
-    end
-  end
-
-  def start(workspace, issue, opts) do
-    runner = Keyword.get(opts, :runner_config, %{})
-    profile_ref = Keyword.get(opts, :execution_profile, "implementation")
-
-    with {:ok, execution_profile} <- resolve_execution_profile(runner, profile_ref),
-         {:ok, server_auth} <- resolve_server_auth(runner["server_auth"]),
-         :ok <- ensure_local_worker(Keyword.get(opts, :worker_host)),
-         {:ok, workspace} <- PathSafety.canonicalize(workspace),
-         :ok <- validate_loopback_hostname(runner["hostname"]),
-         {:ok, {process, config_overlay}} <-
-           launch(workspace, runner, execution_profile, server_auth) do
-      start_launched_session(
-        process,
-        config_overlay,
-        workspace,
-        issue,
-        runner,
-        execution_profile,
-        server_auth,
-        opts
-      )
     end
   end
 

@@ -7,7 +7,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     result =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{
           "publish_target" => %{
@@ -34,7 +34,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
 
   test "reports workspace VCS metadata unavailable" do
     result =
-      PublishPreflight.run("/tmp/missing-workspace", publish_policy(),
+      PublishPreflight.run_for_test("/tmp/missing-workspace", publish_policy(),
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {1, "not a repository"},
@@ -53,7 +53,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
   end
 
   test "reports missing workspace and publish repository" do
-    result = PublishPreflight.run(nil, %{"delivery" => %{"pr_target" => "main"}})
+    result = PublishPreflight.run_for_test(nil, %{"delivery" => %{"pr_target" => "main"}})
 
     assert result.status == :blocked
     assert result.repository == nil
@@ -65,7 +65,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     result =
-      PublishPreflight.run(workspace, publish_policy(),
+      PublishPreflight.run_for_test(workspace, publish_policy(),
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {0, "ok"},
@@ -124,7 +124,12 @@ defmodule SymphonyElixir.PublishPreflightTest do
       Enum.each(["git", "jj", "gh"], &File.chmod!(Path.join(fake_bin, &1), 0o755))
 
       result =
-        PublishPreflight.run(workspace, publish_policy(), env: [{"PATH", fake_bin <> ":" <> System.get_env("PATH", "")}, {"COMMAND_LOG", command_log}])
+        PublishPreflight.run_for_test(workspace, publish_policy(),
+          env: [
+            {"PATH", fake_bin <> ":" <> System.get_env("PATH", "")},
+            {"COMMAND_LOG", command_log}
+          ]
+        )
 
       assert result.status == :passed
       assert result.capabilities.workspace_vcs_metadata
@@ -144,7 +149,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     result =
-      PublishPreflight.run(workspace, publish_policy(),
+      PublishPreflight.run_for_test(workspace, publish_policy(),
         runner:
           preflight_runner(%{
             workspace_vcs_metadata: {0, "ok"},
@@ -165,7 +170,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     missing_base =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{"manifest" => %{"project" => %{"repository" => "https://github.com/example/project"}}},
         runner:
@@ -179,7 +184,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert Enum.map(missing_base.failures, & &1.class) == [:pr_creation_unavailable]
 
     malformed_repo =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{
           "manifest" => %{"project" => %{"repository" => "https://example.com/project"}},
@@ -195,7 +200,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert Enum.map(malformed_repo.failures, & &1.class) == [:pr_creation_unavailable]
 
     blank_values =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{"manifest" => %{"project" => %{"repository" => " "}}, "delivery" => %{"pr_target" => " "}},
         runner:
@@ -214,7 +219,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     missing_base =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{
           "publish_target" => %{
@@ -233,7 +238,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     assert [%{class: :pr_creation_unavailable, details: "publish base branch is missing"}] = missing_base.failures
 
     invalid_repository =
-      PublishPreflight.run(
+      PublishPreflight.run_for_test(
         workspace,
         %{
           "publish_target" => %{
@@ -259,7 +264,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     result =
-      PublishPreflight.run(workspace, publish_policy(),
+      PublishPreflight.run_for_test(workspace, publish_policy(),
         runner: fn
           %{step: :workspace_vcs_metadata} -> {:error, :boom}
           %{step: :pr_creation} -> {:ok, %{status: 0, output: "ok"}}
@@ -274,7 +279,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
     workspace = preflight_workspace!()
 
     result =
-      PublishPreflight.run(workspace, publish_policy(),
+      PublishPreflight.run_for_test(workspace, publish_policy(),
         runner: fn
           %{step: :workspace_vcs_metadata} -> {:ok, %{status: 1, output: " \n\t "}}
           %{step: :pr_creation} -> {:ok, %{status: 0, output: "ok"}}
@@ -302,7 +307,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
       File.write!(Path.join(workspace, "worker-edit.txt"), "still here\n")
 
       result =
-        PublishPreflight.run(workspace, %{"delivery" => %{"pr_target" => "main"}},
+        PublishPreflight.run_for_test(workspace, %{"delivery" => %{"pr_target" => "main"}},
           env: [{"PATH", fake_bin <> ":" <> System.get_env("PATH", "")}],
           timeout_ms: 1
         )
@@ -329,7 +334,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
       System.put_env("PATH", fake_bin)
 
       assert %{status: :passed, failures: []} =
-               PublishPreflight.run("/remote/workspace", publish_policy(), worker_host: "worker.example")
+               PublishPreflight.run_for_test("/remote/workspace", publish_policy(), worker_host: "worker.example")
     after
       restore_env("PATH", previous_path)
       File.rm_rf(test_root)
@@ -348,7 +353,7 @@ defmodule SymphonyElixir.PublishPreflightTest do
       System.put_env("PATH", fake_bin)
 
       result =
-        PublishPreflight.run(
+        PublishPreflight.run_for_test(
           "/remote/workspace",
           %{"delivery" => %{"pr_target" => "main"}},
           worker_host: "worker.example"
@@ -395,8 +400,10 @@ defmodule SymphonyElixir.PublishPreflightTest do
       before_status = git_output!(["status", "--porcelain=v1"], workspace)
       before_refs = git_output!(["ls-remote", "--heads", "origin"], workspace)
 
+      path = fake_bin <> ":" <> System.get_env("PATH", "")
+
       result =
-        PublishPreflight.run(workspace, publish_policy(), env: [{"PATH", fake_bin <> ":" <> System.get_env("PATH", "")}])
+        PublishPreflight.run_for_test(workspace, publish_policy(), env: [{"PATH", path}])
 
       assert result.status == :passed
       assert result.capabilities.workspace_vcs_metadata

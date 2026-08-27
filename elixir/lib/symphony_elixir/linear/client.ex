@@ -342,26 +342,6 @@ defmodule SymphonyElixir.Linear.Client do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
-    with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_run_target(nil) do
-      {:ok, issues}
-    end
-  end
-
-  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(state_names) when is_list(state_names) do
-    normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
-
-    if normalized_states == [] do
-      {:ok, []}
-    else
-      with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_run_target(nil, normalized_states) do
-        {:ok, issues}
-      end
-    end
-  end
-
   @spec fetch_issues_by_states(TargetContext.t(), [String.t()]) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(%TargetContext{} = context, state_names),
@@ -398,12 +378,6 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
-  @spec resolve_run_target(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
-  def resolve_run_target(target \\ nil) do
-    settings = Config.settings!()
-    resolve_run_target(target, settings.tracker.active_states)
-  end
-
   @spec resolve_run_target(TargetContext.t(), RunTarget.t()) ::
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_run_target(%TargetContext{} = context, %RunTarget{} = target),
@@ -411,26 +385,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   def resolve_run_target(%TargetContext{}, _target),
     do: {:error, :invalid_tracker_context}
-
-  @spec resolve_run_target(RunTarget.t() | nil, [String.t()]) ::
-          {:ok, RunTarget.Resolution.t()} | {:error, term()}
-  def resolve_run_target(target, state_names) when is_list(state_names) do
-    settings = Config.settings!()
-    tracker = settings.tracker
-    markers = RunTarget.repo_markers(settings)
-
-    if is_nil(tracker.api_key) do
-      {:error, :missing_linear_api_token}
-    else
-      with {:ok, run_target} <- configured_run_target(target, settings),
-           :ok <- validate_linear_target(run_target),
-           :ok <- RunTarget.validate_marker_safety(run_target, markers),
-           {:ok, assignee_filter} <- routing_assignee_filter(),
-           {:ok, issues} <- do_resolve_run_target(run_target, state_names, markers, assignee_filter, &graphql/2) do
-        {:ok, RunTarget.apply_marker_safety(run_target, issues, markers)}
-      end
-    end
-  end
 
   @doc false
   @spec resolve_run_target(TargetContext.t(), RunTarget.t(), keyword()) ::
@@ -451,21 +405,6 @@ defmodule SymphonyElixir.Linear.Client do
 
   def resolve_run_target(%TargetContext{}, %RunTarget{}, _opts),
     do: {:error, :invalid_tracker_context}
-
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) when is_list(issue_ids) do
-    ids = Enum.uniq(issue_ids)
-
-    case ids do
-      [] ->
-        {:ok, []}
-
-      ids ->
-        with {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, assignee_filter)
-        end
-    end
-  end
 
   @spec fetch_issue_states_by_ids(TargetContext.t(), [String.t()]) ::
           {:ok, [Issue.t()]} | {:error, term()}
@@ -756,9 +695,6 @@ defmodule SymphonyElixir.Linear.Client do
   defp context_scope_value(scope, string_key, atom_key),
     do: Map.get(scope, string_key) || Map.get(scope, atom_key)
 
-  defp configured_run_target(%RunTarget{} = target, _settings), do: {:ok, target}
-  defp configured_run_target(nil, settings), do: RunTarget.from_settings(settings)
-
   defp do_resolve_run_target(%RunTarget{type: :project, project_id: project_id}, state_names, _markers, assignee_filter, graphql_fun)
        when is_binary(project_id) do
     do_fetch_by_project_selector(%{project_id: project_id}, state_names, assignee_filter, graphql_fun)
@@ -910,10 +846,6 @@ defmodule SymphonyElixir.Linear.Client do
       is_binary(suffix) and Regex.match?(~r/^[A-Za-z0-9]{8,}$/, suffix) -> suffix
       true -> nil
     end
-  end
-
-  defp do_fetch_issue_states(ids, assignee_filter) do
-    do_fetch_issue_states(ids, assignee_filter, &graphql/2)
   end
 
   defp do_fetch_issue_states(ids, assignee_filter, graphql_fun)
@@ -1546,16 +1478,6 @@ defmodule SymphonyElixir.Linear.Client do
   defp assigned_to_worker?(_assignee, _assignee_filter), do: false
 
   defp assignee_id(%{} = assignee), do: normalize_assignee_match_value(assignee["id"])
-
-  defp routing_assignee_filter do
-    case Config.settings!().tracker.assignee do
-      nil ->
-        {:ok, nil}
-
-      assignee ->
-        build_assignee_filter(assignee)
-    end
-  end
 
   defp build_assignee_filter(assignee) when is_binary(assignee),
     do: build_assignee_filter(assignee, &graphql/2)

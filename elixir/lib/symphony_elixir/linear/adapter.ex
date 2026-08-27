@@ -42,17 +42,10 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
-  @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
-  def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
-
-  @spec resolve_candidate_issues(SymphonyElixir.RunTarget.t() | nil) ::
-          {:ok, SymphonyElixir.RunTarget.Resolution.t()} | {:error, term()}
-  def resolve_candidate_issues(target), do: client_module().resolve_run_target(target)
-
   @spec resolve_candidate_issues(TargetContext.t(), RunTarget.t()) ::
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_candidate_issues(%TargetContext{} = context, %RunTarget{} = target) do
-    context_client_call(:resolve_run_target, [context, target], fn
+    context_client_call(context, :resolve_run_target, [context, target], fn
       {:ok, resolution} ->
         if valid_context_resolution?(resolution, target) do
           {:ok, resolution}
@@ -65,13 +58,10 @@ defmodule SymphonyElixir.Linear.Adapter do
     end)
   end
 
-  @spec fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issues_by_states(states), do: client_module().fetch_issues_by_states(states)
-
   @spec fetch_issues_by_states(TargetContext.t(), [String.t()]) ::
           {:ok, [term()]} | {:error, term()}
   def fetch_issues_by_states(%TargetContext{} = context, states) when is_list(states) do
-    context_client_call(:fetch_issues_by_states, [context, states], fn
+    context_client_call(context, :fetch_issues_by_states, [context, states], fn
       {:ok, issues} when is_list(issues) ->
         if valid_issue_list?(issues), do: {:ok, issues}, else: context_error_result(:malformed)
 
@@ -79,33 +69,18 @@ defmodule SymphonyElixir.Linear.Adapter do
         context_error_result(result)
     end)
   end
-
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids), do: client_module().fetch_issue_states_by_ids(issue_ids)
 
   @spec fetch_issue_states_by_ids(TargetContext.t(), [String.t()]) ::
           {:ok, [term()]} | {:error, term()}
   def fetch_issue_states_by_ids(%TargetContext{} = context, issue_ids)
       when is_list(issue_ids) do
-    context_client_call(:fetch_issue_states_by_ids, [context, issue_ids], fn
+    context_client_call(context, :fetch_issue_states_by_ids, [context, issue_ids], fn
       {:ok, issues} when is_list(issues) ->
         if valid_issue_list?(issues), do: {:ok, issues}, else: context_error_result(:malformed)
 
       result ->
         context_error_result(result)
     end)
-  end
-
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) when is_binary(issue_id) and is_binary(body) do
-    with {:ok, response} <- client_module().graphql(@create_comment_mutation, %{issueId: issue_id, body: body}),
-         true <- get_in(response, ["data", "commentCreate", "success"]) == true do
-      :ok
-    else
-      false -> {:error, :comment_create_failed}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :comment_create_failed}
-    end
   end
 
   @spec create_comment(TargetContext.t(), String.t(), String.t()) ::
@@ -113,6 +88,7 @@ defmodule SymphonyElixir.Linear.Adapter do
   def create_comment(%TargetContext{} = context, issue_id, body)
       when is_binary(issue_id) and is_binary(body) do
     context_client_call(
+      context,
       :graphql,
       [context, @create_comment_mutation, %{issueId: issue_id, body: body}, []],
       fn
@@ -127,27 +103,13 @@ defmodule SymphonyElixir.Linear.Adapter do
     )
   end
 
-  @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
-  def update_issue_state(issue_id, state_name)
-      when is_binary(issue_id) and is_binary(state_name) do
-    with {:ok, state_id} <- resolve_state_id(issue_id, state_name),
-         {:ok, response} <-
-           client_module().graphql(@update_state_mutation, %{issueId: issue_id, stateId: state_id}),
-         true <- get_in(response, ["data", "issueUpdate", "success"]) == true do
-      :ok
-    else
-      false -> {:error, :issue_update_failed}
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :issue_update_failed}
-    end
-  end
-
   @spec update_issue_state(TargetContext.t(), String.t(), String.t()) ::
           :ok | {:error, term()}
   def update_issue_state(%TargetContext{} = context, issue_id, state_name)
       when is_binary(issue_id) and is_binary(state_name) do
     with {:ok, state_id} <- resolve_state_id(context, issue_id, state_name) do
       context_client_call(
+        context,
         :graphql,
         [context, @update_state_mutation, %{issueId: issue_id, stateId: state_id}, []],
         &normalize_issue_update_result/1
@@ -371,30 +333,39 @@ defmodule SymphonyElixir.Linear.Adapter do
   defp expected_resolution_ordering(%RunTarget{type: :issues}), do: :target
   defp expected_resolution_ordering(%RunTarget{}), do: :priority
 
-  defp context_client_call(function, arguments, normalize_result) do
-    client = client_module()
-
-    cond do
-      not is_atom(client) ->
-        {:error, :invalid_tracker_adapter}
-
-      not Code.ensure_loaded?(client) or
-          not function_exported?(client, function, length(arguments)) ->
-        {:error, :invalid_tracker_adapter}
-
-      true ->
-        result =
-          try do
-            {:returned, apply(client, function, arguments)}
-          catch
-            _kind, _reason -> :failed
-          end
-
-        case result do
-          {:returned, returned} -> normalize_context_result(normalize_result, returned)
-          :failed -> {:error, :linear_request_failed}
+  defp context_client_call(context, function, arguments, normalize_result) do
+    with {:ok, client} <- context_client_module(context),
+         true <- function_exported?(client, function, length(arguments)) do
+      result =
+        try do
+          {:returned, apply(client, function, arguments)}
+        catch
+          _kind, _reason -> :failed
         end
+
+      case result do
+        {:returned, returned} -> normalize_context_result(normalize_result, returned)
+        :failed -> {:error, :linear_request_failed}
+      end
+    else
+      false -> {:error, :invalid_tracker_adapter}
+      {:error, _reason} = error -> error
     end
+  end
+
+  defp context_client_module(%TargetContext{tracker_connection: %{"policy" => policy}})
+       when is_map(policy) do
+    module_name = Map.get(policy, "client_module", Atom.to_string(Client))
+
+    with true <- is_binary(module_name),
+         client <- String.to_existing_atom(module_name),
+         true <- Code.ensure_loaded?(client) do
+      {:ok, client}
+    else
+      _invalid -> {:error, :invalid_tracker_adapter}
+    end
+  rescue
+    ArgumentError -> {:error, :invalid_tracker_adapter}
   end
 
   defp normalize_context_result(normalize_result, returned) do
@@ -450,24 +421,9 @@ defmodule SymphonyElixir.Linear.Adapter do
     end)
   end
 
-  defp client_module do
-    Application.get_env(:symphony_elixir, :linear_client_module, Client)
-  end
-
-  defp resolve_state_id(issue_id, state_name) do
-    with {:ok, response} <-
-           client_module().graphql(@state_lookup_query, %{issueId: issue_id, stateName: state_name}),
-         state_id when is_binary(state_id) <-
-           get_in(response, ["data", "issue", "team", "states", "nodes", Access.at(0), "id"]) do
-      {:ok, state_id}
-    else
-      {:error, reason} -> {:error, reason}
-      _ -> {:error, :state_not_found}
-    end
-  end
-
   defp resolve_state_id(%TargetContext{} = context, issue_id, state_name) do
     context_client_call(
+      context,
       :graphql,
       [context, @state_lookup_query, %{issueId: issue_id, stateName: state_name}, []],
       fn

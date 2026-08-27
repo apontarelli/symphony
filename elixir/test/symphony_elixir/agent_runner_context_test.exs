@@ -257,7 +257,8 @@ defmodule SymphonyElixir.AgentRunnerContextTest do
         "policy" => %{
           "kind" => "linear",
           "endpoint" => "https://#{target_id}.example.invalid/graphql",
-          "api_key" => "key-#{target_id}"
+          "api_key" => "key-#{target_id}",
+          "client_module" => Atom.to_string(LinearClient)
         }
       },
       run_target: %{

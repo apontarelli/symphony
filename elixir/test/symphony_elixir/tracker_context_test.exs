@@ -3,6 +3,7 @@ defmodule SymphonyElixir.TrackerContextTest do
 
   alias SymphonyElixir.{ExecutionContext, RunTarget, TargetContext, Tracker}
   alias SymphonyElixir.Linear.{Client, Issue}
+  alias SymphonyElixir.Tracker.Memory
 
   defmodule RecordingContextLinearClient do
     alias SymphonyElixir.RunTarget
@@ -1171,26 +1172,19 @@ defmodule SymphonyElixir.TrackerContextTest do
     assert {:ok, []} = Tracker.fetch_issue_states_by_ids(context, [])
   end
 
-  test "context adapters reject invalid injected client modules" do
-    context =
-      target_context(
-        "invalid-client",
-        "connection-invalid-client",
-        "https://invalid-client.example/graphql",
-        "invalid-client-token",
-        %{}
-      )
-
+  test "context adapters reject invalid pinned client modules" do
     Application.put_env(:symphony_elixir, :linear_client_module, "not-a-module")
-    assert {:error, :invalid_tracker_adapter} = Tracker.fetch_issue_states_by_ids(context, ["issue"])
+    context = invalid_client_context()
 
-    Application.put_env(
-      :symphony_elixir,
-      :linear_client_module,
-      SymphonyElixir.MissingContextLinearClient
-    )
+    assert {:error, :invalid_tracker_adapter} =
+             Tracker.fetch_issue_states_by_ids(context, ["issue"])
 
-    assert {:error, :invalid_tracker_adapter} = Tracker.fetch_issue_states_by_ids(context, ["issue"])
+    Application.put_env(:symphony_elixir, :linear_client_module, String)
+
+    context = invalid_client_context()
+
+    assert {:error, :invalid_tracker_adapter} =
+             Tracker.fetch_issue_states_by_ids(context, ["issue"])
   end
 
   test "ExecutionContext writes pin comment and state mutation GraphQL calls" do
@@ -1254,7 +1248,7 @@ defmodule SymphonyElixir.TrackerContextTest do
     assert update_query =~ "issueUpdate"
   end
 
-  test "ExecutionContext memory writes preserve legacy event tuples" do
+  test "ExecutionContext memory writes preserve stable event tuples" do
     Application.put_env(
       :symphony_elixir,
       :linear_client_module,
@@ -1285,7 +1279,7 @@ defmodule SymphonyElixir.TrackerContextTest do
     assert_receive {:memory_tracker_state_update, "memory-issue", "Done"}
   end
 
-  test "context memory reads preserve legacy results and explicit overloads" do
+  test "context memory reads preserve explicit results" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
 
     issues = [
@@ -1319,17 +1313,9 @@ defmodule SymphonyElixir.TrackerContextTest do
     assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues(context)
     assert {:ok, [%Issue{id: "memory-2"}]} = Tracker.fetch_issues_by_states(context, ["Done"])
     assert {:ok, [%Issue{id: "memory-1"}]} = Tracker.fetch_issue_states_by_ids(context, ["memory-1"])
-
-    legacy_target = %RunTarget{tracker: "memory", type: :issues, issue_ids: ["memory-1"]}
-    assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues(nil)
-    assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues_uncached(nil)
-    assert {:ok, %RunTarget.Resolution{}} = Tracker.resolve_candidate_issues_uncached()
-
-    assert {:ok, %RunTarget.Resolution{target: ^legacy_target}} =
-             Tracker.resolve_candidate_issues_uncached(legacy_target)
   end
 
-  test "context memory candidate cache follows configured issue identity" do
+  test "context memory candidate cache ignores mutable global issue changes" do
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
 
     context =
@@ -1366,10 +1352,45 @@ defmodule SymphonyElixir.TrackerContextTest do
       [%Issue{id: "memory-b", state: "Todo"}]
     )
 
-    assert {:ok, %RunTarget.Resolution{issues: [%Issue{id: "memory-b"}]}} =
+    assert {:ok, %RunTarget.Resolution{issues: [%Issue{id: "memory-a"}]}} =
              Tracker.resolve_candidate_issues(context)
 
-    assert_receive {:memory_tracker_resolve_candidate_issues, %RunTarget{}}
+    refute_receive {:memory_tracker_resolve_candidate_issues, %RunTarget{}}
+  end
+
+  test "memory adapter covers explicit generic targets and configured failures" do
+    issue = %Issue{id: "memory-generic", state: "Todo"}
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    context =
+      target_context(
+        "memory-generic",
+        "connection-memory-generic",
+        "https://unused-memory.example/graphql",
+        "unused-memory-token",
+        %{}
+      )
+      |> put_in([Access.key!(:tracker_connection), "policy", "kind"], "memory")
+      |> put_in([Access.key!(:tracker_connection), "policy", "endpoint"], nil)
+      |> put_in([Access.key!(:tracker_connection), "policy", "api_key"], nil)
+
+    target = %RunTarget{tracker: "memory", type: :project, project_slug: "project"}
+
+    assert {:ok, %RunTarget.Resolution{issues: [^issue]}} =
+             Memory.resolve_candidate_issues(context, target)
+
+    assert_receive {:memory_tracker_resolve_candidate_issues, ^target}
+    assert {:ok, []} = Memory.fetch_issues_by_states(context, [42])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_errors,
+      %{"fetch_issue_states_by_ids" => :configured_failure}
+    )
+
+    assert {:error, :configured_failure} =
+             Memory.fetch_issue_states_by_ids(context, [issue.id])
   end
 
   test "context Tracker APIs reject malformed public inputs" do
@@ -1820,6 +1841,16 @@ defmodule SymphonyElixir.TrackerContextTest do
     |> Path.dirname()
   end
 
+  defp invalid_client_context do
+    target_context(
+      "invalid-client",
+      "connection-invalid-client",
+      "https://invalid-client.example/graphql",
+      "invalid-client-token",
+      %{}
+    )
+  end
+
   defp target_context(target_id, connection_id, endpoint, token, run_target \\ %{}) do
     %TargetContext{
       target_id: target_id,
@@ -1834,7 +1865,11 @@ defmodule SymphonyElixir.TrackerContextTest do
         "policy" => %{
           "kind" => "linear",
           "endpoint" => endpoint,
-          "api_key" => token
+          "api_key" => token,
+          "client_module" =>
+            :symphony_elixir
+            |> Application.get_env(:linear_client_module, SymphonyElixir.Linear.Client)
+            |> client_module_name()
         }
       },
       run_target: run_target,
@@ -1846,4 +1881,7 @@ defmodule SymphonyElixir.TrackerContextTest do
       budget_limits: %{}
     }
   end
+
+  defp client_module_name(module) when is_atom(module), do: Atom.to_string(module)
+  defp client_module_name(module) when is_binary(module), do: module
 end

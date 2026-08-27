@@ -12,14 +12,11 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
   alias SymphonyElixir.{
     AgentRuntime.Event,
     Codex.DynamicTool,
-    Codex.ExecutionProfile,
     Codex.Launch,
     Config,
     ExecutionContext,
-    PathSafety,
     ProcessSupervisor,
-    Shell,
-    Workflow
+    Shell
   }
 
   @behaviour SymphonyElixir.AgentRuntime
@@ -49,14 +46,10 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
         }
 
   @impl true
-  @spec start(ExecutionContext.t() | Path.t(), map(), keyword()) ::
+  @spec start(ExecutionContext.t(), map(), keyword()) ::
           {:ok, session()} | {:error, term()}
   def start(%ExecutionContext{} = context, _issue, opts) do
     start_session(context, opts)
-  end
-
-  def start(workspace, _issue, opts) do
-    start_session(workspace, opts)
   end
 
   @impl true
@@ -77,23 +70,10 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     capabilities()
   end
 
-  @spec run(Path.t(), String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
-  def run(workspace, prompt, issue, opts \\ []) do
-    with {:ok, session} <- start_session(workspace, opts) do
-      try do
-        run_turn(session, prompt, issue, opts)
-      after
-        stop_session(session)
-      end
-    end
-  end
+  @spec start_session(ExecutionContext.t()) :: {:ok, session()} | {:error, term()}
+  def start_session(%ExecutionContext{} = context), do: start_session(context, [])
 
-  @spec start_session(ExecutionContext.t() | Path.t()) ::
-          {:ok, session()} | {:error, term()}
-  def start_session(context_or_workspace),
-    do: start_session(context_or_workspace, [])
-
-  @spec start_session(ExecutionContext.t() | Path.t(), keyword()) ::
+  @spec start_session(ExecutionContext.t(), keyword()) ::
           {:ok, session()} | {:error, term()}
   def start_session(%ExecutionContext{} = context, opts) do
     with :ok <- validate_context_start_options(opts),
@@ -131,44 +111,6 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
            ) do
         {:ok, session} ->
           {:ok, Map.put(session, :execution_context, context)}
-
-        {:error, reason} ->
-          cleanup_failed_start(process, reason)
-      end
-    end
-  end
-
-  def start_session(workspace, opts) do
-    worker_host = Keyword.get(opts, :worker_host)
-
-    settings = Keyword.get_lazy(opts, :runtime_settings, &Config.settings!/0)
-    runner = Keyword.get_lazy(opts, :runner_config, fn -> Config.default_runner!(settings) end)
-    execution_profile = ExecutionProfile.resolve(settings, runner, Keyword.get(opts, :execution_profile, "implementation"))
-    codex_command = ExecutionProfile.command(runner["command"], execution_profile, runner["model"])
-    codex_command_display = Shell.argv_to_command(codex_command)
-    startup_timeout_ms = Keyword.get(opts, :startup_timeout_ms, runner["read_timeout_ms"])
-    runtime_opts = opts |> Keyword.put(:runner_config, runner) |> Keyword.put(:runtime_settings, settings)
-
-    with {:ok, expanded_workspace} <- validate_workspace_cwd(workspace, worker_host, settings),
-         {:ok, launch} <- Launch.start(expanded_workspace, worker_host, codex_command, line: @port_line_bytes) do
-      process = launch.process
-      port = launch.port
-
-      metadata =
-        port
-        |> port_metadata(worker_host)
-        |> Map.merge(launch_provenance(expanded_workspace, launch.codex_home, codex_command_display, execution_profile))
-
-      Logger.info("Codex app-server launched cwd=#{expanded_workspace} codex_home=#{launch.codex_home} execution_profile=#{execution_profile.name} command=#{codex_command_display}")
-
-      case session_policies(expanded_workspace, worker_host, runtime_opts) do
-        {:ok, session_policies} ->
-          finish_session_startup(process, port, expanded_workspace, session_policies, startup_timeout_ms,
-            metadata: metadata,
-            codex_home: launch.codex_home,
-            worker_host: worker_host,
-            runner_config: runner
-          )
 
         {:error, reason} ->
           cleanup_failed_start(process, reason)
@@ -321,48 +263,6 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     }
   end
 
-  defp validate_workspace_cwd(workspace, nil, settings) when is_binary(workspace) do
-    expanded_workspace = Path.expand(workspace)
-    expanded_root = Path.expand(settings.workspace.root)
-    expanded_root_prefix = expanded_root <> "/"
-
-    with {:ok, canonical_workspace} <- PathSafety.canonicalize(expanded_workspace),
-         {:ok, canonical_root} <- PathSafety.canonicalize(expanded_root) do
-      canonical_root_prefix = canonical_root <> "/"
-
-      cond do
-        canonical_workspace == canonical_root ->
-          {:error, {:invalid_workspace_cwd, :workspace_root, canonical_workspace}}
-
-        String.starts_with?(canonical_workspace <> "/", canonical_root_prefix) ->
-          {:ok, canonical_workspace}
-
-        String.starts_with?(expanded_workspace <> "/", expanded_root_prefix) ->
-          {:error, {:invalid_workspace_cwd, :symlink_escape, expanded_workspace, canonical_root}}
-
-        true ->
-          {:error, {:invalid_workspace_cwd, :outside_workspace_root, canonical_workspace, canonical_root}}
-      end
-    else
-      {:error, {:path_canonicalize_failed, path, reason}} ->
-        {:error, {:invalid_workspace_cwd, :path_unreadable, path, reason}}
-    end
-  end
-
-  defp validate_workspace_cwd(workspace, worker_host, _settings)
-       when is_binary(workspace) and is_binary(worker_host) do
-    cond do
-      String.trim(workspace) == "" ->
-        {:error, {:invalid_workspace_cwd, :empty_remote_workspace, worker_host}}
-
-      String.contains?(workspace, ["\n", "\r", <<0>>]) ->
-        {:error, {:invalid_workspace_cwd, :invalid_remote_workspace, worker_host, workspace}}
-
-      true ->
-        {:ok, workspace}
-    end
-  end
-
   defp port_metadata(port, worker_host) when is_port(port) do
     base_metadata =
       case ProcessSupervisor.identity(port) do
@@ -401,14 +301,6 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
       send_message(port, %{"method" => "initialized", "params" => %{}})
       :ok
     end
-  end
-
-  defp session_policies(workspace, nil, opts) do
-    Config.codex_runtime_settings(workspace, opts)
-  end
-
-  defp session_policies(workspace, worker_host, opts) when is_binary(worker_host) do
-    Config.codex_runtime_settings(workspace, Keyword.put(opts, :remote, true))
   end
 
   defp do_start_session(port, workspace, session_policies, timeout) do
@@ -1460,34 +1352,6 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
       policy_hash: context.target.policy_hash,
       workflow_config_sha256: context.target.repo_manifest_hash
     }
-  end
-
-  defp launch_provenance(workspace, codex_home, codex_command, execution_profile) do
-    workflow_file_path = Workflow.selected_workflow_file_path()
-
-    %{
-      codex_command: codex_command,
-      codex_home: codex_home,
-      codex_workspace: workspace,
-      codex_execution_profile: execution_profile.name,
-      codex_execution_profile_model: execution_profile.model,
-      codex_execution_profile_reasoning_effort: execution_profile.reasoning_effort,
-      codex_execution_profile_budget: execution_profile.budget,
-      codex_execution_profile_timeout_ms: execution_profile.timeout_ms,
-      workflow_file_path: workflow_file_path,
-      workflow_config_sha256: workflow_file_sha256(workflow_file_path)
-    }
-  end
-
-  defp workflow_file_sha256(path) when is_binary(path) do
-    case File.read(path) do
-      {:ok, contents} ->
-        :crypto.hash(:sha256, contents)
-        |> Base.encode16(case: :lower)
-
-      {:error, _reason} ->
-        nil
-    end
   end
 
   defp session_started_details(session_id, thread_id, turn_id, workflow_module_resolution) do

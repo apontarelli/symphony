@@ -114,22 +114,6 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "target cleanup deletes only the requested local issue workspace", %{tmp_dir: tmp_dir} do
-    root = Path.join(tmp_dir, "root")
-    context_a = context(root, "alpha", "SID-410-A")
-    context_b = context(root, "alpha", "SID-410-B")
-
-    assert {:ok, workspace_a} = Workspace.create_for_issue(context_a)
-    assert {:ok, workspace_b} = Workspace.create_for_issue(context_b)
-
-    assert :ok =
-             Workspace.remove_issue_workspaces(context_a.target, context_a.issue_identifier, nil)
-
-    refute File.exists?(workspace_a)
-    assert File.dir?(workspace_b)
-  end
-
-  @tag :tmp_dir
   test "context paths reject forged identities before local effects", %{tmp_dir: tmp_dir} do
     root = Path.join(tmp_dir, "root")
     context = context(root, "alpha", "SID-410")
@@ -636,36 +620,6 @@ defmodule SymphonyElixir.WorkspaceContextTest do
              Workspace.remove(forged, ssh_runner: shell_runner)
 
     refute_receive :hostile_remove_ssh
-  end
-
-  test "remote target cleanup uses its explicit host without global fan-out" do
-    context =
-      context("/remote/workspaces-a", "alpha", "SID-410", worker_host: "worker.example")
-
-    parent = self()
-
-    ssh_runner = fn host, script, timeout_ms ->
-      send(parent, {:ssh_target_remove, host, script, timeout_ms})
-
-      {context_remote_marker(
-         script,
-         "/remote/workspaces-a",
-         "/remote/workspaces-a/alpha/SID-410",
-         "deleted"
-       ), 0}
-    end
-
-    assert :ok =
-             Workspace.remove_issue_workspaces(
-               context.target,
-               context.issue_identifier,
-               context.worker_host,
-               ssh_runner: ssh_runner
-             )
-
-    assert_receive {:ssh_target_remove, "worker.example", script, 7_000}
-    assert script =~ "rm -rf -- \"$canonical_workspace\""
-    refute_receive {:ssh_target_remove, _host, _script, _timeout_ms}
   end
 
   test "remote context rejects current markers bound to another canonical root" do
@@ -2026,7 +1980,12 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     scoped_root = Path.join(tmp_dir, "alpha")
     scoped = context(scoped_root, "alpha", "SID-410")
-    scoped = %{scoped | workspace_path: Path.join(scoped_root, "SID-410")}
+
+    scoped = %{
+      scoped
+      | workspace_path: Path.join(scoped_root, "SID-410"),
+        target: %{scoped.target | workspace_layout: :flat}
+    }
 
     assert {:ok, workspace} = Workspace.create_for_issue(scoped)
     assert workspace == scoped.workspace_path
@@ -2057,14 +2016,6 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
       assert {:error, :invalid_workspace_options} =
                Workspace.run_after_run_hook(context, issue, opts)
-
-      assert {:error, :invalid_workspace_options} =
-               Workspace.remove_issue_workspaces(
-                 context.target,
-                 context.issue_identifier,
-                 nil,
-                 opts
-               )
     end
 
     unknown_options = [unknown: fn -> send(self(), :unexpected_callback) end]
@@ -2079,14 +2030,6 @@ defmodule SymphonyElixir.WorkspaceContextTest do
 
     assert {:error, :invalid_workspace_options} =
              Workspace.run_after_run_hook(context, issue, unknown_options)
-
-    assert {:error, :invalid_workspace_options} =
-             Workspace.remove_issue_workspaces(
-               context.target,
-               context.issue_identifier,
-               nil,
-               unknown_options
-             )
 
     refute File.exists?(root)
     refute_receive :unexpected_callback
@@ -2327,73 +2270,16 @@ defmodule SymphonyElixir.WorkspaceContextTest do
   end
 
   @tag :tmp_dir
-  test "local context removal reports filesystem failures", %{tmp_dir: tmp_dir} do
+  test "local ExecutionContext removal reports filesystem failures", %{tmp_dir: tmp_dir} do
     context = context(Path.join(tmp_dir, "worktrees"), "alpha", "SID-REMOVE")
     File.mkdir_p!(context.workspace_path)
     parent = Path.dirname(context.workspace_path)
+    on_exit(fn -> File.chmod(parent, 0o700) end)
     File.chmod!(parent, 0o500)
 
     assert {:error, :workspace_remove_failed} = Workspace.remove(context)
 
-    assert {:error, :workspace_remove_failed} =
-             Workspace.remove_issue_workspaces(
-               context.target,
-               context.issue_identifier,
-               nil
-             )
-
     File.chmod!(parent, 0o700)
-  end
-
-  @tag :tmp_dir
-  test "target cleanup revalidates hook mutations and ignores hook status", %{tmp_dir: tmp_dir} do
-    outside = Path.join(tmp_dir, "outside")
-    File.mkdir!(outside)
-
-    hooks = %{
-      "after_create" => nil,
-      "after_run" => nil,
-      "before_remove" => "before-remove",
-      "before_run" => nil,
-      "timeout_ms" => 1_000
-    }
-
-    mutated =
-      context(Path.join(tmp_dir, "mutated"), "alpha", "SID-MUTATED", hooks: hooks)
-
-    File.mkdir_p!(mutated.workspace_path)
-
-    mutating_runner = fn _, workspace, _ ->
-      File.rm_rf!(workspace)
-      File.ln_s!(outside, workspace)
-      {"", 0}
-    end
-
-    assert {:error, :invalid_workspace_context} =
-             Workspace.remove_issue_workspaces(
-               mutated.target,
-               mutated.issue_identifier,
-               nil,
-               command_runner: mutating_runner
-             )
-
-    assert File.dir?(outside)
-    File.rm!(mutated.workspace_path)
-
-    ignored =
-      context(Path.join(tmp_dir, "ignored"), "alpha", "SID-IGNORED", hooks: hooks)
-
-    File.mkdir_p!(ignored.workspace_path)
-
-    assert :ok =
-             Workspace.remove_issue_workspaces(
-               ignored.target,
-               ignored.issue_identifier,
-               nil,
-               command_runner: fn _, _, _ -> {"secret output", 23} end
-             )
-
-    refute File.exists?(ignored.workspace_path)
   end
 
   @tag :tmp_dir

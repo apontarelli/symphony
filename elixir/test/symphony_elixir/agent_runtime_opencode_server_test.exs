@@ -3,7 +3,6 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
   alias SymphonyElixir.AgentRuntime
   alias SymphonyElixir.AgentRuntime.{Event, OpenCodeServer}
-  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor, TargetContext}
   alias SymphonyElixir.Linear.Issue
 
@@ -51,31 +50,6 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
        trace: trace,
        workspace: workspace
      }}
-  end
-
-  test "runs the selected OpenCode adapter through the AgentRuntime facade", %{context: context} do
-    assert {:ok, settings} =
-             Schema.parse(%{
-               agent: %{default_runner: "open"},
-               runners: %{open: runner_config(context, :success)},
-               profiles: %{default: %{delivery: %{pr_target: "main"}}}
-             })
-
-    assert {:ok, session} =
-             AgentRuntime.start_session(context.workspace, issue(),
-               settings: settings,
-               startup_timeout_ms: 1_000
-             )
-
-    try do
-      assert session.runner_name == "open"
-      assert session.runner_kind == "opencode_server"
-
-      assert {:ok, %{session_id: "session-contract-message-success"}} =
-               AgentRuntime.send_turn(session, "Facade prompt", issue())
-    after
-      assert :ok = AgentRuntime.stop_session(session)
-    end
   end
 
   test "context facade pins OpenCode profile after global workflow poisoning", %{
@@ -361,7 +335,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       })
 
     assert {:ok, session} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config: runner,
                execution_profile: "implementation",
                startup_timeout_ms: 1_000
@@ -403,7 +377,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
     try do
       assert {:ok, session} =
-               OpenCodeServer.start(context.workspace, issue(),
+               start_opencode_context(context.workspace, issue(),
                  runner_config: runner,
                  startup_timeout_ms: 1_000
                )
@@ -423,7 +397,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     System.delete_env("OPENCODE_TEST_PASSWORD")
 
     assert {:error, {:auth_missing, "OPENCODE_TEST_PASSWORD"}} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config:
                  Map.put(runner_config(context, :success), "server_auth", %{
                    "password" => "env:OPENCODE_TEST_PASSWORD"
@@ -435,7 +409,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     runner = runner_config(context, :success)
 
     assert {:error, {:invalid_opencode_profile_command, "implementation", "not-an-argv"}} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config:
                  Map.put(runner, "execution_profiles", %{
                    "implementation" => %{"command" => "not-an-argv"}
@@ -443,7 +417,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
              )
 
     assert {:error, {:invalid_opencode_profile_model, "implementation", 42}} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config:
                  Map.put(runner, "execution_profiles", %{
                    "implementation" => %{"model" => 42}
@@ -684,20 +658,6 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     end
   end
 
-  test "bounds blocking-request polling by the turn deadline", %{context: context} do
-    assert {:ok, session} = start_adapter(context, :slow_block_poll)
-    started_at = System.monotonic_time(:millisecond)
-
-    try do
-      assert {:error, :turn_timeout} =
-               OpenCodeServer.send_turn(session, "Do not overrun", issue(), turn_timeout_ms: 80)
-
-      assert System.monotonic_time(:millisecond) - started_at < 400
-    after
-      OpenCodeServer.stop(session)
-    end
-  end
-
   test "rejects incomplete assistant message responses", %{context: context} do
     assert {:ok, session} = start_adapter(context, :incomplete_response)
 
@@ -766,7 +726,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     runner = runner_config(context, :success)
 
     assert {:error, {:unsupported_remote_runner, "opencode_server", "worker.example"}} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config: runner,
                worker_host: "worker.example"
              )
@@ -777,7 +737,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     runner = context |> runner_config(:success) |> Map.put("command", [missing_executable])
 
     assert {:error, {:executable_not_found, ^missing_executable}} =
-             OpenCodeServer.start(context.workspace, issue(), runner_config: runner)
+             start_opencode_context(context.workspace, issue(), runner_config: runner)
 
     assert config_overlays(context) == []
   end
@@ -795,7 +755,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
 
     try do
       assert {:error, {:startup_failed, {:server_exit, _status}}} =
-               OpenCodeServer.start(context.workspace, issue(),
+               start_opencode_context(context.workspace, issue(),
                  runner_config: contender_runner,
                  startup_timeout_ms: 1_000
                )
@@ -862,7 +822,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       File.ln_s!(outside, link)
 
       assert {:error, {:opencode_config_overlay_failed, {:unsafe_config_overlay_parent, ^link}}} =
-               OpenCodeServer.start(workspace, issue(), runner_config: runner_config(context, :success))
+               start_opencode_context(workspace, issue(), runner_config: runner_config(context, :success))
 
       assert File.ls!(outside) == []
     end
@@ -875,7 +835,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       |> Map.put("server_auth", %{"password" => "secret", "username" => nil})
 
     assert {:ok, session} =
-             OpenCodeServer.start(context.workspace, issue(),
+             start_opencode_context(context.workspace, issue(),
                runner_config: runner,
                startup_timeout_ms: 1_000
              )
@@ -942,7 +902,7 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
   defp context_hash, do: "sha256:" <> String.duplicate("a", 64)
 
   defp start_adapter(context, scenario, opts \\ []) do
-    OpenCodeServer.start(
+    start_opencode_context(
       context.workspace,
       issue(),
       Keyword.merge(
@@ -975,6 +935,38 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
       "execution_profiles" => %{}
     }
   end
+
+  defp start_opencode_context(workspace, issue, opts) do
+    runner =
+      opts
+      |> Keyword.fetch!(:runner_config)
+      |> maybe_override_runner_timeout("startup_timeout_ms", opts[:startup_timeout_ms])
+      |> maybe_override_runner_timeout("turn_timeout_ms", opts[:turn_timeout_ms])
+
+    target =
+      %{workspace: Path.dirname(workspace)}
+      |> context_target(runner)
+      |> Map.put(:workspace_layout, :flat)
+
+    context_issue = %Issue{
+      id: Map.get(issue, :id, "issue-opencode-contract"),
+      identifier: Path.basename(workspace),
+      title: Map.get(issue, :title, "OpenCode contract")
+    }
+
+    with {:ok, execution_context} <-
+           ExecutionContext.new(
+             target,
+             context_issue,
+             policy: %{"test" => "opencode-context"},
+             worker_host: opts[:worker_host]
+           ) do
+      OpenCodeServer.start(execution_context, issue, [])
+    end
+  end
+
+  defp maybe_override_runner_timeout(runner, _key, nil), do: runner
+  defp maybe_override_runner_timeout(runner, key, value), do: Map.put(runner, key, value)
 
   defp issue do
     %{id: "issue-opencode-contract", identifier: "SID-383", title: "OpenCode contract"}

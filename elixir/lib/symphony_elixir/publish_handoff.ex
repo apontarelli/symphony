@@ -78,14 +78,13 @@ defmodule SymphonyElixir.PublishHandoff do
          {:ok, provenance} <- ExecutionContext.safe_provenance(execution_context),
          :ok <- validate_preflight_provenance(completion, provenance) do
       execution_context.workspace_path
-      |> run(
+      |> run_handoff(
         execution_context.policy,
         issue,
         completion,
         opts
         |> Keyword.put(:worker_host, execution_context.worker_host)
         |> Keyword.put(:timeout_ms, execution_context.timeout_ms)
-        |> Keyword.put(:context_mode, true)
         |> Keyword.put(:delivery_gates, execution_context.target.external_side_effect_gates)
         |> Keyword.put(:provenance, provenance)
       )
@@ -99,16 +98,34 @@ defmodule SymphonyElixir.PublishHandoff do
   def run_context(_context, _issue, _completion, _opts),
     do: {:error, :invalid_publish_handoff_context}
 
-  @spec run(Path.t() | nil, map(), Issue.t() | map() | nil, map(), keyword()) :: result()
-  def run(workspace, policy, issue, completion, opts \\ [])
-      when is_map(policy) and is_map(completion) and is_list(opts) do
-    env = Keyword.get(opts, :env, [])
+  @doc false
+  @spec run_for_test(
+          Path.t() | nil,
+          map(),
+          Issue.t() | map() | nil,
+          map(),
+          keyword()
+        ) :: result()
+  def run_for_test(workspace, policy, issue, completion, opts \\ []) do
+    opts =
+      opts
+      |> Keyword.put_new(:timeout_ms, Config.settings!().hooks.timeout_ms)
+      |> Keyword.put_new(:delivery_gates, %{
+        "vcs_publish" => "allow",
+        "pull_request_write" => "allow"
+      })
+      |> Keyword.put_new_lazy(
+        :runner,
+        fn -> Application.get_env(:symphony_elixir, :publish_handoff_runner) end
+      )
 
-    timeout_ms =
-      case Keyword.fetch(opts, :timeout_ms) do
-        {:ok, timeout_ms} -> timeout_ms
-        :error -> default_timeout_ms()
-      end
+    run_handoff(workspace, policy, issue, completion, opts)
+  end
+
+  defp run_handoff(workspace, policy, issue, completion, opts)
+       when is_map(policy) and is_map(completion) and is_list(opts) do
+    env = Keyword.get(opts, :env, [])
+    timeout_ms = Keyword.fetch!(opts, :timeout_ms)
 
     context = %{
       workspace: workspace,
@@ -905,11 +922,7 @@ defmodule SymphonyElixir.PublishHandoff do
     end
   end
 
-  defp configured_runner(opts) do
-    if Keyword.get(opts, :context_mode, false),
-      do: Keyword.get(opts, :runner),
-      else: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_handoff_runner)
-  end
+  defp configured_runner(opts), do: Keyword.get(opts, :runner)
 
   defp validate_implementation_context(
          %ExecutionContext{role: :implementation} = context,
@@ -947,8 +960,6 @@ defmodule SymphonyElixir.PublishHandoff do
     end
   end
 
-  defp require_delivery_authority(%{delivery_gates: nil}), do: :ok
-
   defp require_delivery_authority(%{delivery_gates: gates}) when is_map(gates) do
     if gates["vcs_publish"] == "allow" and gates["pull_request_write"] == "allow" do
       :ok
@@ -965,23 +976,5 @@ defmodule SymphonyElixir.PublishHandoff do
          %{gates: Map.take(gates, ["vcs_publish", "pull_request_write"])}
        )}
     end
-  end
-
-  defp require_delivery_authority(_context) do
-    {:blocked,
-     failure(
-       :delivery_not_allowed,
-       "Pinned target delivery policy is invalid.",
-       nil,
-       nil,
-       [],
-       nil,
-       nil,
-       %{}
-     )}
-  end
-
-  defp default_timeout_ms do
-    Config.settings!().hooks.timeout_ms
   end
 end

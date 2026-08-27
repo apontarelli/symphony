@@ -393,7 +393,11 @@ defmodule SymphonyElixir.ExecutionContextTest do
     File.ln_s!(real_target, Path.join(internal_target_root, "alpha"))
 
     assert ExecutionContext.new(
-             %{target | worktree_policy: %{target.worktree_policy | "root" => internal_target_root}},
+             %{
+               target
+               | workspace_layout: :target_scoped,
+                 worktree_policy: %{target.worktree_policy | "root" => internal_target_root}
+             },
              issue,
              opts
            ) == {:error, :invalid_workspace_path}
@@ -414,7 +418,11 @@ defmodule SymphonyElixir.ExecutionContextTest do
 
     assert {:ok, context} =
              ExecutionContext.new(
-               %{target | worktree_policy: %{target.worktree_policy | "root" => nonexistent_root}},
+               %{
+                 target
+                 | workspace_layout: :target_scoped,
+                   worktree_policy: %{target.worktree_policy | "root" => nonexistent_root}
+               },
                issue,
                opts
              )
@@ -438,7 +446,11 @@ defmodule SymphonyElixir.ExecutionContextTest do
     File.ln_s!(Path.join(outside, "alpha"), Path.join(base_root, "alpha"))
 
     assert ExecutionContext.new(
-             %{target | worktree_policy: %{target.worktree_policy | "root" => base_root}},
+             %{
+               target
+               | workspace_layout: :target_scoped,
+                 worktree_policy: %{target.worktree_policy | "root" => base_root}
+             },
              issue,
              opts
            ) == {:error, :invalid_workspace_path}

@@ -87,12 +87,6 @@ defmodule SymphonyElixir.TrackerCoordinator do
     end)
   end
 
-  @spec claim_issue(Issue.t(), String.t(), keyword()) :: lease_result()
-  def claim_issue(%Issue{id: issue_id} = issue, owner_id, opts \\ [])
-      when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
-    claim_lease(issue_id, issue, owner_id, %{}, opts)
-  end
-
   @spec claim_issue(TargetContext.t(), Issue.t(), String.t(), keyword()) :: lease_result()
   def claim_issue(
         %TargetContext{target_id: target_id, registry_generation: registry_generation} = target,
@@ -102,13 +96,15 @@ defmodule SymphonyElixir.TrackerCoordinator do
       )
       when is_binary(target_id) and is_binary(registry_generation) and is_binary(issue_id) and
              is_binary(owner_id) and is_list(opts) do
-    claim_lease(
-      lease_key(target, issue_id),
-      issue,
-      owner_id,
-      %{target_id: target_id, registry_generation: registry_generation},
-      opts
-    )
+    with {:ok, opts} <- target_state_options(target, opts) do
+      claim_lease(
+        lease_key(target, issue_id),
+        issue,
+        owner_id,
+        %{target_id: target_id, registry_generation: registry_generation},
+        opts
+      )
+    end
   end
 
   defp claim_lease(key, %Issue{id: issue_id} = issue, owner_id, provenance, opts) do
@@ -141,16 +137,12 @@ defmodule SymphonyElixir.TrackerCoordinator do
     end)
   end
 
-  @spec refresh_issue_lease(String.t(), String.t(), keyword()) :: lease_result()
-  def refresh_issue_lease(issue_id, owner_id, opts \\ [])
-      when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
-    refresh_lease_by_key(issue_id, owner_id, opts)
-  end
-
   @spec refresh_issue_lease(TargetContext.t(), String.t(), String.t(), keyword()) :: lease_result()
   def refresh_issue_lease(%TargetContext{} = target, issue_id, owner_id, opts)
       when is_binary(issue_id) and is_binary(owner_id) and is_list(opts) do
-    refresh_lease_by_key(lease_key(target, issue_id), owner_id, opts)
+    with {:ok, opts} <- target_state_options(target, opts) do
+      refresh_lease_by_key(lease_key(target, issue_id), owner_id, opts)
+    end
   end
 
   defp refresh_lease_by_key(key, owner_id, opts) do
@@ -171,18 +163,13 @@ defmodule SymphonyElixir.TrackerCoordinator do
     end)
   end
 
-  @spec release_issue(String.t(), String.t() | nil, keyword()) ::
-          :ok | {:error, coordinator_error()}
-  def release_issue(issue_id, owner_id \\ nil, opts \\ [])
-      when is_binary(issue_id) and is_list(opts) do
-    release_lease(issue_id, owner_id, opts)
-  end
-
   @spec release_issue(TargetContext.t(), String.t(), String.t() | nil, keyword()) ::
           :ok | {:error, coordinator_error()}
   def release_issue(%TargetContext{} = target, issue_id, owner_id, opts)
       when is_binary(issue_id) and is_list(opts) do
-    release_lease(lease_key(target, issue_id), owner_id, opts)
+    with {:ok, opts} <- target_state_options(target, opts) do
+      release_lease(lease_key(target, issue_id), owner_id, opts)
+    end
   end
 
   defp release_lease(key, owner_id, opts) do
@@ -207,7 +194,7 @@ defmodule SymphonyElixir.TrackerCoordinator do
   end
 
   @spec record_rate_limit(term(), atom(), keyword()) :: map() | {:error, coordinator_error()}
-  def record_rate_limit(details, source, opts \\ []) when is_atom(source) and is_list(opts) do
+  def record_rate_limit(details, source, opts) when is_atom(source) and is_list(opts) do
     now_ms = wall_clock_now_ms(opts)
 
     with_state_write(opts, fn state ->
@@ -217,7 +204,7 @@ defmodule SymphonyElixir.TrackerCoordinator do
   end
 
   @spec rate_limit(keyword()) :: map() | nil | {:error, coordinator_error()}
-  def rate_limit(opts \\ []) when is_list(opts) do
+  def rate_limit(opts) when is_list(opts) do
     now_ms = wall_clock_now_ms(opts)
 
     with_state_write(opts, fn state ->
@@ -240,6 +227,29 @@ defmodule SymphonyElixir.TrackerCoordinator do
          rate_limit: rate_limit_snapshot(state.rate_limit, now_ms)
        }}
     end)
+  end
+
+  defp target_state_options(
+         %TargetContext{worktree_policy: %{"root" => root}},
+         opts
+       )
+       when is_binary(root) do
+    if Keyword.has_key?(opts, :state_path) do
+      {:ok, opts}
+    else
+      {:ok,
+       Keyword.put(
+         opts,
+         :state_path,
+         Path.join(Path.expand(root), ".symphony/tracker_coordinator.state")
+       )}
+    end
+  end
+
+  defp target_state_options(%TargetContext{}, opts) do
+    if Keyword.has_key?(opts, :state_path),
+      do: {:ok, opts},
+      else: {:error, {:coordinator_write_failed, :invalid_target_context}}
   end
 
   @spec state_path() :: Path.t()

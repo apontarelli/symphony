@@ -60,12 +60,11 @@ defmodule SymphonyElixir.PublishPreflight do
          {:ok, provenance} <- ExecutionContext.safe_provenance(execution_context) do
       if publish_allowed?(execution_context) do
         execution_context.workspace_path
-        |> run(
+        |> run_preflight(
           execution_context.policy,
           opts
           |> Keyword.put(:worker_host, execution_context.worker_host)
           |> Keyword.put(:timeout_ms, execution_context.timeout_ms)
-          |> Keyword.put(:context_mode, true)
           |> Keyword.put(:provenance, provenance)
         )
         |> Map.put(:provenance, provenance)
@@ -81,13 +80,22 @@ defmodule SymphonyElixir.PublishPreflight do
   def run_context(_context, _opts),
     do: {:error, :invalid_publish_preflight_context}
 
-  @spec run(Path.t() | nil, map(), keyword()) :: result()
-  def run(workspace, policy, opts \\ []) when is_map(policy) and is_list(opts) do
-    timeout_ms =
-      case Keyword.fetch(opts, :timeout_ms) do
-        {:ok, timeout_ms} -> timeout_ms
-        :error -> default_timeout_ms()
-      end
+  @doc false
+  @spec run_for_test(Path.t() | nil, map(), keyword()) :: result()
+  def run_for_test(workspace, policy, opts \\ []) do
+    opts =
+      opts
+      |> Keyword.put_new(:timeout_ms, Config.settings!().hooks.timeout_ms)
+      |> Keyword.put_new_lazy(
+        :runner,
+        fn -> Application.get_env(:symphony_elixir, :publish_preflight_runner) end
+      )
+
+    run_preflight(workspace, policy, opts)
+  end
+
+  defp run_preflight(workspace, policy, opts) when is_map(policy) and is_list(opts) do
+    timeout_ms = Keyword.fetch!(opts, :timeout_ms)
 
     context = %{
       workspace: workspace,
@@ -278,11 +286,7 @@ defmodule SymphonyElixir.PublishPreflight do
     end
   end
 
-  defp configured_runner(opts) do
-    if Keyword.get(opts, :context_mode, false),
-      do: Keyword.get(opts, :runner),
-      else: Keyword.get(opts, :runner) || Application.get_env(:symphony_elixir, :publish_preflight_runner)
-  end
+  defp configured_runner(opts), do: Keyword.get(opts, :runner)
 
   defp validate_implementation_context(%ExecutionContext{role: :implementation} = context) do
     case ExecutionContext.validate(context) do
@@ -330,9 +334,5 @@ defmodule SymphonyElixir.PublishPreflight do
       ],
       provenance: provenance
     }
-  end
-
-  defp default_timeout_ms do
-    Config.settings!().hooks.timeout_ms
   end
 end

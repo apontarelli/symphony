@@ -1,4 +1,4 @@
-defmodule SymphonyElixir.TargetContext.Legacy do
+defmodule SymphonyElixir.TargetAdmission do
   @moduledoc false
 
   alias SymphonyElixir.Config
@@ -109,11 +109,12 @@ defmodule SymphonyElixir.TargetContext.Legacy do
   @review_hash_fields ~w(mode model reasoning_effort command timeout_ms max_retries required enabled)
   @budget_periods ~w(per_run daily weekly)
 
-  @spec build_at_process_start(keyword()) :: {:ok, TargetContext.t()} | {:error, term()}
-  def build_at_process_start(opts) when is_list(opts) do
+  @spec build_target(keyword()) :: {:ok, TargetContext.t()} | {:error, term()}
+  def build_target(opts) when is_list(opts) do
     with :ok <- validate_options(opts),
          {:ok, %{config: config} = loaded_workflow} when is_map(config) <- Workflow.current(),
          {:ok, settings} <- Schema.parse(config),
+         :ok <- validate_tracker_kind(settings.tracker.kind),
          run_setup = RunSetup.current(),
          profile = Config.profile_override() || RunSetup.profile(run_setup),
          {:ok, target_id} <- target_id(opts, run_setup),
@@ -146,7 +147,9 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     end
   end
 
-  def build_at_process_start(_opts), do: {:error, :invalid_options}
+  def build_target(_opts), do: {:error, :invalid_options}
+  defp validate_tracker_kind(kind) when kind in ["linear", "memory"], do: :ok
+  defp validate_tracker_kind(kind), do: {:error, {:unsupported_tracker_kind, kind}}
 
   defp build_context(
          target_id,
@@ -207,6 +210,7 @@ defmodule SymphonyElixir.TargetContext.Legacy do
        struct!(TargetContext,
          target_id: target_id,
          state: state,
+         workspace_layout: :flat,
          dispatch_mode: dispatch_mode,
          registry_generation: registry_generation,
          policy_hash: policy_hash,
@@ -262,7 +266,7 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     explicit_name = Keyword.get(opts, :saved_run_name)
     saved_name = saved_run_name(run_setup)
 
-    case explicit_name || saved_name || "legacy" do
+    case explicit_name || saved_name || "default" do
       name when is_binary(name) ->
         case RunSetup.validate_name(name) do
           :ok -> {:ok, name}
@@ -298,9 +302,10 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     configured_reference = get_in(repo_manifest, ["runtime", "tracker", "api_key"])
 
     %{
-      "id" => "legacy",
+      "id" => "single-target",
       "policy" => %{
         "api_key" => preserve_credential_reference(tracker.api_key, configured_reference),
+        "client_module" => Atom.to_string(SymphonyElixir.Linear.Client),
         "endpoint" => tracker.endpoint,
         "kind" => tracker.kind,
         "workspace_slug" => tracker.workspace_slug
@@ -422,13 +427,13 @@ defmodule SymphonyElixir.TargetContext.Legacy do
       "tracker_write" => "allow",
       "vcs_publish" => "allow",
       "pull_request_write" => "allow",
-      "merge" => legacy_merge_gate(effective_policy),
+      "merge" => merge_gate(effective_policy),
       "deployment" => "deny",
       "production_data" => "deny"
     }
   end
 
-  defp legacy_merge_gate(effective_policy) do
+  defp merge_gate(effective_policy) do
     auto_land = Map.get(effective_policy, "auto_land")
 
     cond do
@@ -456,7 +461,16 @@ defmodule SymphonyElixir.TargetContext.Legacy do
   defp capacity_limits(settings, run_setup) do
     settings
     |> RunSetup.capacity(run_setup)
-    |> Enum.map(fn {key, value} -> {to_string(key), value} end)
+    |> Map.merge(%{
+      issue_batch_limit: RunSetup.issue_batch_limit(run_setup),
+      max_concurrent_agents_by_state: settings.agent.max_concurrent_agents_by_state,
+      max_concurrent_agents_per_host: settings.worker.max_concurrent_agents_per_host,
+      max_concurrent_startups_per_host: settings.worker.max_concurrent_startups_per_host,
+      max_retry_backoff_ms: settings.agent.max_retry_backoff_ms,
+      poll_interval_ms: settings.polling.interval_ms,
+      worker_hosts: settings.worker.ssh_hosts
+    })
+    |> Enum.map(fn {key, value} -> {to_string(key), normalize_json(value)} end)
     |> Map.new()
   end
 
@@ -476,7 +490,7 @@ defmodule SymphonyElixir.TargetContext.Legacy do
         "capacity_limits" => context_policy.capacity_limits,
         "effective_checks" => context_policy.effective_checks,
         "external_side_effect_gates" => context_policy.external_side_effect_gates,
-        "legacy_policy" => authority_policy,
+        "admission_policy" => authority_policy,
         "repo_policy" => context_policy.repo_policy,
         "run_target" => run_target_projection,
         "tracker_connection" => tracker_hash_projection(context_policy.tracker_connection),

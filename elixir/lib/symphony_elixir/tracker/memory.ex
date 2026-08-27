@@ -7,15 +7,7 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   alias SymphonyElixir.{Linear.Issue, RunTarget, TargetContext}
 
-  @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_candidate_issues do
-    with {:ok, %RunTarget.Resolution{issues: issues}} <- resolve_candidate_issues(nil) do
-      {:ok, issues}
-    end
-  end
-
-  @spec resolve_candidate_issues(RunTarget.t() | nil) :: {:ok, RunTarget.Resolution.t()} | {:error, term()}
-  def resolve_candidate_issues(%RunTarget{type: :issues, issue_ids: issue_ids} = target) do
+  defp resolve_candidate_issues_for_target(%RunTarget{type: :issues, issue_ids: issue_ids} = target) do
     send_event({:memory_tracker_resolve_candidate_issues, target})
 
     wanted_ids = MapSet.new(issue_ids)
@@ -28,7 +20,7 @@ defmodule SymphonyElixir.Tracker.Memory do
     {:ok, RunTarget.Resolution.new(target, sort_by_requested_ids(issues, issue_ids), [])}
   end
 
-  def resolve_candidate_issues(target) do
+  defp resolve_candidate_issues_for_target(target) do
     send_event({:memory_tracker_resolve_candidate_issues, target})
 
     {:ok, RunTarget.Resolution.new(target, issue_entries(), [])}
@@ -37,10 +29,9 @@ defmodule SymphonyElixir.Tracker.Memory do
   @spec resolve_candidate_issues(TargetContext.t(), RunTarget.t()) ::
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_candidate_issues(%TargetContext{}, %RunTarget{} = target),
-    do: resolve_candidate_issues(target)
+    do: resolve_candidate_issues_for_target(target)
 
-  @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issues_by_states(state_names) do
+  defp fetch_issues_by_states_for_target(state_names) do
     send_event({:memory_tracker_fetch_issues_by_states, state_names})
 
     normalized_states =
@@ -57,10 +48,9 @@ defmodule SymphonyElixir.Tracker.Memory do
   @spec fetch_issues_by_states(TargetContext.t(), [String.t()]) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(%TargetContext{}, state_names),
-    do: fetch_issues_by_states(state_names)
+    do: fetch_issues_by_states_for_target(state_names)
 
-  @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
-  def fetch_issue_states_by_ids(issue_ids) do
+  defp fetch_issue_states_by_ids_for_target(issue_ids) do
     send_event({:memory_tracker_fetch_issue_states_by_ids, issue_ids})
 
     case configured_error(:fetch_issue_states_by_ids) do
@@ -80,29 +70,21 @@ defmodule SymphonyElixir.Tracker.Memory do
   @spec fetch_issue_states_by_ids(TargetContext.t(), [String.t()]) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(%TargetContext{}, issue_ids),
-    do: fetch_issue_states_by_ids(issue_ids)
-
-  @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
-  def create_comment(issue_id, body) do
-    send_event({:memory_tracker_comment, issue_id, body})
-    :ok
-  end
+    do: fetch_issue_states_by_ids_for_target(issue_ids)
 
   @spec create_comment(TargetContext.t(), String.t(), String.t()) ::
           :ok | {:error, term()}
-  def create_comment(%TargetContext{}, issue_id, body),
-    do: create_comment(issue_id, body)
-
-  @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
-  def update_issue_state(issue_id, state_name) do
-    send_event({:memory_tracker_state_update, issue_id, state_name})
+  def create_comment(%TargetContext{}, issue_id, body) do
+    send_event({:memory_tracker_comment, issue_id, body})
     :ok
   end
 
   @spec update_issue_state(TargetContext.t(), String.t(), String.t()) ::
           :ok | {:error, term()}
-  def update_issue_state(%TargetContext{}, issue_id, state_name),
-    do: update_issue_state(issue_id, state_name)
+  def update_issue_state(%TargetContext{}, issue_id, state_name) do
+    send_event({:memory_tracker_state_update, issue_id, state_name})
+    :ok
+  end
 
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])

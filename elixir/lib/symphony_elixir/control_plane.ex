@@ -6626,6 +6626,7 @@ defmodule SymphonyElixir.ControlPlane do
       "policy_hash" => target.policy_hash,
       "repo_manifest_hash" => target.repo_manifest_hash,
       "issue_policy_authority" => target.issue_policy_authority,
+      "workspace_layout" => Atom.to_string(target.workspace_layout),
       "repo_policy" => target.repo_policy,
       "tracker_connection" => target.tracker_connection,
       "run_target" => target.run_target,
@@ -6655,6 +6656,16 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   defp target_from_map(map) when is_map(map) do
+    map =
+      Map.put_new_lazy(map, "workspace_layout", fn ->
+        root = get_in(map, ["worktree_policy", "root"])
+
+        if is_map(map["issue_policy_authority"]) or
+             (is_binary(root) and Path.basename(root) == map["target_id"]),
+           do: "flat",
+           else: "target_scoped"
+      end)
+
     keys = ~w(
       budget_limits
       capacity_limits
@@ -6672,11 +6683,13 @@ defmodule SymphonyElixir.ControlPlane do
       target_id
       tracker_connection
       worktree_policy
+      workspace_layout
     )
 
     with true <- Enum.sort(Map.keys(map)) == Enum.sort(keys),
          {:ok, state} <- target_state(map["state"]),
-         {:ok, dispatch_mode} <- dispatch_mode(map["dispatch_mode"]) do
+         {:ok, dispatch_mode} <- dispatch_mode(map["dispatch_mode"]),
+         {:ok, workspace_layout} <- workspace_layout(map["workspace_layout"]) do
       {:ok,
        struct!(TargetContext,
          target_id: map["target_id"],
@@ -6686,6 +6699,7 @@ defmodule SymphonyElixir.ControlPlane do
          policy_hash: map["policy_hash"],
          repo_manifest_hash: map["repo_manifest_hash"],
          issue_policy_authority: map["issue_policy_authority"],
+         workspace_layout: workspace_layout,
          repo_policy: map["repo_policy"],
          tracker_connection: map["tracker_connection"],
          run_target: map["run_target"],
@@ -6972,6 +6986,10 @@ defmodule SymphonyElixir.ControlPlane do
   defp dispatch_mode("watch"), do: {:ok, :watch}
   defp dispatch_mode(nil), do: {:ok, nil}
   defp dispatch_mode(_mode), do: {:error, :invalid_dispatch_mode}
+
+  defp workspace_layout("flat"), do: {:ok, :flat}
+  defp workspace_layout("target_scoped"), do: {:ok, :target_scoped}
+  defp workspace_layout(_layout), do: {:error, :invalid_workspace_layout}
 
   defp execution_role("implementation"), do: {:ok, :implementation}
   defp execution_role("source_reviewer"), do: {:ok, :source_reviewer}
