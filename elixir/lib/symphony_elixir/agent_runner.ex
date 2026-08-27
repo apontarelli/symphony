@@ -369,7 +369,9 @@ defmodule SymphonyElixir.AgentRunner do
 
     with {:ok, max_turns} <- max_turns(context, opts),
          {:ok, session} <-
-           AgentRuntime.start_session(context, issue, runtime_start_opts(opts)) do
+           AgentRuntime.start_session(context, issue, runtime_start_opts(opts)),
+         {:ok, runtime_identity} <-
+           send_runtime_process_identity(codex_update_recipient, context, session) do
       run_result =
         try do
           {:returned,
@@ -389,9 +391,40 @@ defmodule SymphonyElixir.AgentRunner do
           kind, reason -> {:raised, kind, reason, __STACKTRACE__}
         end
 
-      finish_runtime_run(run_result, stop_runtime_session(session))
+      cleanup_result = stop_runtime_session(session)
+      send_runtime_process_stopped(codex_update_recipient, context, runtime_identity, cleanup_result)
+      finish_runtime_run(run_result, cleanup_result)
     end
   end
+
+  defp send_runtime_process_identity(recipient, context, session) when is_pid(recipient) do
+    case AgentRuntime.recovery_identity(session) do
+      {:ok, identity} ->
+        send(recipient, {:runtime_process_identity, ExecutionContext.run_id(context), identity})
+        {:ok, identity}
+
+      {:error, :recovery_identity_unavailable} ->
+        {:ok, nil}
+
+      {:error, reason} ->
+        send(recipient, {:runtime_process_identity_error, ExecutionContext.run_id(context), reason})
+        {:ok, nil}
+    end
+  end
+
+  defp send_runtime_process_identity(_recipient, _context, _session), do: {:ok, nil}
+
+  defp send_runtime_process_stopped(recipient, context, %{"process_group_id" => process_group_id}, :ok)
+       when is_pid(recipient) and is_integer(process_group_id) do
+    send(
+      recipient,
+      {:runtime_process_stopped, ExecutionContext.run_id(context), process_group_id, %{verified_by: "agent_runtime_stop"}}
+    )
+
+    :ok
+  end
+
+  defp send_runtime_process_stopped(_recipient, _context, _identity, _cleanup_result), do: :ok
 
   defp stop_runtime_session(session) do
     case AgentRuntime.stop_session(session) do

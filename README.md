@@ -144,10 +144,10 @@ cp ../symphony.env.example ~/.config/symphony/.env
 ../bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 ```
 
-The root launcher rebuilds the Elixir escript before launch unless `--skip-build` is passed. A
-workflow can enable the dashboard/API with `runtime.server.port`; `--port <port>` or
-`SYMPHONY_PORT` overrides that value for one process. Use `--profile <name>` to select a workflow
-profile.
+The root launcher compiles the Elixir application before launch unless `--skip-build` is passed,
+then runs the CLI through Mix so native dependencies remain loadable. A workflow can enable the
+dashboard/API with `runtime.server.port`; `--port <port>` or `SYMPHONY_PORT` overrides that value
+for one process. Use `--profile <name>` to select a workflow profile.
 
 The legacy `workflow init`, `workflow check`, and `workflow print` command family is a one-release
 compatibility alias. Use `setup init`, `setup check`, and `setup preview`; use `run --preview` for

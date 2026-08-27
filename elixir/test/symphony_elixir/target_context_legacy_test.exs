@@ -119,6 +119,35 @@ defmodule SymphonyElixir.TargetContextLegacyTest do
     refute inspect(context) =~ "poisoned-secret"
   end
 
+  test "legacy authority pins configured credential references instead of resolved values" do
+    System.put_env("LEGACY_TRACKER_KEY", "resolved-tracker-value")
+    System.put_env("LEGACY_RUNNER_PASSWORD", "resolved-runner-value")
+
+    on_exit(fn ->
+      System.delete_env("LEGACY_TRACKER_KEY")
+      System.delete_env("LEGACY_RUNNER_PASSWORD")
+    end)
+
+    write_secret_workflow!(
+      "$LEGACY_TRACKER_KEY",
+      "target-secret",
+      "env:LEGACY_RUNNER_PASSWORD"
+    )
+
+    assert {:ok, context} = Legacy.build_at_process_start([])
+
+    assert get_in(context.tracker_connection, ["policy", "api_key"]) ==
+             "$LEGACY_TRACKER_KEY"
+
+    assert get_in(
+             context.runner_policy,
+             ["runners", "open", "server_auth", "password"]
+           ) == "env:LEGACY_RUNNER_PASSWORD"
+
+    refute inspect(context) =~ "resolved-tracker-value"
+    refute inspect(context) =~ "resolved-runner-value"
+  end
+
   test "legacy authority preserves hooks, expands worktree root, and tracks manifest source" do
     relative_root = "tmp/legacy-context-relative-workspaces"
     hook_sentinel = "printf 'token=sk-test-legacy-hook'\nprintf done"

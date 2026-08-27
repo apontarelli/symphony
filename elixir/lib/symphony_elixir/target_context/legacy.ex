@@ -167,10 +167,10 @@ defmodule SymphonyElixir.TargetContext.Legacy do
       "workflow_module_resolution" => module_resolution
     }
 
-    tracker_connection = tracker_connection(settings)
+    tracker_connection = tracker_connection(settings, repo_manifest)
     run_target = run_target(settings)
     worktree_policy = worktree_policy(settings)
-    runner_policy = runner_policy(settings)
+    runner_policy = runner_policy(settings, repo_manifest)
     capacity_limits = capacity_limits(settings, run_setup)
     budget_limits = budget_limits(effective_policy)
     {state, dispatch_mode} = target_state(RunSetup.mode(run_setup))
@@ -293,13 +293,14 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     end)
   end
 
-  defp tracker_connection(settings) do
+  defp tracker_connection(settings, repo_manifest) do
     tracker = settings.tracker
+    configured_reference = get_in(repo_manifest, ["runtime", "tracker", "api_key"])
 
     %{
       "id" => "legacy",
       "policy" => %{
-        "api_key" => tracker.api_key,
+        "api_key" => preserve_credential_reference(tracker.api_key, configured_reference),
         "endpoint" => tracker.endpoint,
         "kind" => tracker.kind,
         "workspace_slug" => tracker.workspace_slug
@@ -355,12 +356,20 @@ defmodule SymphonyElixir.TargetContext.Legacy do
     end
   end
 
-  defp runner_policy(settings) do
+  defp runner_policy(settings, repo_manifest) do
     default = Config.default_runner_name(settings)
+    configured_runners = get_in(repo_manifest, ["runtime", "runners"]) || %{}
 
     runners =
       settings.runners
       |> normalize_json()
+      |> Map.new(fn {name, runner} ->
+        {name,
+         preserve_credential_references(
+           runner,
+           Map.get(configured_runners, name, %{})
+         )}
+      end)
       |> Map.update!(default, &Map.put(&1, "max_turns", settings.agent.max_turns))
 
     %{
@@ -369,6 +378,30 @@ defmodule SymphonyElixir.TargetContext.Legacy do
       "runners" => runners
     }
   end
+
+  defp preserve_credential_references(parsed, configured)
+       when is_map(parsed) and is_map(configured) do
+    Map.new(parsed, fn {key, value} ->
+      {key,
+       preserve_credential_references(
+         value,
+         Map.get(configured, key)
+       )}
+    end)
+  end
+
+  defp preserve_credential_references(parsed, configured),
+    do: preserve_credential_reference(parsed, configured)
+
+  defp preserve_credential_reference(_parsed, "$" <> variable = reference)
+       when byte_size(variable) > 0,
+       do: reference
+
+  defp preserve_credential_reference(_parsed, "env:" <> variable = reference)
+       when byte_size(variable) > 0,
+       do: reference
+
+  defp preserve_credential_reference(parsed, _configured), do: parsed
 
   defp effective_checks(repo_manifest, effective_policy) do
     %{

@@ -35,7 +35,7 @@ Options:
   --config-root <path>         Saved workflow config root. Default: ~/.config/symphony.
   --save <lowercase-slug>      Save a newly built workflow; collisions fail.
   --yes                        Skip the start confirmation.
-  --skip-build                 Do not rebuild elixir/bin/symphony before launch.
+  --skip-build                 Do not compile the Elixir application before launch.
   -h, --help                   Show this help.
 
 Environment:
@@ -153,10 +153,10 @@ run_elixir() {
       mise exec -- mix setup
     fi
 
-    mise exec -- mix escript.build
-  elif [[ ! -x ./bin/symphony ]]; then
-    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
-    printf 'hint: rerun without --skip-build so the launcher can build it\n' >&2
+    mise exec -- mix compile
+  elif [[ ! -d _build/dev/lib/symphony_elixir/ebin ]]; then
+    printf 'error: compiled Symphony application is missing\n' >&2
+    printf 'hint: rerun without --skip-build so the launcher can compile it\n' >&2
     exit 127
   fi
 
@@ -170,7 +170,7 @@ run_elixir() {
     args+=(--profile "$profile")
   fi
 
-  exec mise exec -- ./bin/symphony "${args[@]}" "$@"
+  exec mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${args[@]}" "$@"
 }
 
 prepare_elixir_cli_environment() {
@@ -199,10 +199,10 @@ prepare_elixir_cli() {
       mise exec -- mix setup
     fi
 
-    mise exec -- mix escript.build
-  elif [[ ! -x ./bin/symphony ]]; then
-    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
-    printf 'hint: rerun without SYMPHONY_SKIP_BUILD=1 so the launcher can build it\n' >&2
+    mise exec -- mix compile
+  elif [[ ! -d _build/dev/lib/symphony_elixir/ebin ]]; then
+    printf 'error: compiled Symphony application is missing\n' >&2
+    printf 'hint: rerun without SYMPHONY_SKIP_BUILD=1 so the launcher can compile it\n' >&2
     exit 127
   fi
 }
@@ -212,9 +212,9 @@ prepare_read_only_elixir_cli() {
 
   prepare_elixir_cli_environment "$symphony_home"
 
-  if [[ ! -x ./bin/symphony ]]; then
-    printf 'error: %s/bin/symphony is missing\n' "$symphony_home" >&2
-    printf 'hint: build it explicitly with: cd %s && mise exec -- mix escript.build\n' "$symphony_home" >&2
+  if [[ ! -d _build/dev/lib/symphony_elixir/ebin ]]; then
+    printf 'error: compiled Symphony application is missing\n' >&2
+    printf 'hint: compile it explicitly with: cd %s && mise exec -- mix compile\n' "$symphony_home" >&2
     exit 127
   fi
 }
@@ -227,7 +227,7 @@ run_workflow_cli() {
 
   prepare_elixir_cli "$symphony_home"
 
-  exec mise exec -- ./bin/symphony "$@"
+  exec mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "$@"
 }
 
 run_list_cli() {
@@ -268,7 +268,7 @@ run_list_cli() {
 
   prepare_read_only_elixir_cli "$symphony_home"
 
-  exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- ./bin/symphony "${args[@]}"
+  exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${args[@]}"
 }
 
 run_saved_setup_cli() {
@@ -279,7 +279,7 @@ run_saved_setup_cli() {
   local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
   local caller_root="$PWD"
   local use_env_file=1
-  local escript_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
+  local cli_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
   local env_optional=0
   local interactive_tty=0
   local arg
@@ -299,7 +299,7 @@ run_saved_setup_cli() {
         ;;
       --preview|--picker)
         env_optional=1
-        escript_args+=("$1")
+        cli_args+=("$1")
         shift
         ;;
       --skip-build)
@@ -307,7 +307,7 @@ run_saved_setup_cli() {
         shift
         ;;
       *)
-        escript_args+=("$1")
+        cli_args+=("$1")
         shift
         ;;
     esac
@@ -338,9 +338,9 @@ run_saved_setup_cli() {
       exit 127
     }
 
-    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" op run --env-file "$env_file" -- mise exec -- ./bin/symphony "${escript_args[@]}")
+    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" op run --env-file "$env_file" -- mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${cli_args[@]}")
   else
-    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" mise exec -- ./bin/symphony "${escript_args[@]}")
+    cmd=(env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" "SYMPHONY_INTERACTIVE_TTY=$interactive_tty" mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${cli_args[@]}")
   fi
 
   exec "${cmd[@]}"

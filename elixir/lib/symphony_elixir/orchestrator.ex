@@ -10,13 +10,16 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.{
     AgentRunner,
     Config,
+    ControlPlane,
     ExecutionContext,
     HandoffRoute,
     HandoffRouteRecorder,
+    ProcessSupervisor,
     PublishHandoff,
     PublishPreflight,
     QualityGate,
     ReviewRecords,
+    RunAuthority,
     RunSetup,
     RunTarget,
     StatusDashboard,
@@ -31,6 +34,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Workflow.PublishTarget
 
   @continuation_retry_delay_ms 1_000
+  @durable_lease_renew_interval_ms 10_000
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
@@ -59,6 +63,8 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_token,
       :run_mode,
       :issue_batch_limit,
+      :control_plane,
+      :durable_renew_timer_ref,
       dispatched_issue_count: 0,
       running: %{},
       completed: MapSet.new(),
@@ -89,6 +95,10 @@ defmodule SymphonyElixir.Orchestrator do
         config = Config.settings!()
         capacity = RunSetup.capacity(config)
 
+        owner_id =
+          Keyword.get(opts, :coordinator_owner_id) ||
+            default_coordinator_owner_id(Keyword.get(opts, :name, __MODULE__))
+
         state = %State{
           poll_interval_ms: config.polling.interval_ms,
           max_concurrent_agents: capacity.max_concurrent_agents,
@@ -102,12 +112,17 @@ defmodule SymphonyElixir.Orchestrator do
           runtime_totals: @empty_runtime_totals,
           runtime_rate_limits: nil,
           tracker_rate_limit: nil,
-          coordinator_owner_id:
-            Keyword.get(opts, :coordinator_owner_id) ||
-              default_coordinator_owner_id(Keyword.get(opts, :name, __MODULE__))
+          coordinator_owner_id: owner_id,
+          control_plane: configured_control_plane(opts),
+          durable_renew_timer_ref: nil
         }
 
-        if validate_startup?, do: run_terminal_workspace_cleanup()
+        state =
+          state
+          |> recover_durable_runs()
+          |> schedule_durable_lease_renewal()
+
+        if validate_startup? and is_nil(state.control_plane), do: run_terminal_workspace_cleanup()
         state = schedule_tick(state, 0)
 
         {:ok, state}
@@ -264,6 +279,38 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _run_id}, state), do: {:noreply, state}
 
+  def handle_info({:runtime_process_identity, run_id, identity}, state)
+      when is_map(identity) do
+    {:noreply, register_durable_process(state, run_id, identity)}
+  end
+
+  def handle_info({:runtime_process_identity_error, run_id, reason}, state) do
+    {:noreply,
+     block_durable_identity_failure(
+       state,
+       run_id,
+       "runtime process identity failed: #{inspect(reason)}"
+     )}
+  end
+
+  def handle_info(
+        {:runtime_process_stopped, run_id, process_group_id, evidence},
+        state
+      )
+      when is_integer(process_group_id) and is_map(evidence) do
+    {:noreply, record_durable_process_stopped(state, run_id, process_group_id, evidence)}
+  end
+
+  def handle_info(:renew_durable_leases, state) do
+    state =
+      state
+      |> Map.put(:durable_renew_timer_ref, nil)
+      |> renew_durable_leases()
+      |> schedule_durable_lease_renewal()
+
+    {:noreply, state}
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -275,9 +322,21 @@ defmodule SymphonyElixir.Orchestrator do
     else
       Logger.info("Agent task completed #{run_log_context(run_id, running_entry)} session_id=#{session_id}; scheduling active-state continuation check")
 
-      state
-      |> complete_issue(run_id, running_entry)
-      |> schedule_issue_retry(
+      state = complete_issue(state, run_id, running_entry)
+
+      running_entry =
+        transition_durable_entry(
+          running_entry,
+          :retrying,
+          %{
+            attempt: 1,
+            due_at_ms: System.system_time(:millisecond) + @continuation_retry_delay_ms,
+            failure: %{code: "continuation", message: "checking active tracker state"}
+          }
+        )
+
+      schedule_issue_retry(
+        state,
         run_id,
         1,
         retry_metadata_from_running(running_entry, %{
@@ -311,6 +370,19 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Agent task exited #{run_log_context(run_id, running_entry)} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
     next_attempt = next_retry_attempt_from_running(running_entry)
+    durable_attempt = if(is_integer(next_attempt), do: next_attempt, else: 1)
+    delay_ms = retry_delay(durable_attempt, %{error: "agent exited"})
+
+    running_entry =
+      transition_durable_entry(
+        running_entry,
+        :retrying,
+        %{
+          attempt: durable_attempt,
+          due_at_ms: System.system_time(:millisecond) + delay_ms,
+          failure: %{code: "agent_exit", message: inspect(reason)}
+        }
+      )
 
     schedule_issue_retry(
       state,
@@ -520,8 +592,12 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     blocked_entries =
-      Enum.map(state.blocked, fn {run_id, blocked_entry} ->
-        {run_id, Map.get(blocked_entry, :issue), Map.get(blocked_entry, :execution_context)}
+      Enum.flat_map(state.blocked, fn {run_id, blocked_entry} ->
+        if match?(%RunAuthority{}, Map.get(blocked_entry, :durable_authority)) do
+          []
+        else
+          [{run_id, Map.get(blocked_entry, :issue), Map.get(blocked_entry, :execution_context)}]
+        end
       end)
 
     retry_entries =
@@ -529,7 +605,10 @@ defmodule SymphonyElixir.Orchestrator do
         {run_id, nil, Map.get(entry, :execution_context)}
       end)
 
-    claimed_entries = Enum.map(state.claimed, fn run_id -> {run_id, nil, nil} end)
+    claimed_entries =
+      state.claimed
+      |> Enum.reject(&durable_blocked_run?(state, &1))
+      |> Enum.map(fn run_id -> {run_id, nil, nil} end)
 
     (running_entries ++ blocked_entries ++ retry_entries ++ claimed_entries)
     |> Enum.reduce(%{}, fn {run_id, issue, context}, acc ->
@@ -540,6 +619,9 @@ defmodule SymphonyElixir.Orchestrator do
     end)
     |> Enum.map(fn {run_id, {issue, context}} -> {run_id, issue, context} end)
   end
+
+  defp durable_blocked_run?(%State{} = state, run_id),
+    do: match?(%{durable_authority: %RunAuthority{}}, Map.get(state.blocked, run_id))
 
   defp refresh_coordinator_lease(
          run_id,
@@ -767,6 +849,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec integrate_durable_recovery_for_test(map(), State.t()) :: State.t()
+  def integrate_durable_recovery_for_test(recovery, %State{} = state),
+    do: integrate_durable_recovery(recovery, state)
+
+  @doc false
+  @spec fenced_external_result_for_test(ControlPlane.SideEffect.t()) :: map()
+  def fenced_external_result_for_test(%ControlPlane.SideEffect{} = effect),
+    do: fenced_external_result({:completed, effect})
+
+  @doc false
   @spec handle_retry_issue_lookup_for_test(
           Issue.t(),
           term(),
@@ -954,22 +1046,27 @@ defmodule SymphonyElixir.Orchestrator do
     blocked_entry = Map.get(state.blocked, run_id, %{})
     context = Map.get(blocked_entry, :execution_context)
 
-    cond do
-      terminal_issue_state?(issue.state, terminal_states) ->
-        Logger.info("Blocked issue moved to terminal state: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}; releasing block")
-        cleanup_issue_workspace(context, issue.identifier, Map.get(blocked_entry, :worker_host))
-        release_issue_claim(state, run_id, context)
+    if match?(%RunAuthority{}, Map.get(blocked_entry, :durable_authority)) do
+      Logger.debug("Durable blocked issue remains fenced pending operator action: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}")
+      refresh_blocked_issue_state(state, run_id, issue)
+    else
+      cond do
+        terminal_issue_state?(issue.state, terminal_states) ->
+          Logger.info("Blocked issue moved to terminal state: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}; releasing block")
+          cleanup_issue_workspace(context, issue.identifier, Map.get(blocked_entry, :worker_host))
+          release_issue_claim(state, run_id, context)
 
-      !issue_routable?(issue, context) ->
-        Logger.info("Blocked issue no longer routed to this worker: #{retry_log_context(run_id, context, issue.identifier)} assignee=#{inspect(issue.assignee_id)}; releasing block")
-        release_issue_claim(state, run_id, context)
+        !issue_routable?(issue, context) ->
+          Logger.info("Blocked issue no longer routed to this worker: #{retry_log_context(run_id, context, issue.identifier)} assignee=#{inspect(issue.assignee_id)}; releasing block")
+          release_issue_claim(state, run_id, context)
 
-      active_issue_state?(issue.state, active_states) ->
-        refresh_blocked_issue_state(state, run_id, issue)
+        active_issue_state?(issue.state, active_states) ->
+          refresh_blocked_issue_state(state, run_id, issue)
 
-      true ->
-        Logger.info("Blocked issue moved to non-active state: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}; releasing block")
-        release_issue_claim(state, run_id, context)
+        true ->
+          Logger.info("Blocked issue moved to non-active state: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}; releasing block")
+          release_issue_claim(state, run_id, context)
+      end
     end
   end
 
@@ -1016,28 +1113,109 @@ defmodule SymphonyElixir.Orchestrator do
       nil ->
         release_issue_claim(state, run_id)
 
-      %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
+      %{pid: pid, ref: ref} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
-        context = Map.get(running_entry, :execution_context)
-        worker_host = Map.get(running_entry, :worker_host)
 
-        if cleanup_workspace do
-          cleanup_issue_workspace(context, identifier, worker_host)
+        case stop_and_verify_durable_process(running_entry) do
+          {:ok, stopped_entry} ->
+            stop_running_task(pid, ref)
+
+            finish_stopped_running_issue(
+              state,
+              run_id,
+              stopped_entry,
+              cleanup_workspace
+            )
+
+          {:error, reason} ->
+            stop_running_task(pid, ref)
+
+            block_issue_from_entry(
+              state,
+              run_id,
+              running_entry,
+              "runtime process termination is unverifiable: #{inspect(reason)}"
+            )
         end
-
-        stop_running_task(pid, ref)
-
-        %{
-          state
-          | running: Map.delete(state.running, run_id),
-            claimed: MapSet.delete(state.claimed, run_id),
-            blocked: Map.delete(state.blocked, run_id),
-            retry_attempts: Map.delete(state.retry_attempts, run_id)
-        }
 
       _ ->
         release_issue_claim(state, run_id)
     end
+  end
+
+  defp finish_stopped_running_issue(
+         state,
+         run_id,
+         stopped_entry,
+         cleanup_workspace
+       ) do
+    context = Map.get(stopped_entry, :execution_context)
+    authority = Map.get(stopped_entry, :durable_authority)
+
+    result =
+      if cleanup_workspace do
+        complete_stopped_running_cleanup(stopped_entry, authority, context)
+      else
+        finalize_inactive_authority(
+          authority,
+          "running_issue_left_active_states"
+        )
+      end
+
+    finish_stopped_running_result(
+      result,
+      state,
+      run_id,
+      stopped_entry,
+      context
+    )
+  end
+
+  defp complete_stopped_running_cleanup(
+         _stopped_entry,
+         authority,
+         %ExecutionContext{} = context
+       ),
+       do: complete_durable_run(authority, context)
+
+  defp complete_stopped_running_cleanup(stopped_entry, nil, _context) do
+    cleanup_issue_workspace(
+      Map.get(stopped_entry, :identifier),
+      Map.get(stopped_entry, :worker_host)
+    )
+  end
+
+  defp finish_stopped_running_result(
+         :ok,
+         state,
+         run_id,
+         _stopped_entry,
+         context
+       ) do
+    release_coordinator_lease(context, coordinator_owner_id(state))
+
+    %{
+      state
+      | running: Map.delete(state.running, run_id),
+        claimed: MapSet.delete(state.claimed, run_id),
+        blocked: Map.delete(state.blocked, run_id),
+        retry_attempts: Map.delete(state.retry_attempts, run_id)
+    }
+  end
+
+  defp finish_stopped_running_result(
+         {:error, reason},
+         state,
+         run_id,
+         stopped_entry,
+         _context
+       ) do
+    block_issue_from_entry(
+      state,
+      run_id,
+      stopped_entry,
+      "durable terminal cleanup failed: #{inspect(reason)}"
+    )
   end
 
   defp reconcile_stalled_running_issues(%State{running: running} = state)
@@ -1374,10 +1552,18 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp block_issue_from_entry(%State{} = state, run_id, running_entry, error) do
+    running_entry =
+      transition_durable_entry(
+        running_entry,
+        :blocked,
+        %{reason: error}
+      )
+
     handoff_route =
       handoff_decision_for_running_entry(running_entry, blocker_metadata(running_entry, error))
 
     maybe_persist_handoff_route(running_entry, handoff_route)
+    release_durable_authority(Map.get(running_entry, :durable_authority))
 
     blocked_entry =
       running_entry
@@ -1387,6 +1573,7 @@ defmodule SymphonyElixir.Orchestrator do
         identifier: Map.get(running_entry, :identifier, issue_id_from_run_id(run_id)),
         issue: Map.get(running_entry, :issue),
         execution_context: Map.get(running_entry, :execution_context),
+        durable_authority: Map.get(running_entry, :durable_authority),
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path),
         session_id: running_entry_session_id(running_entry),
@@ -1654,7 +1841,8 @@ defmodule SymphonyElixir.Orchestrator do
          issue,
          attempt \\ nil,
          preferred_worker_host \\ nil,
-         pinned_context \\ nil
+         pinned_context \\ nil,
+         durable_authority \\ nil
        ) do
     case execution_context_for_dispatch(
            state,
@@ -1667,23 +1855,34 @@ defmodule SymphonyElixir.Orchestrator do
 
         case TrackerCoordinator.claim_issue(context.target, issue, owner_id, []) do
           :ok ->
-            dispatch_claimed_issue(state, issue, attempt, context, owner_id)
+            dispatch_claimed_issue(
+              state,
+              issue,
+              attempt,
+              context,
+              owner_id,
+              durable_authority
+            )
 
           {:error, :leased} ->
             Logger.debug("Skipping dispatch; issue already leased by another local daemon: #{execution_context_log(context)}")
+
             state
 
           {:error, reason} ->
             Logger.warning("Skipping dispatch; tracker coordinator claim failed for #{execution_context_log(context)}: #{inspect(reason)}")
+
             state
         end
 
       :no_worker_capacity ->
         Logger.debug("No worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
+
         state
 
       {:error, reason} ->
         Logger.error("Skipping dispatch; execution context admission failed for #{issue_context(issue)} reason=#{inspect(reason)}")
+
         state
     end
   end
@@ -1741,40 +1940,239 @@ defmodule SymphonyElixir.Orchestrator do
          %State{} = state,
          issue,
          attempt,
-         %ExecutionContext{} = context,
-         owner_id
+         %ExecutionContext{} = pinned_context,
+         owner_id,
+         durable_authority
        ) do
-    case revalidate_issue_for_dispatch(
-           issue,
-           fn issue_ids -> Tracker.fetch_issue_states_by_ids(context.target, issue_ids) end,
-           terminal_state_set(context),
-           context
-         ) do
-      {:ok, %Issue{} = refreshed_issue} ->
-        state
-        |> spawn_issue_in_context(refreshed_issue, attempt, context)
-        |> release_untracked_lease(context, owner_id)
-
-      {:skip, :missing} ->
-        Logger.info("Skipping dispatch; issue no longer active or visible: #{execution_context_log(context)}")
-        release_coordinator_lease(context, owner_id)
-        state
-
-      {:skip, %Issue{} = refreshed_issue, reason} ->
-        Logger.info(
-          "Skipping stale dispatch after issue refresh: #{execution_context_log(context)} reason=#{inspect(reason)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}"
+    case prepare_durable_authority(state, pinned_context, durable_authority) do
+      {:ok, authority} ->
+        resolve_claimed_dispatch(
+          state,
+          issue,
+          attempt,
+          pinned_context,
+          owner_id,
+          authority
         )
 
-        release_coordinator_lease(context, owner_id)
+      error ->
+        handle_durable_dispatch_error(
+          error,
+          state,
+          issue,
+          pinned_context,
+          owner_id,
+          nil
+        )
+    end
+  end
+
+  defp resolve_claimed_dispatch(
+         state,
+         issue,
+         attempt,
+         pinned_context,
+         owner_id,
+         authority
+       ) do
+    case resolve_dispatch_context(authority, pinned_context) do
+      {:ok, context} ->
+        result =
+          revalidate_issue_for_dispatch(
+            issue,
+            fn issue_ids ->
+              Tracker.fetch_issue_states_by_ids(context.target, issue_ids)
+            end,
+            terminal_state_set(context),
+            context
+          )
+
+        handle_dispatch_revalidation(
+          result,
+          state,
+          attempt,
+          pinned_context,
+          context,
+          owner_id,
+          authority
+        )
+
+      error ->
+        handle_durable_dispatch_error(
+          error,
+          state,
+          issue,
+          pinned_context,
+          owner_id,
+          authority
+        )
+    end
+  end
+
+  defp handle_dispatch_revalidation(
+         {:ok, %Issue{} = refreshed_issue},
+         state,
+         attempt,
+         pinned_context,
+         context,
+         owner_id,
+         authority
+       ) do
+    case start_durable_authority(authority) do
+      {:ok, running_authority} ->
         state
+        |> spawn_issue_in_context(
+          refreshed_issue,
+          attempt,
+          context,
+          running_authority
+        )
+        |> release_untracked_lease(context, owner_id)
 
       {:error, reason} ->
-        release_coordinator_lease(context, owner_id)
+        Logger.warning("Skipping dispatch; durable running transition failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
 
-        handle_tracker_fetch_error(state, reason, :dispatch_revalidation, fn ->
-          Logger.warning("Skipping dispatch; issue refresh failed for #{execution_context_log(context)}: #{inspect(reason)}")
-        end)
+        release_durable_authority(authority)
+        release_coordinator_lease(pinned_context, owner_id)
+        state
     end
+  end
+
+  defp handle_dispatch_revalidation(
+         {:skip, :missing},
+         state,
+         _attempt,
+         pinned_context,
+         _context,
+         owner_id,
+         authority
+       ) do
+    Logger.info("Skipping dispatch; issue no longer active or visible: #{execution_context_log(pinned_context)}")
+
+    complete_skipped_authority(authority, "issue_missing")
+    release_coordinator_lease(pinned_context, owner_id)
+    state
+  end
+
+  defp handle_dispatch_revalidation(
+         {:skip, %Issue{} = refreshed_issue, reason},
+         state,
+         _attempt,
+         pinned_context,
+         _context,
+         owner_id,
+         authority
+       ) do
+    Logger.info(
+      "Skipping stale dispatch after issue refresh: #{execution_context_log(pinned_context)} reason=#{inspect(reason)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}"
+    )
+
+    complete_skipped_authority(authority, inspect(reason))
+    release_coordinator_lease(pinned_context, owner_id)
+    state
+  end
+
+  defp handle_dispatch_revalidation(
+         {:error, reason},
+         state,
+         _attempt,
+         pinned_context,
+         _context,
+         owner_id,
+         authority
+       ) do
+    release_durable_authority(authority)
+    release_coordinator_lease(pinned_context, owner_id)
+
+    handle_tracker_fetch_error(state, reason, :dispatch_revalidation, fn ->
+      Logger.warning("Skipping dispatch; issue refresh failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+    end)
+  end
+
+  defp handle_durable_dispatch_error(
+         {:blocked, reason},
+         state,
+         issue,
+         pinned_context,
+         owner_id,
+         %RunAuthority{} = authority
+       ) do
+    Logger.warning("Blocking dispatch; durable credentials are unavailable for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+
+    state =
+      case RunAuthority.transition(authority, :blocked, %{reason: inspect(reason)}) do
+        {:ok, blocked_authority} ->
+          release_durable_authority(blocked_authority)
+          put_blocked_durable_dispatch(state, issue, pinned_context, blocked_authority, reason)
+
+        {:error, transition_reason} ->
+          Logger.error("Durable credential block transition failed for #{execution_context_log(pinned_context)}: #{inspect(transition_reason)}")
+          release_durable_authority(authority)
+          state
+      end
+
+    release_coordinator_lease(pinned_context, owner_id)
+    state
+  end
+
+  defp handle_durable_dispatch_error(
+         {:blocked, reason},
+         state,
+         _issue,
+         pinned_context,
+         owner_id,
+         _authority
+       ) do
+    Logger.warning("Skipping dispatch; credentials are unavailable for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+    release_coordinator_lease(pinned_context, owner_id)
+    state
+  end
+
+  defp handle_durable_dispatch_error(
+         {:error, reason},
+         state,
+         _issue,
+         pinned_context,
+         owner_id,
+         authority
+       ) do
+    Logger.warning("Skipping dispatch; durable run admission failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+
+    release_durable_authority(authority)
+    release_coordinator_lease(pinned_context, owner_id)
+    state
+  end
+
+  defp put_blocked_durable_dispatch(
+         %State{} = state,
+         %Issue{} = issue,
+         %ExecutionContext{} = context,
+         %RunAuthority{} = authority,
+         reason
+       ) do
+    run_id = ExecutionContext.run_id(context)
+
+    blocked_entry = %{
+      issue_id: context.issue_id,
+      identifier: context.issue_identifier,
+      issue: issue,
+      execution_context: context,
+      durable_authority: authority,
+      worker_host: context.worker_host,
+      workspace_path: context.workspace_path,
+      session_id: nil,
+      error: "durable credentials are unavailable: #{inspect(reason)}",
+      blocked_at: DateTime.utc_now(),
+      last_runtime_message: nil,
+      last_runtime_event: nil,
+      last_runtime_timestamp: nil
+    }
+
+    %{
+      state
+      | claimed: MapSet.put(state.claimed, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
   end
 
   defp release_untracked_lease(%State{} = state, %ExecutionContext{} = context, owner_id) do
@@ -1819,11 +2217,492 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp coordinator_owner_id(_state), do: default_coordinator_owner_id(__MODULE__)
 
+  defp configured_control_plane(opts) do
+    case Keyword.fetch(opts, :control_plane) do
+      {:ok, false} -> nil
+      {:ok, server} -> server
+      :error -> if(Process.whereis(ControlPlane), do: ControlPlane)
+    end
+  end
+
+  defp prepare_durable_authority(%State{control_plane: nil}, _context, _authority),
+    do: {:ok, nil}
+
+  defp prepare_durable_authority(
+         %State{},
+         _context,
+         %RunAuthority{} = authority
+       ),
+       do: {:ok, authority}
+
+  defp prepare_durable_authority(
+         %State{control_plane: server} = state,
+         %ExecutionContext{} = context,
+         nil
+       ),
+       do: RunAuthority.admit(server, coordinator_owner_id(state), context)
+
+  defp resolve_dispatch_context(nil, %ExecutionContext{} = context), do: {:ok, context}
+
+  defp resolve_dispatch_context(%RunAuthority{} = authority, _pinned_context),
+    do: ControlPlane.resolve_admission_credentials(authority.admission)
+
+  defp start_durable_authority(nil), do: {:ok, nil}
+
+  defp start_durable_authority(%RunAuthority{} = authority),
+    do: RunAuthority.transition(authority, :running, %{})
+
+  defp complete_skipped_authority(nil, _reason), do: :ok
+
+  defp complete_skipped_authority(%RunAuthority{} = authority, _reason) do
+    case RunAuthority.transition(authority, :completed, %{disposition: :skipped}) do
+      {:ok, completed} -> release_durable_authority(completed)
+      {:error, _reason} -> release_durable_authority(authority)
+    end
+  end
+
+  defp finalize_inactive_authority(nil, _reason), do: :ok
+
+  defp finalize_inactive_authority(%RunAuthority{} = authority, reason) do
+    case RunAuthority.transition(authority, :blocked, %{reason: reason}) do
+      {:ok, blocked} -> release_durable_authority(blocked)
+      {:error, _reason} -> release_durable_authority(authority)
+    end
+  end
+
+  defp recover_durable_runs(%State{control_plane: nil} = state), do: state
+
+  defp recover_durable_runs(%State{control_plane: server} = state) do
+    case RunAuthority.recover(server, coordinator_owner_id(state)) do
+      {:ok, recoveries} ->
+        Enum.reduce(recoveries, state, &integrate_durable_recovery/2)
+
+      {:error, reason} ->
+        Logger.error("Durable run recovery failed: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp integrate_durable_recovery(
+         %{
+           action: action,
+           authority: %RunAuthority{} = authority,
+           execution_context: %ExecutionContext{} = context
+         },
+         %State{} = state
+       )
+       when action in [:dispatch, :retry] do
+    run_id = ExecutionContext.run_id(context)
+    release_coordinator_lease(context, nil)
+    now_ms = System.system_time(:millisecond)
+    retry_due_at_ms = authority.lifecycle.retry_due_at_ms || now_ms
+    delay_ms = max(retry_due_at_ms - now_ms, 1)
+    attempt = max(authority.lifecycle.retry_attempt || 1, 1)
+
+    state
+    |> Map.update!(:claimed, &MapSet.put(&1, run_id))
+    |> schedule_issue_retry(run_id, attempt, %{
+      execution_context: context,
+      durable_authority: authority,
+      identifier: authority.admission.issue_identifier,
+      retry_delay_ms: delay_ms,
+      error: if(action == :retry, do: "recovering interrupted run")
+    })
+  end
+
+  defp integrate_durable_recovery(
+         %{
+           action: :blocked,
+           authority: %RunAuthority{} = authority,
+           blocked_reason: blocked_reason
+         },
+         %State{} = state
+       ) do
+    context = authority.admission.context
+    run_id = ExecutionContext.run_id(context)
+    release_coordinator_lease(context, nil)
+    release_durable_authority(authority)
+
+    blocked_entry = %{
+      issue_id: context.issue_id,
+      identifier: context.issue_identifier,
+      issue: nil,
+      execution_context: context,
+      durable_authority: authority,
+      worker_host: context.worker_host,
+      workspace_path: context.workspace_path,
+      session_id: nil,
+      error: blocked_reason || authority.lifecycle.blocked_reason,
+      blocked_at: DateTime.utc_now(),
+      last_runtime_message: nil,
+      last_runtime_event: nil,
+      last_runtime_timestamp: nil
+    }
+
+    %{
+      state
+      | claimed: MapSet.put(state.claimed, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
+  defp integrate_durable_recovery(
+         %{action: :cleanup, authority: %RunAuthority{} = authority},
+         %State{} = state
+       ) do
+    context = authority.admission.context
+    run_id = ExecutionContext.run_id(context)
+    release_coordinator_lease(context, nil)
+
+    case run_durable_cleanup(authority, context) do
+      {:ok, cleaned} ->
+        release_durable_authority(cleaned)
+        release_issue_claim(state, run_id, context)
+
+      {:error, reason} ->
+        Logger.warning("Recovered cleanup blocked target_id=#{context.target.target_id} issue_id=#{context.issue_id}: #{inspect(reason)}")
+        release_durable_authority(authority)
+
+        blocked_entry = %{
+          issue_id: context.issue_id,
+          identifier: context.issue_identifier,
+          issue: nil,
+          execution_context: context,
+          durable_authority: authority,
+          worker_host: context.worker_host,
+          workspace_path: context.workspace_path,
+          session_id: nil,
+          error: "durable cleanup requires operator reconciliation",
+          blocked_at: DateTime.utc_now(),
+          last_runtime_message: nil,
+          last_runtime_event: nil,
+          last_runtime_timestamp: nil
+        }
+
+        %{
+          state
+          | claimed: MapSet.put(state.claimed, run_id),
+            blocked: Map.put(state.blocked, run_id, blocked_entry)
+        }
+    end
+  end
+
+  defp run_durable_cleanup(%RunAuthority{} = authority, %ExecutionContext{} = context) do
+    result =
+      RunAuthority.run_side_effect(
+        authority,
+        :workspace_cleanup,
+        "cleanup:#{authority.lifecycle.sequence}",
+        %{workspace_path: context.workspace_path},
+        fn -> remove_workspace_outcome(context) end
+      )
+
+    finish_durable_cleanup(authority, result)
+  end
+
+  defp remove_workspace_outcome(context) do
+    case Workspace.remove(context) do
+      {:ok, removed} -> {:ok, %{removed: inspect(removed)}}
+      {:error, reason} -> {:failed, %{reason: inspect(reason)}}
+    end
+  end
+
+  defp finish_durable_cleanup(authority, {:ok, _outcome, _effect}),
+    do: RunAuthority.transition(authority, :cleaned, %{})
+
+  defp finish_durable_cleanup(authority, {:completed, _effect}),
+    do: RunAuthority.transition(authority, :cleaned, %{})
+
+  defp finish_durable_cleanup(_authority, {:failed, effect}),
+    do: {:error, {:cleanup_failed, effect}}
+
+  defp finish_durable_cleanup(_authority, {:blocked, effect}),
+    do: {:error, {:cleanup_reconciliation_required, effect}}
+
+  defp finish_durable_cleanup(_authority, {:error, reason}), do: {:error, reason}
+
+  defp release_durable_authority(%RunAuthority{} = authority) do
+    case RunAuthority.release(authority) do
+      :ok -> :ok
+      {:error, reason} -> Logger.warning("Durable lease release failed: #{inspect(reason)}")
+    end
+  end
+
+  defp release_durable_authority(_authority), do: :ok
+
+  defp transition_durable_entry(running_entry, _next_state, _evidence)
+       when not is_map(running_entry),
+       do: running_entry
+
+  defp transition_durable_entry(running_entry, next_state, evidence) do
+    case Map.get(running_entry, :durable_authority) do
+      %RunAuthority{} = authority ->
+        case RunAuthority.transition(authority, next_state, evidence) do
+          {:ok, transitioned} ->
+            Map.put(running_entry, :durable_authority, transitioned)
+
+          {:error, reason} ->
+            Logger.error("Durable lifecycle transition failed run_id=#{inspect(ExecutionContext.run_id(running_entry.execution_context))} next_state=#{next_state}: #{inspect(reason)}")
+
+            Map.put(running_entry, :durable_error, reason)
+        end
+
+      _no_authority ->
+        running_entry
+    end
+  end
+
+  defp complete_durable_run(nil, %ExecutionContext{} = context) do
+    case Workspace.remove(context) do
+      {:ok, _removed} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp complete_durable_run(%RunAuthority{} = authority, %ExecutionContext{} = context) do
+    with {:ok, completed} <-
+           RunAuthority.transition(authority, :completed, %{disposition: :succeeded}),
+         {:ok, cleanup_pending} <-
+           RunAuthority.transition(completed, :cleanup_pending, %{}),
+         {:ok, cleaned} <- run_durable_cleanup(cleanup_pending, context) do
+      release_durable_authority(cleaned)
+      :ok
+    end
+  end
+
+  defp register_durable_process(%State{} = state, run_id, identity) do
+    case Map.get(state.running, run_id) do
+      %{durable_authority: %RunAuthority{} = authority} = running_entry ->
+        case RunAuthority.register_process(authority, identity) do
+          {:ok, registered} ->
+            updated =
+              running_entry
+              |> Map.put(:durable_authority, registered)
+              |> Map.put(:durable_process_identity, identity)
+
+            %{state | running: Map.put(state.running, run_id, updated)}
+
+          {:error, reason} ->
+            stop_and_block_issue(
+              state,
+              run_id,
+              running_entry,
+              "durable process registration failed: #{inspect(reason)}"
+            )
+        end
+
+      _no_durable_run ->
+        state
+    end
+  end
+
+  defp stop_and_verify_durable_process(%{durable_authority: %RunAuthority{} = authority} = running_entry) do
+    case Map.get(running_entry, :durable_process_identity) do
+      %{"process_group_id" => process_group_id} = identity
+      when is_integer(process_group_id) ->
+        verify_durable_process_stop(
+          authority,
+          running_entry,
+          identity,
+          process_group_id
+        )
+
+      _missing ->
+        {:error, :process_identity_missing}
+    end
+  end
+
+  defp stop_and_verify_durable_process(running_entry), do: {:ok, running_entry}
+
+  defp verify_durable_process_stop(
+         authority,
+         running_entry,
+         identity,
+         process_group_id
+       ) do
+    identity
+    |> ProcessSupervisor.terminate_recovered_group()
+    |> record_verified_process_stop(
+      authority,
+      running_entry,
+      process_group_id
+    )
+  end
+
+  defp record_verified_process_stop(
+         {:stopped, evidence},
+         authority,
+         running_entry,
+         process_group_id
+       ) do
+    case RunAuthority.record_process_stopped(
+           authority,
+           process_group_id,
+           evidence
+         ) do
+      {:ok, stopped} ->
+        {:ok, Map.put(running_entry, :durable_authority, stopped)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp record_verified_process_stop(
+         {:unverifiable, evidence},
+         _authority,
+         _running_entry,
+         _process_group_id
+       ),
+       do: {:error, {:process_termination_unverifiable, evidence}}
+
+  defp record_durable_process_stopped(
+         %State{} = state,
+         run_id,
+         process_group_id,
+         evidence
+       ) do
+    case Map.get(state.running, run_id) do
+      %{durable_authority: %RunAuthority{} = authority} = running_entry ->
+        case RunAuthority.record_process_stopped(
+               authority,
+               process_group_id,
+               evidence
+             ) do
+          {:ok, stopped} ->
+            updated = Map.put(running_entry, :durable_authority, stopped)
+            %{state | running: Map.put(state.running, run_id, updated)}
+
+          {:error, reason} ->
+            stop_and_block_issue(
+              state,
+              run_id,
+              running_entry,
+              "durable process termination record failed: #{inspect(reason)}"
+            )
+        end
+
+      _no_durable_run ->
+        state
+    end
+  end
+
+  defp block_durable_identity_failure(%State{} = state, run_id, error) do
+    case Map.get(state.running, run_id) do
+      %{durable_authority: %RunAuthority{}} = running_entry ->
+        stop_and_block_issue(state, run_id, running_entry, error)
+
+      _no_durable_run ->
+        state
+    end
+  end
+
+  defp schedule_durable_lease_renewal(%State{control_plane: server, durable_renew_timer_ref: nil} = state)
+       when not is_nil(server) do
+    timer_ref =
+      Process.send_after(
+        self(),
+        :renew_durable_leases,
+        @durable_lease_renew_interval_ms
+      )
+
+    %{state | durable_renew_timer_ref: timer_ref}
+  end
+
+  defp schedule_durable_lease_renewal(%State{} = state), do: state
+
+  defp renew_durable_leases(%State{control_plane: nil} = state), do: state
+
+  defp renew_durable_leases(%State{} = state) do
+    state =
+      Enum.reduce(Map.keys(state.running), state, fn run_id, state_acc ->
+        renew_running_authority(state_acc, run_id)
+      end)
+
+    Enum.reduce(Map.keys(state.retry_attempts), state, fn run_id, state_acc ->
+      renew_retry_authority(state_acc, run_id)
+    end)
+  end
+
+  defp renew_running_authority(%State{} = state, run_id) do
+    case Map.get(state.running, run_id) do
+      %{durable_authority: %RunAuthority{} = authority} = running_entry ->
+        case RunAuthority.renew(authority) do
+          {:ok, renewed} ->
+            updated = Map.put(running_entry, :durable_authority, renewed)
+            %{state | running: Map.put(state.running, run_id, updated)}
+
+          {:error, reason} ->
+            stop_and_block_issue(
+              state,
+              run_id,
+              running_entry,
+              "durable lease renewal failed: #{inspect(reason)}"
+            )
+        end
+
+      _no_durable_run ->
+        state
+    end
+  end
+
+  defp renew_retry_authority(%State{} = state, run_id) do
+    case Map.get(state.retry_attempts, run_id) do
+      %{durable_authority: %RunAuthority{} = authority} = retry_entry ->
+        case RunAuthority.renew(authority) do
+          {:ok, renewed} ->
+            updated = Map.put(retry_entry, :durable_authority, renewed)
+            %{state | retry_attempts: Map.put(state.retry_attempts, run_id, updated)}
+
+          {:error, reason} ->
+            Logger.error("Durable retry lease renewal failed run_id=#{inspect(run_id)}: #{inspect(reason)}")
+
+            block_retry_metadata(
+              state,
+              run_id,
+              retry_entry,
+              "durable retry lease renewal failed"
+            )
+        end
+
+      _no_durable_run ->
+        state
+    end
+  end
+
+  defp block_retry_metadata(state, run_id, metadata, error) do
+    context = metadata[:execution_context]
+
+    blocked_entry = %{
+      issue_id: issue_id_from_run_id(run_id),
+      identifier: metadata[:identifier] || issue_id_from_run_id(run_id),
+      issue: nil,
+      execution_context: context,
+      durable_authority: metadata[:durable_authority],
+      worker_host: metadata[:worker_host],
+      workspace_path: metadata[:workspace_path],
+      session_id: metadata[:session_id],
+      error: error,
+      blocked_at: DateTime.utc_now(),
+      last_runtime_message: nil,
+      last_runtime_event: nil,
+      last_runtime_timestamp: nil
+    }
+
+    %{
+      state
+      | claimed: MapSet.put(state.claimed, run_id),
+        retry_attempts: Map.delete(state.retry_attempts, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
   defp spawn_issue_in_context(
          %State{} = state,
          issue,
          attempt,
-         %ExecutionContext{} = context
+         %ExecutionContext{} = context,
+         durable_authority
        ) do
     recipient = self()
     run_id = ExecutionContext.run_id(context)
@@ -1843,6 +2722,7 @@ defmodule SymphonyElixir.Orchestrator do
             identifier: issue.identifier,
             issue: issue,
             execution_context: context,
+            durable_authority: durable_authority,
             worker_host: context.worker_host,
             workspace_path: context.workspace_path,
             stall_timeout_ms: context.runner_config["stall_timeout_ms"],
@@ -1901,6 +2781,7 @@ defmodule SymphonyElixir.Orchestrator do
             execution_context: context,
             identifier: issue.identifier,
             issue_url: issue.url,
+            durable_authority: durable_authority,
             error: "failed to spawn agent: #{inspect(reason)}",
             worker_host: context.worker_host
           }
@@ -1980,6 +2861,10 @@ defmodule SymphonyElixir.Orchestrator do
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
     context = metadata[:execution_context] || Map.get(previous_retry, :execution_context)
+
+    durable_authority =
+      metadata[:durable_authority] || Map.get(previous_retry, :durable_authority)
+
     policy_fields = context_policy_tracking_fields(context)
     profile = pick_retry_profile(previous_retry, metadata, policy_fields)
     target = pick_retry_target(previous_retry, metadata, policy_fields)
@@ -2008,6 +2893,7 @@ defmodule SymphonyElixir.Orchestrator do
         worker_host: worker_host,
         workspace_path: workspace_path,
         execution_context: context,
+        durable_authority: durable_authority,
         profile: profile,
         target: target,
         policy_ref: policy_ref
@@ -2029,6 +2915,7 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path),
           execution_context: Map.get(retry_entry, :execution_context),
+          durable_authority: Map.get(retry_entry, :durable_authority),
           profile: Map.get(retry_entry, :profile),
           target: Map.get(retry_entry, :target),
           policy_ref: Map.get(retry_entry, :policy_ref)
@@ -2053,11 +2940,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp fetch_and_handle_retry_issue(state, run_id, attempt, metadata) do
     context = metadata[:execution_context]
+    issue_id = issue_id_from_run_id(run_id)
 
-    case resolve_retry_candidates(context) do
-      {:ok, %RunTarget.Resolution{issues: issues}} ->
+    case fetch_retry_issues(context, issue_id) do
+      {:ok, issues} ->
         state = clear_tracker_rate_limit(state)
-        issue_id = issue_id_from_run_id(run_id)
 
         issues
         |> find_issue_by_id(issue_id)
@@ -2079,10 +2966,19 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp resolve_retry_candidates(%ExecutionContext{target: target}),
-    do: Tracker.resolve_candidate_issues_uncached(target)
+  defp fetch_retry_issues(
+         %ExecutionContext{target: target},
+         issue_id
+       )
+       when is_binary(issue_id),
+       do: Tracker.fetch_issue_states_by_ids(target, [issue_id])
 
-  defp resolve_retry_candidates(_context), do: Tracker.resolve_candidate_issues_uncached()
+  defp fetch_retry_issues(_context, _issue_id) do
+    case Tracker.resolve_candidate_issues_uncached() do
+      {:ok, %RunTarget.Resolution{issues: issues}} -> {:ok, issues}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp retry_tracker_backoff_issue(%State{} = state, run_id, attempt, metadata) do
     remaining_ms =
@@ -2112,20 +3008,45 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue state is terminal: #{retry_log_context(run_id, context, issue.identifier)} state=#{issue.state}; removing associated workspace")
 
-        cleanup_issue_workspace(context, issue.identifier, metadata[:worker_host])
-        {:noreply, release_issue_claim(state, run_id, context)}
+        case complete_durable_run(metadata[:durable_authority], context) do
+          :ok ->
+            {:noreply, release_issue_claim(state, run_id, context)}
+
+          {:error, reason} ->
+            Logger.warning("Terminal durable cleanup blocked for #{retry_log_context(run_id, context, issue.identifier)}: #{inspect(reason)}")
+
+            {:noreply,
+             block_retry_metadata(
+               state,
+               run_id,
+               metadata,
+               "terminal cleanup requires operator reconciliation"
+             )}
+        end
 
       retry_candidate_issue?(issue, terminal_states) ->
         handle_active_retry(state, run_id, issue, attempt, metadata)
 
       true ->
         Logger.debug("Issue left active states, removing claim #{retry_log_context(run_id, context, issue.identifier)}")
+
+        finalize_inactive_authority(
+          metadata[:durable_authority],
+          "issue_left_active_states"
+        )
+
         {:noreply, release_issue_claim(state, run_id, context)}
     end
   end
 
   defp handle_retry_issue_lookup(nil, state, run_id, _attempt, metadata) do
     Logger.debug("Issue no longer visible, removing claim #{retry_log_context(run_id, metadata[:execution_context], metadata[:identifier])}")
+
+    finalize_inactive_authority(
+      metadata[:durable_authority],
+      "issue_no_longer_visible"
+    )
+
     {:noreply, release_issue_claim(state, run_id, metadata[:execution_context])}
   end
 
@@ -2167,7 +3088,15 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set(context), context) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host], context)}
+      {:noreply,
+       dispatch_issue(
+         state,
+         issue,
+         attempt,
+         metadata[:worker_host],
+         context,
+         metadata[:durable_authority]
+       )}
     else
       Logger.debug("No available slots for retrying #{retry_log_context(run_id, context, issue.identifier)}; retrying again")
 
@@ -2276,6 +3205,7 @@ defmodule SymphonyElixir.Orchestrator do
        when is_map(running_entry) and is_map(metadata) do
     metadata
     |> Map.put(:execution_context, Map.get(running_entry, :execution_context))
+    |> Map.put(:durable_authority, Map.get(running_entry, :durable_authority))
     |> Map.merge(policy_tracking_fields_from_running(running_entry))
   end
 
@@ -2382,13 +3312,134 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp maybe_put_worker_host(opts, _worker_host), do: opts
 
+  defp run_fenced_external(running_entry, kind, intent, operation)
+       when is_map(running_entry) and is_atom(kind) and is_map(intent) and
+              is_function(operation, 0) do
+    case Map.get(running_entry, :durable_authority) do
+      %RunAuthority{} = authority ->
+        run_durable_external(authority, kind, intent, operation)
+
+      _no_durable_authority ->
+        normalize_unfenced_external_result(operation.())
+    end
+  end
+
+  defp run_durable_external(authority, kind, intent, operation) do
+    authority
+    |> RunAuthority.run_side_effect(
+      kind,
+      "run-completion",
+      intent,
+      operation
+    )
+    |> normalize_durable_external_result()
+  end
+
+  defp normalize_durable_external_result({:ok, result, _effect}), do: {:ok, result}
+  defp normalize_durable_external_result({:completed, effect}), do: {:completed, effect}
+
+  defp normalize_durable_external_result({:failed, effect}),
+    do: {:error, {:side_effect_failed, effect}}
+
+  defp normalize_durable_external_result({:blocked, effect}),
+    do: {:error, {:reconciliation_required, effect}}
+
+  defp normalize_durable_external_result({:error, reason}), do: {:error, reason}
+
+  defp normalize_unfenced_external_result({:ok, result}), do: {:ok, result}
+
+  defp normalize_unfenced_external_result({:failed, result}),
+    do: {:error, {:side_effect_failed, result}}
+
+  defp fenced_external_result({:ok, result}), do: result
+
+  defp fenced_external_result({:completed, %{outcome: outcome} = effect})
+       when is_map(outcome) do
+    outcome
+    |> restore_durable_completion_result()
+    |> Map.put(:durable_replay, :completed)
+    |> Map.put(:artifact_path, effect.artifact_path)
+  end
+
+  defp fenced_external_result({:completed, effect}),
+    do: fenced_external_result({:error, {:completed_side_effect_outcome_missing, effect}})
+
+  defp fenced_external_result({:error, reason}) do
+    %{
+      status: :blocked,
+      failure: %{
+        reason: :durable_side_effect_blocked,
+        detail: inspect(reason)
+      }
+    }
+  end
+
+  defp restore_durable_completion_result(outcome) do
+    outcome
+    |> restore_durable_map_keys()
+    |> Map.update(:status, :unknown, &restore_durable_status/1)
+  end
+
+  defp restore_durable_map_keys(value) when is_map(value) do
+    Map.new(value, fn {key, nested} ->
+      restored_key = restore_durable_key(key)
+      restored_value = nested |> restore_durable_map_keys() |> restore_durable_field(restored_key)
+      {restored_key, restored_value}
+    end)
+  end
+
+  defp restore_durable_map_keys(value) when is_list(value),
+    do: Enum.map(value, &restore_durable_map_keys/1)
+
+  defp restore_durable_map_keys(value), do: value
+
+  defp restore_durable_field("true", key)
+       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation],
+       do: true
+
+  defp restore_durable_field("false", key)
+       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation],
+       do: false
+
+  defp restore_durable_field(value, _key), do: value
+
+  defp restore_durable_key(key) when is_atom(key), do: key
+
+  defp restore_durable_key(key) when is_binary(key) do
+    String.to_existing_atom(key)
+  rescue
+    ArgumentError -> key
+  end
+
+  defp restore_durable_key(key), do: key
+
+  defp restore_durable_status(:passed), do: :passed
+  defp restore_durable_status(:blocked), do: :blocked
+  defp restore_durable_status("passed"), do: :passed
+  defp restore_durable_status("blocked"), do: :blocked
+  defp restore_durable_status(_status), do: :unknown
+
+  defp durable_term_hash(term) do
+    "sha256:" <>
+      (:crypto.hash(:sha256, :erlang.term_to_binary(term))
+       |> Base.encode16(case: :lower))
+  end
+
   defp run_publish_preflight(%{execution_context: %ExecutionContext{} = context} = running_entry) do
     if publish_handoff_policy?(context.policy) and
          HandoffRouteRecorder.completion_metadata?(Map.get(running_entry, :completion)) do
+      result =
+        run_fenced_external(
+          running_entry,
+          :publish_preflight,
+          %{issue_identifier: context.issue_identifier},
+          fn -> {:ok, PublishPreflight.run_context(context)} end
+        )
+
       put_completion_result(
         running_entry,
         :publish_preflight,
-        PublishPreflight.run_context(context)
+        fenced_external_result(result)
       )
     else
       running_entry
@@ -2423,8 +3474,16 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_map(completion) do
     if publish_handoff_policy?(context.policy) and publish_handoff_needed?(completion) do
-      context
-      |> PublishHandoff.run_context(issue, completion)
+      result =
+        run_fenced_external(
+          running_entry,
+          :publish_handoff,
+          %{issue_identifier: context.issue_identifier},
+          fn -> {:ok, PublishHandoff.run_context(context, issue, completion)} end
+        )
+
+      result
+      |> fenced_external_result()
       |> maybe_store_publish_handoff(running_entry)
     else
       running_entry
@@ -2988,15 +4047,35 @@ defmodule SymphonyElixir.Orchestrator do
   defp workflow_module_refs(_resolution), do: []
 
   defp maybe_persist_handoff_route(
-         %{execution_context: %ExecutionContext{} = context},
+         %{execution_context: %ExecutionContext{} = context} = running_entry,
          %HandoffRoute.Decision{} = decision
        ) do
-    case HandoffRouteRecorder.record(context, decision) do
-      :ok ->
+    result =
+      run_fenced_external(
+        running_entry,
+        :handoff_route,
+        %{
+          issue_identifier: context.issue_identifier,
+          decision_sha256: durable_term_hash(decision)
+        },
+        fn ->
+          case HandoffRouteRecorder.record(context, decision) do
+            :ok -> {:ok, %{status: "recorded"}}
+            {:error, reason} -> {:failed, %{reason: inspect(reason)}}
+          end
+        end
+      )
+
+    case result do
+      {:ok, _result} ->
+        :ok
+
+      {:completed, _effect} ->
         :ok
 
       {:error, reason} ->
-        Logger.warning("Unable to persist handoff route for #{execution_context_log(context)}: #{inspect(reason)}")
+        Logger.warning("Unable to persist fenced handoff route for #{execution_context_log(context)}: #{inspect(reason)}")
+
         :ok
     end
   end

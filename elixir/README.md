@@ -136,8 +136,8 @@ mise exec -- ./bin/symphony run --workflow /path/to/local-symphony-runtime.yml
 
 From a checkout, the repository also provides a higher-level shell launcher at `../bin/symphony`.
 It keeps local shell glue in this repo instead of dotfiles, resolves local runtime setup files,
-optionally loads `~/.config/symphony/.env` through `op run`, rebuilds the escript before launching,
-and passes the resolved run setup to the Elixir CLI.
+optionally loads `~/.config/symphony/.env` through `op run`, compiles the application, and launches
+the CLI through Mix so native dependencies remain loadable.
 
 For first-run local use, invoke bare `symphony` from a repository with a valid `symphony.yml`.
 The launcher opens a picker showing saved `default`, then `main`, then other saved workflows,
@@ -159,6 +159,14 @@ capacity profiles. Saved names are lowercase slugs and live at
 Explicit issue IDs use issue-batch mode with a limit of one by default. Explicit issue and
 interactive local runs accept `--max-agents`, `--max-startups`, `--no-land`, and
 `--human-review-only`. These options can only reduce selected capacity or add safety restrictions.
+Phase 3 self-dogfood must use explicit issue batches with
+`--max-agents 1 --max-startups 1 --no-land --human-review-only`; do not use a saved watch target.
+Retain the resolved preview, run ID
+and startup owner, post-restart control-plane inspection, repository validation output, and final
+handoff route with the child issue. For an interrupted-run case, stop the Symphony host, restart the
+same explicit batch, and confirm that the old fencing generation is stale before the retry starts.
+If process ownership, credentials, or a delivery outcome cannot be verified, leave the run blocked
+and use `control-plane inspect`, `resume`, or `abandon`; do not replay the external action.
 
 Use `symphony list` for read-only catalog inspection:
 
@@ -247,11 +255,27 @@ store supports pinned admissions, leases, fenced lifecycle transitions, side-eff
 process ownership, and restart recovery. Autonomous multi-target activation, fairness, and
 scheduling remain deferred.
 
+For each runtime dispatch, the orchestrator commits the pinned admission and acquires its durable
+lease before it resolves current credentials or revalidates tracker state. It renews the lease every
+10 seconds, records the adapter process identity before the first turn, and persists running,
+retrying, blocked, completion, and cleanup transitions. Publish preflight, publish handoff,
+handoff-route tracker writes, and workspace cleanup start only through the current fenced side-effect
+intent. Startup recovery fences the prior owner, verifies or terminates its recorded process group,
+releases the legacy coordinator lease, and retries from the pinned admission.
+
 The deterministic contract test is
 `test/symphony_elixir/two_target_isolation_test.exs`. It poisons mutable global configuration after
 admission and covers two target scopes through tracker resolution, workspace hooks, prompt and
 module resolution, runtime preflight, AgentRunner, quality gates, publish and handoff, tracker
 mutation, orchestrator stall/retry/crash/blocked state, artifacts, and cleanup.
+The Phase 3 crash/restart contract is
+`test/symphony_elixir/control_plane_test.exs` test
+`two-target crash recovery preserves pinned authority and fenced side effects`. It admits two
+targets with one tracker issue identity, interrupts both while they own processes, poisons mutable
+registry and workflow files, rotates or removes recovery credentials, and reopens the durable store.
+The test proves deterministic retry and blocked recovery, stale-owner rejection, no replay of an
+interrupted delivery intent, idempotent recovered delivery, target-scoped artifacts, and fenced
+cleanup.
 
 ## Configuration
 

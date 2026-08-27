@@ -10,7 +10,7 @@ defmodule SymphonyElixir.AgentRuntime do
   require Logger
 
   alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OpenCodeServer}
-  alias SymphonyElixir.{Config, ExecutionContext}
+  alias SymphonyElixir.{Config, ExecutionContext, ProcessSupervisor}
   alias SymphonyElixir.Config.Schema
 
   @type adapter_config :: term()
@@ -181,6 +181,18 @@ defmodule SymphonyElixir.AgentRuntime do
        }}
     end
   end
+
+  @doc """
+  Returns the stable local process identity used for fenced restart recovery.
+  """
+  @spec recovery_identity(Session.t()) ::
+          {:ok, ProcessSupervisor.recovery_identity()} | {:error, :recovery_identity_unavailable | term()}
+  def recovery_identity(%Session{
+        adapter_session: %{process: %ProcessSupervisor{} = process}
+      }),
+      do: ProcessSupervisor.recovery_identity(process)
+
+  def recovery_identity(%Session{}), do: {:error, :recovery_identity_unavailable}
 
   @spec send_turn(Session.t(), String.t(), map()) :: {:ok, term()} | {:error, term()}
   def send_turn(session, prompt, issue), do: send_turn(session, prompt, issue, [])

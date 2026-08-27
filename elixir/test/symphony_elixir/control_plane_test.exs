@@ -1265,6 +1265,283 @@ defmodule SymphonyElixir.ControlPlaneTest do
              )
   end
 
+  test "two-target crash recovery preserves pinned authority and fenced side effects" do
+    config_root = tmp_root!("control-plane-two-target-crash")
+    {clock_state, clock} = test_clock!(8_500_000)
+    registry_path = Path.join(config_root, "target-registry.yml")
+    workflow_path = Path.join(config_root, "workflow.yml")
+    File.write!(registry_path, "registry-generation=admitted\n")
+    File.write!(workflow_path, "mix test.sid433\n")
+
+    pinned_generation = hash(File.read!(registry_path))
+    pinned_check = workflow_path |> File.read!() |> String.trim()
+    server = start_control_plane!(config_root, clock: clock)
+
+    alpha =
+      execution_context!(config_root, "alpha", "shared-issue", "SID-433",
+        generation: pinned_generation,
+        check: pinned_check,
+        tracker_key: "$ALPHA_TRACKER_KEY",
+        runner_password: "env:ALPHA_RUNNER_PASSWORD",
+        side_effect_gates: all_side_effect_gates()
+      )
+
+    beta =
+      execution_context!(config_root, "beta", "shared-issue", "SID-433",
+        generation: pinned_generation,
+        check: pinned_check,
+        tracker_key: "$BETA_TRACKER_KEY",
+        runner_password: "env:BETA_RUNNER_PASSWORD",
+        side_effect_gates: all_side_effect_gates()
+      )
+
+    assert {:ok, alpha_admission} = ControlPlane.admit_run(server, alpha)
+    assert {:ok, beta_admission} = ControlPlane.admit_run(server, beta)
+    refute alpha_admission.admitted_run_id == beta_admission.admitted_run_id
+
+    assert {:ok, alpha_old_lease} =
+             ControlPlane.acquire_lease(server, alpha_admission.admitted_run_id, "owner-old-alpha")
+
+    assert {:ok, beta_old_lease} =
+             ControlPlane.acquire_lease(server, beta_admission.admitted_run_id, "owner-old-beta")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, alpha_old_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(server, beta_old_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, alpha_old_lease, process_identity(50_001))
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, beta_old_lease, process_identity(50_002))
+
+    assert {:ok, %SideEffect{state: :pending} = interrupted_delivery} =
+             ControlPlane.begin_side_effect(
+               server,
+               alpha_old_lease,
+               :publish_handoff,
+               "delivery-before-crash",
+               %{commit: "alpha-pinned"}
+             )
+
+    File.write!(registry_path, "registry-generation=poisoned\n")
+    File.write!(workflow_path, "mix poisoned\n")
+    stop_process(server)
+    set_clock!(clock_state, 8_501_000)
+    reopened = start_control_plane!(config_root, clock: clock)
+    parent = self()
+
+    env_fetcher = fn
+      "ALPHA_TRACKER_KEY" -> {:ok, "rotated-alpha-tracker"}
+      "ALPHA_RUNNER_PASSWORD" -> {:ok, "rotated-alpha-runner"}
+      "BETA_TRACKER_KEY" -> {:ok, "rotated-beta-tracker"}
+      "BETA_RUNNER_PASSWORD" -> :error
+    end
+
+    assert {:ok, recovered} =
+             ControlPlane.recover_runs(reopened, "owner-restarted",
+               process_terminator: fn ownership ->
+                 send(parent, {:terminated_before_recovery, ownership})
+                 {:stopped, %{verified_by: "sid_433_test"}}
+               end,
+               env_fetcher: env_fetcher
+             )
+
+    assert Enum.map(recovered, & &1.admission.target_id) == ["alpha", "beta"]
+    by_target = Map.new(recovered, &{&1.admission.target_id, &1})
+
+    assert %Recovery{
+             action: :retry,
+             execution_context: recovered_alpha,
+             lifecycle: %Lifecycle{
+               state: :retrying,
+               sequence: 3,
+               retry_attempt: 1,
+               failure: %{"code" => "host_restart"}
+             },
+             lease: alpha_recovery_lease
+           } = by_target["alpha"]
+
+    assert %Recovery{
+             action: :blocked,
+             execution_context: nil,
+             blocked_reason: "recovery credentials are missing",
+             lifecycle: %Lifecycle{
+               state: :blocked,
+               sequence: 3,
+               blocked_reason: "recovery credentials are missing"
+             },
+             lease: beta_recovery_lease
+           } = by_target["beta"]
+
+    assert recovered_alpha.target.target_id == "alpha"
+    assert recovered_alpha.target.registry_generation == pinned_generation
+    assert recovered_alpha.target.effective_checks["pre_handoff"] == [pinned_check]
+    assert recovered_alpha.workspace_path == alpha.workspace_path
+    refute inspect(recovered_alpha) =~ "poisoned"
+    refute inspect(recovered_alpha) =~ "rotated-alpha"
+
+    beta_pinned = by_target["beta"].admission.context
+    assert beta_pinned.target.target_id == "beta"
+    assert beta_pinned.target.registry_generation == pinned_generation
+    assert beta_pinned.target.effective_checks["pre_handoff"] == [pinned_check]
+    refute inspect(beta_pinned) =~ "poisoned"
+
+    assert alpha_recovery_lease.fencing_token > alpha_old_lease.fencing_token
+    assert beta_recovery_lease.fencing_token > beta_old_lease.fencing_token
+
+    assert_receive {:terminated_before_recovery, %ProcessOwnership{target_id: "alpha", process_group_id: 50_001}}
+
+    assert_receive {:terminated_before_recovery, %ProcessOwnership{target_id: "beta", process_group_id: 50_002}}
+
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(reopened, alpha_old_lease)
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(reopened, beta_old_lease)
+
+    for {lease, kind} <- [
+          {alpha_old_lease, :publish_handoff},
+          {beta_old_lease, :workspace_cleanup}
+        ] do
+      assert {:error, :stale_lease} =
+               ControlPlane.run_side_effect(
+                 reopened,
+                 lease,
+                 kind,
+                 "stale-after-fence",
+                 %{},
+                 fn ->
+                   send(parent, {:stale_side_effect_started, kind})
+                   {:ok, %{}}
+                 end
+               )
+    end
+
+    refute_receive {:stale_side_effect_started, _kind}
+
+    assert {:blocked,
+            %SideEffect{
+              state: :reconciliation_required,
+              artifact_path: interrupted_artifact_path
+            }} =
+             ControlPlane.run_side_effect(
+               reopened,
+               alpha_recovery_lease,
+               :publish_handoff,
+               "delivery-before-crash",
+               %{commit: "alpha-pinned"},
+               fn ->
+                 send(parent, :interrupted_delivery_replayed)
+                 {:ok, %{status: "published"}}
+               end
+             )
+
+    assert interrupted_artifact_path == interrupted_delivery.artifact_path
+    refute_receive :interrupted_delivery_replayed
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 4}} =
+             ControlPlane.transition_run(
+               reopened,
+               alpha_recovery_lease,
+               3,
+               :retrying,
+               :running,
+               %{}
+             )
+
+    delivery = fn ->
+      send(parent, :recovered_delivery_started)
+      {:ok, %{status: "published"}}
+    end
+
+    assert {:ok, %SideEffect{state: :succeeded} = delivered} =
+             ControlPlane.run_side_effect(
+               reopened,
+               alpha_recovery_lease,
+               :publish_handoff,
+               "delivery-after-restart",
+               %{commit: "alpha-retry"},
+               delivery
+             )
+
+    assert_receive :recovered_delivery_started
+
+    assert {:ok, ^delivered} =
+             ControlPlane.run_side_effect(
+               reopened,
+               alpha_recovery_lease,
+               :publish_handoff,
+               "delivery-after-restart",
+               %{commit: "alpha-retry"},
+               delivery
+             )
+
+    refute_receive :recovered_delivery_started
+
+    assert {:ok, %Lifecycle{state: :completed, sequence: 5}} =
+             ControlPlane.transition_run(
+               reopened,
+               alpha_recovery_lease,
+               4,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:ok, %Lifecycle{state: :cleanup_pending, sequence: 6}} =
+             ControlPlane.transition_run(
+               reopened,
+               alpha_recovery_lease,
+               5,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    assert {:ok, %SideEffect{state: :succeeded} = cleanup_effect} =
+             ControlPlane.run_side_effect(
+               reopened,
+               alpha_recovery_lease,
+               :workspace_cleanup,
+               "cleanup-after-restart",
+               %{workspace: alpha.workspace_path},
+               fn ->
+                 send(parent, :recovered_cleanup_started)
+                 {:ok, %{removed: true}}
+               end
+             )
+
+    assert_receive :recovered_cleanup_started
+
+    assert {:ok, %Lifecycle{state: :cleaned, sequence: 7}} =
+             ControlPlane.transition_run(
+               reopened,
+               alpha_recovery_lease,
+               6,
+               :cleanup_pending,
+               :cleaned,
+               %{}
+             )
+
+    assert {:ok, alpha_effects} =
+             ControlPlane.list_side_effects(reopened, alpha_admission.admitted_run_id)
+
+    assert {:ok, []} =
+             ControlPlane.list_side_effects(reopened, beta_admission.admitted_run_id)
+
+    assert length(alpha_effects) == 3
+    assert Enum.uniq(Enum.map(alpha_effects, & &1.artifact_path)) == Enum.map(alpha_effects, & &1.artifact_path)
+
+    for effect <- alpha_effects do
+      assert String.starts_with?(effect.artifact_path, alpha.workspace_path)
+      assert effect.target_id == "alpha"
+      refute effect.artifact_path =~ beta.workspace_path
+    end
+
+    assert cleanup_effect.artifact_path =~ "/workspace_cleanup/"
+    assert delivered.artifact_path =~ "/publish_handoff/"
+  end
+
   test "restart fences the old owner and converts verified interrupted work to a pinned retry" do
     config_root = tmp_root!("control-plane-recovery-running")
     {clock_state, clock} = test_clock!(9_000_000)
