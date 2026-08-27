@@ -72,6 +72,10 @@ defmodule SymphonyElixir.ProcessSupervisor do
         }
   @type startup_timeout :: (-> non_neg_integer())
   @type startup_fun :: (t(), startup_timeout() -> :ok | {:ok, term()} | {:error, term()})
+  @type recovery_identity :: %{
+          required(String.t()) => pos_integer() | String.t()
+        }
+  @type recovery_outcome :: {:stopped | :unverifiable, map()}
   @type t :: %__MODULE__{
           port: port(),
           os_pid: non_neg_integer() | nil,
@@ -162,6 +166,49 @@ defmodule SymphonyElixir.ProcessSupervisor do
 
   def identity(port) when is_port(port),
     do: %{os_pid: port_os_pid(port), process_group_id: nil}
+
+  @doc """
+  Captures the stable local identity required to reconcile this process group
+  after a host-process restart.
+  """
+  @spec recovery_identity(t()) :: {:ok, recovery_identity()} | {:error, term()}
+  def recovery_identity(%__MODULE__{cleanup: :process_group} = process) do
+    with process_group_id when is_integer(process_group_id) <- owned_process_group(process),
+         {:ok, parent_pid, ^process_group_id, started_at} <-
+           process_identity_with_start(process_group_id),
+         true <- parent_pid == process.wrapper_pid do
+      {:ok,
+       %{
+         "os_pid" => process.os_pid,
+         "process_group_id" => process_group_id,
+         "wrapper_pid" => process.wrapper_pid,
+         "started_at" => started_at
+       }}
+    else
+      _invalid -> {:error, :process_identity_unverifiable}
+    end
+  end
+
+  def recovery_identity(%__MODULE__{}), do: {:error, :process_group_not_owned}
+
+  @doc """
+  Terminates a process group only when its current leader still matches a
+  previously captured recovery identity.
+  """
+  @spec terminate_recovered_group(map()) :: recovery_outcome()
+  def terminate_recovered_group(identity) when is_map(identity) do
+    with {:ok, normalized} <- normalize_recovery_identity(identity),
+         :ok <- process_group_support() do
+      reconcile_recovered_group(normalized)
+    else
+      {:error, reason} ->
+        {:unverifiable, %{reason: inspect(reason), verified_by: "process_supervisor"}}
+    end
+  end
+
+  def terminate_recovered_group(_identity) do
+    {:unverifiable, %{reason: "invalid persisted process identity", verified_by: "process_supervisor"}}
+  end
 
   @spec descendant_cleanup_supported?() :: boolean()
   def descendant_cleanup_supported?, do: process_group_supported?()
@@ -935,24 +982,35 @@ defmodule SymphonyElixir.ProcessSupervisor do
   end
 
   defp process_identity(pid) when is_integer(pid) and pid > 0 do
+    case process_identity_with_start(pid) do
+      {:ok, parent_pid, process_group_id, _started_at} ->
+        {:ok, parent_pid, process_group_id}
+
+      :error ->
+        :error
+    end
+  end
+
+  defp process_identity_with_start(pid) when is_integer(pid) and pid > 0 do
     case System.cmd(
            "ps",
-           ["-o", "ppid=,pgid=", "-p", Integer.to_string(pid)],
+           ["-o", "ppid=,pgid=,lstart=", "-p", Integer.to_string(pid)],
            stderr_to_stdout: true
          ) do
-      {output, 0} -> parse_process_identity(output)
+      {output, 0} -> parse_process_identity_with_start(output)
       _failed -> :error
     end
   rescue
     _exception -> :error
   end
 
-  defp parse_process_identity(output) when is_binary(output) do
-    with [parent_text, group_text] <-
-           output |> String.trim() |> String.split(~r/\s+/, trim: true),
+  defp parse_process_identity_with_start(output) when is_binary(output) do
+    with [parent_text, group_text, started_at] <-
+           output |> String.trim() |> String.split(~r/\s+/, parts: 3, trim: true),
          {parent_pid, ""} <- Integer.parse(parent_text),
-         {process_group_id, ""} <- Integer.parse(group_text) do
-      {:ok, parent_pid, process_group_id}
+         {process_group_id, ""} <- Integer.parse(group_text),
+         true <- started_at != "" do
+      {:ok, parent_pid, process_group_id, started_at}
     else
       _invalid -> :error
     end
@@ -1032,6 +1090,108 @@ defmodule SymphonyElixir.ProcessSupervisor do
       wait_for_process_group(process_group_id, attempts - 1)
     else
       :ok
+    end
+  end
+
+  defp normalize_recovery_identity(identity) do
+    with {:ok, os_pid} <- fetch_identity_field(identity, "os_pid"),
+         {:ok, process_group_id} <- fetch_identity_field(identity, "process_group_id"),
+         {:ok, wrapper_pid} <- fetch_identity_field(identity, "wrapper_pid"),
+         {:ok, started_at} <- fetch_identity_field(identity, "started_at"),
+         true <- Enum.all?([os_pid, process_group_id, wrapper_pid], &(is_integer(&1) and &1 > 0)),
+         true <- os_pid == process_group_id,
+         true <- is_binary(started_at) and started_at != "" do
+      {:ok,
+       %{
+         os_pid: os_pid,
+         process_group_id: process_group_id,
+         wrapper_pid: wrapper_pid,
+         started_at: started_at
+       }}
+    else
+      _invalid -> {:error, :invalid_persisted_process_identity}
+    end
+  end
+
+  defp fetch_identity_field(identity, field) do
+    atom_field = String.to_existing_atom(field)
+
+    case {Map.fetch(identity, field), Map.fetch(identity, atom_field)} do
+      {{:ok, value}, :error} -> {:ok, value}
+      {:error, {:ok, value}} -> {:ok, value}
+      _missing_or_duplicate -> :error
+    end
+  end
+
+  defp reconcile_recovered_group(identity) do
+    case process_group_members(identity.process_group_id) do
+      {:ok, []} ->
+        {:stopped,
+         %{
+           result: "already_stopped",
+           verified_by: "process_supervisor",
+           process_group_id: identity.process_group_id
+         }}
+
+      {:ok, _members} ->
+        terminate_matching_recovered_group(identity)
+
+      {:error, reason} ->
+        {:unverifiable,
+         %{
+           reason: inspect(reason),
+           verified_by: "process_supervisor",
+           process_group_id: identity.process_group_id
+         }}
+    end
+  end
+
+  defp terminate_matching_recovered_group(identity) do
+    case process_identity_with_start(identity.os_pid) do
+      {:ok, parent_pid, process_group_id, started_at}
+      when parent_pid == identity.wrapper_pid and
+             process_group_id == identity.process_group_id and
+             started_at == identity.started_at ->
+        terminate_verified_recovered_group(identity.process_group_id)
+
+      observed ->
+        {:unverifiable,
+         %{
+           reason: "persisted process identity does not match the live group leader",
+           observed_identity: inspect(observed),
+           verified_by: "process_supervisor",
+           process_group_id: identity.process_group_id
+         }}
+    end
+  end
+
+  defp terminate_verified_recovered_group(process_group_id) do
+    signal_process_group(process_group_id, "TERM")
+    Process.sleep(@termination_grace_ms)
+
+    if process_group_alive?(process_group_id) do
+      signal_process_group(process_group_id, "KILL")
+    end
+
+    wait_for_process_group(process_group_id, 10)
+
+    case process_group_cleanup_result(process_group_id) do
+      :ok ->
+        {:stopped,
+         %{
+           result: "terminated",
+           verified_by: "process_supervisor",
+           process_group_id: process_group_id
+         }}
+
+      {:error, {:process_cleanup_failed, detail}} ->
+        {:unverifiable,
+         %{
+           reason: "verified process group survived termination",
+           detail: inspect(detail),
+           verified_by: "process_supervisor",
+           process_group_id: process_group_id
+         }}
     end
   end
 

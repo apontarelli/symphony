@@ -1519,10 +1519,10 @@ Distinct terminal reasons are important because retry logic and logs differ.
 - The orchestrator serializes state mutations through one authority to avoid duplicate dispatch.
 - `claimed` and `running` checks are REQUIRED before launching any worker.
 - Reconciliation runs before dispatch on every tick.
-- Restart recovery is tracker-driven and filesystem-driven (without a durable orchestrator DB).
-- v1 does not require recovery of the resolved per-attempt workflow policy after process restart;
-  a recovered future dispatch MAY resolve policy from the current compiled workflow and runtime
-  config.
+- Hosts that do not enable durable admission use tracker- and filesystem-driven restart recovery.
+- Durably admitted runs MUST recover retry timing, blocked state, cleanup authority, and resolved
+  per-attempt policy from the pinned envelope according to Section 10.12. Mutable workflow or
+  registry configuration MUST NOT replace that authority after restart.
 - Startup terminal cleanup removes stale workspaces for issues already in terminal states.
 
 ## 8. Polling, Scheduling, and Reconciliation
@@ -2171,6 +2171,31 @@ unverifiable process group. Verified termination MUST be recorded before ownersh
 Unverifiable termination MUST move a running or retrying lifecycle to blocked in the same
 transaction; later verified termination may permit ownership transfer, but MUST NOT silently clear
 the blocked lifecycle.
+
+### 10.12 Durable Restart Recovery
+
+At control-plane startup, the recovery owner MUST load admitted, running, retrying, blocked, and
+cleanup-pending lifecycles in deterministic admission order. Recovery MUST issue a new fencing token
+before inspecting or terminating work owned by the previous token. The previous owner MUST then fail
+lease renewal and every fenced durable mutation, even if its worker survives the host-process
+restart.
+
+Local process ownership intended for recovery MUST include a stable leader PID, process-group ID,
+wrapper PID, and OS process start identity. Recovery MAY terminate a recorded process group only
+when the live leader still matches every stored identity field. An absent group is a verified stopped
+result. Missing identity, inspection failure, or an identity mismatch is unverifiable: recovery MUST
+not signal that group and MUST block the affected run for operator reconciliation.
+
+Interrupted running work MUST NOT reattach to a runtime-specific session. After verified old-process
+termination, it MUST transition under the new fencing token to an immediate retry with a durable
+`host_restart` failure. An unverifiable or unrecorded process outcome MUST transition running work to
+blocked instead. Existing retry attempt, deadline, and failure evidence; blocked reasons; completion
+disposition; and cleanup authority MUST survive without recomputation.
+
+The new owner MUST resolve current secret values from the references in the pinned admission before
+returning admitted or retrying work to execution. Missing or failed credential resolution MUST block
+only that run and MUST NOT persist or inspect the resolved value. Cleanup recovery uses its pinned
+cleanup authority and must remain blocked if prior process ownership is unverifiable.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
@@ -2933,19 +2958,14 @@ runtime policy and SHOULD fail fast when Chrome/Chromium launch infrastructure i
 
 ### 14.3 Partial State Recovery (Restart)
 
-Current design is intentionally in-memory for scheduler state.
-Restart recovery means the service can resume useful operation by polling tracker state and reusing
-preserved workspaces. It does not mean retry timers, running sessions, or live worker state survive
-process restart.
+The baseline single-target scheduler remains in-memory and recovers by polling tracker state, reusing
+preserved workspaces, and cleaning terminal workspaces. It does not restore process-memory retry
+timers or attach to running sessions.
 
-After restart:
-
-- No retry timers are restored from prior process memory.
-- No running sessions are assumed recoverable.
-- Service recovers by:
-  - startup terminal workspace cleanup
-  - fresh polling of active issues
-  - re-dispatching eligible work
+Durably admitted runs use the control-plane recovery contract in Section 10.12 instead. The new
+owner fences the prior token, verifies or blocks recorded process ownership, restores durable retry
+deadlines and blocked or cleanup work, and uses the pinned admission context. Runtime-specific
+session attachment is never part of restart recovery.
 
 ### 14.4 Operator Intervention Points
 
@@ -3516,7 +3536,6 @@ Use the same validation profiles as Section 17:
 - Incident signal intake extension defaults to dry-run, requires explicit project opt-in for create
   mode, documents project-monitoring ownership, binds create mode to the selected workflow tracker
   project, and performs bounded non-terminal duplicate suppression.
-- TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in compiled runtime config without prescribing UI
   implementation details.
 - TODO: Add first-class tracker write APIs (comments/state transitions) in the orchestrator instead

@@ -12,6 +12,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     Lifecycle,
     LifecycleTransition,
     ProcessOwnership,
+    Recovery,
     SideEffect
   }
 
@@ -1212,7 +1213,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
              ControlPlane.transition_run(server, lease, 1, :admitted, :running, %{})
 
     assert {:ok, %ProcessOwnership{state: :running, process_group_id: 41_001}} =
-             ControlPlane.register_process_group(server, lease, 41_001)
+             ControlPlane.register_process_group(server, lease, process_identity(41_001))
 
     assert {:error, :process_termination_unverified} =
              ControlPlane.transfer_lease(server, lease, "owner-b")
@@ -1262,6 +1263,389 @@ defmodule SymphonyElixir.ControlPlaneTest do
                41_001,
                {:stopped, %{verified_by: "late-owner"}}
              )
+  end
+
+  test "restart fences the old owner and converts verified interrupted work to a pinned retry" do
+    config_root = tmp_root!("control-plane-recovery-running")
+    {clock_state, clock} = test_clock!(9_000_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-431")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, old_lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-old")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, old_lease, 1, :admitted, :running, %{})
+
+    identity = process_identity(51_001)
+
+    assert {:ok, %ProcessOwnership{evidence: %{"identity" => ^identity}}} =
+             ControlPlane.register_process_group(server, old_lease, identity)
+
+    stop_process(server)
+    set_clock!(clock_state, 9_001_000)
+    reopened = start_control_plane!(config_root, clock: clock)
+    parent = self()
+
+    process_terminator = fn ownership ->
+      send(parent, {:terminated_old_group, ownership})
+      {:stopped, %{verified_by: "recovery_test"}}
+    end
+
+    assert {:ok,
+            [
+              %Recovery{
+                action: :retry,
+                execution_context: recovered_context,
+                lifecycle: %Lifecycle{
+                  state: :retrying,
+                  retry_attempt: 1,
+                  retry_due_at_ms: 9_001_000,
+                  failure: %{"code" => "host_restart"}
+                },
+                lease: recovered_lease
+              } = recovery
+            ]} =
+             ControlPlane.recover_runs(reopened, "owner-new",
+               process_terminator: process_terminator,
+               env_fetcher: fn "TRACKER_KEY" -> {:ok, "current-tracker-secret"} end
+             )
+
+    assert_receive {:terminated_old_group, %ProcessOwnership{fencing_token: old_token, process_group_id: 51_001}}
+
+    assert old_token == old_lease.fencing_token
+    assert recovered_lease.fencing_token > old_lease.fencing_token
+    assert recovered_context.target.policy_hash == context.target.policy_hash
+    assert recovered_context.policy == context.policy
+    refute inspect(recovery) =~ "current-tracker-secret"
+    refute database_bytes(ControlPlane.path(config_root: config_root)) =~ "current-tracker-secret"
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(reopened, old_lease)
+
+    assert {:error, :stale_lease} =
+             ControlPlane.transition_run(
+               reopened,
+               old_lease,
+               recovery.lifecycle.sequence,
+               :retrying,
+               :blocked,
+               %{reason: "stale worker"}
+             )
+  end
+
+  test "recovery resumes old process reconciliation after recovery itself crashes" do
+    config_root = tmp_root!("control-plane-recovery-interrupted")
+    server = start_control_plane!(config_root)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-431")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, old_lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-old")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, old_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, old_lease, process_identity(51_501))
+
+    stop_process(server)
+    reopened = start_control_plane!(config_root)
+    parent = self()
+
+    {recovery_pid, recovery_monitor} =
+      spawn_monitor(fn ->
+        ControlPlane.recover_runs(reopened, "owner-interrupted",
+          process_terminator: fn ownership ->
+            send(parent, {:interrupted_recovery_inspecting, ownership})
+            Process.sleep(:infinity)
+          end
+        )
+      end)
+
+    assert_receive {:interrupted_recovery_inspecting,
+                    %ProcessOwnership{
+                      fencing_token: old_token,
+                      process_group_id: 51_501
+                    }}
+
+    assert old_token == old_lease.fencing_token
+    Process.exit(recovery_pid, :kill)
+    assert_receive {:DOWN, ^recovery_monitor, :process, ^recovery_pid, :killed}
+
+    assert {:ok, [%Recovery{action: :retry, lifecycle: %Lifecycle{state: :retrying}}]} =
+             ControlPlane.recover_runs(reopened, "owner-resumed",
+               process_terminator: fn ownership ->
+                 send(parent, {:resumed_recovery_terminated, ownership})
+                 {:stopped, %{verified_by: "recovery_test"}}
+               end,
+               env_fetcher: fn "TRACKER_KEY" -> {:ok, "current-tracker-secret"} end
+             )
+
+    assert_receive {:resumed_recovery_terminated,
+                    %ProcessOwnership{
+                      fencing_token: ^old_token,
+                      process_group_id: 51_501
+                    }}
+  end
+
+  test "restart does not reuse stopped ownership from an earlier attempt" do
+    config_root = tmp_root!("control-plane-recovery-process-lineage")
+    server = start_control_plane!(config_root)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-431")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, first_lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-first")
+
+    assert {:ok, %Lifecycle{sequence: 2}} =
+             ControlPlane.transition_run(server, first_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, first_lease, process_identity(51_601))
+
+    assert {:ok, %ProcessOwnership{state: :stopped}} =
+             ControlPlane.record_process_group_termination(
+               server,
+               first_lease,
+               51_601,
+               {:stopped, %{verified_by: "recovery_test"}}
+             )
+
+    assert {:ok, %Lifecycle{sequence: 3, state: :retrying}} =
+             ControlPlane.transition_run(
+               server,
+               first_lease,
+               2,
+               :running,
+               :retrying,
+               %{
+                 attempt: 1,
+                 due_at_ms: System.system_time(:millisecond),
+                 failure: %{code: "runtime_failed", message: "retry"}
+               }
+             )
+
+    stop_process(server)
+    reopened = start_control_plane!(config_root)
+
+    assert {:ok, [%Recovery{action: :retry, lease: retry_lease}]} =
+             ControlPlane.recover_runs(reopened, "owner-retry", env_fetcher: fn "TRACKER_KEY" -> {:ok, "current-tracker-secret"} end)
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(reopened, retry_lease, 3, :retrying, :running, %{})
+
+    stop_process(reopened)
+    resumed = start_control_plane!(config_root)
+
+    assert {:ok,
+            [
+              %Recovery{
+                action: :blocked,
+                blocked_reason: "recorded process ownership is missing after interruption",
+                lifecycle: %Lifecycle{state: :blocked}
+              }
+            ]} =
+             ControlPlane.recover_runs(resumed, "owner-resumed",
+               process_terminator: fn _ownership ->
+                 flunk("recovery must not reuse process ownership from an earlier attempt")
+               end
+             )
+  end
+
+  test "restart blocks uncertain process ownership without attaching or retrying" do
+    config_root = tmp_root!("control-plane-recovery-unverifiable")
+    {_clock_state, clock} = test_clock!(9_100_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-1", "SID-431")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, old_lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-old")
+
+    assert {:ok, %Lifecycle{state: :running}} =
+             ControlPlane.transition_run(server, old_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, old_lease, process_identity(52_001))
+
+    stop_process(server)
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:ok,
+            [
+              %Recovery{
+                action: :blocked,
+                execution_context: nil,
+                blocked_reason: "process group termination is unverifiable",
+                lifecycle: %Lifecycle{
+                  state: :blocked,
+                  blocked_reason: "process group termination is unverifiable"
+                },
+                lease: recovered_lease
+              }
+            ]} =
+             ControlPlane.recover_runs(reopened, "owner-new",
+               process_terminator: fn _ownership ->
+                 {:unverifiable, %{reason: "live identity did not match"}}
+               end
+             )
+
+    assert recovered_lease.fencing_token > old_lease.fencing_token
+    assert {:error, :stale_lease} = ControlPlane.renew_lease(reopened, old_lease)
+  end
+
+  test "restart restores admitted, retry, blocked, and cleanup work from durable authority" do
+    config_root = tmp_root!("control-plane-recovery-states")
+    {_clock_state, clock} = test_clock!(9_200_000)
+    server = start_control_plane!(config_root, clock: clock)
+
+    contexts = %{
+      admitted: execution_context!(config_root, "alpha", "admitted", "SID-431-A"),
+      retrying: execution_context!(config_root, "alpha", "retrying", "SID-431-R"),
+      blocked: execution_context!(config_root, "alpha", "blocked", "SID-431-B"),
+      cleanup: execution_context!(config_root, "alpha", "cleanup", "SID-431-C")
+    }
+
+    admissions =
+      Map.new(contexts, fn {state, context} ->
+        assert {:ok, admission} = ControlPlane.admit_run(server, context)
+        {state, admission}
+      end)
+
+    leases =
+      Map.new(admissions, fn {state, admission} ->
+        assert {:ok, lease} =
+                 ControlPlane.acquire_lease(
+                   server,
+                   admission.admitted_run_id,
+                   "owner-#{state}"
+                 )
+
+        {state, lease}
+      end)
+
+    retry_lease = leases.retrying
+
+    assert {:ok, %Lifecycle{sequence: 2}} =
+             ControlPlane.transition_run(server, retry_lease, 1, :admitted, :running, %{})
+
+    retry_failure = %{code: "runtime_failed", message: "retry later"}
+
+    assert {:ok, %Lifecycle{state: :retrying}} =
+             ControlPlane.transition_run(
+               server,
+               retry_lease,
+               2,
+               :running,
+               :retrying,
+               %{attempt: 3, due_at_ms: 9_250_000, failure: retry_failure}
+             )
+
+    blocked_lease = leases.blocked
+
+    assert {:ok, %Lifecycle{sequence: 2}} =
+             ControlPlane.transition_run(server, blocked_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %Lifecycle{state: :blocked}} =
+             ControlPlane.transition_run(
+               server,
+               blocked_lease,
+               2,
+               :running,
+               :blocked,
+               %{reason: "operator approval required"}
+             )
+
+    cleanup_lease = leases.cleanup
+
+    assert {:ok, %Lifecycle{sequence: 2}} =
+             ControlPlane.transition_run(server, cleanup_lease, 1, :admitted, :running, %{})
+
+    assert {:ok, %Lifecycle{sequence: 3}} =
+             ControlPlane.transition_run(
+               server,
+               cleanup_lease,
+               2,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:ok, %Lifecycle{state: :cleanup_pending} = cleanup_before_restart} =
+             ControlPlane.transition_run(
+               server,
+               cleanup_lease,
+               3,
+               :completed,
+               :cleanup_pending,
+               %{}
+             )
+
+    stop_process(server)
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:ok, recovered} =
+             ControlPlane.recover_runs(reopened, "owner-recovery", env_fetcher: fn "TRACKER_KEY" -> {:ok, "current-tracker-secret"} end)
+
+    by_identifier = Map.new(recovered, &{&1.admission.issue_identifier, &1})
+
+    assert %Recovery{action: :dispatch, lifecycle: %Lifecycle{state: :admitted}} =
+             by_identifier["SID-431-A"]
+
+    assert %Recovery{
+             action: :retry,
+             lifecycle: %Lifecycle{
+               state: :retrying,
+               retry_attempt: 3,
+               retry_due_at_ms: 9_250_000,
+               failure: %{"code" => "runtime_failed", "message" => "retry later"}
+             }
+           } = by_identifier["SID-431-R"]
+
+    assert %Recovery{
+             action: :blocked,
+             blocked_reason: "operator approval required",
+             lifecycle: %Lifecycle{state: :blocked}
+           } = by_identifier["SID-431-B"]
+
+    assert %Recovery{
+             action: :cleanup,
+             lifecycle: %Lifecycle{
+               state: :cleanup_pending,
+               completion_disposition: "succeeded",
+               cleanup_authority: cleanup_authority
+             }
+           } = by_identifier["SID-431-C"]
+
+    assert cleanup_authority == cleanup_before_restart.cleanup_authority
+  end
+
+  test "missing credentials block only the affected recovered run" do
+    config_root = tmp_root!("control-plane-recovery-credentials")
+    server = start_control_plane!(config_root)
+
+    missing_context =
+      execution_context!(config_root, "alpha", "missing", "SID-431-M", runner_password: "env:MISSING_PASSWORD")
+
+    ready_context = execution_context!(config_root, "beta", "ready", "SID-431-D")
+    assert {:ok, _missing} = ControlPlane.admit_run(server, missing_context)
+    assert {:ok, _ready} = ControlPlane.admit_run(server, ready_context)
+    stop_process(server)
+    reopened = start_control_plane!(config_root)
+
+    env_fetcher = fn
+      "TRACKER_KEY" -> {:ok, "current-tracker-secret"}
+      "MISSING_PASSWORD" -> :error
+    end
+
+    assert {:ok, recovered} =
+             ControlPlane.recover_runs(reopened, "owner-recovery", env_fetcher: env_fetcher)
+
+    by_identifier = Map.new(recovered, &{&1.admission.issue_identifier, &1})
+
+    assert %Recovery{
+             action: :blocked,
+             blocked_reason: "recovery credentials are missing",
+             lifecycle: %Lifecycle{
+               state: :blocked,
+               blocked_reason: "recovery credentials are missing"
+             }
+           } = by_identifier["SID-431-M"]
+
+    assert %Recovery{action: :dispatch, lifecycle: %Lifecycle{state: :admitted}} =
+             by_identifier["SID-431-D"]
   end
 
   test "resolved tracker and runner credentials are rejected before persistence" do
@@ -1477,6 +1861,15 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
   defp maybe_put_runner_password(runner, password) do
     Map.put(runner, "server_auth", %{"username" => "symphony", "password" => password})
+  end
+
+  defp process_identity(process_group_id) do
+    %{
+      "os_pid" => process_group_id,
+      "process_group_id" => process_group_id,
+      "wrapper_pid" => process_group_id - 1,
+      "started_at" => "Wed Aug 26 17:00:00 2026"
+    }
   end
 
   defp hash(value) do

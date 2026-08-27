@@ -10,6 +10,7 @@ defmodule SymphonyElixir.ControlPlane do
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.LocalConfig
+  alias SymphonyElixir.ProcessSupervisor
   alias SymphonyElixir.ReviewRecords.Redaction
   alias SymphonyElixir.TargetContext
 
@@ -22,6 +23,7 @@ defmodule SymphonyElixir.ControlPlane do
   @maximum_clock_skew_ms 1_000
   @call_timeout_ms @maximum_busy_timeout_ms + 5_000
   @lifecycle_states [:admitted, :running, :retrying, :blocked, :completed, :cleanup_pending, :cleaned]
+  @recoverable_lifecycle_states [:admitted, :running, :retrying, :blocked, :cleanup_pending]
   @idempotent_lifecycle_states [:completed, :cleanup_pending, :cleaned]
   @side_effect_kinds [
     :tracker_write,
@@ -32,7 +34,7 @@ defmodule SymphonyElixir.ControlPlane do
   ]
   @side_effect_states [:pending, :succeeded, :failed, :reconciliation_required]
   @legal_lifecycle_transitions %{
-    admitted: [:running, :completed],
+    admitted: [:running, :blocked, :completed],
     running: [:retrying, :blocked, :completed],
     retrying: [:running, :blocked, :completed],
     blocked: [:running, :completed],
@@ -303,6 +305,30 @@ defmodule SymphonyElixir.ControlPlane do
           }
   end
 
+  defmodule Recovery do
+    @moduledoc false
+
+    @enforce_keys [:admission, :lifecycle, :lease, :action]
+    defstruct [
+      :admission,
+      :lifecycle,
+      :lease,
+      :action,
+      :execution_context,
+      :blocked_reason
+    ]
+
+    @type action :: :dispatch | :retry | :blocked | :cleanup
+    @type t :: %__MODULE__{
+            admission: Admission.t(),
+            lifecycle: Lifecycle.t(),
+            lease: Lease.t(),
+            action: action(),
+            execution_context: ExecutionContext.t() | nil,
+            blocked_reason: String.t() | nil
+          }
+  end
+
   @type health :: %{
           required(:path) => Path.t(),
           required(:schema_version) => pos_integer(),
@@ -353,6 +379,11 @@ defmodule SymphonyElixir.ControlPlane do
           | :invalid_process_ownership
           | :process_ownership_conflict
           | :process_termination_unverified
+          | :stale_lease
+          | Error.t()
+  @type recovery_error ::
+          :invalid_recovery
+          | :recovery_not_found
           | :stale_lease
           | Error.t()
 
@@ -663,14 +694,15 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   @doc """
-  Registers the local process group owned by the current fenced lease.
+  Registers the stable local process identity owned by the current fenced
+  lease. The identity must come from `ProcessSupervisor.recovery_identity/1`.
   """
-  @spec register_process_group(GenServer.server(), Lease.t(), pos_integer()) ::
+  @spec register_process_group(GenServer.server(), Lease.t(), map()) ::
           {:ok, ProcessOwnership.t()} | {:error, process_ownership_error()}
-  def register_process_group(server \\ __MODULE__, lease, process_group_id) do
+  def register_process_group(server \\ __MODULE__, lease, process_identity) do
     GenServer.call(
       server,
-      {:register_process_group, lease, process_group_id},
+      {:register_process_group, lease, process_identity},
       @call_timeout_ms
     )
   end
@@ -699,6 +731,41 @@ defmodule SymphonyElixir.ControlPlane do
       @call_timeout_ms
     )
   end
+
+  @doc """
+  Fences and reconstructs every durable nonterminal run for a new host owner.
+
+  Interrupted running work becomes an immediate retry only after its prior
+  process group is absent or verifiably terminated. Retry deadlines, blocked
+  reasons, and cleanup authority are returned without consulting mutable
+  workflow or registry configuration.
+  """
+  def recover_runs(server \\ __MODULE__, owner_id, opts \\ [])
+
+  @spec recover_runs(GenServer.server(), String.t(), keyword()) ::
+          {:ok, [Recovery.t()]} | {:error, recovery_error() | term()}
+
+  def recover_runs(server, owner_id, opts) when is_list(opts) do
+    process_terminator =
+      Keyword.get(opts, :process_terminator, &terminate_recorded_process_group/1)
+
+    credential_opts = Keyword.take(opts, [:env_fetcher])
+
+    with :ok <- validate_recovery_request(owner_id, process_terminator),
+         {:ok, admitted_run_ids} <-
+           GenServer.call(server, :list_recoverable_runs, @call_timeout_ms) do
+      recover_admitted_runs(
+        server,
+        admitted_run_ids,
+        owner_id,
+        process_terminator,
+        credential_opts,
+        []
+      )
+    end
+  end
+
+  def recover_runs(_server, _owner_id, _opts), do: {:error, :invalid_recovery}
 
   @doc """
   Projects durable lifecycle state into the existing orchestrator state slots.
@@ -834,6 +901,23 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, result, state}
   end
 
+  def handle_call(:list_recoverable_runs, _from, state) do
+    {:reply, select_recoverable_run_ids(state.connection, state.path), state}
+  end
+
+  def handle_call({:fence_run_for_recovery, admitted_run_id, owner_id}, _from, state) do
+    result =
+      fence_run_for_recovery(
+        state.connection,
+        state.path,
+        admitted_run_id,
+        owner_id,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
   def handle_call({:fetch_lifecycle, admitted_run_id}, _from, state) do
     {:reply, load_lifecycle(state.connection, state.path, admitted_run_id), state}
   end
@@ -929,13 +1013,13 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, load_side_effects(state.connection, state.path, admitted_run_id), state}
   end
 
-  def handle_call({:register_process_group, lease, process_group_id}, _from, state) do
+  def handle_call({:register_process_group, lease, process_identity}, _from, state) do
     result =
       persist_process_group(
         state.connection,
         state.path,
         lease,
-        process_group_id,
+        process_identity,
         state.clock
       )
 
@@ -960,6 +1044,24 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, result, state}
   end
 
+  def handle_call(
+        {:record_recovered_process_termination, lease, ownership, outcome},
+        _from,
+        state
+      ) do
+    result =
+      persist_recovered_process_termination(
+        state.connection,
+        state.path,
+        lease,
+        ownership,
+        outcome,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
   @impl true
   def terminate(_reason, %{connection: connection, path: database_path}) do
     _ = Sqlite3.close(connection)
@@ -968,6 +1070,290 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp validate_recovery_request(owner_id, process_terminator) do
+    with :ok <- validate_owner_id(owner_id),
+         true <- is_function(process_terminator, 1) do
+      :ok
+    else
+      _invalid -> {:error, :invalid_recovery}
+    end
+  end
+
+  defp recover_admitted_runs(
+         _server,
+         [],
+         _owner_id,
+         _process_terminator,
+         _credential_opts,
+         recovered
+       ),
+       do: {:ok, Enum.reverse(recovered)}
+
+  defp recover_admitted_runs(
+         server,
+         [admitted_run_id | rest],
+         owner_id,
+         process_terminator,
+         credential_opts,
+         recovered
+       ) do
+    with {:ok, claim} <-
+           GenServer.call(
+             server,
+             {:fence_run_for_recovery, admitted_run_id, owner_id},
+             @call_timeout_ms
+           ),
+         {:ok, lifecycle, process_blocked_reason} <-
+           reconcile_recovery_process(server, claim, process_terminator),
+         {:ok, recovery} <-
+           build_recovery(server, claim, lifecycle, process_blocked_reason, credential_opts) do
+      recover_admitted_runs(
+        server,
+        rest,
+        owner_id,
+        process_terminator,
+        credential_opts,
+        [recovery | recovered]
+      )
+    end
+  end
+
+  defp reconcile_recovery_process(
+         server,
+         %{lifecycle: %Lifecycle{state: :running}} = claim,
+         _process_terminator
+       )
+       when is_nil(claim.previous_process_ownership) do
+    reason = "recorded process ownership is missing after interruption"
+
+    with {:ok, blocked} <-
+           transition_run(
+             server,
+             claim.lease,
+             claim.lifecycle.sequence,
+             :running,
+             :blocked,
+             %{reason: reason}
+           ) do
+      {:ok, blocked, reason}
+    end
+  end
+
+  defp reconcile_recovery_process(
+         _server,
+         %{previous_process_ownership: nil, lifecycle: lifecycle},
+         _process_terminator
+       ),
+       do: {:ok, lifecycle, nil}
+
+  defp reconcile_recovery_process(
+         _server,
+         %{
+           previous_process_ownership: %ProcessOwnership{state: :stopped},
+           lifecycle: lifecycle
+         },
+         _process_terminator
+       ),
+       do: {:ok, lifecycle, nil}
+
+  defp reconcile_recovery_process(
+         _server,
+         %{
+           previous_process_ownership: %ProcessOwnership{state: :unverifiable},
+           lifecycle: lifecycle
+         },
+         _process_terminator
+       ) do
+    {:ok, lifecycle, "process group ownership requires operator reconciliation"}
+  end
+
+  defp reconcile_recovery_process(
+         server,
+         %{
+           previous_process_ownership: %ProcessOwnership{state: :running} = ownership,
+           lease: lease
+         } = claim,
+         process_terminator
+       ) do
+    outcome = invoke_process_terminator(process_terminator, ownership)
+
+    with {:ok, _ownership} <-
+           GenServer.call(
+             server,
+             {:record_recovered_process_termination, lease, ownership, outcome},
+             @call_timeout_ms
+           ),
+         {:ok, lifecycle} <- fetch_lifecycle(server, lease.admitted_run_id) do
+      case outcome do
+        {:stopped, _evidence} -> {:ok, lifecycle, nil}
+        {:unverifiable, _evidence} -> {:ok, lifecycle, lifecycle.blocked_reason || recovery_process_block_reason(claim)}
+      end
+    end
+  end
+
+  defp invoke_process_terminator(process_terminator, ownership) do
+    case process_terminator.(ownership) do
+      {state, evidence} when state in [:stopped, :unverifiable] and is_map(evidence) ->
+        {state, evidence}
+
+      other ->
+        {:unverifiable, %{reason: "process terminator returned an invalid result", result: inspect(other)}}
+    end
+  rescue
+    error ->
+      {:unverifiable,
+       %{
+         reason: "process terminator raised",
+         exception: inspect(error.__struct__),
+         message: Exception.message(error)
+       }}
+  catch
+    kind, reason ->
+      {:unverifiable, %{reason: "process terminator exited", exit_kind: inspect(kind), detail: inspect(reason)}}
+  end
+
+  defp terminate_recorded_process_group(%ProcessOwnership{evidence: evidence}) do
+    case Map.fetch(evidence, "identity") do
+      {:ok, identity} when is_map(identity) ->
+        ProcessSupervisor.terminate_recovered_group(identity)
+
+      _missing ->
+        {:unverifiable, %{reason: "persisted process identity is missing", verified_by: "control_plane"}}
+    end
+  end
+
+  defp recovery_process_block_reason(%{lifecycle: %Lifecycle{state: :cleanup_pending}}),
+    do: "cleanup is blocked by unverifiable process ownership"
+
+  defp recovery_process_block_reason(_claim),
+    do: "process group termination is unverifiable"
+
+  defp build_recovery(
+         _server,
+         claim,
+         lifecycle,
+         process_blocked_reason,
+         _credential_opts
+       )
+       when is_binary(process_blocked_reason) do
+    {:ok, recovery(claim, lifecycle, :blocked, nil, process_blocked_reason)}
+  end
+
+  defp build_recovery(server, claim, %Lifecycle{state: :running} = lifecycle, nil, credential_opts) do
+    case resolve_admission_credentials(claim.admission, credential_opts) do
+      {:ok, context} ->
+        attempt = (lifecycle.retry_attempt || 0) + 1
+
+        with {:ok, retrying} <-
+               transition_run(
+                 server,
+                 claim.lease,
+                 lifecycle.sequence,
+                 :running,
+                 :retrying,
+                 %{
+                   attempt: attempt,
+                   due_at_ms: claim.recovered_at_ms,
+                   failure: %{
+                     code: "host_restart",
+                     message: "run was interrupted by a host-process restart"
+                   }
+                 }
+               ) do
+          {:ok, recovery(claim, retrying, :retry, context, nil)}
+        end
+
+      {:blocked, reason} ->
+        block_recovery_credentials(server, claim, lifecycle, reason)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_recovery(
+         server,
+         claim,
+         %Lifecycle{state: state} = lifecycle,
+         nil,
+         credential_opts
+       )
+       when state in [:admitted, :retrying] do
+    case resolve_admission_credentials(claim.admission, credential_opts) do
+      {:ok, context} ->
+        action = if state == :admitted, do: :dispatch, else: :retry
+        {:ok, recovery(claim, lifecycle, action, context, nil)}
+
+      {:blocked, reason} ->
+        block_recovery_credentials(server, claim, lifecycle, reason)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp build_recovery(
+         _server,
+         claim,
+         %Lifecycle{state: :blocked} = lifecycle,
+         nil,
+         _credential_opts
+       ) do
+    {:ok, recovery(claim, lifecycle, :blocked, nil, lifecycle.blocked_reason)}
+  end
+
+  defp build_recovery(
+         _server,
+         claim,
+         %Lifecycle{state: :cleanup_pending} = lifecycle,
+         nil,
+         credential_opts
+       ) do
+    case resolve_admission_credentials(claim.admission, credential_opts) do
+      {:ok, context} ->
+        {:ok, recovery(claim, lifecycle, :cleanup, context, nil)}
+
+      {:blocked, reason} ->
+        blocked_reason = credential_block_reason(reason)
+        {:ok, recovery(claim, lifecycle, :blocked, nil, blocked_reason)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp block_recovery_credentials(server, claim, lifecycle, reason) do
+    blocked_reason = credential_block_reason(reason)
+
+    with {:ok, blocked} <-
+           transition_run(
+             server,
+             claim.lease,
+             lifecycle.sequence,
+             lifecycle.state,
+             :blocked,
+             %{reason: blocked_reason}
+           ) do
+      {:ok, recovery(claim, blocked, :blocked, nil, blocked_reason)}
+    end
+  end
+
+  defp credential_block_reason(:missing_credentials), do: "recovery credentials are missing"
+
+  defp credential_block_reason(:credential_resolution_failed),
+    do: "recovery credential resolution failed"
+
+  defp recovery(claim, lifecycle, action, context, blocked_reason) do
+    %Recovery{
+      admission: claim.admission,
+      lifecycle: lifecycle,
+      lease: claim.lease,
+      action: action,
+      execution_context: context,
+      blocked_reason: blocked_reason
+    }
+  end
 
   defp busy_timeout(opts, database_path) do
     timeout_ms =
@@ -1745,6 +2131,206 @@ defmodule SymphonyElixir.ControlPlane do
       {:error, reason} -> corrupt_store(database_path, {:invalid_side_effect_schema, reason})
     end
   end
+
+  defp select_recoverable_run_ids(connection, database_path) do
+    states = Enum.map_join(@recoverable_lifecycle_states, ", ", &"'#{Atom.to_string(&1)}'")
+
+    sql = """
+    SELECT admitted_run_id
+    FROM run_lifecycles
+    WHERE state IN (#{states})
+    ORDER BY admitted_at ASC, admitted_run_id ASC
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [],
+           database_path,
+           "cannot list recoverable runs"
+         ) do
+      {:ok, rows} ->
+        decode_recoverable_run_ids(rows, database_path)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp decode_recoverable_run_ids(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [admitted_run_id], {:ok, admitted_run_ids}
+      when is_binary(admitted_run_id) and admitted_run_id != "" ->
+        {:cont, {:ok, [admitted_run_id | admitted_run_ids]}}
+
+      _invalid, _acc ->
+        {:halt, corrupt_store(database_path, :invalid_recoverable_run)}
+    end)
+    |> case do
+      {:ok, admitted_run_ids} -> {:ok, Enum.reverse(admitted_run_ids)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp fence_run_for_recovery(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         clock
+       ) do
+    with :ok <- validate_admitted_run_id(admitted_run_id),
+         :ok <- validate_owner_id(owner_id) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        fence_current_run_for_recovery(
+          connection,
+          database_path,
+          admitted_run_id,
+          owner_id,
+          now_ms
+        )
+      end)
+    else
+      _invalid -> {:error, :invalid_recovery}
+    end
+  end
+
+  defp fence_current_run_for_recovery(
+         connection,
+         database_path,
+         admitted_run_id,
+         owner_id,
+         now_ms
+       ) do
+    with {:ok, {lifecycle, _cleanup_authority}} <-
+           select_lifecycle_by_run_id(connection, database_path, admitted_run_id),
+         true <- lifecycle.state in @recoverable_lifecycle_states,
+         {:ok, admission} <-
+           load_admission(
+             connection,
+             database_path,
+             lifecycle.target_id,
+             lifecycle.tracker_issue_id
+           ),
+         {:ok, lease_row} <- select_lease_record(connection, database_path, admitted_run_id),
+         {:ok, previous_process_ownership} <-
+           select_lifecycle_process_ownership(connection, database_path, lifecycle),
+         {:ok, lease} <-
+           fence_recovery_lease(
+             connection,
+             database_path,
+             admission,
+             owner_id,
+             lease_row,
+             now_ms
+           ) do
+      {:ok,
+       %{
+         admission: admission,
+         lifecycle: lifecycle,
+         lease: lease,
+         previous_process_ownership: previous_process_ownership,
+         recovered_at_ms: now_ms
+       }}
+    else
+      false -> {:error, :recovery_not_found}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp fence_recovery_lease(
+         connection,
+         database_path,
+         admission,
+         owner_id,
+         [
+           _target_id,
+           _tracker_issue_id,
+           nil,
+           nil,
+           nil,
+           nil,
+           nil,
+           nil
+         ],
+         now_ms
+       ) do
+    with :ok <-
+           insert_lease_record(
+             connection,
+             database_path,
+             admission.admitted_run_id,
+             owner_id,
+             now_ms
+           ) do
+      {:ok,
+       build_lease(
+         admission.admitted_run_id,
+         admission.target_id,
+         admission.tracker_issue_id,
+         owner_id,
+         1,
+         lease_deadline(now_ms)
+       )}
+    end
+  end
+
+  defp fence_recovery_lease(
+         connection,
+         database_path,
+         admission,
+         owner_id,
+         [
+           target_id,
+           tracker_issue_id,
+           _current_owner_id,
+           fencing_token,
+           _deadline_ms,
+           _acquired_at_ms,
+           _renewed_at_ms,
+           last_observed_at_ms
+         ],
+         now_ms
+       )
+       when target_id == admission.target_id and
+              tracker_issue_id == admission.tracker_issue_id and
+              is_integer(fencing_token) and fencing_token > 0 and
+              is_integer(last_observed_at_ms) do
+    with :ok <- validate_clock_progress(now_ms, last_observed_at_ms, database_path),
+         next_token = fencing_token + 1,
+         next_deadline_ms = lease_deadline(now_ms),
+         :ok <-
+           activate_lease_record(
+             connection,
+             database_path,
+             admission.admitted_run_id,
+             fencing_token,
+             owner_id,
+             next_token,
+             next_deadline_ms,
+             now_ms
+           ) do
+      {:ok,
+       build_lease(
+         admission.admitted_run_id,
+         admission.target_id,
+         admission.tracker_issue_id,
+         owner_id,
+         next_token,
+         next_deadline_ms
+       )}
+    end
+  end
+
+  defp fence_recovery_lease(
+         _connection,
+         database_path,
+         _admission,
+         _owner_id,
+         _lease_row,
+         _now_ms
+       ),
+       do: corrupt_store(database_path, :invalid_recovery_lease)
 
   defp acquire_run_lease(
          connection,
@@ -4170,15 +4756,18 @@ defmodule SymphonyElixir.ControlPlane do
     ])
   end
 
-  defp persist_process_group(connection, database_path, lease, process_group_id, clock) do
+  defp persist_process_group(connection, database_path, lease, process_identity, clock) do
     with :ok <- validate_lease(lease),
-         true <- is_integer(process_group_id) and process_group_id > 0 do
+         {:ok, process_group_id, evidence, evidence_json} <-
+           normalize_process_identity(process_identity) do
       lease_transaction(connection, database_path, clock, fn now_ms ->
         register_current_process_group(
           connection,
           database_path,
           lease,
           process_group_id,
+          evidence,
+          evidence_json,
           now_ms
         )
       end)
@@ -4187,11 +4776,37 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
+  defp normalize_process_identity(identity) when is_map(identity) do
+    with true <-
+           evidence_keys?(
+             identity,
+             [:os_pid, :process_group_id, :wrapper_pid, :started_at]
+           ),
+         {:ok, os_pid} <- fetch_evidence(identity, :os_pid),
+         {:ok, process_group_id} <- fetch_evidence(identity, :process_group_id),
+         {:ok, wrapper_pid} <- fetch_evidence(identity, :wrapper_pid),
+         {:ok, started_at} <- fetch_evidence(identity, :started_at),
+         true <- Enum.all?([os_pid, process_group_id, wrapper_pid], &(is_integer(&1) and &1 > 0)),
+         true <- os_pid == process_group_id,
+         true <- valid_non_empty_string?(started_at),
+         {:ok, normalized_identity} <- normalize_durable_evidence(identity),
+         evidence = %{"identity" => normalized_identity},
+         {:ok, evidence_json} <- encode_json(evidence) do
+      {:ok, process_group_id, evidence, evidence_json}
+    else
+      _invalid -> {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp normalize_process_identity(_identity), do: {:error, :invalid_process_ownership}
+
   defp register_current_process_group(
          connection,
          database_path,
          lease,
          process_group_id,
+         evidence,
+         evidence_json,
          now_ms
        ) do
     with {:ok, lease_row} <-
@@ -4214,13 +4829,15 @@ defmodule SymphonyElixir.ControlPlane do
             database_path,
             lease,
             process_group_id,
+            evidence_json,
             now_ms
           )
 
         %ProcessOwnership{
           process_group_id: ^process_group_id,
           owner_id: owner_id,
-          state: :running
+          state: :running,
+          evidence: ^evidence
         } = ownership
         when owner_id == lease.owner_id ->
           {:ok, ownership}
@@ -4260,6 +4877,85 @@ defmodule SymphonyElixir.ControlPlane do
       end)
     else
       _invalid -> {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp persist_recovered_process_termination(
+         connection,
+         database_path,
+         lease,
+         %ProcessOwnership{} = ownership,
+         outcome,
+         clock
+       ) do
+    with :ok <- validate_lease(lease),
+         true <- ownership.admitted_run_id == lease.admitted_run_id,
+         true <- ownership.target_id == lease.target_id,
+         true <- ownership.tracker_issue_id == lease.tracker_issue_id,
+         true <- ownership.fencing_token < lease.fencing_token,
+         {:ok, next_state, evidence} <- normalize_process_termination(outcome),
+         {:ok, evidence_json} <- encode_json(evidence) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        terminate_recovered_process_group(
+          connection,
+          database_path,
+          lease,
+          ownership,
+          next_state,
+          evidence,
+          evidence_json,
+          now_ms
+        )
+      end)
+    else
+      _invalid -> {:error, :invalid_process_ownership}
+    end
+  end
+
+  defp persist_recovered_process_termination(
+         _connection,
+         _database_path,
+         _lease,
+         _ownership,
+         _outcome,
+         _clock
+       ),
+       do: {:error, :invalid_process_ownership}
+
+  defp terminate_recovered_process_group(
+         connection,
+         database_path,
+         lease,
+         ownership,
+         next_state,
+         evidence,
+         evidence_json,
+         now_ms
+       ) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <- authorize_lease(lease_row, lease, now_ms, database_path),
+         {:ok, stored_ownership} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             ownership.admitted_run_id,
+             ownership.fencing_token
+           ),
+         true <- stored_ownership === ownership do
+      apply_process_termination(
+        connection,
+        database_path,
+        stored_ownership,
+        lease,
+        next_state,
+        evidence,
+        evidence_json,
+        now_ms
+      )
+    else
+      false -> {:error, :process_ownership_conflict}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -4413,7 +5109,7 @@ defmodule SymphonyElixir.ControlPlane do
          cleanup_authority,
          now_ms
        )
-       when state in [:running, :retrying] do
+       when state in [:admitted, :running, :retrying] do
     request = %{
       lease: lease,
       expected_sequence: lifecycle.sequence,
@@ -4433,6 +5129,16 @@ defmodule SymphonyElixir.ControlPlane do
       {:error, _reason} = error -> error
     end
   end
+
+  defp block_unverifiable_lifecycle(
+         _connection,
+         _database_path,
+         _lease,
+         %Lifecycle{state: :cleanup_pending},
+         _cleanup_authority,
+         _now_ms
+       ),
+       do: :ok
 
   defp block_unverifiable_lifecycle(
          _connection,
@@ -4501,6 +5207,7 @@ defmodule SymphonyElixir.ControlPlane do
          database_path,
          lease,
          process_group_id,
+         evidence_json,
          now_ms
        ) do
     with {:ok, started_at} <- timestamp_from_ms(now_ms, database_path),
@@ -4519,7 +5226,7 @@ defmodule SymphonyElixir.ControlPlane do
                evidence_json,
                started_at,
                updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', '{}', ?7, ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'running', ?7, ?8, ?8)
              """,
              [
                lease.admitted_run_id,
@@ -4528,6 +5235,7 @@ defmodule SymphonyElixir.ControlPlane do
                lease.owner_id,
                lease.fencing_token,
                process_group_id,
+               evidence_json,
                started_at
              ],
              database_path,
@@ -4574,6 +5282,33 @@ defmodule SymphonyElixir.ControlPlane do
       database_path,
       "cannot persist process-group termination"
     )
+  end
+
+  defp select_lifecycle_process_ownership(
+         connection,
+         database_path,
+         %Lifecycle{} = lifecycle
+       ) do
+    with {:ok, transition} <-
+           select_lifecycle_transition(
+             connection,
+             database_path,
+             lifecycle.admitted_run_id,
+             lifecycle.sequence
+           ) do
+      case transition.fencing_token do
+        fencing_token when is_integer(fencing_token) ->
+          select_process_ownership(
+            connection,
+            database_path,
+            lifecycle.admitted_run_id,
+            fencing_token
+          )
+
+        nil ->
+          {:ok, nil}
+      end
+    end
   end
 
   defp select_process_ownership(
@@ -5702,5 +6437,23 @@ defimpl Inspect, for: SymphonyElixir.ControlPlane.Admission do
       ])
 
     concat(["#SymphonyElixir.ControlPlane.Admission<", to_doc(safe, opts), ">"])
+  end
+end
+
+defimpl Inspect, for: SymphonyElixir.ControlPlane.Recovery do
+  import Inspect.Algebra
+
+  @impl true
+  def inspect(recovery, opts) do
+    safe =
+      Map.take(recovery, [
+        :admission,
+        :lifecycle,
+        :lease,
+        :action,
+        :blocked_reason
+      ])
+
+    concat(["#SymphonyElixir.ControlPlane.Recovery<", to_doc(safe, opts), ">"])
   end
 end

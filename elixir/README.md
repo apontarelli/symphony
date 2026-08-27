@@ -243,8 +243,8 @@ data.
 The public `symphony run <saved-name>` and `symphony run --workflow <path>` commands remain
 single-target admission adapters. After admission, they use the same context-first execution path.
 The current host still activates and polls one selected target. The local durable control-plane
-store now supports pinned admissions, leases, fenced lifecycle transitions, side-effect intents,
-and local process ownership. Restart recovery and autonomous multi-target activation, fairness, and
+store supports pinned admissions, leases, fenced lifecycle transitions, side-effect intents, local
+process ownership, and restart recovery. Autonomous multi-target activation, fairness, and
 scheduling remain deferred.
 
 The deterministic contract test is
@@ -369,6 +369,21 @@ delivery gates; cleanup requires cleanup-pending lifecycle authority.
 Local process-group ownership is stored with its lease token. Transfer, release, and later
 acquisition remain blocked until that process group has a verified stopped result. An unverifiable
 termination blocks a running or retrying lifecycle for operator reconciliation.
+
+On restart, `ControlPlane.recover_runs/3` loads admitted, running, retrying, blocked, and
+cleanup-pending rows in deterministic admission order. It issues the startup owner a new fencing
+token before process inspection, so the old owner can no longer renew or mutate. A process group is
+terminated only when its stored leader PID, group ID, wrapper PID, and OS start identity match the
+live leader. A missing or mismatched identity blocks that run without signaling the uncertain
+process. Verified interrupted running work becomes an immediate durable `host_restart` retry;
+existing retry deadlines, blocked reasons, completion disposition, and cleanup authority are
+restored unchanged.
+
+Recovery resolves current credentials only from the pinned admission references after fencing.
+Missing credentials block only the affected run. Resolved values are returned in memory for admitted
+or retrying work and are omitted from durable state and recovery inspection output. Recovered
+dispatch and retry policy comes from the pinned admission, not the mutable workflow or target
+registry.
 
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase
@@ -804,8 +819,9 @@ runtime:
 - A running or retrying issue keeps the resolved workflow profile policy selected at dispatch time.
   Hot-reloaded workflow/profile changes apply to future dispatches, not to the in-memory policy of
   already-running or already-retrying issues.
-- v1 does not persist attempt policy in a durable store. After a process restart, any recovered
-  future dispatch resolves policy from the current workflow/runtime config.
+- Durably admitted work persists its resolved policy in the pinned execution context. Restart
+  recovery uses that context; later workflow, profile, and target-registry changes apply only to new
+  admissions.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 

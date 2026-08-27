@@ -547,6 +547,53 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
     end
   end
 
+  test "recovery identity terminates only the matching live process group" do
+    if ProcessSupervisor.descendant_cleanup_supported?() do
+      assert {:ok, process} =
+               ProcessSupervisor.start(["/bin/sh", "-c", "while :; do sleep 1; done"])
+
+      on_exit(fn -> ProcessSupervisor.kill(process) end)
+      os_pid = ProcessSupervisor.identity(process).os_pid
+
+      assert {:ok,
+              %{
+                "os_pid" => ^os_pid,
+                "process_group_id" => ^os_pid,
+                "wrapper_pid" => wrapper_pid,
+                "started_at" => started_at
+              } = identity} = ProcessSupervisor.recovery_identity(process)
+
+      assert is_integer(wrapper_pid)
+      assert is_binary(started_at)
+
+      assert {:stopped, %{result: "terminated"}} =
+               ProcessSupervisor.terminate_recovered_group(identity)
+
+      assert eventually(fn -> if os_pid_alive?(os_pid), do: nil, else: :stopped end) == :stopped
+    else
+      assert ProcessSupervisor.descendant_cleanup_supported?() == false
+    end
+  end
+
+  test "recovery refuses a process group when the persisted start identity does not match" do
+    if ProcessSupervisor.descendant_cleanup_supported?() do
+      assert {:ok, process} =
+               ProcessSupervisor.start(["/bin/sh", "-c", "while :; do sleep 1; done"])
+
+      on_exit(fn -> ProcessSupervisor.kill(process) end)
+      os_pid = ProcessSupervisor.identity(process).os_pid
+      assert {:ok, identity} = ProcessSupervisor.recovery_identity(process)
+      mismatched = Map.put(identity, "started_at", "Mon Jan 01 00:00:00 1990")
+
+      assert {:unverifiable, %{reason: "persisted process identity does not match the live group leader"}} =
+               ProcessSupervisor.terminate_recovered_group(mismatched)
+
+      assert os_pid_alive?(os_pid)
+    else
+      assert ProcessSupervisor.descendant_cleanup_supported?() == false
+    end
+  end
+
   defp stale_process_with_sentinel do
     assert {:ok, process} = ProcessSupervisor.start(["/bin/cat"])
     owner_monitor = Process.monitor(process.owner)
