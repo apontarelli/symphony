@@ -66,7 +66,8 @@ defmodule SymphonyElixir.CLI do
           optional(:confirm) => (String.t() -> boolean()),
           optional(:prompt) => (String.t() -> String.t() | nil | :eof),
           optional(:puts) => (String.t() -> term()),
-          optional(:host_evaluate) => ([String.t()] -> {:ok, String.t()} | {:error, String.t()})
+          optional(:host_evaluate) => ([String.t()] -> {:ok, String.t()} | {:error, String.t()}),
+          optional(:control_plane_evaluate) => ([String.t()] -> {:ok, String.t()} | {:error, String.t()})
         }
 
   @spec main([String.t()]) :: no_return()
@@ -123,6 +124,21 @@ defmodule SymphonyElixir.CLI do
 
   def evaluate(["review-records" | review_record_args], _deps) do
     ReviewRecordsCommand.evaluate(review_record_args)
+  end
+
+  def evaluate(["control-plane" | control_plane_args], deps) do
+    control_plane_evaluate =
+      Map.get(deps, :control_plane_evaluate, &SymphonyElixir.ControlPlaneCLI.evaluate/1)
+
+    case control_plane_evaluate.(control_plane_args) do
+      {:ok, output} when is_binary(output) -> {:ok, output}
+      {:error, message} when is_binary(message) -> {:error, message}
+      _other -> {:error, "control_plane_dependency_error"}
+    end
+  rescue
+    _exception -> {:error, "control_plane_dependency_error"}
+  catch
+    _kind, _reason -> {:error, "control_plane_dependency_error"}
   end
 
   def evaluate(["host" | host_args], deps) do
@@ -313,6 +329,7 @@ defmodule SymphonyElixir.CLI do
         [--max-agents <count>] [--max-startups <count>] [--no-land] [--human-review-only]
       symphony run --workflow <path> [--mode watch|drain|issue_batch] [options]
       symphony host target <add|import|plan|patch> [options]
+      symphony control-plane <inspect|resume|abandon|prune> [options]
     """
     |> String.trim()
   end

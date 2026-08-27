@@ -4,7 +4,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias SymphonyElixir.{HandoffRoute, RunTarget, Tracker}
+  alias SymphonyElixir.{ControlPlane, HandoffRoute, RunTarget, Tracker}
   alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Tracker.Memory
 
@@ -713,6 +713,103 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "control-plane API and dashboard use the canonical durable snapshot" do
+    config_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-control-plane-web-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(config_root)
+    on_exit(fn -> File.rm_rf(config_root) end)
+
+    control_plane_name = {:global, {__MODULE__, :control_plane, make_ref()}}
+
+    control_plane =
+      start_supervised!(
+        {ControlPlane, config_root: config_root, name: control_plane_name},
+        restart: :temporary
+      )
+
+    orchestrator_name = Module.concat(__MODULE__, :ControlPlaneWebOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot()
+      )
+
+    start_test_endpoint(
+      orchestrator: orchestrator_name,
+      control_plane: control_plane,
+      control_plane_retention_days: 30,
+      snapshot_timeout_ms: 50
+    )
+
+    payload = json_response(get(build_conn(), "/api/v1/control-plane/runs"), 200)
+
+    assert payload["counts"] == %{
+             "blocked" => 0,
+             "nonterminal" => 0,
+             "reconciliation_required" => 0,
+             "total" => 0
+           }
+
+    assert payload["runs"] == []
+
+    preview = json_response(post(build_conn(), "/api/v1/control-plane/prune", %{}), 200)
+    assert preview["operation"] == "prune"
+    assert preview["retention_days"] == 30
+    assert preview["eligible_count"] == 0
+
+    result =
+      json_response(
+        post(build_conn(), "/api/v1/control-plane/prune", %{
+          "confirmation" => preview["confirmation"]
+        }),
+        202
+      )
+
+    assert result == %{
+             "operation" => "prune",
+             "pruned_count" => 0,
+             "pruned_run_ids" => [],
+             "retention_days" => 30
+           }
+
+    remote_conn = %{build_conn() | remote_ip: {203, 0, 113, 10}}
+
+    assert json_response(post(remote_conn, "/api/v1/control-plane/prune", %{}), 403) ==
+             %{
+               "error" => %{
+                 "code" => "operator_api_local_only",
+                 "message" => "Control-plane mutations require a loopback connection"
+               }
+             }
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Durable control plane"
+    assert html =~ "No durable runs."
+  end
+
+  test "control-plane API reports invalid retention configuration without exposing values" do
+    start_test_endpoint(control_plane_retention_days: %{"api_key" => "operator-secret"})
+
+    response =
+      build_conn()
+      |> post("/api/v1/control-plane/prune", %{})
+      |> json_response(503)
+
+    assert response == %{
+             "error" => %{
+               "code" => "invalid_terminal_retention_days",
+               "message" => "Invalid control_plane.terminal_retention_days: expected a positive integer, got map"
+             }
+           }
+
+    refute inspect(response) =~ "operator-secret"
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do

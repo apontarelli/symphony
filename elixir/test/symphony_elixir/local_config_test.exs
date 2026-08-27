@@ -12,6 +12,7 @@ defmodule SymphonyElixir.LocalConfigTest do
     assert config["workspace"]["root"] == "~/dev/symphony-workspaces"
     assert config["tracker"]["active_states"] == ["Todo", "In Progress", "Merging", "Rework"]
     assert config["tracker"]["terminal_states"] == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+    assert config["control_plane"]["terminal_retention_days"] == 30
 
     assert config["capacity_profiles"] == %{
              "light" => %{"max_concurrent_agents" => 1, "max_concurrent_startups" => 1},
@@ -94,6 +95,35 @@ defmodule SymphonyElixir.LocalConfigTest do
              LocalConfig.resolve_capacity(config, "light")
 
     assert is_nil(ceilings["max_concurrent_agents"])
+  end
+
+  test "terminal retention rejects invalid operator configuration" do
+    assert {:ok, 30} =
+             LocalConfig.default_config()
+             |> LocalConfig.terminal_retention_days()
+
+    for invalid <- [nil, "30", 0, -1] do
+      config =
+        LocalConfig.default_config()
+        |> put_in(["control_plane", "terminal_retention_days"], invalid)
+
+      assert {:error, {:invalid_terminal_retention_days, ^invalid}} =
+               LocalConfig.terminal_retention_days(config)
+    end
+  end
+
+  test "null terminal retention loaded from operator config remains invalid" do
+    root = tmp_dir!("symphony-local-config")
+
+    File.write!(Path.join(root, "config.yml"), """
+    control_plane:
+      terminal_retention_days:
+    """)
+
+    assert {:ok, config} = LocalConfig.load(config_root: root)
+
+    assert {:error, {:invalid_terminal_retention_days, nil}} =
+             LocalConfig.terminal_retention_days(config)
   end
 
   defp tmp_dir!(prefix) do

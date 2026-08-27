@@ -19,6 +19,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRuntime.OpenCodeServer,
           SymphonyElixir.Config,
           SymphonyElixir.ControlPlane,
+          SymphonyElixir.ControlPlaneCLI,
           SymphonyElixir.ControlPlane.Error,
           SymphonyElixir.IncidentLinearIssue.Linear,
           SymphonyElixir.WorkflowCLI,

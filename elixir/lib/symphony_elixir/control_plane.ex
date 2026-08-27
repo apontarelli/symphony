@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ControlPlane do
   """
 
   use GenServer
+  require Logger
   alias Exqlite.Sqlite3
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.LocalConfig
@@ -33,6 +34,9 @@ defmodule SymphonyElixir.ControlPlane do
     :workspace_cleanup
   ]
   @side_effect_states [:pending, :succeeded, :failed, :reconciliation_required]
+  @operator_run_actions [:resume, :abandon]
+  @terminal_lifecycle_states [:completed, :cleaned]
+  @retained_artifact_kinds ["publish_handoff", "handoff_route"]
   @legal_lifecycle_transitions %{
     admitted: [:running, :blocked, :completed],
     running: [:retrying, :blocked, :completed],
@@ -386,6 +390,19 @@ defmodule SymphonyElixir.ControlPlane do
           | :recovery_not_found
           | :stale_lease
           | Error.t()
+  @type operator_error ::
+          :confirmation_required
+          | :invalid_confirmation
+          | :invalid_operator_action
+          | :operator_action_not_allowed
+          | :reconciliation_required
+          | admission_error()
+          | lease_error()
+          | lifecycle_error()
+  @type prune_error ::
+          :invalid_confirmation
+          | :invalid_retention
+          | Error.t()
 
   @type credential_resolution ::
           {:ok, ExecutionContext.t()}
@@ -440,6 +457,76 @@ defmodule SymphonyElixir.ControlPlane do
   @spec health(GenServer.server()) :: {:ok, health()} | {:error, Error.t()}
   def health(server \\ __MODULE__) do
     GenServer.call(server, :health, @call_timeout_ms)
+  end
+
+  @doc """
+  Returns the credential-safe canonical projection of every durable run.
+  """
+  @spec inspect_runs(GenServer.server()) :: {:ok, [map()]} | {:error, Error.t()}
+  def inspect_runs(server \\ __MODULE__) do
+    GenServer.call(server, :inspect_runs, @call_timeout_ms)
+  end
+
+  @doc """
+  Previews a fenced resume or abandon operation against current durable state.
+  """
+  @spec preview_run_action(GenServer.server(), :resume | :abandon, String.t()) ::
+          {:ok, map()} | {:error, operator_error()}
+  def preview_run_action(server \\ __MODULE__, action, admitted_run_id) do
+    GenServer.call(
+      server,
+      {:preview_run_action, action, admitted_run_id},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Confirms a previously previewed run action.
+
+  The confirmation token binds the action to the current lifecycle sequence and
+  fencing generation. The operation acquires a new lease before mutation.
+  """
+  @spec confirm_run_action(
+          GenServer.server(),
+          :resume | :abandon,
+          String.t(),
+          String.t(),
+          String.t()
+        ) :: {:ok, %{lease: Lease.t(), run: map()}} | {:error, operator_error()}
+  def confirm_run_action(
+        server \\ __MODULE__,
+        action,
+        admitted_run_id,
+        owner_id,
+        confirmation
+      ) do
+    GenServer.call(
+      server,
+      {:confirm_run_action, action, admitted_run_id, owner_id, confirmation},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Previews terminal-run pruning for the configured retention period.
+  """
+  @spec preview_prune(GenServer.server(), pos_integer()) ::
+          {:ok, map()} | {:error, prune_error()}
+  def preview_prune(server \\ __MODULE__, retention_days) do
+    GenServer.call(server, {:preview_prune, retention_days}, @call_timeout_ms)
+  end
+
+  @doc """
+  Prunes only terminal runs that still match a current preview.
+  """
+  @spec prune(GenServer.server(), pos_integer(), String.t()) ::
+          {:ok, map()} | {:error, prune_error()}
+  def prune(server \\ __MODULE__, retention_days, confirmation) do
+    GenServer.call(
+      server,
+      {:prune, retention_days, confirmation},
+      @call_timeout_ms
+    )
   end
 
   @doc """
@@ -836,6 +923,70 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, check_health(state.connection, state.path), state}
   end
 
+  def handle_call(:inspect_runs, _from, state) do
+    result = load_operator_snapshots(state.connection, state.path)
+    log_operator_snapshot(result)
+    {:reply, result, state}
+  end
+
+  def handle_call({:preview_run_action, action, admitted_run_id}, _from, state) do
+    result =
+      preview_operator_run_action(
+        state.connection,
+        state.path,
+        action,
+        admitted_run_id
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call(
+        {:confirm_run_action, action, admitted_run_id, owner_id, confirmation},
+        _from,
+        state
+      ) do
+    result =
+      confirm_operator_run_action(
+        state.connection,
+        state.path,
+        state.clock,
+        action,
+        admitted_run_id,
+        owner_id,
+        confirmation
+      )
+
+    log_operator_action(action, admitted_run_id, result)
+    {:reply, result, state}
+  end
+
+  def handle_call({:preview_prune, retention_days}, _from, state) do
+    result =
+      preview_terminal_prune(
+        state.connection,
+        state.path,
+        state.clock,
+        retention_days
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:prune, retention_days, confirmation}, _from, state) do
+    result =
+      prune_terminal_runs(
+        state.connection,
+        state.path,
+        state.clock,
+        retention_days,
+        confirmation
+      )
+
+    log_prune(result)
+    {:reply, result, state}
+  end
+
   def handle_call({:transaction, operation}, _from, state) do
     {:reply, run_transaction(state.connection, state.path, operation), state}
   end
@@ -1070,6 +1221,655 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp load_operator_snapshots(connection, database_path) do
+    sql = """
+    SELECT
+      admissions.admitted_run_id,
+      admissions.target_id,
+      admissions.tracker_issue_id,
+      admissions.issue_identifier,
+      lifecycles.state,
+      lifecycles.sequence,
+      leases.owner_id,
+      COALESCE(leases.fencing_token, 0),
+      leases.lease_deadline_ms,
+      lifecycles.retry_attempt,
+      lifecycles.retry_due_at_ms,
+      lifecycles.blocked_reason,
+      CASE
+        WHEN EXISTS (
+          SELECT 1 FROM side_effect_intents effects
+          WHERE effects.admitted_run_id = admissions.admitted_run_id
+            AND effects.state = 'reconciliation_required'
+        ) THEN 'reconciliation_required'
+        WHEN EXISTS (
+          SELECT 1 FROM side_effect_intents effects
+          WHERE effects.admitted_run_id = admissions.admitted_run_id
+            AND effects.state = 'pending'
+        ) THEN 'pending'
+        WHEN EXISTS (
+          SELECT 1 FROM side_effect_intents effects
+          WHERE effects.admitted_run_id = admissions.admitted_run_id
+            AND effects.state = 'failed'
+        ) THEN 'failed'
+        ELSE 'clear'
+      END,
+      CASE
+        WHEN lifecycles.state = 'cleaned' THEN lifecycles.cleaned_at
+        WHEN lifecycles.state = 'completed' THEN lifecycles.completed_at
+        ELSE NULL
+      END,
+      lifecycles.updated_at
+    FROM run_admissions admissions
+    JOIN run_lifecycles lifecycles
+      ON lifecycles.admitted_run_id = admissions.admitted_run_id
+    LEFT JOIN run_leases leases
+      ON leases.admitted_run_id = admissions.admitted_run_id
+    ORDER BY admissions.admitted_at, admissions.admitted_run_id
+    """
+
+    with {:ok, rows} <-
+           domain_query(
+             connection,
+             sql,
+             [],
+             database_path,
+             "cannot inspect durable control-plane runs"
+           ) do
+      decode_operator_snapshots(rows, database_path)
+    end
+  end
+
+  defp decode_operator_snapshots(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, snapshots} ->
+      case decode_operator_snapshot(row) do
+        {:ok, snapshot} -> {:cont, {:ok, [snapshot | snapshots]}}
+        :error -> {:halt, corrupt_store(database_path, :invalid_operator_snapshot)}
+      end
+    end)
+    |> case do
+      {:ok, snapshots} -> {:ok, Enum.reverse(snapshots)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_operator_snapshot([
+         admitted_run_id,
+         target_id,
+         tracker_issue_id,
+         issue_identifier,
+         state,
+         sequence,
+         owner_id,
+         fencing_generation,
+         lease_expires_at_ms,
+         retry_attempt,
+         retry_due_at_ms,
+         blocked_reason,
+         reconciliation_status,
+         terminal_at,
+         updated_at
+       ]) do
+    with true <-
+           valid_operator_identity?(
+             admitted_run_id,
+             target_id,
+             tracker_issue_id,
+             issue_identifier
+           ),
+         true <- valid_operator_lifecycle?(state, sequence),
+         true <-
+           valid_operator_lease?(
+             owner_id,
+             fencing_generation,
+             lease_expires_at_ms
+           ),
+         true <-
+           valid_operator_optional_fields?(
+             retry_attempt,
+             retry_due_at_ms,
+             blocked_reason,
+             terminal_at
+           ),
+         true <- valid_reconciliation_status?(reconciliation_status),
+         true <- is_binary(updated_at) do
+      {:ok,
+       %{
+         admitted_run_id: Redaction.redact_string(admitted_run_id),
+         target_id: Redaction.redact_string(target_id),
+         tracker_issue_id: Redaction.redact_string(tracker_issue_id),
+         issue_identifier: Redaction.redact_string(issue_identifier),
+         lifecycle_state: state,
+         lifecycle_sequence: sequence,
+         owner_id: redact_optional_string(owner_id),
+         lease_expires_at_ms: lease_expires_at_ms,
+         fencing_generation: fencing_generation,
+         retry_attempt: retry_attempt,
+         retry_due_at_ms: retry_due_at_ms,
+         blocked_reason: redact_optional_string(blocked_reason),
+         reconciliation_status: reconciliation_status,
+         terminal_at: terminal_at,
+         updated_at: updated_at
+       }}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp decode_operator_snapshot(_row), do: :error
+
+  defp valid_operator_identity?(
+         admitted_run_id,
+         target_id,
+         tracker_issue_id,
+         issue_identifier
+       ) do
+    Enum.all?(
+      [admitted_run_id, target_id, tracker_issue_id, issue_identifier],
+      &valid_non_empty_string?/1
+    )
+  end
+
+  defp valid_operator_lifecycle?(state, sequence) do
+    state in [
+      "admitted",
+      "running",
+      "retrying",
+      "blocked",
+      "completed",
+      "cleanup_pending",
+      "cleaned"
+    ] and is_integer(sequence) and sequence > 0
+  end
+
+  defp valid_operator_lease?(owner_id, fencing_generation, lease_expires_at_ms) do
+    valid_optional_string?(owner_id) and
+      is_integer(fencing_generation) and fencing_generation >= 0 and
+      valid_optional_integer?(lease_expires_at_ms)
+  end
+
+  defp valid_operator_optional_fields?(
+         retry_attempt,
+         retry_due_at_ms,
+         blocked_reason,
+         terminal_at
+       ) do
+    valid_optional_integer?(retry_attempt) and
+      valid_optional_integer?(retry_due_at_ms) and
+      valid_optional_string?(blocked_reason) and
+      valid_optional_string?(terminal_at)
+  end
+
+  defp valid_reconciliation_status?(status),
+    do: status in ["clear", "failed", "pending", "reconciliation_required"]
+
+  defp valid_optional_string?(nil), do: true
+  defp valid_optional_string?(value), do: is_binary(value)
+  defp valid_optional_integer?(nil), do: true
+  defp valid_optional_integer?(value), do: is_integer(value)
+
+  defp redact_optional_string(nil), do: nil
+  defp redact_optional_string(value), do: Redaction.redact_string(value)
+
+  defp preview_operator_run_action(connection, database_path, action, admitted_run_id) do
+    with :ok <- validate_operator_action(action),
+         :ok <- validate_admitted_run_id(admitted_run_id),
+         {:ok, snapshot} <-
+           load_operator_snapshot(connection, database_path, admitted_run_id),
+         :ok <- validate_operator_action_state(action, snapshot),
+         :ok <- require_reconciled_side_effects(snapshot) do
+      {:ok, operator_run_preview(action, snapshot)}
+    end
+  end
+
+  defp load_operator_snapshot(connection, database_path, admitted_run_id) do
+    with {:ok, snapshots} <- load_operator_snapshots(connection, database_path) do
+      case Enum.find(snapshots, &(&1.admitted_run_id == admitted_run_id)) do
+        nil -> {:error, :admission_not_found}
+        snapshot -> {:ok, snapshot}
+      end
+    end
+  end
+
+  defp validate_operator_action(action) when action in @operator_run_actions, do: :ok
+  defp validate_operator_action(_action), do: {:error, :invalid_operator_action}
+
+  defp validate_operator_action_state(:resume, %{lifecycle_state: state})
+       when state in ["admitted", "retrying", "blocked"],
+       do: :ok
+
+  defp validate_operator_action_state(:abandon, %{lifecycle_state: state})
+       when state in ["admitted", "running", "retrying", "blocked"],
+       do: :ok
+
+  defp validate_operator_action_state(_action, _snapshot),
+    do: {:error, :operator_action_not_allowed}
+
+  defp require_reconciled_side_effects(%{reconciliation_status: status})
+       when status in ["pending", "reconciliation_required"],
+       do: {:error, :reconciliation_required}
+
+  defp require_reconciled_side_effects(_snapshot), do: :ok
+
+  defp operator_run_preview(action, snapshot) do
+    %{
+      operation: Atom.to_string(action),
+      run: snapshot,
+      confirmation:
+        confirmation_token(%{
+          "operation" => Atom.to_string(action),
+          "admitted_run_id" => snapshot.admitted_run_id,
+          "lifecycle_sequence" => snapshot.lifecycle_sequence,
+          "lifecycle_state" => snapshot.lifecycle_state,
+          "fencing_generation" => snapshot.fencing_generation
+        })
+    }
+  end
+
+  defp confirm_operator_run_action(
+         connection,
+         database_path,
+         clock,
+         action,
+         admitted_run_id,
+         owner_id,
+         confirmation
+       ) do
+    with :ok <- validate_owner_id(owner_id),
+         true <- is_binary(confirmation) and confirmation != "",
+         {:ok, preview} <-
+           preview_operator_run_action(
+             connection,
+             database_path,
+             action,
+             admitted_run_id
+           ),
+         true <- confirmation == preview.confirmation,
+         {:ok, lease} <-
+           acquire_run_lease(
+             connection,
+             database_path,
+             admitted_run_id,
+             owner_id,
+             clock
+           ) do
+      apply_operator_run_action(
+        connection,
+        database_path,
+        clock,
+        action,
+        preview.run,
+        lease
+      )
+    else
+      false -> {:error, :invalid_confirmation}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp apply_operator_run_action(
+         connection,
+         database_path,
+         clock,
+         action,
+         snapshot,
+         lease
+       ) do
+    next_state = if action == :resume, do: :running, else: :completed
+    evidence = if action == :resume, do: %{}, else: %{disposition: "abandoned_by_operator"}
+
+    result =
+      persist_lifecycle_transition(
+        connection,
+        database_path,
+        lease,
+        snapshot.lifecycle_sequence,
+        String.to_existing_atom(snapshot.lifecycle_state),
+        next_state,
+        evidence,
+        clock
+      )
+
+    case result do
+      {:ok, lifecycle} ->
+        {:ok,
+         %{
+           lease: lease,
+           run: operator_snapshot_after_action(snapshot, lifecycle, lease)
+         }}
+
+      {:error, _reason} = error ->
+        _ = release_run_lease(connection, database_path, lease, clock)
+        error
+    end
+  end
+
+  defp operator_snapshot_after_action(snapshot, lifecycle, lease) do
+    %{
+      snapshot
+      | lifecycle_state: Atom.to_string(lifecycle.state),
+        lifecycle_sequence: lifecycle.sequence,
+        owner_id: redact_optional_string(lease.owner_id),
+        lease_expires_at_ms: lease.deadline_ms,
+        fencing_generation: lease.fencing_token,
+        retry_attempt: lifecycle.retry_attempt,
+        retry_due_at_ms: lifecycle.retry_due_at_ms,
+        blocked_reason: redact_optional_string(lifecycle.blocked_reason),
+        terminal_at: lifecycle.cleaned_at || lifecycle.completed_at,
+        updated_at: lifecycle.updated_at
+    }
+  end
+
+  defp preview_terminal_prune(connection, database_path, clock, retention_days) do
+    with :ok <- validate_retention_days(retention_days),
+         {:ok, now_ms} <- wall_clock_ms(clock, database_path),
+         {:ok, eligible_run_ids} <-
+           eligible_prune_run_ids(
+             connection,
+             database_path,
+             now_ms,
+             retention_days
+           ),
+         {:ok, snapshots} <- load_operator_snapshots(connection, database_path) do
+      eligible = Enum.filter(snapshots, &(&1.admitted_run_id in eligible_run_ids))
+
+      terminal_count =
+        Enum.count(snapshots, fn snapshot ->
+          snapshot.lifecycle_state in Enum.map(@terminal_lifecycle_states, &Atom.to_string/1)
+        end)
+
+      {:ok,
+       %{
+         operation: "prune",
+         retention_days: retention_days,
+         eligible_runs: eligible,
+         eligible_count: length(eligible),
+         preserved_terminal_count: terminal_count - length(eligible),
+         confirmation:
+           confirmation_token(%{
+             "operation" => "prune",
+             "retention_days" => retention_days,
+             "eligible_run_ids" => eligible_run_ids
+           })
+       }}
+    end
+  end
+
+  defp validate_retention_days(retention_days)
+       when is_integer(retention_days) and retention_days > 0,
+       do: :ok
+
+  defp validate_retention_days(_retention_days), do: {:error, :invalid_retention}
+
+  defp eligible_prune_run_ids(
+         connection,
+         database_path,
+         now_ms,
+         retention_days
+       ) do
+    cutoff_ms = now_ms - retention_days * 86_400_000
+
+    with {:ok, cutoff} <- timestamp_from_ms(cutoff_ms, database_path) do
+      sql = """
+      SELECT lifecycles.admitted_run_id
+      FROM run_lifecycles lifecycles
+      LEFT JOIN run_leases leases
+        ON leases.admitted_run_id = lifecycles.admitted_run_id
+      WHERE lifecycles.state IN ('completed', 'cleaned')
+        AND CASE
+          WHEN lifecycles.state = 'cleaned' THEN lifecycles.cleaned_at
+          ELSE lifecycles.completed_at
+        END <= ?1
+        AND (
+          leases.owner_id IS NULL OR
+          leases.lease_deadline_ms <= ?2
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM run_process_ownership ownership
+          WHERE ownership.admitted_run_id = lifecycles.admitted_run_id
+            AND ownership.state != 'stopped'
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM side_effect_intents effects
+          WHERE effects.admitted_run_id = lifecycles.admitted_run_id
+            AND (
+              effects.state IN ('pending', 'reconciliation_required') OR
+              effects.kind IN (?3, ?4)
+            )
+        )
+      ORDER BY lifecycles.admitted_run_id
+      """
+
+      with {:ok, rows} <-
+             domain_query(
+               connection,
+               sql,
+               [cutoff, now_ms | @retained_artifact_kinds],
+               database_path,
+               "cannot preview terminal control-plane retention"
+             ) do
+        decode_run_id_rows(rows, database_path)
+      end
+    end
+  end
+
+  defp decode_run_id_rows(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn
+      [admitted_run_id], {:ok, run_ids}
+      when is_binary(admitted_run_id) and admitted_run_id != "" ->
+        {:cont, {:ok, [admitted_run_id | run_ids]}}
+
+      _invalid, _acc ->
+        {:halt, corrupt_store(database_path, :invalid_prune_candidate)}
+    end)
+    |> case do
+      {:ok, run_ids} -> {:ok, Enum.reverse(run_ids)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp prune_terminal_runs(
+         connection,
+         database_path,
+         clock,
+         retention_days,
+         confirmation
+       ) do
+    with true <- is_binary(confirmation) and confirmation != "",
+         {:ok, preview} <-
+           preview_terminal_prune(
+             connection,
+             database_path,
+             clock,
+             retention_days
+           ),
+         true <- confirmation == preview.confirmation,
+         run_ids = Enum.map(preview.eligible_runs, & &1.admitted_run_id),
+         {:ok, pruned_count} <-
+           delete_terminal_runs(
+             connection,
+             database_path,
+             clock,
+             retention_days,
+             run_ids
+           ) do
+      {:ok,
+       %{
+         operation: "prune",
+         retention_days: retention_days,
+         pruned_count: pruned_count,
+         pruned_run_ids: run_ids
+       }}
+    else
+      false -> {:error, :invalid_confirmation}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp delete_terminal_runs(
+         connection,
+         database_path,
+         clock,
+         retention_days,
+         run_ids
+       ) do
+    with {:ok, now_ms} <- wall_clock_ms(clock, database_path) do
+      delete_terminal_runs_at(
+        connection,
+        database_path,
+        now_ms,
+        retention_days,
+        run_ids
+      )
+    end
+  end
+
+  defp delete_terminal_runs_at(
+         connection,
+         database_path,
+         now_ms,
+         retention_days,
+         run_ids
+       ) do
+    run_transaction(connection, database_path, fn _transaction ->
+      delete_current_terminal_runs(
+        connection,
+        database_path,
+        now_ms,
+        retention_days,
+        run_ids
+      )
+    end)
+  end
+
+  defp delete_current_terminal_runs(
+         connection,
+         database_path,
+         now_ms,
+         retention_days,
+         run_ids
+       ) do
+    with {:ok, current_run_ids} <-
+           eligible_prune_run_ids(
+             connection,
+             database_path,
+             now_ms,
+             retention_days
+           ),
+         true <- Enum.all?(run_ids, &(&1 in current_run_ids)),
+         :ok <-
+           delete_run_rows(
+             connection,
+             database_path,
+             "run_process_ownership",
+             run_ids
+           ),
+         :ok <-
+           delete_run_rows(
+             connection,
+             database_path,
+             "side_effect_intents",
+             run_ids
+           ),
+         :ok <-
+           delete_run_rows(
+             connection,
+             database_path,
+             "run_lifecycle_transitions",
+             run_ids
+           ),
+         :ok <-
+           delete_run_rows(
+             connection,
+             database_path,
+             "run_lifecycles",
+             run_ids
+           ),
+         :ok <- delete_run_rows(connection, database_path, "run_leases", run_ids),
+         :ok <-
+           delete_run_rows(
+             connection,
+             database_path,
+             "run_admissions",
+             run_ids
+           ) do
+      {:ok, length(run_ids)}
+    else
+      false -> {:error, :invalid_confirmation}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp delete_run_rows(_connection, _database_path, _table, []), do: :ok
+
+  defp delete_run_rows(connection, database_path, table, run_ids) do
+    Enum.reduce_while(run_ids, :ok, fn admitted_run_id, :ok ->
+      sql = "DELETE FROM #{table} WHERE admitted_run_id = ?1"
+
+      case expect_no_rows(
+             connection,
+             sql,
+             [admitted_run_id],
+             database_path,
+             "cannot prune terminal control-plane rows from #{table}"
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp confirmation_token(payload) do
+    payload
+    |> Jason.encode!()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  defp log_operator_snapshot({:ok, snapshots}) do
+    Logger.debug(fn ->
+      "control_plane_snapshot=" <> Jason.encode!(snapshots)
+    end)
+  end
+
+  defp log_operator_snapshot({:error, reason}) do
+    Logger.warning(
+      "control_plane_snapshot_failed=" <>
+        Jason.encode!(Redaction.json_ready(%{reason: inspect(reason)}))
+    )
+  end
+
+  defp log_operator_action(action, admitted_run_id, result) do
+    Logger.info(fn ->
+      "control_plane_operation=" <>
+        Jason.encode!(
+          Redaction.json_ready(%{
+            operation: action,
+            admitted_run_id: admitted_run_id,
+            result: operator_result_status(result)
+          })
+        )
+    end)
+  end
+
+  defp log_prune(result) do
+    Logger.info(fn ->
+      "control_plane_operation=" <>
+        Jason.encode!(
+          Redaction.json_ready(%{
+            operation: :prune,
+            result: operator_result_status(result)
+          })
+        )
+    end)
+  end
+
+  defp operator_result_status({:ok, result}),
+    do: %{status: :ok, result: result}
+
+  defp operator_result_status({:error, reason}),
+    do: %{status: :error, reason: inspect(reason)}
 
   defp validate_recovery_request(owner_id, process_terminator) do
     with :ok <- validate_owner_id(owner_id),

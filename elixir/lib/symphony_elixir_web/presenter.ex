@@ -3,7 +3,7 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, RunTarget, StatusDashboard}
+  alias SymphonyElixir.{Config, ControlPlane, Orchestrator, RunTarget, StatusDashboard}
 
   @stale_after_seconds 5 * 60
   @default_profile "default"
@@ -66,6 +66,39 @@ defmodule SymphonyElixirWeb.Presenter do
       :unavailable ->
         %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
     end
+  end
+
+  @spec control_plane_payload(GenServer.server()) :: {:ok, map()} | {:error, term()}
+  def control_plane_payload(control_plane) do
+    case ControlPlane.inspect_runs(control_plane) do
+      {:ok, runs} ->
+        {:ok,
+         %{
+           generated_at:
+             DateTime.utc_now()
+             |> DateTime.truncate(:second)
+             |> DateTime.to_iso8601(),
+           counts: %{
+             total: length(runs),
+             nonterminal:
+               Enum.count(runs, fn run ->
+                 run.lifecycle_state not in ["completed", "cleaned"]
+               end),
+             blocked: Enum.count(runs, &(&1.lifecycle_state == "blocked")),
+             reconciliation_required:
+               Enum.count(
+                 runs,
+                 &(&1.reconciliation_status == "reconciliation_required")
+               )
+           },
+           runs: runs
+         }}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  catch
+    :exit, reason -> {:error, reason}
   end
 
   @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}

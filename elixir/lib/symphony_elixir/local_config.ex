@@ -67,6 +67,7 @@ defmodule SymphonyElixir.LocalConfig do
         "max_turns" => 20,
         "max_retry_backoff_ms" => 300_000
       },
+      "control_plane" => %{"terminal_retention_days" => 30},
       "capacity_profiles" => %{
         "light" => %{"max_concurrent_agents" => 1, "max_concurrent_startups" => 1},
         "normal" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 1},
@@ -109,7 +110,12 @@ defmodule SymphonyElixir.LocalConfig do
   def load(opts \\ []) do
     with {:ok, content} <- File.read(path(opts)),
          {:ok, decoded} <- decode_yaml(content) do
-      config = drop_nil_values(decoded, preserve_nil_under: [["deployment", "ceilings"]])
+      config =
+        drop_nil_values(decoded,
+          preserve_nil_under: [["deployment", "ceilings"]],
+          preserve_nil_paths: [["control_plane", "terminal_retention_days"]]
+        )
+
       {:ok, deep_merge(default_config(), config)}
     end
   end
@@ -131,6 +137,22 @@ defmodule SymphonyElixir.LocalConfig do
     |> normalize_keys()
     |> Map.take(@runtime_keys)
   end
+
+  @spec terminal_retention_days(config()) :: {:ok, pos_integer()} | {:error, term()}
+  def terminal_retention_days(config) when is_map(config) do
+    case config
+         |> normalize_keys()
+         |> get_in(["control_plane", "terminal_retention_days"]) do
+      days when is_integer(days) and days > 0 ->
+        {:ok, days}
+
+      invalid ->
+        {:error, {:invalid_terminal_retention_days, invalid}}
+    end
+  end
+
+  def terminal_retention_days(config),
+    do: {:error, {:invalid_terminal_retention_days, config}}
 
   @spec resolve_capacity(config(), String.t() | map() | nil) :: {:ok, capacity()} | {:error, term()}
   def resolve_capacity(config, nil), do: resolve_capacity(config, "normal")
@@ -207,11 +229,10 @@ defmodule SymphonyElixir.LocalConfig do
   defp drop_nil_values(value, _opts, _path), do: value
 
   defp preserve_nil_path?(path, opts) do
-    opts
-    |> Keyword.get(:preserve_nil_under, [])
-    |> Enum.any?(fn prefix ->
-      length(path) > length(prefix) and Enum.take(path, length(prefix)) == prefix
-    end)
+    path in Keyword.get(opts, :preserve_nil_paths, []) or
+      Enum.any?(Keyword.get(opts, :preserve_nil_under, []), fn prefix ->
+        length(path) > length(prefix) and Enum.take(path, length(prefix)) == prefix
+      end)
   end
 
   defp decode_yaml(content) do

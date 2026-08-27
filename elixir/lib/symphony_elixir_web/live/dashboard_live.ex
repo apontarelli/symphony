@@ -5,6 +5,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
+  alias SymphonyElixir.ReviewRecords.Redaction
   alias SymphonyElixirWeb.{Endpoint, ObservabilityPubSub, Presenter}
   @runtime_tick_ms 1_000
 
@@ -126,6 +127,77 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_int(@payload.runtime_totals.total_tokens) %></p>
             <p class="metric-detail"><%= token_hotspot_text(@payload.token_hotspot) %></p>
           </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Durable control plane</h2>
+              <p class="section-copy">
+                Credential-safe durable run state, lease ownership, fencing, retry timing, and reconciliation.
+              </p>
+            </div>
+          </div>
+
+          <%= if @payload.control_plane[:error] do %>
+            <p class="empty-state">
+              Control-plane snapshot unavailable: <%= @payload.control_plane.error %>
+            </p>
+          <% else %>
+            <%= if @payload.control_plane.runs == [] do %>
+              <p class="empty-state">No durable runs.</p>
+            <% else %>
+              <div class="table-wrap">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>Target / issue</th>
+                      <th>State</th>
+                      <th>Owner / lease</th>
+                      <th>Fence</th>
+                      <th>Retry</th>
+                      <th>Blocked reason</th>
+                      <th>Reconciliation</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr :for={run <- @payload.control_plane.runs}>
+                      <td data-label="Target / issue">
+                        <div class="issue-stack">
+                          <span class="issue-id"><%= run.target_id %> / <%= run.issue_identifier %></span>
+                          <span class="muted mono"><%= run.admitted_run_id %></span>
+                        </div>
+                      </td>
+                      <td data-label="State">
+                        <span class={state_badge_class(run.lifecycle_state)}>
+                          <%= run.lifecycle_state %>
+                        </span>
+                      </td>
+                      <td data-label="Owner / lease">
+                        <div class="issue-stack">
+                          <span><%= run.owner_id || "unowned" %></span>
+                          <span class="muted numeric"><%= format_timestamp_ms(run.lease_expires_at_ms) %></span>
+                        </div>
+                      </td>
+                      <td data-label="Fence" class="numeric"><%= run.fencing_generation %></td>
+                      <td data-label="Retry">
+                        <div class="issue-stack">
+                          <span class="numeric"><%= run.retry_attempt || "n/a" %></span>
+                          <span class="muted numeric"><%= format_timestamp_ms(run.retry_due_at_ms) %></span>
+                        </div>
+                      </td>
+                      <td data-label="Blocked reason"><%= run.blocked_reason || "n/a" %></td>
+                      <td data-label="Reconciliation">
+                        <span class={state_badge_class(run.reconciliation_status)}>
+                          <%= run.reconciliation_status %>
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            <% end %>
+          <% end %>
         </section>
 
         <section :if={@payload.tracker.limited} class="section-card tracker-limit-card">
@@ -563,6 +635,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
     orchestrator()
     |> Presenter.state_payload(snapshot_timeout_ms())
     |> put_project_groups()
+    |> put_control_plane()
+  end
+
+  defp put_control_plane(%{error: _error} = payload),
+    do: Map.put(payload, :control_plane, %{error: "orchestrator snapshot unavailable"})
+
+  defp put_control_plane(payload) do
+    control_plane =
+      case Presenter.control_plane_payload(control_plane()) do
+        {:ok, snapshot} -> snapshot
+        {:error, reason} -> %{error: Redaction.redact_string(inspect(reason)), runs: []}
+      end
+
+    Map.put(payload, :control_plane, control_plane)
   end
 
   attr(:identifier, :string, required: true)
@@ -711,6 +797,10 @@ defmodule SymphonyElixirWeb.DashboardLive do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
   end
 
+  defp control_plane do
+    Endpoint.config(:control_plane) || SymphonyElixir.ControlPlane
+  end
+
   defp snapshot_timeout_ms do
     Endpoint.config(:snapshot_timeout_ms) || 15_000
   end
@@ -796,6 +886,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp format_duration_ms(value) when is_integer(value) and value >= 0, do: "#{value}ms"
   defp format_duration_ms(_value), do: "n/a"
+
+  defp format_timestamp_ms(value) when is_integer(value) and value >= 0 do
+    case DateTime.from_unix(value, :millisecond) do
+      {:ok, datetime} -> DateTime.to_iso8601(datetime)
+      {:error, _reason} -> "n/a"
+    end
+  end
+
+  defp format_timestamp_ms(_value), do: "n/a"
 
   defp token_hotspot_text(nil), do: "No active token hotspot."
 

@@ -316,7 +316,8 @@ not in the checked-in repo manifest.
 Local operator config is stored at `~/.config/symphony/config.yml`. Defaults include workspace root
 `~/dev/symphony-workspaces`, Linear active states `Todo`, `In Progress`, `Merging`, and `Rework`,
 terminal states `Closed`, `Cancelled`, `Canceled`, `Duplicate`, and `Done`, polling interval
-`30000`, Codex app-server runner defaults, and capacity profiles:
+`30000`, 30-day terminal control-plane retention, Codex app-server runner defaults, and capacity
+profiles:
 
 - `light`: 1 agent / 1 startup
 - `normal`: 4 agents / 1 startup
@@ -384,6 +385,27 @@ Missing credentials block only the affected run. Resolved values are returned in
 or retrying work and are omitted from durable state and recovery inspection output. Recovered
 dispatch and retry policy comes from the pinned admission, not the mutable workflow or target
 registry.
+
+Operators can inspect the same credential-safe durable run projection through
+`symphony control-plane inspect`, `GET /api/v1/control-plane/runs`, the dashboard durable
+control-plane table, and structured `control_plane_snapshot` debug logs. The projection includes
+target and issue identity, lifecycle state and sequence, current owner and lease expiry, fencing
+generation, retry timing, blocked reason, and reconciliation status. It omits pinned policy,
+execution context, credentials, and raw transition evidence.
+
+`symphony control-plane resume <run-id>` and `abandon <run-id>` first return a confirmation token
+bound to the current lifecycle sequence and fencing generation. Supplying that token with
+`--confirm` and `--owner` acquires a new lease before the mutation; active leases, changed state,
+running process ownership, and unresolved side-effect reconciliation fail closed. The equivalent
+JSON API operations are `POST /api/v1/control-plane/runs/:run_id/resume` and `abandon`; mutating
+control-plane API requests are accepted only from loopback clients.
+
+`control_plane.terminal_retention_days` defaults to `30` and must be a positive integer.
+`symphony control-plane prune` and `POST /api/v1/control-plane/prune` return a preview token before
+deleting anything. Confirmation recomputes eligibility, then atomically removes only old completed
+or cleaned runs. Blocked and other nonterminal runs, active leases, uncertain process ownership,
+pending or reconciliation-required side effects, and runs linked to durable publish-handoff or
+handoff-route artifacts are preserved.
 
 
 Saved run setups live at `~/.config/symphony/runs/<lowercase-slug>.yml`. Names may contain lowercase

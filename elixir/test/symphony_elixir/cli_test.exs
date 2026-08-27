@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.CLITest do
   use ExUnit.Case
 
-  alias SymphonyElixir.{CLI, ControlPlane, LocalConfig}
+  alias SymphonyElixir.{CLI, ControlPlane, ControlPlaneCLI, LocalConfig}
   alias SymphonyElixir.Workflow.{Manifest, Renderer}
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
@@ -601,6 +601,7 @@ defmodule SymphonyElixir.CLITest do
     assert usage =~ "symphony run --workflow <path>"
     assert usage =~ "symphony setup migrate --repo <path>"
     assert usage =~ "symphony host target <add|import|plan|patch> [options]"
+    assert usage =~ "symphony control-plane <inspect|resume|abandon|prune> [options]"
     refute usage =~ @ack_flag
     refute usage =~ "--dry-run"
     refute usage =~ "--setup"
@@ -638,6 +639,37 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:ok, "injected host output"} = CLI.evaluate(["host", "target", "add", "my-id"], deps)
     assert_received {:host_evaluate, ["target", "add", "my-id"]}
+  end
+
+  test "injected control_plane_evaluate receives operator args and result passes through" do
+    parent = self()
+
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        control_plane_evaluate: fn control_plane_args ->
+          send(parent, {:control_plane_evaluate, control_plane_args})
+          {:ok, "canonical control-plane output"}
+        end
+      })
+
+    assert {:ok, "canonical control-plane output"} =
+             CLI.evaluate(["control-plane", "inspect", "--json"], deps)
+
+    assert_received {:control_plane_evaluate, ["inspect", "--json"]}
+  end
+
+  test "control-plane CLI inspects an empty durable store without daemon startup" do
+    config_root = tmp_repo!("control-plane-cli-inspect")
+
+    assert {:ok, output} =
+             ControlPlaneCLI.evaluate([
+               "inspect",
+               "--config-root",
+               config_root,
+               "--json"
+             ])
+
+    assert Jason.decode!(output) == %{"runs" => []}
   end
 
   test "injected host_evaluate error passes through without daemon dependencies" do

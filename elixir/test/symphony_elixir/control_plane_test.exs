@@ -1362,11 +1362,12 @@ defmodule SymphonyElixir.ControlPlaneTest do
                     %ProcessOwnership{
                       fencing_token: old_token,
                       process_group_id: 51_501
-                    }}
+                    }},
+                   1_000
 
     assert old_token == old_lease.fencing_token
     Process.exit(recovery_pid, :kill)
-    assert_receive {:DOWN, ^recovery_monitor, :process, ^recovery_pid, :killed}
+    assert_receive {:DOWN, ^recovery_monitor, :process, ^recovery_pid, :killed}, 1_000
 
     assert {:ok, [%Recovery{action: :retry, lifecycle: %Lifecycle{state: :retrying}}]} =
              ControlPlane.recover_runs(reopened, "owner-resumed",
@@ -1381,7 +1382,8 @@ defmodule SymphonyElixir.ControlPlaneTest do
                     %ProcessOwnership{
                       fencing_token: ^old_token,
                       process_group_id: 51_501
-                    }}
+                    }},
+                   1_000
   end
 
   test "restart does not reuse stopped ownership from an earlier attempt" do
@@ -1672,6 +1674,303 @@ defmodule SymphonyElixir.ControlPlaneTest do
     refute database_bytes(database_path) =~ runner_secret
     assert scalar_query!(database_path, "SELECT count(*) FROM target_generations") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
+  end
+
+  test "operator inspection uses one redacted canonical durable vocabulary" do
+    config_root = tmp_root!("control-plane-operator-inspection")
+    {clock_state, clock} = test_clock!(1_000)
+    server = start_control_plane!(config_root, clock: clock)
+    context = execution_context!(config_root, "alpha", "issue-safe", "SID-432")
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-a")
+
+    assert {:ok, %Lifecycle{state: :blocked}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               1,
+               :admitted,
+               :blocked,
+               %{reason: "token=operator-secret at /private/operator/path"}
+             )
+
+    assert {:ok, [snapshot]} = ControlPlane.inspect_runs(server)
+    assert snapshot.admitted_run_id == admission.admitted_run_id
+    assert snapshot.target_id == "alpha"
+    assert snapshot.tracker_issue_id == "issue-safe"
+    assert snapshot.issue_identifier == "SID-432"
+    assert snapshot.lifecycle_state == "blocked"
+    assert snapshot.lifecycle_sequence == 2
+    assert snapshot.owner_id == "owner-a"
+    assert snapshot.lease_expires_at_ms == 31_000
+    assert snapshot.fencing_generation == 1
+    assert snapshot.retry_attempt == nil
+    assert snapshot.retry_due_at_ms == nil
+    assert snapshot.reconciliation_status == "clear"
+    assert snapshot.blocked_reason =~ "token=<redacted:secret>"
+    assert snapshot.blocked_reason =~ "<redacted:absolute-path>"
+    refute inspect(snapshot) =~ "operator-secret"
+    refute inspect(snapshot) =~ "/private/operator/path"
+
+    set_clock!(clock_state, 2_000)
+    assert :ok = ControlPlane.release_lease(server, lease)
+  end
+
+  test "resume and abandon confirmations bind current durable state and fencing" do
+    config_root = tmp_root!("control-plane-operator-actions")
+    server = start_control_plane!(config_root)
+    context = execution_context!(config_root, "alpha", "issue-actions", "SID-432-A")
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+
+    assert {:ok, resume_preview} =
+             ControlPlane.preview_run_action(server, :resume, admission.admitted_run_id)
+
+    assert resume_preview.operation == "resume"
+    assert resume_preview.run.lifecycle_state == "admitted"
+
+    assert {:error, :invalid_confirmation} =
+             ControlPlane.confirm_run_action(
+               server,
+               :resume,
+               admission.admitted_run_id,
+               "operator-resume",
+               "stale-preview"
+             )
+
+    assert {:ok, %{lease: resume_lease, run: resumed}} =
+             ControlPlane.confirm_run_action(
+               server,
+               :resume,
+               admission.admitted_run_id,
+               "token=operator-secret at /private/operator/path",
+               resume_preview.confirmation
+             )
+
+    assert resumed.lifecycle_state == "running"
+    assert resumed.lifecycle_sequence == 2
+    assert resumed.owner_id == "token=<redacted:secret> at <redacted:absolute-path>"
+    assert resumed.fencing_generation == 1
+
+    assert {:ok, abandon_preview} =
+             ControlPlane.preview_run_action(server, :abandon, admission.admitted_run_id)
+
+    assert {:error, :lease_held} =
+             ControlPlane.confirm_run_action(
+               server,
+               :abandon,
+               admission.admitted_run_id,
+               "operator-abandon",
+               abandon_preview.confirmation
+             )
+
+    assert :ok = ControlPlane.release_lease(server, resume_lease)
+
+    assert {:ok, fresh_abandon_preview} =
+             ControlPlane.preview_run_action(server, :abandon, admission.admitted_run_id)
+
+    assert {:ok, %{lease: abandon_lease, run: abandoned}} =
+             ControlPlane.confirm_run_action(
+               server,
+               :abandon,
+               admission.admitted_run_id,
+               "operator-abandon",
+               fresh_abandon_preview.confirmation
+             )
+
+    assert abandoned.lifecycle_state == "completed"
+    assert abandoned.lifecycle_sequence == 3
+    assert abandoned.fencing_generation == 2
+    assert :ok = ControlPlane.release_lease(server, abandon_lease)
+  end
+
+  test "retention prunes only confirmed old terminal rows" do
+    config_root = tmp_root!("control-plane-retention")
+    {clock_state, clock} = test_clock!(0)
+    server = start_control_plane!(config_root, clock: clock)
+
+    eligible_context = execution_context!(config_root, "alpha", "eligible", "SID-432-P")
+    blocked_context = execution_context!(config_root, "alpha", "blocked", "SID-432-B")
+
+    reconciliation_context =
+      execution_context!(config_root, "alpha", "reconciliation", "SID-432-R")
+
+    assert {:ok, eligible} = ControlPlane.admit_run(server, eligible_context)
+
+    assert {:ok, eligible_lease} =
+             ControlPlane.acquire_lease(server, eligible.admitted_run_id, "owner-eligible")
+
+    assert {:ok, %Lifecycle{state: :completed}} =
+             ControlPlane.transition_run(
+               server,
+               eligible_lease,
+               1,
+               :admitted,
+               :completed,
+               %{disposition: "done"}
+             )
+
+    assert :ok = ControlPlane.release_lease(server, eligible_lease)
+
+    assert {:ok, blocked} = ControlPlane.admit_run(server, blocked_context)
+
+    assert {:ok, blocked_lease} =
+             ControlPlane.acquire_lease(server, blocked.admitted_run_id, "owner-blocked")
+
+    assert {:ok, %Lifecycle{state: :blocked}} =
+             ControlPlane.transition_run(
+               server,
+               blocked_lease,
+               1,
+               :admitted,
+               :blocked,
+               %{reason: "operator decision required"}
+             )
+
+    assert :ok = ControlPlane.release_lease(server, blocked_lease)
+
+    assert {:ok, reconciliation} =
+             ControlPlane.admit_run(server, reconciliation_context)
+
+    assert {:ok, reconciliation_lease} =
+             ControlPlane.acquire_lease(
+               server,
+               reconciliation.admitted_run_id,
+               "owner-reconciliation"
+             )
+
+    assert {:ok, %SideEffect{state: :pending}} =
+             ControlPlane.begin_side_effect(
+               server,
+               reconciliation_lease,
+               :tracker_write,
+               "retention-reconciliation",
+               %{operation: "comment"}
+             )
+
+    assert {:blocked, %SideEffect{state: :reconciliation_required}} =
+             ControlPlane.begin_side_effect(
+               server,
+               reconciliation_lease,
+               :tracker_write,
+               "retention-reconciliation",
+               %{operation: "comment"}
+             )
+
+    assert {:ok, %Lifecycle{state: :completed}} =
+             ControlPlane.transition_run(
+               server,
+               reconciliation_lease,
+               1,
+               :admitted,
+               :completed,
+               %{disposition: "done"}
+             )
+
+    assert :ok = ControlPlane.release_lease(server, reconciliation_lease)
+
+    set_clock!(clock_state, 31 * 86_400_000)
+
+    assert {:ok, preview} = ControlPlane.preview_prune(server, 30)
+    assert preview.eligible_count == 1
+    assert preview.preserved_terminal_count == 1
+    assert Enum.map(preview.eligible_runs, & &1.admitted_run_id) == [eligible.admitted_run_id]
+
+    assert {:error, :invalid_confirmation} =
+             ControlPlane.prune(server, 30, "stale-preview")
+
+    assert {:ok, %{pruned_count: 1, pruned_run_ids: [eligible_run_id]}} =
+             ControlPlane.prune(server, 30, preview.confirmation)
+
+    assert eligible_run_id == eligible.admitted_run_id
+
+    assert {:error, :admission_not_found} =
+             ControlPlane.fetch_lifecycle(server, eligible.admitted_run_id)
+
+    assert {:ok, %Lifecycle{state: :blocked}} =
+             ControlPlane.fetch_lifecycle(server, blocked.admitted_run_id)
+
+    assert {:ok, reconciliation_snapshot} =
+             ControlPlane.fetch_lifecycle(server, reconciliation.admitted_run_id)
+
+    assert reconciliation_snapshot.state == :completed
+    assert {:error, :invalid_retention} = ControlPlane.preview_prune(server, 0)
+  end
+
+  test "prune revalidates eligibility inside the delete transaction" do
+    config_root = tmp_root!("control-plane-retention-race")
+    test_pid = self()
+    retention_now_ms = 31 * 86_400_000
+
+    {:ok, clock_state} =
+      Agent.start_link(fn ->
+        %{armed: false, calls: 0, now_ms: 0}
+      end)
+
+    clock = fn ->
+      {action, now_ms} =
+        Agent.get_and_update(clock_state, fn state ->
+          calls = if state.armed, do: state.calls + 1, else: state.calls
+          action = if state.armed and calls == 2, do: :block, else: :continue
+          {{action, state.now_ms}, %{state | calls: calls}}
+        end)
+
+      if action == :block do
+        send(test_pid, {:prune_revalidation_clock, self()})
+
+        receive do
+          :continue_prune -> :ok
+        after
+          1_000 -> raise "prune revalidation was not released"
+        end
+      end
+
+      now_ms
+    end
+
+    server = start_control_plane!(config_root, clock: clock)
+    concurrent_server = start_control_plane!(config_root, clock: fn -> retention_now_ms end)
+    context = execution_context!(config_root, "alpha", "race", "SID-432-RACE")
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    assert {:ok, lease} = ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner")
+
+    assert {:ok, %Lifecycle{state: :completed}} =
+             ControlPlane.transition_run(
+               server,
+               lease,
+               1,
+               :admitted,
+               :completed,
+               %{disposition: "done"}
+             )
+
+    assert :ok = ControlPlane.release_lease(server, lease)
+    Agent.update(clock_state, &%{&1 | now_ms: retention_now_ms})
+    assert {:ok, preview} = ControlPlane.preview_prune(server, 30)
+    Agent.update(clock_state, &%{&1 | armed: true, calls: 0})
+
+    prune_task =
+      Task.async(fn ->
+        ControlPlane.prune(server, 30, preview.confirmation)
+      end)
+
+    assert_receive {:prune_revalidation_clock, clock_pid}, 1_000
+
+    assert {:ok, concurrent_lease} =
+             ControlPlane.acquire_lease(
+               concurrent_server,
+               admission.admitted_run_id,
+               "concurrent-owner"
+             )
+
+    send(clock_pid, :continue_prune)
+    assert Task.await(prune_task) == {:error, :invalid_confirmation}
+
+    assert {:ok, %Lifecycle{state: :completed}} =
+             ControlPlane.fetch_lifecycle(server, admission.admitted_run_id)
+
+    assert :ok = ControlPlane.release_lease(concurrent_server, concurrent_lease)
   end
 
   test "version one stores migrate through admission, lease, lifecycle, and side-effect schemas" do
