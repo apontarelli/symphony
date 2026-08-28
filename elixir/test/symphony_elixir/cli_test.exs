@@ -600,7 +600,7 @@ defmodule SymphonyElixir.CLITest do
     assert usage =~ "symphony run [ISSUE-ID ...]"
     assert usage =~ "symphony run --workflow <path>"
     assert usage =~ "symphony setup migrate --repo <path>"
-    assert usage =~ "symphony host target <add|import|plan|patch> [options]"
+    assert usage =~ "symphony host target <add|import|plan|patch|activate|pause|drain|retire> [options]"
     assert usage =~ "symphony control-plane <inspect|resume|abandon|prune> [options]"
     refute usage =~ @ack_flag
     refute usage =~ "--dry-run"

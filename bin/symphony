@@ -11,6 +11,7 @@ Usage:
   symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
   symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes] [restrictive options]
   symphony run --workflow /path/to/symphony.runtime.yml [options]
+  symphony host target <add|import|plan|patch|activate|pause|drain|retire> [options]
 
 Commands:
   no arguments                 Open the saved-workflow picker in a repo with symphony.yml.
@@ -18,6 +19,7 @@ Commands:
   list                         List saved workflows for the active repo without starting Symphony.
   run <saved-name>             Preview, confirm, and start a saved workflow.
   run --workflow <path>        Start an explicit runtime file.
+  host                         Preview and confirm target registry changes.
 
 Options:
   --preview                    Resolve and print a saved workflow without side effects.
@@ -355,7 +357,7 @@ main() {
     run_elixir "$repo_root" "$@"
   fi
 
-  if [[ "${1:-}" == "workflow" || "${1:-}" == "setup" ]]; then
+  if [[ "${1:-}" == "workflow" || "${1:-}" == "setup" || "${1:-}" == "host" ]]; then
     run_workflow_cli "$repo_root" "$@"
   fi
 

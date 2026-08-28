@@ -34,6 +34,44 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   @gate_values ~w(deny manual_approval allow)
   @target_scheduling_keys ~w(weight)
 
+  @type lifecycle_action :: :activate | :pause | :drain | :retire
+
+  @spec transition_target(map(), String.t(), lifecycle_action(), :explicit | :watch | nil) ::
+          {:ok, map()} | {:error, Error.t()}
+  def transition_target(configured, target_id, action, requested_mode \\ nil)
+
+  def transition_target(configured, target_id, action, requested_mode)
+      when is_map(configured) and is_binary(target_id) do
+    path = "$.targets.#{target_id}"
+
+    state =
+      case Map.fetch(configured, "state") do
+        :error -> :paused
+        {:ok, configured_state_value} -> configured_state(configured_state_value)
+      end
+
+    with :ok <- validate_lifecycle_transition(state, action, path),
+         {:ok, dispatch_mode} <- lifecycle_dispatch_mode(configured, action, requested_mode, path) do
+      transitioned =
+        configured
+        |> Map.put("state", lifecycle_state(action))
+        |> put_lifecycle_dispatch_mode(action, dispatch_mode)
+
+      {:ok, transitioned}
+    end
+  end
+
+  def transition_target(_configured, target_id, _action, _requested_mode) do
+    path = if is_binary(target_id), do: "$.targets.#{target_id}", else: "$.targets"
+
+    {:error,
+     %Error{
+       code: :invalid_lifecycle_target,
+       message: "target lifecycle input is invalid",
+       path: path
+     }}
+  end
+
   @spec validate(map(), keyword()) :: {:ok, Snapshot.t()} | {:error, Error.t()}
   def validate(document, opts \\ []) when is_map(document) and is_list(opts) do
     case Map.fetch(document, "version") do
@@ -265,6 +303,87 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   defp effective_state(_configured_state, false), do: :paused
   defp effective_state(nil, true), do: :paused
   defp effective_state(configured_state, true), do: configured_state
+
+  defp validate_lifecycle_transition(:retired, _action, path) do
+    {:error,
+     %Error{
+       code: :target_retired,
+       message: "retired target is terminal",
+       path: path <> ".state"
+     }}
+  end
+
+  defp validate_lifecycle_transition(:paused, action, _path)
+       when action in [:activate, :retire],
+       do: :ok
+
+  defp validate_lifecycle_transition(:active, action, _path)
+       when action in [:pause, :drain],
+       do: :ok
+
+  defp validate_lifecycle_transition(:draining, :pause, _path), do: :ok
+
+  defp validate_lifecycle_transition(state, action, path) do
+    {:error,
+     %Error{
+       code: :invalid_transition,
+       message: "target lifecycle transition from #{lifecycle_state_name(state)} by #{lifecycle_action_name(action)} is invalid",
+       path: path <> ".state"
+     }}
+  end
+
+  defp lifecycle_dispatch_mode(configured, :activate, requested_mode, path) do
+    mode =
+      case requested_mode do
+        nil -> dispatch_mode(configured["dispatch_mode"])
+        requested -> requested
+      end
+
+    if mode in [:explicit, :watch] do
+      {:ok, mode}
+    else
+      {:error,
+       %Error{
+         code: :dispatch_mode_required,
+         message: "activation requires dispatch mode explicit or watch",
+         path: path <> ".dispatch_mode"
+       }}
+    end
+  end
+
+  defp lifecycle_dispatch_mode(_configured, action, nil, _path)
+       when action in [:pause, :drain, :retire],
+       do: {:ok, nil}
+
+  defp lifecycle_dispatch_mode(_configured, _action, _requested_mode, path) do
+    {:error,
+     %Error{
+       code: :invalid_dispatch_mode,
+       message: "dispatch mode is invalid for target lifecycle action",
+       path: path <> ".dispatch_mode"
+     }}
+  end
+
+  defp lifecycle_state(:activate), do: "active"
+  defp lifecycle_state(:pause), do: "paused"
+  defp lifecycle_state(:drain), do: "draining"
+  defp lifecycle_state(:retire), do: "retired"
+  defp lifecycle_state(_action), do: "unknown"
+
+  defp put_lifecycle_dispatch_mode(configured, :activate, mode),
+    do: Map.put(configured, "dispatch_mode", Atom.to_string(mode))
+
+  defp put_lifecycle_dispatch_mode(configured, _action, _mode), do: configured
+
+  defp lifecycle_state_name(state) when state in [:paused, :active, :draining, :retired],
+    do: Atom.to_string(state)
+
+  defp lifecycle_state_name(_state), do: "unknown"
+
+  defp lifecycle_action_name(action) when action in [:activate, :pause, :drain, :retire],
+    do: Atom.to_string(action)
+
+  defp lifecycle_action_name(_action), do: "unknown action"
 
   defp normalize_target(configured, opts) do
     home = Keyword.get(opts, :home)

@@ -132,6 +132,9 @@ defmodule SymphonyElixir.OperatorCommandService do
   @secret_reference_regex ~r/^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
   @plan_envelope_keys ~w(envelope_version plan_id action target_id command registry_path expected_generation proposed_generation source_hashes created_at)
   @plan_identity_keys ~w(action command envelope_version expected_generation proposed_generation registry_path source_hashes target_id)
+  @lifecycle_actions [:activate, :pause, :drain, :retire]
+  @actions [:add, :import, :patch | @lifecycle_actions]
+  @action_names Enum.map(@actions, &Atom.to_string/1)
 
   defmodule Error do
     @moduledoc false
@@ -198,7 +201,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             id: String.t() | nil,
-            action: :add | :import | :patch,
+            action: :add | :import | :patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             expected_generation: String.t(),
@@ -246,7 +249,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             plan_id: String.t(),
-            action: :add | :import | :patch,
+            action: :add | :import | :patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             old_generation: String.t(),
@@ -328,8 +331,41 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  def plan(%Command.Activate{} = command, opts),
+    do: plan_lifecycle(command, :activate, command.dispatch_mode, opts)
+
+  def plan(%Command.Pause{} = command, opts),
+    do: plan_lifecycle(command, :pause, nil, opts)
+
+  def plan(%Command.Drain{} = command, opts),
+    do: plan_lifecycle(command, :drain, nil, opts)
+
+  def plan(%Command.Retire{} = command, opts),
+    do: plan_lifecycle(command, :retire, nil, opts)
+
   def plan(_command, _opts),
     do: error(:invalid_command, "command must be a typed operator command", "$.command")
+
+  defp plan_lifecycle(command, action, requested_mode, opts) do
+    with :ok <- validate_lifecycle_command(command, action),
+         {:ok, registry_path} <- registry_path(opts),
+         plan_dir <- plan_dir(opts, registry_path),
+         {:ok, current_file} <- read_registry(registry_path),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, registry_path) do
+      build_lifecycle_plan(
+        command.target_id,
+        action,
+        requested_mode,
+        registry_path,
+        plan_dir,
+        current_file,
+        current_document,
+        current_snapshot,
+        opts
+      )
+    end
+  end
 
   @spec apply(String.t(), TargetRegistry.generation(), true, keyword()) ::
           {:ok, ApplyResult.t()} | {:error, Error.t()}
@@ -360,7 +396,7 @@ defmodule SymphonyElixir.OperatorCommandService do
     with true <-
            envelope["plan_id"] == plan_id and envelope["target_id"] == target_id and
              envelope["registry_path"] == registry_path and
-             envelope["action"] in ["add", "import", "patch"] and
+             envelope["action"] in @action_names and
              valid_envelope_command?(envelope["action"], target_id, envelope["command"]),
          :ok <- validate_envelope_sources(envelope) do
       :ok
@@ -453,7 +489,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          :ok <- validate_plan_id(envelope["plan_id"]),
          :ok <- validate_generation(envelope["expected_generation"]),
          :ok <- validate_generation(envelope["proposed_generation"]),
-         true <- envelope["action"] in ["add", "import", "patch"],
+         true <- envelope["action"] in @action_names,
          true <- valid_id?(envelope["target_id"]),
          true <- valid_path?(envelope["registry_path"]),
          true <- strict_json_map?(envelope["command"]),
@@ -493,7 +529,7 @@ defmodule SymphonyElixir.OperatorCommandService do
     with true <- envelope["plan_id"] == plan_id,
          true <- envelope["expected_generation"] == expected_generation,
          true <- envelope["registry_path"] == registry_path,
-         true <- envelope["action"] in ["add", "import", "patch"],
+         true <- envelope["action"] in @action_names,
          true <- valid_id?(envelope["target_id"]),
          :ok <- validate_generation(envelope["proposed_generation"]),
          true <- is_map(envelope["source_hashes"]),
@@ -542,6 +578,22 @@ defmodule SymphonyElixir.OperatorCommandService do
       valid_patch_map?(elem(decode_patch_input(patch_input), 1))
   end
 
+  defp valid_envelope_command?(
+         "activate",
+         target_id,
+         %{"target_id" => target_id, "dispatch_mode" => mode} = command
+       )
+       when map_size(command) == 2,
+       do: mode in ["explicit", "watch"]
+
+  defp valid_envelope_command?(
+         action,
+         target_id,
+         %{"target_id" => target_id} = command
+       )
+       when action in ["pause", "drain", "retire"] and map_size(command) == 1,
+       do: true
+
   defp valid_envelope_command?(_action, _target_id, _command), do: false
 
   defp validate_envelope_sources(%{
@@ -566,6 +618,13 @@ defmodule SymphonyElixir.OperatorCommandService do
   end
 
   defp validate_envelope_sources(%{"action" => "import"}), do: :ok
+
+  defp validate_envelope_sources(%{"action" => action, "source_hashes" => source_hashes})
+       when action in ["activate", "pause", "drain", "retire"] do
+    if source_hashes == %{},
+      do: :ok,
+      else: error(:plan_mismatch, "lifecycle source bindings are invalid", "$.plan.source_hashes")
+  end
 
   defp replace_from_envelope(envelope, opts) do
     replacer =
@@ -674,6 +733,39 @@ defmodule SymphonyElixir.OperatorCommandService do
     else
       {:error, %Error{}} = error -> error
       _failure -> error(:registry_unreadable, "target registry could not be read while locked", path)
+    end
+  end
+
+  defp rebuild_envelope(%{"action" => action} = envelope, current_bytes, _opts)
+       when action in ["activate", "pause", "drain", "retire"] do
+    target_id = envelope["target_id"]
+    lifecycle_action = lifecycle_action(action)
+    requested_mode = envelope_lifecycle_mode(envelope)
+
+    with {:ok, current_file} <- current_file(current_bytes),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, envelope["registry_path"]),
+         %{} = current_target <- current_document["targets"][target_id],
+         {:ok, proposed_target} <-
+           Schema.transition_target(current_target, target_id, lifecycle_action, requested_mode),
+         proposed_document <-
+           put_in(current_document, ["targets", target_id], proposed_target),
+         proposed_bytes <- Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <-
+           snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
+         proposed_snapshot <- Composition.compose(proposed_snapshot),
+         :ok <- ensure_lifecycle_applicable(current_snapshot, proposed_snapshot, target_id, lifecycle_action),
+         :ok <-
+           verify_proposed_generation(
+             proposed_bytes,
+             envelope["proposed_generation"],
+             envelope["registry_path"]
+           ) do
+      {:ok, proposed_bytes}
+    else
+      nil -> error(:target_not_found, "target ID no longer exists", "$.targets.#{target_id}")
+      {:error, %TargetRegistry.Error{} = source} -> registry_error(source)
+      {:error, %Error{}} = error -> error
     end
   end
 
@@ -835,6 +927,58 @@ defmodule SymphonyElixir.OperatorCommandService do
       else: error(:plan_not_applicable, "rebuilt add proposal is not applicable", "$.plan")
   end
 
+  defp ensure_lifecycle_applicable(current_snapshot, proposed_snapshot, target_id, action) do
+    target = proposed_snapshot.targets[target_id]
+
+    applicable? =
+      current_snapshot.globally_valid? and proposed_snapshot.globally_valid? and
+        lifecycle_target_applicable?(target, action)
+
+    if applicable?,
+      do: :ok,
+      else: error(:plan_not_applicable, "rebuilt lifecycle proposal is not applicable", "$.plan")
+  end
+
+  defp lifecycle_target_applicable?(
+         %TargetRegistry.Target{
+           configured_state: :active,
+           effective_state: :active,
+           dispatch_mode: mode,
+           valid?: true
+         },
+         :activate
+       ),
+       do: mode in [:explicit, :watch]
+
+  defp lifecycle_target_applicable?(%TargetRegistry.Target{configured_state: state}, action)
+       when action in [:pause, :drain, :retire],
+       do: state == lifecycle_configured_state(action)
+
+  defp lifecycle_target_applicable?(_target, _action), do: false
+
+  defp lifecycle_configured_state(:pause), do: :paused
+  defp lifecycle_configured_state(:drain), do: :draining
+  defp lifecycle_configured_state(:retire), do: :retired
+
+  defp lifecycle_action("activate"), do: :activate
+  defp lifecycle_action("pause"), do: :pause
+  defp lifecycle_action("drain"), do: :drain
+  defp lifecycle_action("retire"), do: :retire
+
+  defp envelope_lifecycle_mode(%{
+         "action" => "activate",
+         "command" => %{"dispatch_mode" => "explicit"}
+       }),
+       do: :explicit
+
+  defp envelope_lifecycle_mode(%{
+         "action" => "activate",
+         "command" => %{"dispatch_mode" => "watch"}
+       }),
+       do: :watch
+
+  defp envelope_lifecycle_mode(_envelope), do: nil
+
   defp verify_proposed_generation(bytes, expected, path) do
     if Preview.generation(bytes) == expected,
       do: :ok,
@@ -921,6 +1065,36 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  defp validate_lifecycle_command(%Command.Activate{} = command, :activate) do
+    if Map.keys(command) |> Enum.sort() == [:__struct__, :dispatch_mode, :target_id] and
+         valid_id?(command.target_id) and command.dispatch_mode in [:explicit, :watch, nil] do
+      :ok
+    else
+      error(:invalid_command, "activate command is invalid", "$.command")
+    end
+  end
+
+  defp validate_lifecycle_command(%Command.Pause{} = command, :pause),
+    do: validate_target_only_lifecycle_command(command, :pause)
+
+  defp validate_lifecycle_command(%Command.Drain{} = command, :drain),
+    do: validate_target_only_lifecycle_command(command, :drain)
+
+  defp validate_lifecycle_command(%Command.Retire{} = command, :retire),
+    do: validate_target_only_lifecycle_command(command, :retire)
+
+  defp validate_lifecycle_command(_command, _action),
+    do: error(:invalid_command, "lifecycle command is invalid", "$.command")
+
+  defp validate_target_only_lifecycle_command(command, action) do
+    if Map.keys(command) |> Enum.sort() == [:__struct__, :target_id] and
+         valid_id?(command.target_id) do
+      :ok
+    else
+      error(:invalid_command, "#{action} command is invalid", "$.command")
+    end
+  end
+
   defp validate_patch(command) do
     if Map.keys(command) |> Enum.sort() == [:__struct__, :changes, :target_id] and
          valid_id?(command.target_id) and strict_json_map?(command.changes) and
@@ -980,7 +1154,7 @@ defmodule SymphonyElixir.OperatorCommandService do
       nested_path = path <> "." <> key
 
       if key in ["state", "dispatch_mode"] do
-        {:halt, error(:unknown_key, "#{key} is unreachable in Phase 1", nested_path)}
+        {:halt, error(:unknown_key, "#{key} is controlled by lifecycle commands", nested_path)}
       else
         nested
         |> reject_unreachable_patch_keys(nested_path)
@@ -1097,6 +1271,71 @@ defmodule SymphonyElixir.OperatorCommandService do
         is_function(value, 4)
     end)
   end
+
+  defp build_lifecycle_plan(
+         target_id,
+         action,
+         requested_mode,
+         registry_path,
+         plan_dir,
+         current_file,
+         current_document,
+         current_snapshot,
+         opts
+       ) do
+    with true <- current_snapshot.globally_valid?,
+         {:ok, current_target} when is_map(current_target) <-
+           Map.fetch(current_document["targets"], target_id),
+         {:ok, proposed_target} <-
+           Schema.transition_target(current_target, target_id, action, requested_mode),
+         proposed_document <- put_in(current_document, ["targets", target_id], proposed_target),
+         proposed_bytes <- Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <- snapshot_for(proposed_document, proposed_bytes, registry_path),
+         proposed_snapshot <- Composition.compose(proposed_snapshot),
+         :ok <- ensure_lifecycle_applicable(current_snapshot, proposed_snapshot, target_id, action),
+         registry_preview <- Preview.preview(current_snapshot, proposed_snapshot, proposed_bytes),
+         created_at <- now(opts),
+         command_data <- lifecycle_command_data(target_id, action, proposed_target),
+         {:ok, envelope} <-
+           build_envelope(
+             Atom.to_string(action),
+             target_id,
+             command_data,
+             registry_path,
+             current_file.generation,
+             %{},
+             created_at,
+             proposed_bytes
+           ),
+         {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
+      {:ok,
+       public_plan(
+         stored,
+         action,
+         target_id,
+         registry_path,
+         true,
+         %{"registry" => json_value(registry_preview)}
+       )}
+    else
+      false -> error(:plan_not_applicable, "lifecycle change requires a globally valid registry", "$.registry")
+      :error -> error(:target_not_found, "target ID does not exist", "$.targets.#{target_id}")
+      {:ok, _invalid_target} -> error(:invalid_lifecycle_target, "target lifecycle input is invalid", "$.targets.#{target_id}")
+      {:error, %TargetRegistry.Error{} = source} -> registry_error(source)
+      {:error, %Error{}} = error -> error
+    end
+  end
+
+  defp lifecycle_command_data(target_id, :activate, proposed_target) do
+    %{
+      "target_id" => target_id,
+      "dispatch_mode" => proposed_target["dispatch_mode"]
+    }
+  end
+
+  defp lifecycle_command_data(target_id, action, _proposed_target)
+       when action in [:pause, :drain, :retire],
+       do: %{"target_id" => target_id}
 
   defp plan_patch(
          command,

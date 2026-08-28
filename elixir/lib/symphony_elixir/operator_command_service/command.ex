@@ -34,5 +34,51 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
           }
   end
 
-  @type t :: Add.t() | Import.t() | Patch.t()
+  defmodule Activate do
+    @moduledoc false
+
+    @enforce_keys [:target_id]
+    defstruct [:target_id, :dispatch_mode]
+
+    @type t :: %__MODULE__{
+            target_id: String.t(),
+            dispatch_mode: :explicit | :watch | nil
+          }
+  end
+
+  defmodule Pause do
+    @moduledoc false
+
+    @enforce_keys [:target_id]
+    defstruct [:target_id]
+
+    @type t :: %__MODULE__{target_id: String.t()}
+  end
+
+  defmodule Drain do
+    @moduledoc false
+
+    @enforce_keys [:target_id]
+    defstruct [:target_id]
+
+    @type t :: %__MODULE__{target_id: String.t()}
+  end
+
+  defmodule Retire do
+    @moduledoc false
+
+    @enforce_keys [:target_id]
+    defstruct [:target_id]
+
+    @type t :: %__MODULE__{target_id: String.t()}
+  end
+
+  @type t ::
+          Add.t()
+          | Import.t()
+          | Patch.t()
+          | Activate.t()
+          | Pause.t()
+          | Drain.t()
+          | Retire.t()
 end

@@ -1068,6 +1068,69 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     end
   end
 
+  test "lifecycle transitions follow the registry-owned state graph" do
+    cases = [
+      {:activate, "paused", "active"},
+      {:pause, "active", "paused"},
+      {:pause, "draining", "paused"},
+      {:drain, "active", "draining"},
+      {:retire, "paused", "retired"}
+    ]
+
+    for {action, from, to} <- cases do
+      target =
+        valid_target()
+        |> Map.put("state", from)
+        |> Map.put("dispatch_mode", "watch")
+
+      assert {:ok, transitioned} =
+               Schema.transition_target(target, "main", action)
+
+      assert transitioned["state"] == to
+      assert transitioned["dispatch_mode"] == "watch"
+    end
+  end
+
+  test "activation requires or reuses a valid dispatch mode" do
+    paused = valid_target()
+
+    assert {:error, %TargetRegistry.Error{code: :dispatch_mode_required}} =
+             Schema.transition_target(paused, "main", :activate)
+
+    assert {:ok, explicit} =
+             Schema.transition_target(paused, "main", :activate, :explicit)
+
+    assert explicit["state"] == "active"
+    assert explicit["dispatch_mode"] == "explicit"
+
+    watching = Map.put(paused, "dispatch_mode", "watch")
+    assert {:ok, reused} = Schema.transition_target(watching, "main", :activate)
+    assert reused["dispatch_mode"] == "watch"
+  end
+
+  test "retired is terminal and retirement requires paused" do
+    for action <- [:activate, :pause, :drain, :retire] do
+      target = valid_target() |> Map.put("state", "retired")
+
+      assert {:error, %TargetRegistry.Error{code: :target_retired}} =
+               Schema.transition_target(target, "main", action)
+    end
+
+    for {state, action} <- [
+          {"active", :activate},
+          {"active", :retire},
+          {"draining", :activate},
+          {"draining", :drain},
+          {"paused", :pause},
+          {"paused", :drain}
+        ] do
+      target = valid_target() |> Map.put("state", state)
+
+      assert {:error, %TargetRegistry.Error{code: :invalid_transition}} =
+               Schema.transition_target(target, "main", action)
+    end
+  end
+
   test "diagnostics sort by scope, path, code, and message" do
     target_a =
       valid_target()

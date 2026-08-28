@@ -15,6 +15,14 @@ defmodule SymphonyElixir.HostCLI do
     symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target plan <id> --patch <target-patch.yml> [--registry <path>] [--json]
     symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target activate <id> [--mode <watch|explicit>] [--registry <path>] [--json]
+    symphony host target activate <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target pause <id> [--registry <path>] [--json]
+    symphony host target pause <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target drain <id> [--registry <path>] [--json]
+    symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target retire <id> [--registry <path>] [--json]
+    symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
   """
 
   @add_usage """
@@ -38,6 +46,33 @@ defmodule SymphonyElixir.HostCLI do
   Usage:
     symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
   """
+
+  @activate_usage """
+  Usage:
+    symphony host target activate <id> [--mode <watch|explicit>] [--registry <path>] [--json]
+    symphony host target activate <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @pause_usage """
+  Usage:
+    symphony host target pause <id> [--registry <path>] [--json]
+    symphony host target pause <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @drain_usage """
+  Usage:
+    symphony host target drain <id> [--registry <path>] [--json]
+    symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @retire_usage """
+  Usage:
+    symphony host target retire <id> [--registry <path>] [--json]
+    symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @actions [:add, :import, :patch, :activate, :pause, :drain, :retire]
+  @lifecycle_actions [:activate, :pause, :drain, :retire]
 
   @target_id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
   @plan_id_regex ~r/^[0-9a-f]{64}$/
@@ -126,6 +161,18 @@ defmodule SymphonyElixir.HostCLI do
     evaluate_patch(args, deps)
   end
 
+  for action <- @lifecycle_actions do
+    action_name = Atom.to_string(action)
+
+    def evaluate(["target", unquote(action_name), "--help"], _deps) do
+      {:ok, lifecycle_usage(unquote(action))}
+    end
+
+    def evaluate(["target", unquote(action_name) | args], deps) do
+      evaluate_lifecycle(unquote(action), args, deps)
+    end
+  end
+
   def evaluate(["target", _unknown | _args], _deps) do
     {:error, host_usage()}
   end
@@ -133,6 +180,109 @@ defmodule SymphonyElixir.HostCLI do
   def evaluate(_args, _deps) do
     {:error, host_usage()}
   end
+
+  defp evaluate_lifecycle(action, args, deps) do
+    usage = lifecycle_usage(action)
+
+    case parse_lifecycle_args(action, args) do
+      {:ok, target_id, opts} ->
+        dispatch_lifecycle(action, target_id, opts, deps)
+
+      :error ->
+        if json_selected?(args),
+          do: json_error_envelope("invalid_arguments", "Invalid arguments", usage, deps),
+          else: {:error, usage}
+    end
+  end
+
+  defp parse_lifecycle_args(action, args) do
+    option_keys =
+      if action == :activate,
+        do: [:mode, :confirm, :registry, :json],
+        else: [:confirm, :registry, :json]
+
+    strict_options =
+      if action == :activate,
+        do: [mode: :keep, confirm: :keep, registry: :keep, json: :boolean],
+        else: [confirm: :keep, registry: :keep, json: :boolean]
+
+    with :ok <- prevalidate_argv(args, option_keys),
+         {opts, [target_id], []} <- OptionParser.parse(args, strict: strict_options),
+         true <- valid_target_id?(target_id),
+         true <- valid_singleton_counts?(opts, option_keys),
+         true <- valid_lifecycle_mode?(action, opts) do
+      {:ok, target_id, opts}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp valid_lifecycle_mode?(:activate, opts) do
+    modes = Keyword.get_values(opts, :mode)
+    confirm? = Keyword.has_key?(opts, :confirm)
+
+    length(modes) <= 1 and Enum.all?(modes, &(&1 in ["explicit", "watch"])) and
+      not (confirm? and modes != [])
+  end
+
+  defp valid_lifecycle_mode?(action, opts) when action in [:pause, :drain, :retire],
+    do: not Keyword.has_key?(opts, :mode)
+
+  defp dispatch_lifecycle(action, target_id, opts, deps) do
+    if Keyword.has_key?(opts, :confirm) do
+      do_lifecycle_confirm(action, target_id, opts, deps)
+    else
+      do_lifecycle_preview(action, target_id, opts, deps)
+    end
+  end
+
+  defp do_lifecycle_preview(action, target_id, opts, deps) do
+    json? = Keyword.get(opts, :json, false)
+    registry_opt = registry_opt(opts)
+    expected_path = expected_registry_path(registry_opt)
+
+    with command <- lifecycle_command(action, target_id, Keyword.get(opts, :mode)),
+         service_opts <- build_service_opts(registry_opt),
+         {:ok, plan} <- plan(command, service_opts, deps),
+         :ok <- validate_plan_for_command(plan, action, target_id, expected_path),
+         {:ok, output} <- render_plan_output(plan, json?, deps) do
+      {:ok, output}
+    else
+      error -> format_host_error(error, json?, lifecycle_usage(action), deps)
+    end
+  end
+
+  defp do_lifecycle_confirm(action, target_id, opts, deps) do
+    plan_id = Keyword.fetch!(opts, :confirm)
+    json? = Keyword.get(opts, :json, false)
+    registry_opt = registry_opt(opts)
+    expected_path = expected_registry_path(registry_opt)
+
+    with :ok <- validate_plan_id(plan_id),
+         service_opts <- build_service_opts(registry_opt),
+         {:ok, result} <- confirm_action(target_id, plan_id, action, true, service_opts, deps),
+         :ok <- validate_apply_result_for_command(result, action, target_id, plan_id, expected_path),
+         {:ok, output} <- render_apply_output(result, json?, deps) do
+      {:ok, output}
+    else
+      error -> format_host_error(error, json?, lifecycle_usage(action), deps)
+    end
+  end
+
+  defp lifecycle_command(:activate, target_id, mode) do
+    %Command.Activate{
+      target_id: target_id,
+      dispatch_mode: lifecycle_dispatch_mode(mode)
+    }
+  end
+
+  defp lifecycle_command(:pause, target_id, nil), do: %Command.Pause{target_id: target_id}
+  defp lifecycle_command(:drain, target_id, nil), do: %Command.Drain{target_id: target_id}
+  defp lifecycle_command(:retire, target_id, nil), do: %Command.Retire{target_id: target_id}
+
+  defp lifecycle_dispatch_mode("explicit"), do: :explicit
+  defp lifecycle_dispatch_mode("watch"), do: :watch
+  defp lifecycle_dispatch_mode(nil), do: nil
 
   defp evaluate_add(args, deps) do
     case parse_add_args(args) do
@@ -552,7 +702,7 @@ defmodule SymphonyElixir.HostCLI do
 
   defp valid_plan_base?(plan) do
     is_binary(plan.target_id) and
-      plan.action in [:add, :import, :patch] and
+      plan.action in @actions and
       valid_plan_id_applicability?(plan.id, plan.applicable?) and
       valid_registry_path?(plan.registry_path) and
       is_boolean(plan.applicable?)
@@ -580,7 +730,7 @@ defmodule SymphonyElixir.HostCLI do
 
   defp valid_apply_result_field_types?(result) do
     valid_apply_plan_id?(result.plan_id) and
-      result.action in [:add, :import, :patch] and
+      result.action in @actions and
       is_binary(result.target_id) and
       valid_registry_path?(result.registry_path) and
       valid_generation?(result.old_generation) and
@@ -1165,4 +1315,8 @@ defmodule SymphonyElixir.HostCLI do
   defp import_usage, do: @import_usage |> String.trim()
   defp plan_usage, do: @plan_usage |> String.trim()
   defp patch_usage, do: @patch_usage |> String.trim()
+  defp lifecycle_usage(:activate), do: @activate_usage |> String.trim()
+  defp lifecycle_usage(:pause), do: @pause_usage |> String.trim()
+  defp lifecycle_usage(:drain), do: @drain_usage |> String.trim()
+  defp lifecycle_usage(:retire), do: @retire_usage |> String.trim()
 end

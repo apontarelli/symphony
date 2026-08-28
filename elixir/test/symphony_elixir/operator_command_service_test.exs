@@ -119,6 +119,124 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
+  test "lifecycle plans are read-only and confirmations publish every valid transition", %{
+    tmp_dir: tmp_dir
+  } do
+    target =
+      tmp_dir
+      |> patch_target()
+      |> Map.put("display_name", "secret-token-label")
+      |> Map.delete("dispatch_mode")
+      |> Map.delete("state")
+
+    registry_path = write_registry(tmp_dir, %{"alpha" => target})
+    fixed_now = fn -> "2026-08-27T00:00:00Z" end
+
+    transitions = [
+      {%Command.Activate{target_id: "alpha", dispatch_mode: :explicit}, :activate, "active", "explicit"},
+      {%Command.Pause{target_id: "alpha"}, :pause, "paused", "explicit"},
+      {%Command.Activate{target_id: "alpha"}, :activate, "active", "explicit"},
+      {%Command.Drain{target_id: "alpha"}, :drain, "draining", "explicit"},
+      {%Command.Pause{target_id: "alpha"}, :pause, "paused", "explicit"},
+      {%Command.Retire{target_id: "alpha"}, :retire, "retired", "explicit"}
+    ]
+
+    for {command, action, expected_state, expected_mode} <- transitions do
+      registry_before = File.read!(registry_path)
+
+      assert {:ok, first} =
+               OperatorCommandService.plan(command,
+                 registry_path: registry_path,
+                 now: fixed_now
+               )
+
+      assert {:ok, second} =
+               OperatorCommandService.plan(command,
+                 registry_path: registry_path,
+                 now: fixed_now
+               )
+
+      assert first == second
+      assert first.action == action
+      assert first.applicable?
+      assert File.read!(registry_path) == registry_before
+      refute Jason.encode!(first.preview) =~ "secret-token-label"
+
+      assert {:ok, result} =
+               OperatorCommandService.confirm("alpha", first.id, true, registry_path: registry_path)
+
+      assert result.action == action
+      assert result.new_generation == first.proposed_generation
+      assert result.committed?
+      assert result.plan_consumed?
+
+      assert {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+      assert get_in(document, ["targets", "alpha", "state"]) == expected_state
+      assert get_in(document, ["targets", "alpha", "dispatch_mode"]) == expected_mode
+    end
+
+    assert {:error, %OperatorCommandService.Error{code: :target_retired}} =
+             OperatorCommandService.plan(%Command.Activate{target_id: "alpha"},
+               registry_path: registry_path
+             )
+
+    assert {:error, %OperatorCommandService.Error{code: :target_retired}} =
+             OperatorCommandService.plan(
+               %Command.Patch{target_id: "alpha", changes: %{"display_name" => "renamed"}},
+               registry_path: registry_path
+             )
+  end
+
+  @tag :tmp_dir
+  test "activation requires a mode and lifecycle confirmation failures never write", %{
+    tmp_dir: tmp_dir
+  } do
+    target = tmp_dir |> patch_target() |> Map.delete("dispatch_mode")
+    registry_path = write_registry(tmp_dir, %{"alpha" => target})
+    registry_before = File.read!(registry_path)
+
+    assert {:error, %OperatorCommandService.Error{code: :dispatch_mode_required}} =
+             OperatorCommandService.plan(%Command.Activate{target_id: "alpha"},
+               registry_path: registry_path
+             )
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Activate{target_id: "alpha", dispatch_mode: :watch},
+               registry_path: registry_path
+             )
+
+    assert {:error, %OperatorCommandService.Error{code: :plan_mismatch}} =
+             OperatorCommandService.confirm("beta", plan.id, true, registry_path: registry_path)
+
+    plan_dir = Path.join(tmp_dir, "target-plans")
+    assert {:ok, envelope} = PlanStore.read(plan_dir, plan.id)
+    plan_id = plan.id
+
+    corrupt = Map.put(envelope, "created_at", "not-a-time")
+
+    assert {:error, %OperatorCommandService.Error{code: :plan_corrupt}} =
+             OperatorCommandService.apply(plan.id, plan.expected_generation, true,
+               registry_path: registry_path,
+               read_plan: fn ^plan_dir, ^plan_id -> {:ok, corrupt} end
+             )
+
+    File.write!(registry_path, registry_before <> "# stale\n")
+
+    assert {:error, %OperatorCommandService.Error{code: :stale_generation}} =
+             OperatorCommandService.confirm("alpha", plan.id, true, registry_path: registry_path)
+
+    File.write!(registry_path, registry_before)
+    File.mkdir!(registry_path <> ".lock")
+
+    assert {:error, %OperatorCommandService.Error{code: :registry_locked}} =
+             OperatorCommandService.confirm("alpha", plan.id, true, registry_path: registry_path)
+
+    assert File.read!(registry_path) == registry_before
+    assert File.exists?(Path.join(plan_dir, plan.id <> ".json"))
+  end
+
+  @tag :tmp_dir
   test "patch recursively merges known fixed target maps without writing", %{tmp_dir: tmp_dir} do
     registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
     registry_before = File.read!(registry_path)

@@ -19,6 +19,14 @@ defmodule SymphonyElixir.HostCLITest do
     symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target plan <id> --patch <target-patch.yml> [--registry <path>] [--json]
     symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target activate <id> [--mode <watch|explicit>] [--registry <path>] [--json]
+    symphony host target activate <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target pause <id> [--registry <path>] [--json]
+    symphony host target pause <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target drain <id> [--registry <path>] [--json]
+    symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
+    symphony host target retire <id> [--registry <path>] [--json]
+    symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
   """
 
   defp host_usage do
@@ -839,6 +847,112 @@ defmodule SymphonyElixir.HostCLITest do
              HostCLI.evaluate(["target", "patch", "my-target", "--confirm", plan_id], deps)
 
     assert_received {:confirm_action, "my-target", ^plan_id, :patch, true, []}
+  end
+
+  test "lifecycle previews invoke typed commands and activation parses dispatch mode" do
+    parent = self()
+
+    deps = %{
+      plan: fn command, _opts ->
+        action =
+          case command do
+            %Command.Activate{} -> :activate
+            %Command.Pause{} -> :pause
+            %Command.Drain{} -> :drain
+            %Command.Retire{} -> :retire
+          end
+
+        send(parent, {:lifecycle_plan, action, command})
+        {:ok, sample_plan(action, command.target_id)}
+      end
+    }
+
+    assert {:ok, _output} =
+             HostCLI.evaluate(
+               ["target", "activate", "my-target", "--mode", "watch"],
+               deps
+             )
+
+    assert_received {:lifecycle_plan, :activate, %Command.Activate{target_id: "my-target", dispatch_mode: :watch}}
+
+    for {action, module} <- [
+          {:pause, Command.Pause},
+          {:drain, Command.Drain},
+          {:retire, Command.Retire}
+        ] do
+      assert {:ok, _output} =
+               HostCLI.evaluate(["target", Atom.to_string(action), "my-target"], deps)
+
+      assert_received {:lifecycle_plan, ^action, command}
+      assert command.__struct__ == module
+      assert command.target_id == "my-target"
+    end
+  end
+
+  test "lifecycle confirmations bind the exact action" do
+    parent = self()
+    plan_id = String.duplicate("a", 64)
+
+    for action <- [:activate, :pause, :drain, :retire] do
+      deps = %{
+        confirm_action: fn target_id, supplied_id, supplied_action, confirmation, opts ->
+          send(
+            parent,
+            {:lifecycle_confirm, target_id, supplied_id, supplied_action, confirmation, opts}
+          )
+
+          {:ok, sample_apply_result(action, supplied_id, default_registry_path())}
+        end
+      }
+
+      assert {:ok, output} =
+               HostCLI.evaluate(
+                 ["target", Atom.to_string(action), "my-target", "--confirm", plan_id],
+                 deps
+               )
+
+      assert_received {:lifecycle_confirm, "my-target", ^plan_id, ^action, true, []}
+      assert output =~ "Apply #{action} for my-target"
+    end
+  end
+
+  test "lifecycle grammar rejects invalid mode and mixed preview confirmation" do
+    plan_id = String.duplicate("a", 64)
+    deps = forbidden_deps()
+
+    for args <- [
+          ["target", "activate", "my-target", "--mode", "automatic"],
+          ["target", "activate", "my-target", "--mode", "watch", "--confirm", plan_id],
+          ["target", "pause", "my-target", "--mode", "watch"]
+        ] do
+      assert {:error, usage} = HostCLI.evaluate(args, deps)
+      assert usage =~ "Usage:"
+      refute_received :plan_called
+      refute_received :confirm_action_called
+    end
+  end
+
+  test "lifecycle preview output is deterministic and redacted in text and json" do
+    secret = "ghp_1234567890abcdef"
+
+    plan = %{
+      sample_plan(:activate, "my-target")
+      | id: String.duplicate("a", 64),
+        applicable?: true,
+        preview: %{"registry" => %{"token" => secret, "state" => "active"}}
+    }
+
+    for json? <- [false, true] do
+      args = ["target", "activate", "my-target", "--mode", "watch"]
+      args = if json?, do: args ++ ["--json"], else: args
+
+      assert {:ok, first} = HostCLI.evaluate(args, preview_deps(plan))
+      assert {:ok, second} = HostCLI.evaluate(args, preview_deps(plan))
+      assert first == second
+      refute first =~ secret
+      assert first =~ "[REDACTED]"
+      if json?, do: assert(valid_json?(first))
+    end
   end
 
   test "all preview commands reject a plan bound to another registry in text and json" do
@@ -4189,7 +4303,11 @@ defmodule SymphonyElixir.HostCLITest do
     [
       {:add, ["target", "add", "my-target", "--input", "target.yml"]},
       {:import, ["target", "import", "my-target", "--workflow", "/wf.yml", "--repo", "/repo"]},
-      {:patch, ["target", "plan", "my-target", "--patch", "patch.yml"]}
+      {:patch, ["target", "plan", "my-target", "--patch", "patch.yml"]},
+      {:activate, ["target", "activate", "my-target", "--mode", "watch"]},
+      {:pause, ["target", "pause", "my-target"]},
+      {:drain, ["target", "drain", "my-target"]},
+      {:retire, ["target", "retire", "my-target"]}
     ]
   end
 
@@ -4197,7 +4315,11 @@ defmodule SymphonyElixir.HostCLITest do
     [
       {:add, ["target", "add", "my-target", "--confirm", plan_id]},
       {:import, ["target", "import", "my-target", "--confirm", plan_id]},
-      {:patch, ["target", "patch", "my-target", "--confirm", plan_id]}
+      {:patch, ["target", "patch", "my-target", "--confirm", plan_id]},
+      {:activate, ["target", "activate", "my-target", "--confirm", plan_id]},
+      {:pause, ["target", "pause", "my-target", "--confirm", plan_id]},
+      {:drain, ["target", "drain", "my-target", "--confirm", plan_id]},
+      {:retire, ["target", "retire", "my-target", "--confirm", plan_id]}
     ]
   end
 

@@ -199,9 +199,9 @@ cp ../symphony.env.example ~/.config/symphony/.env
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
 symlink `../bin/symphony` into a directory already on `PATH`.
 
-## Target registry authoring (Phase 1)
+## Target registry authoring and lifecycle
 
-Operators can author local host target registry entries with these commands:
+Operators can author and control local host target registry entries with these commands:
 
 ```text
 symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
@@ -210,6 +210,14 @@ symphony host target import <id> --workflow <path> --repo <path> [--connection <
 symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
 symphony host target plan <id> --patch <target-patch.yml> [--registry <path>] [--json]
 symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target activate <id> [--mode <watch|explicit>] [--registry <path>] [--json]
+symphony host target activate <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target pause <id> [--registry <path>] [--json]
+symphony host target pause <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target drain <id> [--registry <path>] [--json]
+symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
+symphony host target retire <id> [--registry <path>] [--json]
+symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
 ```
 
 The default registry is `~/.config/symphony/targets.yml`, with private plan envelopes in the
@@ -224,15 +232,21 @@ deterministic YAML; plan consumption happens afterward. If post-commit verificat
 consumption fails, confirmation can report an error after the registry has changed, so inspect the
 registry before retrying.
 
-Add and import always create paused targets with no dispatch. Import reads the source runtime and
-repository without modifying either; the current committed repository manifest remains
+Add and import always create paused targets with no dispatch mode. Import reads the source runtime
+and repository without modifying either; the current committed repository manifest remains
 authoritative. Patch input is a target-only recursive schema patch, not JSON Patch or JSON Merge
-Patch, and Phase 1 rejects state or dispatch changes.
+Patch, and general patch operations cannot change lifecycle state or dispatch mode.
 
-Phase 1 is registry authoring only: it does not provide polling, queues, dispatch, active host runs,
-scheduler integration, or automatic host-policy bootstrap. Existing `symphony run` paths are
-unchanged and do not consume this registry. Initial host policy/bootstrap remains a direct, fully
-validated YAML operation.
+Activation requires `explicit` or `watch` dispatch mode and reuses an existing valid mode when
+`--mode` is omitted. The lifecycle graph is `paused -> active`, `active -> draining`,
+`active|draining -> paused`, and `paused -> retired`. Retired is terminal: it cannot reactivate or
+accept general patches. A configured active state does not bypass registry validation or enable
+dispatch by itself.
+
+Target activation currently updates registry posture only. It does not provide polling, queues,
+dispatch, active host runs, scheduler integration, or automatic host-policy bootstrap. Existing
+`symphony run` paths are unchanged and do not consume this registry. Initial host policy/bootstrap
+remains a direct, fully validated YAML operation.
 
 ## Execution context isolation (Phase 2)
 
