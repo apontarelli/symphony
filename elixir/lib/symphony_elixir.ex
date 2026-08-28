@@ -36,7 +36,8 @@ defmodule SymphonyElixir.Application do
             {Phoenix.PubSub, name: SymphonyElixir.PubSub},
             {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
             SymphonyElixir.WorkflowStore,
-            {SymphonyElixir.Orchestrator, orchestrator_options},
+            SymphonyElixir.TargetSupervisor,
+            {SymphonyElixir.HostScheduler, target_context: target_context, orchestrator_opts: orchestrator_options},
             SymphonyElixir.HttpServer,
             SymphonyElixir.StatusDashboard
           ]

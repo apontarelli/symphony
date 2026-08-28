@@ -174,6 +174,8 @@ defmodule SymphonyElixir.TestSupport do
   end
 
   def stop_default_orchestrator do
+    stop_dynamic_target_orchestrators()
+
     children =
       case Process.whereis(SymphonyElixir.Supervisor) do
         pid when is_pid(pid) -> Supervisor.which_children(pid)
@@ -181,17 +183,31 @@ defmodule SymphonyElixir.TestSupport do
       end
 
     case Enum.find(children, fn
-           {SymphonyElixir.Orchestrator, _pid, _type, _modules} -> true
+           {SymphonyElixir.HostScheduler, _pid, _type, _modules} -> true
            _child -> false
          end) do
-      {SymphonyElixir.Orchestrator, _pid, _type, _modules} ->
+      {SymphonyElixir.HostScheduler, _pid, _type, _modules} ->
         case Supervisor.terminate_child(
                SymphonyElixir.Supervisor,
-               SymphonyElixir.Orchestrator
+               SymphonyElixir.HostScheduler
              ) do
           :ok -> :ok
           {:error, :not_found} -> :ok
         end
+
+      nil ->
+        :ok
+    end
+  end
+
+  defp stop_dynamic_target_orchestrators do
+    case Process.whereis(SymphonyElixir.TargetSupervisor) do
+      pid when is_pid(pid) ->
+        pid
+        |> DynamicSupervisor.which_children()
+        |> Enum.each(fn {_id, child_pid, _type, _modules} ->
+          DynamicSupervisor.terminate_child(pid, child_pid)
+        end)
 
       nil ->
         :ok

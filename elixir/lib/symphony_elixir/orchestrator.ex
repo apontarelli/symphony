@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
     ExecutionContext,
     HandoffRoute,
     HandoffRouteRecorder,
+    HostScheduler,
     ProcessSupervisor,
     PublishHandoff,
     PublishPreflight,
@@ -28,6 +29,7 @@ defmodule SymphonyElixir.Orchestrator do
     Workspace
   }
 
+  alias SymphonyElixir.HostScheduler.Grant
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Workflow.PublishTarget
 
@@ -62,12 +64,14 @@ defmodule SymphonyElixir.Orchestrator do
       :max_retry_backoff_ms,
       :target_context,
       :quality_gate_runner,
+      :agent_runner_options,
       :next_poll_due_at_ms,
       :poll_check_in_progress,
       :tick_timer_ref,
       :tick_token,
       :run_mode,
       :issue_batch_limit,
+      :host_scheduler,
       :control_plane,
       :durable_renew_timer_ref,
       dispatched_issue_count: 0,
@@ -77,6 +81,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      due_host_retries: %{},
       runtime_totals: nil,
       runtime_rate_limits: nil,
       tracker_rate_limit: nil,
@@ -137,6 +142,8 @@ defmodule SymphonyElixir.Orchestrator do
           Keyword.get(opts, :coordinator_owner_id) ||
             default_coordinator_owner_id(Keyword.get(opts, :name, __MODULE__))
 
+        host_scheduler = Keyword.get(opts, :host_scheduler)
+
         state = %State{
           poll_interval_ms: capacity_limit(limits, "poll_interval_ms", 1_000),
           max_concurrent_agents: capacity_limit(limits, "max_concurrent_agents", 1),
@@ -147,6 +154,7 @@ defmodule SymphonyElixir.Orchestrator do
           max_retry_backoff_ms: capacity_limit(limits, "max_retry_backoff_ms", 300_000),
           target_context: target_context,
           quality_gate_runner: Keyword.get(opts, :quality_gate_runner),
+          agent_runner_options: Keyword.get(opts, :agent_runner_options, []),
           next_poll_due_at_ms: now_ms,
           poll_check_in_progress: false,
           tick_timer_ref: nil,
@@ -158,7 +166,8 @@ defmodule SymphonyElixir.Orchestrator do
           tracker_rate_limit: nil,
           coordinator_owner_id: owner_id,
           control_plane: configured_control_plane(opts),
-          durable_renew_timer_ref: nil
+          durable_renew_timer_ref: nil,
+          host_scheduler: %{server: host_scheduler, grant: nil}
         }
 
         state =
@@ -166,7 +175,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> recover_durable_runs()
           |> schedule_durable_lease_renewal()
 
-        state = if target_context, do: schedule_tick(state, 0), else: state
+        state = maybe_start_polling(state)
         {:ok, state}
 
       {:error, reason} ->
@@ -195,8 +204,53 @@ defmodule SymphonyElixir.Orchestrator do
   defp target_run_mode(%TargetContext{dispatch_mode: :explicit}), do: :issue_batch
   defp target_run_mode(_target), do: :watch
 
+  defp maybe_start_polling(
+         %State{
+           host_scheduler: %{server: scheduler},
+           target_context: %TargetContext{target_id: target_id}
+         } = state
+       )
+       when not is_nil(scheduler) do
+    :ok = HostScheduler.register_target(scheduler, target_id, self())
+    %{state | next_poll_due_at_ms: nil}
+  end
+
+  defp maybe_start_polling(%State{target_context: %TargetContext{}} = state),
+    do: schedule_tick(state, 0)
+
+  defp maybe_start_polling(state), do: state
+
   defp default_coordinator_owner_id(name) do
     "#{node()}:#{inspect(name)}:#{System.unique_integer([:positive])}"
+  end
+
+  @spec dispatch_grant(GenServer.server(), Grant.t()) :: :ok
+  def dispatch_grant(server, %Grant{} = grant), do: GenServer.cast(server, {:dispatch_grant, grant})
+
+  @impl true
+  def handle_cast(
+        {:dispatch_grant, %Grant{target_id: target_id, target_pid: target_pid} = grant},
+        %State{
+          target_context: %TargetContext{target_id: target_id},
+          host_scheduler: %{grant: nil} = host_scheduler
+        } = state
+      )
+      when target_pid == self() do
+    state = %{
+      state
+      | host_scheduler: %{host_scheduler | grant: grant},
+        poll_check_in_progress: true,
+        next_poll_due_at_ms: nil
+    }
+
+    notify_dashboard()
+    :ok = schedule_poll_cycle_start()
+    {:noreply, state}
+  end
+
+  def handle_cast({:dispatch_grant, %Grant{} = grant}, state) do
+    :ok = HostScheduler.release_all(grant)
+    {:noreply, state}
   end
 
   @impl true
@@ -231,6 +285,21 @@ defmodule SymphonyElixir.Orchestrator do
     {:noreply, state}
   end
 
+  def handle_info(:run_poll_cycle, %State{host_scheduler: %{grant: %Grant{}}} = state) do
+    {state, grant_used?} = maybe_dispatch_due_host_retry(state)
+    state = if grant_used?, do: state, else: maybe_dispatch(state)
+    state = finish_host_poll(state)
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_info(:run_poll_cycle, %State{host_scheduler: %{server: scheduler}} = state)
+      when not is_nil(scheduler) do
+    notify_dashboard()
+    {:noreply, %{state | poll_check_in_progress: false}}
+  end
+
   def handle_info(:run_poll_cycle, state) do
     state = maybe_dispatch(state)
     state = %{state | poll_check_in_progress: false}
@@ -250,6 +319,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       run_id ->
         {running_entry, state} = pop_running_entry(state, run_id)
+        release_host_grant(running_entry)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
 
@@ -307,6 +377,7 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_runtime_event(running_entry, update)
+        maybe_release_host_startup(running_entry, updated_running_entry)
 
         state =
           state
@@ -321,6 +392,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:runtime_event, _run_id, _update}, state), do: {:noreply, state}
+
+  def handle_info(
+        {:retry_issue, run_id, retry_token},
+        %State{
+          host_scheduler: %{server: scheduler},
+          target_context: %TargetContext{target_id: target_id}
+        } = state
+      )
+      when not is_nil(scheduler) do
+    due_host_retries = Map.put(state.due_host_retries, run_id, retry_token)
+    _request = HostScheduler.request_poll(scheduler, target_id)
+    notify_dashboard()
+    {:noreply, %{state | due_host_retries: due_host_retries}}
+  end
 
   def handle_info({:retry_issue, run_id, retry_token}, state) do
     result =
@@ -1270,9 +1355,10 @@ defmodule SymphonyElixir.Orchestrator do
          :ok,
          state,
          run_id,
-         _stopped_entry,
+         stopped_entry,
          context
        ) do
+    release_host_grant(stopped_entry)
     release_coordinator_lease(context, coordinator_owner_id(state))
 
     %{
@@ -1645,6 +1731,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     maybe_persist_handoff_route(running_entry, handoff_route)
     release_durable_authority(Map.get(running_entry, :durable_authority))
+    release_host_grant(running_entry)
 
     blocked_entry =
       running_entry
@@ -1680,6 +1767,23 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp choose_issues(
+         %RunTarget.Resolution{} = resolution,
+         %State{
+           target_context: target,
+           host_scheduler: %{grant: %Grant{}}
+         } = state
+       ) do
+    active_states = active_state_set(target)
+    terminal_states = terminal_state_set(target)
+
+    resolution
+    |> order_candidate_issues()
+    |> Enum.reduce_while(state, fn issue, state_acc ->
+      maybe_choose_granted_issue(issue, state_acc, active_states, terminal_states)
+    end)
+  end
+
   defp choose_issues(%RunTarget.Resolution{} = resolution, %State{target_context: target} = state) do
     active_states = active_state_set(target)
     terminal_states = terminal_state_set(target)
@@ -1689,6 +1793,34 @@ defmodule SymphonyElixir.Orchestrator do
     |> Enum.reduce_while(state, fn issue, state_acc ->
       maybe_choose_issue(issue, state_acc, active_states, terminal_states)
     end)
+  end
+
+  defp maybe_choose_granted_issue(issue, state, active_states, terminal_states) do
+    if should_dispatch_issue?(issue, state, active_states, terminal_states) do
+      grant = state.host_scheduler.grant
+
+      case HostScheduler.reserve_dispatch(grant) do
+        :ok ->
+          dispatched = dispatch_issue(state, issue)
+          maybe_release_rejected_dispatch(dispatched, grant)
+          {:halt, dispatched}
+
+        {:error, _reason} ->
+          {:halt, state}
+      end
+    else
+      {:cont, state}
+    end
+  end
+
+  defp maybe_release_rejected_dispatch(%State{} = state, %Grant{} = grant) do
+    accepted? =
+      Enum.any?(state.running, fn {_run_id, entry} ->
+        Map.get(entry, :host_grant) == grant
+      end)
+
+    if not accepted?, do: HostScheduler.release_dispatch(grant)
+    :ok
   end
 
   defp maybe_choose_issue(issue, state, active_states, terminal_states) do
@@ -2746,7 +2878,14 @@ defmodule SymphonyElixir.Orchestrator do
     recipient = self()
     run_id = ExecutionContext.run_id(context)
 
-    case start_agent_task(context, issue, recipient, attempt, durable_authority) do
+    case start_agent_task(
+           context,
+           issue,
+           recipient,
+           attempt,
+           durable_authority,
+           state.agent_runner_options
+         ) do
       {:ok, pid, durable_token_usage_baseline} ->
         ref = Process.monitor(pid)
 
@@ -2772,6 +2911,7 @@ defmodule SymphonyElixir.Orchestrator do
             last_runtime_event: nil,
             last_runtime_error_signature: nil,
             startup_slot?: true,
+            host_grant: current_host_grant(state),
             codex_app_server_pid: nil,
             codex_command: nil,
             codex_home: nil,
@@ -2828,11 +2968,13 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp start_agent_task(context, issue, recipient, attempt, durable_authority) do
+  defp start_agent_task(context, issue, recipient, attempt, durable_authority, runner_options) do
+    runner_options = Keyword.put(runner_options, :attempt, attempt)
+
     with {:ok, baseline} <- durable_token_usage_baseline(durable_authority),
          {:ok, pid} <-
            Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-             AgentRunner.run_context(context, issue, recipient, attempt: attempt)
+             AgentRunner.run_context(context, issue, recipient, runner_options)
            end) do
       {:ok, pid, baseline}
     end
@@ -2850,9 +2992,6 @@ defmodule SymphonyElixir.Orchestrator do
         error
     end
   end
-
-  defp durable_token_usage_baseline(_authority),
-    do: {:error, :durable_authority_required}
 
   defp revalidate_issue_for_dispatch(
          %Issue{id: issue_id},
@@ -2883,7 +3022,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp complete_issue(%State{} = state, run_id, running_entry) do
     running_entry =
       running_entry
-      |> run_quality_gate()
+      |> run_quality_gate_with_host_slot()
       |> run_publish_steps_if_allowed()
 
     handoff_route = handoff_decision_for_running_entry(running_entry, nil)
@@ -2906,6 +3045,28 @@ defmodule SymphonyElixir.Orchestrator do
         retry_attempts: Map.delete(state.retry_attempts, run_id)
     }
   end
+
+  defp run_quality_gate_with_host_slot(
+         %{
+           host_grant: %Grant{scheduler: scheduler},
+           execution_context: %ExecutionContext{target: %TargetContext{target_id: target_id}}
+         } = running_entry
+       ) do
+    case HostScheduler.reserve_reviewer(scheduler, target_id, self()) do
+      {:ok, reservation} ->
+        try do
+          run_quality_gate(running_entry)
+        after
+          :ok = HostScheduler.release_reviewer(scheduler, reservation)
+        end
+
+      {:error, :capacity} ->
+        Logger.error("Host reviewer capacity unavailable target_id=#{target_id}")
+        running_entry
+    end
+  end
+
+  defp run_quality_gate_with_host_slot(running_entry), do: run_quality_gate(running_entry)
 
   defp schedule_issue_retry(%State{} = state, run_id, attempt, metadata)
        when is_map(metadata) do
@@ -3730,6 +3891,49 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp increment_dispatched_issue_count(_state, nil), do: 1
   defp increment_dispatched_issue_count(_state, _attempt), do: 0
+  defp current_host_grant(%State{host_scheduler: %{grant: grant}}), do: grant
+  defp current_host_grant(%State{}), do: nil
+
+  defp finish_host_poll(%State{host_scheduler: %{grant: %Grant{} = grant} = host_scheduler} = state) do
+    continue? = continue_polling?(state)
+    :ok = HostScheduler.finish_poll(grant, continue?)
+
+    %{
+      state
+      | host_scheduler: %{host_scheduler | grant: nil},
+        poll_check_in_progress: false,
+        next_poll_due_at_ms: if(continue?, do: System.monotonic_time(:millisecond) + state.poll_interval_ms, else: nil)
+    }
+  end
+
+  defp maybe_dispatch_due_host_retry(%State{due_host_retries: due} = state)
+       when map_size(due) == 0,
+       do: {state, false}
+
+  defp maybe_dispatch_due_host_retry(%State{host_scheduler: %{grant: %Grant{} = grant}, due_host_retries: due} = state) do
+    {run_id, retry_token} = Enum.min_by(due, fn {run_id, _token} -> inspect(run_id) end)
+
+    case HostScheduler.reserve_dispatch(grant) do
+      :ok ->
+        state = %{state | due_host_retries: Map.delete(due, run_id)}
+
+        result =
+          case pop_retry_attempt_state(state, run_id, retry_token) do
+            {:ok, attempt, metadata, state} ->
+              handle_retry_issue(state, run_id, attempt, metadata)
+
+            :missing ->
+              {:noreply, state}
+          end
+
+        {:noreply, dispatched} = result
+        maybe_release_rejected_dispatch(dispatched, grant)
+        {dispatched, true}
+
+      {:error, _reason} ->
+        {state, true}
+    end
+  end
 
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
@@ -3846,6 +4050,8 @@ defmodule SymphonyElixir.Orchestrator do
         |> Map.merge(safe_context_status_fields(metadata))
       end)
 
+    polling = polling_snapshot(state, now_ms)
+
     {:reply,
      %{
        running: running,
@@ -3858,11 +4064,27 @@ defmodule SymphonyElixir.Orchestrator do
          limited?: tracker_backoff_active?(state),
          rate_limit: tracker_rate_limit_snapshot(state, now_ms)
        },
-       polling: %{
-         checking?: state.poll_check_in_progress == true,
-         next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
-         poll_interval_ms: state.poll_interval_ms
-       }
+       polling: polling
+     }, state}
+  end
+
+  def handle_call(
+        :request_refresh,
+        _from,
+        %State{
+          host_scheduler: %{server: scheduler},
+          target_context: %TargetContext{target_id: target_id}
+        } = state
+      )
+      when not is_nil(scheduler) do
+    %{coalesced: coalesced} = HostScheduler.request_poll(scheduler, target_id)
+
+    {:reply,
+     %{
+       queued: true,
+       coalesced: coalesced,
+       requested_at: DateTime.utc_now(),
+       operations: ["poll", "reconcile"]
      }, state}
   end
 
@@ -3879,6 +4101,29 @@ defmodule SymphonyElixir.Orchestrator do
        requested_at: DateTime.utc_now(),
        operations: ["poll", "reconcile"]
      }, state}
+  end
+
+  defp polling_snapshot(%State{host_scheduler: %{server: scheduler}} = state, _now_ms)
+       when not is_nil(scheduler) do
+    host = HostScheduler.snapshot(scheduler)
+
+    %{
+      checking?: state.poll_check_in_progress == true,
+      next_poll_in_ms: host.next_poll_in_ms,
+      poll_interval_ms: state.poll_interval_ms
+    }
+  catch
+    :exit, _reason -> local_polling_snapshot(state, System.monotonic_time(:millisecond))
+  end
+
+  defp polling_snapshot(state, now_ms), do: local_polling_snapshot(state, now_ms)
+
+  defp local_polling_snapshot(state, now_ms) do
+    %{
+      checking?: state.poll_check_in_progress == true,
+      next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
+      poll_interval_ms: state.poll_interval_ms
+    }
   end
 
   defp tracker_rate_limit_snapshot(%State{tracker_rate_limit: nil}, _now_ms), do: nil
@@ -4160,6 +4405,27 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_release_startup_slot(running_entry, _event), do: running_entry
+
+  defp maybe_release_host_startup(
+         %{startup_slot?: true, host_grant: %Grant{} = grant},
+         %{startup_slot?: false, last_runtime_event: :startup_failed}
+       ) do
+    HostScheduler.release_all(grant)
+  end
+
+  defp maybe_release_host_startup(
+         %{startup_slot?: true, host_grant: %Grant{} = grant},
+         %{startup_slot?: false}
+       ) do
+    HostScheduler.release_startup(grant)
+  end
+
+  defp maybe_release_host_startup(_previous, _updated), do: :ok
+
+  defp release_host_grant(%{host_grant: %Grant{} = grant}),
+    do: HostScheduler.release_all(grant)
+
+  defp release_host_grant(_running_entry), do: :ok
 
   defp codex_app_server_pid_for_update(_existing, %{codex_app_server_pid: pid})
        when is_binary(pid),

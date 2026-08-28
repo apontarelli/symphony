@@ -243,10 +243,10 @@ Activation requires `explicit` or `watch` dispatch mode and reuses an existing v
 accept general patches. A configured active state does not bypass registry validation or enable
 dispatch by itself.
 
-Target activation currently updates registry posture only. It does not provide polling, queues,
-dispatch, active host runs, scheduler integration, or automatic host-policy bootstrap. Existing
-`symphony run` paths are unchanged and do not consume this registry. Initial host policy/bootstrap
-remains a direct, fully validated YAML operation.
+Target activation currently updates registry posture only. It does not add registry-backed polling,
+queues, dispatch, or automatic host-policy bootstrap. Existing `symphony run` paths do not consume
+the registry, but each selected single target now runs through the host scheduler described below.
+Initial host policy/bootstrap remains a direct, fully validated YAML operation.
 
 ## Execution context isolation (Phase 2)
 
@@ -263,15 +263,22 @@ include target ID, registry generation, and policy hash, but do not include cred
 data.
 
 The public `symphony run <saved-name>`, `symphony run --workflow <path>`, and explicit-issue
-commands are single-target admission forms. They build the canonical `TargetContext` before polling.
-After admission, tracker, workspace, AgentRunner, runtime, quality, publish, handoff, cleanup, and
-orchestrator operations accept only the pinned target or execution context. They do not expose
-ambient-config or workspace-only runtime entry points.
+commands are single-target admission forms. They build the canonical `TargetContext`, start its
+orchestrator under `SymphonyElixir.TargetSupervisor`, and register that target with
+`SymphonyElixir.HostScheduler`. Preview, restrictive overrides, issue-batch, watch, and drain
+semantics remain target-scoped and unchanged.
 
-The current host still activates and polls one selected target. The local durable control-plane
-store supports pinned admissions, leases, fenced lifecycle transitions, side-effect intents, local
-process ownership, and restart recovery. Autonomous multi-target activation, fairness, and
-scheduling remain deferred.
+`HostScheduler` owns poll timing, weighted-deficit credit and cursor state, and host agent, startup,
+reviewer, and poll counts. It issues an external grant before a target can poll. One current grant
+can reserve at most one dispatch attempt. The target orchestrator retains issue lifecycle, target
+and Linear-state capacity checks, runtime events, retries, quality, delivery, and fenced side
+effects. Grant release is idempotent across dispatch rejection, startup failure, worker exit,
+cancellation, and lease loss.
+
+The current host still activates one selected target. The local durable control-plane store supports
+pinned admissions, leases, fenced lifecycle transitions, side-effect intents, local process
+ownership, and restart recovery through this topology. Registry-backed multi-target activation and
+dispatch remain deferred.
 
 For each runtime dispatch, the orchestrator commits the pinned admission and acquires its durable
 lease before it resolves current credentials or revalidates tracker state. It renews the lease every

@@ -25,6 +25,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.WorkflowCLI,
           SymphonyElixir.Workflow.Renderer,
           SymphonyElixir.Linear.Client,
+          SymphonyElixir.HostScheduler,
           SymphonyElixir.LocalConfig,
           SymphonyElixir.SpecsCheck,
           SymphonyElixir.Orchestrator,

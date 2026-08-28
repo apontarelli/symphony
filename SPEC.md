@@ -1540,8 +1540,32 @@ Tick sequence:
 2. Run dispatch preflight validation.
 3. Fetch candidate issues from tracker using active states.
 4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
+5. Attempt at most one eligible dispatch under the current host grant.
 6. Notify observability/status consumers of state changes.
+
+### 8.1.1 Host Grant Boundary
+
+The host scheduler owns poll timing, scheduling policy state, cursor position, and host agent,
+startup, reviewer, and poll counts. A target orchestrator MUST hold a current host grant before it
+polls or attempts dispatch. One grant authorizes at most one dispatch attempt. Target capacity and
+per-Linear-state capacity checks remain inside the target orchestrator and apply in addition to host
+capacity.
+
+Dispatch rejection, startup failure, worker exit, cancellation, and lease loss MUST return every
+held host and target slot. Release MUST be idempotent because more than one terminal signal can
+describe the same attempt. Reviewer work MUST reserve and release a host reviewer slot.
+
+Weighted-deficit policy uses stable target order and positive integer target weights. Credit is
+added only when no eligible target has dispatchable credit. Each addition grants `weight` credit and
+caps stored credit at `weight * max_credit_rounds`. Selection starts at the cursor and advances in
+stable order after each grant. For continuously eligible targets, the documented starvation bound
+is:
+
+`max_credit_rounds * sum(all configured target weights)`
+
+successful grant decisions. The current single-target launch topology uses this policy with one
+target. Registry-backed multi-target activation is a separate capability.
+
 
 Backlog grooming is a separate intake workflow, not implementation dispatch. A backlog watcher MAY
 poll Backlog issues that carry grooming-owned labels, but it SHOULD use cheap issue metadata before

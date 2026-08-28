@@ -68,9 +68,11 @@ admissions. Active-run and artifact identity includes the target ID; identical L
 identifiers under two targets do not share tracker, filesystem, runner, check, delivery, retry,
 handoff, or cleanup state.
 
-This guarantee does not activate multiple targets on one host. Current saved-workflow and explicit
-workflow launches remain single-target admission paths. Durable control-plane storage is deferred,
-as is a multi-target scheduler with activation, fairness, leases, or fencing.
+This guarantee does not activate multiple registry targets on one host. Current saved-workflow and
+explicit-workflow launches remain single-target admission paths, but they now run through one host
+scheduler and a dynamically supervised target orchestrator. The durable control plane owns pinned
+admissions, leases, fencing, process ownership, and recovery. Registry-backed multi-target
+activation and weighted dispatch remain deferred.
 
 ## Near-Term Horizon
 

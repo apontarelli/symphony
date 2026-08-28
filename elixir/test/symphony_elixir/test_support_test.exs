@@ -15,10 +15,10 @@ defmodule SymphonyElixir.RestartingOrchestratorTestSupportTest do
     :ok =
       Supervisor.terminate_child(
         SymphonyElixir.Supervisor,
-        SymphonyElixir.Orchestrator
+        SymphonyElixir.HostScheduler
       )
 
-    mark_default_orchestrator_restarting()
+    mark_host_scheduler_restarting()
 
     assert restarting_child(Supervisor.which_children(SymphonyElixir.Supervisor))
 
@@ -28,7 +28,7 @@ defmodule SymphonyElixir.RestartingOrchestratorTestSupportTest do
     :ok
   end
 
-  test "setup cancels a restarting default orchestrator before publishing global state" do
+  test "setup cancels a restarting host scheduler before publishing global state" do
     assert stopped_child(Supervisor.which_children(SymphonyElixir.Supervisor))
 
     refute Process.whereis(SymphonyElixir.Orchestrator)
@@ -39,20 +39,20 @@ defmodule SymphonyElixir.RestartingOrchestratorTestSupportTest do
   end
 
   defp restarting_child(children) do
-    {SymphonyElixir.Orchestrator, :restarting, :worker, [SymphonyElixir.Orchestrator]} in children
+    {SymphonyElixir.HostScheduler, :restarting, :worker, [SymphonyElixir.HostScheduler]} in children
   end
 
   defp stopped_child(children) do
-    {SymphonyElixir.Orchestrator, :undefined, :worker, [SymphonyElixir.Orchestrator]} in children
+    {SymphonyElixir.HostScheduler, :undefined, :worker, [SymphonyElixir.HostScheduler]} in children
   end
 
-  defp mark_default_orchestrator_restarting do
+  defp mark_host_scheduler_restarting do
     :sys.replace_state(SymphonyElixir.Supervisor, fn state ->
       children_state = elem(state, 3)
       children = elem(children_state, 1)
-      child = Map.fetch!(children, SymphonyElixir.Orchestrator)
+      child = Map.fetch!(children, SymphonyElixir.HostScheduler)
       restarting_child = put_elem(child, 1, :restarting)
-      restarting_children = Map.put(children, SymphonyElixir.Orchestrator, restarting_child)
+      restarting_children = Map.put(children, SymphonyElixir.HostScheduler, restarting_child)
 
       put_elem(state, 3, put_elem(children_state, 1, restarting_children))
     end)
