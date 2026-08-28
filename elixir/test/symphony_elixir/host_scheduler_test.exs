@@ -27,6 +27,18 @@ defmodule SymphonyElixir.HostSchedulerTest do
     assert_receive {:"$gen_cast", {:dispatch_grant, %Grant{} = grant}}, 1_000
     assert HostScheduler.snapshot(scheduler).counts == %{agents: 0, startups: 0, reviewers: 0, polls: 1}
 
+    assert %{
+             configured_state: :active,
+             effective_state: :active,
+             eligibility_reason: :poll_in_progress,
+             queue_count: 1,
+             scheduling: %{weight: 1, deficit: 0},
+             counts: %{agents: 0, startups: 0, reviewers: 0, polls: 1},
+             limits: %{agents: 1, startups: 1, reviewers: 1},
+             budget_limits: nil,
+             tracker_backoff: %{active: false, remaining_ms: nil}
+           } = HostScheduler.snapshot(scheduler).targets[target.target_id]
+
     assert :ok = HostScheduler.reserve_dispatch(grant)
     assert {:error, :stale_grant} = HostScheduler.reserve_dispatch(grant)
     assert HostScheduler.snapshot(scheduler).counts == %{agents: 1, startups: 1, reviewers: 0, polls: 1}

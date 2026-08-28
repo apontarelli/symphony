@@ -2624,11 +2624,13 @@ Requirements:
 If the implementation exposes a synchronous runtime snapshot (for dashboards or monitoring), it
 SHOULD return:
 
-- `running` (list of running session rows)
+- `running`, `retrying`, and `blocked` session rows
+- each session row MUST include `target_id` and `admitted_run_id` when durable admission exists, so
+  overlapping issue IDs and identifiers remain unambiguous
 - each running row SHOULD include `turn_count`
-- running and retry rows SHOULD include resolved workflow policy metadata when available:
-  `profile`, `target`, `policy_ref`, and the resolved `policy` object
-- `retrying` (list of retry queue rows)
+- session rows MAY include safe resolved metadata such as `profile`, workflow target,
+  and `policy_ref`; raw policy, credentials, secret references, prompts, and transition evidence
+  MUST NOT be projected
 - session and retry rows SHOULD include the tracker-provided issue URL when available
 - `runtime_totals`
   - `input_tokens`
@@ -2641,6 +2643,11 @@ SHOULD return:
   - `limited` (boolean)
   - `rate_limit` (`null` when not limited; otherwise includes `reason`, `source`,
     `retry_after_ms`, `remaining_ms`, `limited_until`, `reset_at`, `status`, and `errors`)
+- `scheduler`
+  - host queue count and host capacity use/limits
+  - one target row with target ID, configured/effective state, eligibility reason, queue count,
+    scheduling weight/deficit, target capacity use/limits, budget reservation/charged use,
+    tracker backoff, running/retrying/blocked counts, and safe durable run identities
 
 RECOMMENDED snapshot error modes:
 
@@ -2650,10 +2657,9 @@ RECOMMENDED snapshot error modes:
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and
-implementation-defined.
-
-If present, it SHOULD draw from orchestrator state/metrics only and MUST NOT be REQUIRED for
-correctness.
+implementation-defined. If present, dashboard, JSON, and structured-log scheduler status MUST use
+one credential-safe projection. The surface MUST NOT be required for correctness and MUST NOT expose
+raw policy, credentials, secret references, prompts, or transition evidence.
 
 ### 13.5 Session Metrics and Token Accounting
 

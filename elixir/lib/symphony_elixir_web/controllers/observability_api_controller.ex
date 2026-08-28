@@ -15,7 +15,7 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec state(Conn.t(), map()) :: Conn.t()
   def state(conn, _params) do
-    json(conn, Presenter.state_payload(orchestrator(), snapshot_timeout_ms()))
+    json(conn, state_payload())
   end
 
   @spec control_plane(Conn.t(), map()) :: Conn.t()
@@ -84,10 +84,18 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   end
 
   @spec issue(Conn.t(), map()) :: Conn.t()
-  def issue(conn, %{"issue_identifier" => issue_identifier}) do
-    case Presenter.issue_payload(issue_identifier, orchestrator(), snapshot_timeout_ms()) do
+  def issue(conn, %{"issue_identifier" => issue_identifier} = params) do
+    case issue_payload(issue_identifier, Map.get(params, "target_id")) do
       {:ok, payload} ->
         json(conn, payload)
+
+      {:error, :ambiguous_issue} ->
+        error_response(
+          conn,
+          409,
+          "ambiguous_issue",
+          "Multiple targets use this issue identifier; provide target_id"
+        )
 
       {:error, :issue_not_found} ->
         error_response(conn, 404, "issue_not_found", "Issue not found")
@@ -295,8 +303,46 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     |> json(%{error: %{code: code, message: message}})
   end
 
+  defp state_payload do
+    case Endpoint.config(:orchestrator) do
+      nil ->
+        Presenter.host_state_payload(
+          host_scheduler(),
+          control_plane_server(),
+          snapshot_timeout_ms()
+        )
+
+      configured_orchestrator ->
+        Presenter.state_payload(configured_orchestrator, snapshot_timeout_ms())
+    end
+  end
+
+  defp issue_payload(issue_identifier, target_id) do
+    case Endpoint.config(:orchestrator) do
+      nil ->
+        Presenter.host_issue_payload(
+          issue_identifier,
+          target_id,
+          host_scheduler(),
+          control_plane_server(),
+          snapshot_timeout_ms()
+        )
+
+      configured_orchestrator ->
+        Presenter.issue_payload(
+          issue_identifier,
+          configured_orchestrator,
+          snapshot_timeout_ms()
+        )
+    end
+  end
+
   defp orchestrator do
     Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
+  end
+
+  defp host_scheduler do
+    Endpoint.config(:host_scheduler) || SymphonyElixir.HostScheduler
   end
 
   defp snapshot_timeout_ms do

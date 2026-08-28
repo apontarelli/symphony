@@ -1285,19 +1285,105 @@ defmodule SymphonyElixir.HostScheduler do
   defp valid_budget_proof?(_proof, _grant), do: false
 
   defp target_snapshots(state) do
+    now_ms = monotonic_ms()
+
     Map.new(state.targets, fn {target_id, target} ->
       counts = target_slot_counts(state, target_id)
+      backoff_until_ms = connection_backoff_until(state, target.context)
 
       {target_id,
        %{
-         state: target.context.state,
+         configured_state: target.context.state,
+         effective_state: effective_target_state(state, target, now_ms),
+         eligibility_reason: target_eligibility_reason(state, target_id, target, now_ms),
          generation: target.context.registry_generation,
          pid: target.pid,
+         queue_count: target_queue_count(state, target_id, target),
          counts: counts,
+         limits: target.limits,
+         scheduling: %{
+           weight: Map.fetch!(state.policy.weights, target_id),
+           deficit: Map.fetch!(state.policy.credits, target_id)
+         },
+         budget_limits: budget_limits_snapshot(target.context.budget_limits),
+         tracker_backoff: %{
+           active: is_integer(backoff_until_ms) and backoff_until_ms > now_ms,
+           remaining_ms: if(is_integer(backoff_until_ms), do: max(backoff_until_ms - now_ms, 0), else: nil)
+         },
          next_poll_in_ms: due_in_ms(target.next_poll_due_at_ms)
        }}
     end)
   end
+
+  defp effective_target_state(_state, %TargetState{context: %{state: state}}, _now_ms)
+       when state in [:paused, :draining, :retired],
+       do: state
+
+  defp effective_target_state(_state, %TargetState{activation_pending?: true}, _now_ms),
+    do: :activating
+
+  defp effective_target_state(%State{registry_verified?: false}, _target, _now_ms),
+    do: :unavailable
+
+  defp effective_target_state(state, %TargetState{} = target, now_ms) do
+    cond do
+      not current_target_process?(state, target.context, target.pid) -> :unavailable
+      connection_backoff_active?(state, target.context, now_ms) -> :limited
+      true -> :active
+    end
+  end
+
+  defp target_eligibility_reason(%State{registry_verified?: false}, _target_id, _target, _now_ms),
+    do: :registry_unverified
+
+  defp target_eligibility_reason(_state, _target_id, %TargetState{activation_pending?: true}, _now_ms),
+    do: :activation_pending
+
+  defp target_eligibility_reason(_state, _target_id, %TargetState{context: %{state: :paused}}, _now_ms),
+    do: :target_paused
+
+  defp target_eligibility_reason(_state, _target_id, %TargetState{context: %{state: :retired}}, _now_ms),
+    do: :target_retired
+
+  defp target_eligibility_reason(state, target_id, %TargetState{} = target, now_ms) do
+    cond do
+      not current_target_process?(state, target.context, target.pid) ->
+        :target_process_unavailable
+
+      target.context.state == :draining and not target.retry_requested? ->
+        :target_draining
+
+      connection_backoff_active?(state, target.context, now_ms) ->
+        :tracker_backoff
+
+      target_poll_in_progress?(state, target_id) ->
+        :poll_in_progress
+
+      slot_counts(state).polls >= state.host_limits.polls.max_concurrent ->
+        :host_poll_capacity
+
+      not due_at?(target.next_poll_due_at_ms, now_ms) ->
+        :poll_not_due
+
+      true ->
+        :eligible
+    end
+  end
+
+  defp target_queue_count(state, target_id, target) do
+    in_progress = if target_poll_in_progress?(state, target_id), do: 1, else: 0
+    queued = if is_integer(target.next_poll_due_at_ms) or target.retry_requested?, do: 1, else: 0
+    in_progress + queued
+  end
+
+  defp budget_limits_snapshot(%{
+         "per_run" => %{"max_total_tokens" => per_run},
+         "daily" => %{"max_total_tokens" => daily},
+         "weekly" => %{"max_total_tokens" => weekly}
+       }),
+       do: %{per_run_tokens: per_run, daily_tokens: daily, weekly_tokens: weekly}
+
+  defp budget_limits_snapshot(_limits), do: nil
 
   defp put_target(state, target_id, target),
     do: %{state | targets: Map.put(state.targets, target_id, target)}

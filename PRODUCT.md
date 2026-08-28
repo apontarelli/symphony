@@ -68,11 +68,11 @@ admissions. Active-run and artifact identity includes the target ID; identical L
 identifiers under two targets do not share tracker, filesystem, runner, check, delivery, retry,
 handoff, or cleanup state.
 
-This guarantee does not activate multiple registry targets on one host. Current saved-workflow and
-explicit-workflow launches remain single-target admission paths, but they now run through one host
-scheduler and a dynamically supervised target orchestrator. The durable control plane owns pinned
-admissions, leases, fencing, process ownership, and recovery. Registry-backed multi-target
-activation and weighted dispatch remain deferred.
+Registry-backed host runs activate every valid active or draining target from one verified
+generation. One host scheduler applies weighted-deficit fairness, host/target/runner capacity,
+durable token-budget reservations, tracker-connection backoff, pause, drain, restart, cancellation,
+and lease-loss fencing. Saved-workflow and explicit-workflow launches remain convenient
+single-target admission forms on the same scheduler boundary.
 
 ## Near-Term Horizon
 

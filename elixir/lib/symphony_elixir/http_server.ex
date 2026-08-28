@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HttpServer do
   Compatibility facade that starts the Phoenix observability endpoint when enabled.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator}
+  alias SymphonyElixir.Config
   alias SymphonyElixirWeb.Endpoint
 
   @secret_key_bytes 48
@@ -21,23 +21,28 @@ defmodule SymphonyElixir.HttpServer do
     case Keyword.get(opts, :port, Config.server_port()) do
       port when is_integer(port) and port >= 0 ->
         host = Keyword.get(opts, :host, Config.settings!().server.host)
-        orchestrator = Keyword.get(opts, :orchestrator, Orchestrator)
+        orchestrator = Keyword.get(opts, :orchestrator)
+        host_scheduler = Keyword.get(opts, :host_scheduler, SymphonyElixir.HostScheduler)
+        control_plane = Keyword.get(opts, :control_plane, SymphonyElixir.ControlPlane)
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
         with {:ok, ip} <- parse_host(host) do
-          endpoint_opts = [
-            server: true,
-            http: [ip: ip, port: port],
-            url: [host: normalize_host(host)],
-            orchestrator: orchestrator,
-            snapshot_timeout_ms: snapshot_timeout_ms,
-            secret_key_base: secret_key_base()
-          ]
+          endpoint_opts =
+            [
+              server: true,
+              http: [ip: ip, port: port],
+              url: [host: normalize_host(host)],
+              host_scheduler: host_scheduler,
+              control_plane: control_plane,
+              snapshot_timeout_ms: snapshot_timeout_ms,
+              secret_key_base: secret_key_base()
+            ]
 
           endpoint_config =
             :symphony_elixir
             |> Application.get_env(Endpoint, [])
             |> Keyword.merge(endpoint_opts)
+            |> maybe_put_orchestrator(orchestrator)
 
           Application.put_env(:symphony_elixir, Endpoint, endpoint_config)
           Endpoint.start_link()
@@ -47,6 +52,12 @@ defmodule SymphonyElixir.HttpServer do
         :ignore
     end
   end
+
+  defp maybe_put_orchestrator(endpoint_opts, nil),
+    do: Keyword.delete(endpoint_opts, :orchestrator)
+
+  defp maybe_put_orchestrator(endpoint_opts, orchestrator),
+    do: Keyword.put(endpoint_opts, :orchestrator, orchestrator)
 
   @spec bound_port(term()) :: non_neg_integer() | nil
   def bound_port(_server \\ __MODULE__) do

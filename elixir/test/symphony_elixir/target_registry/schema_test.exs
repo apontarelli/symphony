@@ -1131,6 +1131,33 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     end
   end
 
+  test "lifecycle transitions reject malformed targets, states, actions, and modes" do
+    assert {:error, %TargetRegistry.Error{path: "$.targets.main"}} =
+             Schema.transition_target(:invalid, "main", :pause)
+
+    assert {:error, %TargetRegistry.Error{path: "$.targets"}} =
+             Schema.transition_target(:invalid, nil, :pause)
+
+    active = valid_target() |> Map.put("state", "active")
+
+    assert {:error, %TargetRegistry.Error{code: :invalid_dispatch_mode}} =
+             Schema.transition_target(active, "main", :pause, :watch)
+
+    invalid_state = Map.put(active, "state", "not-a-state")
+
+    assert {:error, %TargetRegistry.Error{code: :invalid_transition, message: state_message}} =
+             Schema.transition_target(invalid_state, "main", :pause)
+
+    assert state_message =~ "unknown"
+
+    paused = Map.put(active, "state", "paused")
+
+    assert {:error, %TargetRegistry.Error{code: :invalid_transition, message: action_message}} =
+             Schema.transition_target(paused, "main", :unknown_action)
+
+    assert action_message =~ "unknown action"
+  end
+
   test "diagnostics sort by scope, path, code, and message" do
     target_a =
       valid_target()

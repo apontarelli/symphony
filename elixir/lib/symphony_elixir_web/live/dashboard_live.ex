@@ -129,6 +129,110 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
         </section>
 
+        <section :if={@payload[:scheduler]} class="section-card scheduler-section">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Host scheduler</h2>
+              <p class="section-copy">
+                Target eligibility, queue pressure, weighted credit, capacity, token budgets, and tracker backoff.
+              </p>
+            </div>
+            <span class="state-badge">
+              Queue <span class="numeric"><%= @payload.scheduler.host.queue_count %></span>
+            </span>
+          </div>
+
+          <div class="scheduler-host-capacity" aria-label="Host capacity">
+            <span>Agents <strong class="numeric"><%= @payload.scheduler.host.capacity.used.agents %>/<%= @payload.scheduler.host.capacity.limits.agents %></strong></span>
+            <span>Startups <strong class="numeric"><%= @payload.scheduler.host.capacity.used.startups %>/<%= @payload.scheduler.host.capacity.limits.startups %></strong></span>
+            <span>Reviewers <strong class="numeric"><%= @payload.scheduler.host.capacity.used.reviewers %>/<%= @payload.scheduler.host.capacity.limits.reviewers %></strong></span>
+            <span>Polls <strong class="numeric"><%= @payload.scheduler.host.capacity.used.polls %>/<%= @payload.scheduler.host.capacity.limits.polls %></strong></span>
+          </div>
+
+          <%= if @payload.scheduler.targets == [] do %>
+            <p class="empty-state">No targets are configured.</p>
+          <% else %>
+            <div class="scheduler-target-grid">
+              <article :for={target <- @payload.scheduler.targets} class="scheduler-target-card">
+                <div class="scheduler-target-header">
+                  <div>
+                    <p class="eyebrow">Target</p>
+                    <h3 class="scheduler-target-title"><%= target.target_id %></h3>
+                  </div>
+                  <div class="chip-row">
+                    <span class={state_badge_class(target.effective_state)}>
+                      <%= target.effective_state %>
+                    </span>
+                    <span :if={target.configured_state != target.effective_state} class="state-badge">
+                      configured <%= target.configured_state %>
+                    </span>
+                  </div>
+                </div>
+
+                <dl class="scheduler-detail-grid">
+                  <div>
+                    <dt>Eligibility</dt>
+                    <dd><%= target.eligibility_reason %></dd>
+                  </div>
+                  <div>
+                    <dt>Queue</dt>
+                    <dd class="numeric"><%= target.queue_count %></dd>
+                  </div>
+                  <div>
+                    <dt>Weight / deficit</dt>
+                    <dd class="numeric"><%= target.scheduling.weight %> / <%= target.scheduling.deficit %></dd>
+                  </div>
+                  <div>
+                    <dt>Runs</dt>
+                    <dd class="numeric"><%= target.counts.running %> running · <%= target.counts.retrying %> retrying · <%= target.counts.blocked %> blocked</dd>
+                  </div>
+                  <div>
+                    <dt>Target capacity</dt>
+                    <dd class="numeric">
+                      A <%= target.capacity.used.agents %>/<%= target.capacity.limits.agents %>
+                      · S <%= target.capacity.used.startups %>/<%= target.capacity.limits.startups %>
+                      · R <%= target.capacity.used.reviewers %>/<%= target.capacity.limits.reviewers %>
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Tracker backoff</dt>
+                    <dd class="numeric"><%= if target.tracker_backoff.active, do: format_duration_ms(target.tracker_backoff.remaining_ms), else: "none" %></dd>
+                  </div>
+                  <div class="scheduler-detail-wide">
+                    <dt>Token budget</dt>
+                    <dd class="numeric">
+                      <%= if target.budget.configured do %>
+                        <span>
+                          <%= target.budget.reserved_tokens %> reserved · <%= target.budget.charged_tokens %> charged
+                        </span>
+                        <span class="scheduler-budget-periods">
+                          Day <%= target.budget.daily_reserved_tokens + target.budget.daily_charged_tokens %>/<%= target.budget.limits.daily_tokens %>
+                          · Week <%= target.budget.weekly_reserved_tokens + target.budget.weekly_charged_tokens %>/<%= target.budget.limits.weekly_tokens %>
+                          · Per run <%= target.budget.limits.per_run_tokens %>
+                        </span>
+                        <span :if={target.budget.exhausted} class="state-badge state-badge-warning">exhausted</span>
+                      <% else %>
+                        Unlimited
+                      <% end %>
+                    </dd>
+                  </div>
+                </dl>
+
+                <ul :if={target.runs != []} class="scheduler-run-list" aria-label={"#{target.target_id} durable runs"}>
+                  <li :for={run <- target.runs}>
+                    <span class="issue-id"><%= run.target_id %> / <%= run.issue_identifier %></span>
+                    <span class="muted mono"><%= run.admitted_run_id %></span>
+                    <span class="scheduler-run-state">
+                      <span class={state_badge_class(run.state)}><%= run.state %></span>
+                      <span :if={run.blocked_reason} class="muted"><%= run.blocked_reason %></span>
+                    </span>
+                  </li>
+                </ul>
+              </article>
+            </div>
+          <% end %>
+        </section>
+
         <section class="section-card">
           <div class="section-header">
             <div>
@@ -557,7 +661,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="empty-state">No blocked sessions.</p>
           <% else %>
             <div class="table-wrap">
-              <table class="data-table" style="min-width: 760px;">
+              <table class="data-table">
                 <thead>
                   <tr>
                     <th>Issue</th>
@@ -632,8 +736,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp load_payload do
-    orchestrator()
-    |> Presenter.state_payload(snapshot_timeout_ms())
+    payload =
+      case Endpoint.config(:orchestrator) do
+        nil ->
+          Presenter.host_state_payload(
+            host_scheduler(),
+            control_plane(),
+            snapshot_timeout_ms()
+          )
+
+        configured_orchestrator ->
+          Presenter.state_payload(configured_orchestrator, snapshot_timeout_ms())
+      end
+
+    payload
     |> put_project_groups()
     |> put_control_plane()
   end
@@ -721,13 +837,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp project_groups(_payload), do: []
 
-  defp project_group_key(%{policy: %{"policy_metadata" => metadata}}) when is_map(metadata) do
-    cond do
-      is_binary(metadata["project_slug"]) -> "project_slug:#{metadata["project_slug"]}"
-      is_binary(metadata["project_id"]) -> "project_id:#{metadata["project_id"]}"
-      true -> "unassigned"
-    end
-  end
+  defp project_group_key(%{project_slug: slug}) when is_binary(slug),
+    do: "project_slug:#{slug}"
+
+  defp project_group_key(%{project_id: id}) when is_binary(id),
+    do: "project_id:#{id}"
 
   defp project_group_key(_entry), do: "unassigned"
 
@@ -793,12 +907,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
-  defp orchestrator do
-    Endpoint.config(:orchestrator) || SymphonyElixir.Orchestrator
-  end
-
   defp control_plane do
     Endpoint.config(:control_plane) || SymphonyElixir.ControlPlane
+  end
+
+  defp host_scheduler do
+    Endpoint.config(:host_scheduler) || SymphonyElixir.HostScheduler
   end
 
   defp snapshot_timeout_ms do

@@ -100,7 +100,13 @@ defmodule SymphonyElixir.HostSchedulerRegistryTest do
              case HostScheduler.snapshot(scheduler) do
                %{
                  counts: %{agents: 1, startups: 1, polls: 0},
-                 targets: %{"alpha" => %{state: :paused, generation: ^generation_b}}
+                 targets: %{
+                   "alpha" => %{
+                     configured_state: :paused,
+                     effective_state: :paused,
+                     generation: ^generation_b
+                   }
+                 }
                } = snapshot ->
                  snapshot
 

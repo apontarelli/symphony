@@ -46,6 +46,38 @@ defmodule SymphonyElixir.ExtensionsTest do
     end
   end
 
+  defmodule StaticHostScheduler do
+    use GenServer
+
+    def start_link(snapshot), do: GenServer.start_link(__MODULE__, snapshot)
+    def set_snapshot(server, snapshot), do: GenServer.call(server, {:set_snapshot, snapshot})
+
+    @impl true
+    def init(snapshot), do: {:ok, snapshot}
+
+    @impl true
+    def handle_call(:snapshot, _from, snapshot), do: {:reply, snapshot, snapshot}
+
+    def handle_call({:set_snapshot, snapshot}, _from, _current),
+      do: {:reply, :ok, snapshot}
+  end
+
+  defmodule StaticControlPlane do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts), do: {:ok, opts}
+
+    @impl true
+    def handle_call(:inspect_runs, _from, state),
+      do: {:reply, {:ok, Keyword.fetch!(state, :runs)}, state}
+
+    def handle_call(:inspect_target_budgets, _from, state),
+      do: {:reply, {:ok, Keyword.fetch!(state, :budgets)}, state}
+  end
+
   setup do
     linear_client_module = Application.get_env(:symphony_elixir, :linear_client_module)
 
@@ -339,10 +371,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "profile" => "default",
                  "target" => "Human Review",
                  "policy_ref" => "policy-http",
-                 "policy" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
-                   "policy_ref" => "policy-http"
-                 },
                  "session_id" => "thread-http",
                  "startup" => false,
                  "adapter" => nil,
@@ -370,12 +398,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "workspace_path" => nil,
                  "profile" => "strict",
                  "target" => "Merging",
-                 "policy_ref" => "policy-retry",
-                 "policy" => %{
-                   "checks" => ["mix test"],
-                   "delivery" => %{"pr_target" => "Merging"},
-                   "policy_ref" => "policy-retry"
-                 }
+                 "policy_ref" => "policy-retry"
                }
              ],
              "blocked" => [
@@ -392,10 +415,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "profile" => "strict",
                  "target" => "Human Review",
                  "policy_ref" => "policy-blocked",
-                 "policy" => %{
-                   "delivery" => %{"pr_target" => "Human Review"},
-                   "policy_ref" => "policy-blocked"
-                 },
                  "session_id" => "thread-blocked",
                  "pr_target" => "main",
                  "blocked_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("blocked_at"),
@@ -457,10 +476,6 @@ defmodule SymphonyElixir.ExtensionsTest do
                "profile" => "default",
                "target" => "Human Review",
                "policy_ref" => "policy-http",
-               "policy" => %{
-                 "delivery" => %{"pr_target" => "Human Review"},
-                 "policy_ref" => "policy-http"
-               },
                "session_id" => "thread-http",
                "startup" => false,
                "adapter" => nil,
@@ -491,12 +506,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "error" => "boom",
                "profile" => "strict",
                "target" => "Merging",
-               "policy_ref" => "policy-retry",
-               "policy" => %{
-                 "checks" => ["mix test"],
-                 "delivery" => %{"pr_target" => "Merging"},
-                 "policy_ref" => "policy-retry"
-               }
+               "policy_ref" => "policy-retry"
              }
            } =
              json_response(conn, 200)
@@ -1090,6 +1100,123 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "Rate limits"
   end
 
+  test "host observability renders scheduler states, safe run identity, and empty state" do
+    snapshot = static_snapshot()
+    running = snapshot.running |> hd() |> Map.put(:issue_id, "issue-shared") |> Map.put(:identifier, "MT-DUP")
+    blocked = snapshot.blocked |> hd() |> Map.put(:issue_id, "issue-shared") |> Map.put(:identifier, "MT-DUP")
+
+    {:ok, active_runtime} =
+      StaticOrchestrator.start_link(
+        name: Module.concat(__MODULE__, :ActiveTargetRuntime),
+        snapshot: %{snapshot | running: [running], retrying: [], blocked: []}
+      )
+
+    {:ok, blocked_runtime} =
+      StaticOrchestrator.start_link(
+        name: Module.concat(__MODULE__, :BlockedTargetRuntime),
+        snapshot: %{snapshot | running: [], retrying: [], blocked: [blocked]}
+      )
+
+    {:ok, empty_runtime} =
+      StaticOrchestrator.start_link(
+        name: Module.concat(__MODULE__, :EmptyTargetRuntime),
+        snapshot: %{snapshot | running: [], retrying: [], blocked: []}
+      )
+
+    active_target =
+      scheduler_target(active_runtime, :active, :active, :eligible,
+        budget_limits: %{
+          per_run_tokens: 100,
+          daily_tokens: 100,
+          weekly_tokens: 500
+        }
+      )
+
+    limited_backoff = %{active: true, remaining_ms: 5_000}
+
+    limited_target =
+      scheduler_target(empty_runtime, :active, :limited, :tracker_backoff, tracker_backoff: limited_backoff)
+
+    host_snapshot = %{
+      counts: %{agents: 1, startups: 0, reviewers: 0, polls: 1},
+      limits: %{
+        agents: 4,
+        startups: 2,
+        reviewers: 2,
+        polls: %{max_concurrent: 2}
+      },
+      targets: %{
+        "active" => active_target,
+        "limited" => limited_target,
+        "paused" => scheduler_target(empty_runtime, :paused, :paused, :target_paused),
+        "draining" => scheduler_target(empty_runtime, :draining, :draining, :target_draining),
+        "blocked" => scheduler_target(blocked_runtime, :active, :active, :eligible)
+      }
+    }
+
+    runs = [
+      durable_run_snapshot("active-run", "active", "running", nil),
+      durable_run_snapshot("blocked-run", "blocked", "blocked", "lease_lost")
+    ]
+
+    budgets = [
+      %{
+        target_id: "active",
+        reserved_tokens: 10,
+        daily_reserved_tokens: 10,
+        weekly_reserved_tokens: 10,
+        charged_tokens: 90,
+        daily_charged_tokens: 90,
+        weekly_charged_tokens: 90
+      }
+    ]
+
+    {:ok, scheduler} = StaticHostScheduler.start_link(host_snapshot)
+    {:ok, control_plane} = StaticControlPlane.start_link(runs: runs, budgets: budgets)
+
+    start_test_endpoint(
+      orchestrator: nil,
+      host_scheduler: scheduler,
+      control_plane: control_plane,
+      snapshot_timeout_ms: 50
+    )
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    targets = state_payload["scheduler"]["targets"]
+
+    assert Enum.map(targets, & &1["target_id"]) == ["active", "blocked", "draining", "limited", "paused"]
+
+    assert %{
+             "budget" => %{
+               "exhausted" => true,
+               "daily_reserved_tokens" => 10,
+               "weekly_reserved_tokens" => 10
+             }
+           } = Enum.find(targets, &(&1["target_id"] == "active"))
+
+    assert %{"error" => %{"code" => "ambiguous_issue"}} =
+             json_response(get(build_conn(), "/api/v1/MT-DUP"), 409)
+
+    assert %{"target_id" => "active", "admitted_run_id" => "active-run"} =
+             json_response(get(build_conn(), "/api/v1/MT-DUP?target_id=active"), 200)
+
+    {:ok, view, html} = live(build_conn(), "/")
+    assert html =~ "Host scheduler"
+    assert html =~ "active"
+    assert html =~ "limited"
+    assert html =~ "paused"
+    assert html =~ "draining"
+    assert html =~ "1 blocked"
+    assert html =~ "lease_lost"
+    assert html =~ "Day 100/100"
+    assert html =~ "active / MT-DUP"
+    assert html =~ "active-run"
+
+    assert :ok = StaticHostScheduler.set_snapshot(scheduler, %{host_snapshot | targets: %{}})
+    send(view.pid, :observability_updated)
+    assert render(view) =~ "No targets are configured."
+  end
+
   test "dashboard liveview renders an unavailable state without crashing" do
     start_test_endpoint(
       orchestrator: Module.concat(__MODULE__, :MissingDashboardOrchestrator),
@@ -1183,6 +1310,41 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, endpoint_config)
     start_supervised!({SymphonyElixirWeb.Endpoint, []})
+  end
+
+  defp scheduler_target(pid, configured_state, effective_state, eligibility_reason, opts \\ []) do
+    %{
+      pid: pid,
+      configured_state: configured_state,
+      effective_state: effective_state,
+      eligibility_reason: eligibility_reason,
+      queue_count: 1,
+      counts: %{agents: 0, startups: 0, reviewers: 0, polls: 0},
+      limits: %{agents: 1, startups: 1, reviewers: 1},
+      scheduling: %{weight: 1, deficit: 0},
+      budget_limits: Keyword.get(opts, :budget_limits),
+      tracker_backoff: Keyword.get(opts, :tracker_backoff, %{active: false, remaining_ms: nil})
+    }
+  end
+
+  defp durable_run_snapshot(admitted_run_id, target_id, lifecycle_state, blocked_reason) do
+    %{
+      admitted_run_id: admitted_run_id,
+      target_id: target_id,
+      tracker_issue_id: "issue-shared",
+      issue_identifier: "MT-DUP",
+      lifecycle_state: lifecycle_state,
+      lifecycle_sequence: 1,
+      owner_id: nil,
+      lease_expires_at_ms: nil,
+      fencing_generation: 1,
+      retry_attempt: nil,
+      retry_due_at_ms: nil,
+      blocked_reason: blocked_reason,
+      reconciliation_status: "clear",
+      terminal_at: nil,
+      updated_at: "2026-08-28T00:00:00Z"
+    }
   end
 
   defp static_snapshot do

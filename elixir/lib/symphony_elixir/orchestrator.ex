@@ -4437,7 +4437,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
-    if Process.whereis(server) do
+    if orchestrator_available?(server) do
       try do
         GenServer.call(server, :snapshot, timeout)
       catch
@@ -4448,6 +4448,15 @@ defmodule SymphonyElixir.Orchestrator do
       :unavailable
     end
   end
+
+  defp orchestrator_available?(server) when is_pid(server), do: Process.alive?(server)
+  defp orchestrator_available?(server) when is_atom(server), do: is_pid(Process.whereis(server))
+
+  defp orchestrator_available?({:global, name}),
+    do: is_pid(:global.whereis_name(name))
+
+  defp orchestrator_available?({:via, module, name}),
+    do: is_pid(module.whereis_name(name))
 
   @impl true
   def handle_call(:snapshot, _from, state) do

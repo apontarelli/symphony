@@ -498,6 +498,10 @@ defmodule SymphonyElixir.TrackerContextTest do
         "strategy" => "per_issue",
         "hooks" => %{}
       })
+      |> update_in(
+        [Access.key!(:tracker_connection)],
+        &Map.put(&1, "coordinator_state_path", pinned_state_path)
+      )
 
     Workflow.set_workflow_file_path(missing_workflow)
     assert_raise ArgumentError, fn -> Config.settings!() end

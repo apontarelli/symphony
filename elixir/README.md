@@ -296,6 +296,14 @@ leaves stop-dependent resources fenced and does not signal the uncertain process
 reacquires each paused admission's lease and token reservation from its pinned context before the
 scheduler enables new candidate polling.
 
+The host scheduler projection is shared by the dashboard, `GET /api/v1/state`, and stable
+`Scheduler host status` / `Scheduler target status` log records. It reports each target's
+configured/effective state, eligibility reason, queue count, scheduling weight and deficit,
+host/target capacity use, durable token reservation and charged use, tracker backoff, and
+running/retrying/blocked counts. Durable run identities use
+`target_id / issue_identifier / admitted_run_id`, so overlapping identifiers remain distinct.
+The projection omits raw policy, credentials, secret references, prompts, and transition evidence.
+
 
 For each runtime dispatch, the orchestrator commits the pinned admission and acquires its durable
 lease before it resolves current credentials or revalidates tracker state. It renews the lease every
@@ -463,6 +471,11 @@ control-plane table, and structured `control_plane_snapshot` debug logs. The pro
 target and issue identity, lifecycle state and sequence, current owner and lease expiry, fencing
 generation, retry timing, blocked reason, and reconciliation status. It omits pinned policy,
 execution context, credentials, and raw transition evidence.
+
+Scheduler inspection uses the same redaction boundary. `GET /api/v1/state` returns a `scheduler`
+object with host capacity and target rows. `GET /api/v1/<issue_identifier>` returns
+`409 ambiguous_issue` when more than one target has the identifier; add
+`?target_id=<target-id>` to select the durable run.
 
 `symphony control-plane resume <run-id>` and `abandon <run-id>` first return a confirmation token
 bound to the current lifecycle sequence and fencing generation. Supplying that token with
@@ -922,7 +935,8 @@ runtime:
   recovery uses that context; later workflow, profile, and target-registry changes apply only to new
   admissions.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. Add
+  `?target_id=<target-id>` to the issue route when registry targets overlap.
 
 ## Incident-triggered issues
 
@@ -947,6 +961,12 @@ The observability UI now runs on a minimal Phoenix stack:
 - LiveView for the dashboard at `/`
 - A compact control panel overview for freshness, running/retrying work, work errors,
   config warnings, stale sessions, runtime, token usage, and tracker availability
+- Host scheduler cards for target state and eligibility, queue pressure, weight/deficit,
+  host/target capacity, durable token budgets, tracker backoff, and running/retrying/blocked counts
+- Safe durable run identity as `target / issue / admitted run`, including duplicate issue
+  identifiers under different targets
+- Empty, active, limited, paused, draining, and blocked target states with responsive narrow and
+  wide layouts
 - A primary project status table for the configured tracker project plus runtime project rows
 - Running session detail with issue state, profile/target, runtime, last Codex update,
   copyable session ID, and token split

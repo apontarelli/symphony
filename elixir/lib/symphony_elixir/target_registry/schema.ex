@@ -370,7 +370,6 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   defp lifecycle_state(:pause), do: "paused"
   defp lifecycle_state(:drain), do: "draining"
   defp lifecycle_state(:retire), do: "retired"
-  defp lifecycle_state(_action), do: "unknown"
 
   defp put_lifecycle_dispatch_mode(configured, :activate, mode),
     do: Map.put(configured, "dispatch_mode", Atom.to_string(mode))

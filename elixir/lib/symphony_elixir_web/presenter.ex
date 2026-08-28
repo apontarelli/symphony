@@ -3,7 +3,15 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, ControlPlane, Orchestrator, RunTarget, StatusDashboard}
+  alias SymphonyElixir.{
+    Config,
+    ControlPlane,
+    HostScheduler,
+    Orchestrator,
+    RunTarget,
+    SchedulerStatus,
+    StatusDashboard
+  }
 
   @stale_after_seconds 5 * 60
   @default_profile "default"
@@ -12,61 +20,233 @@ defmodule SymphonyElixirWeb.Presenter do
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at_datetime = DateTime.utc_now() |> DateTime.truncate(:second)
-    generated_at = DateTime.to_iso8601(generated_at_datetime)
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
-      %{} = snapshot ->
-        bound_projects = bound_project_payloads(snapshot)
-        default_project_slug = default_project_slug(bound_projects)
-        projects_by_slug = projects_by_slug(bound_projects)
-        running = Enum.map(snapshot.running, &running_entry_payload(&1, projects_by_slug, default_project_slug))
-        retrying = Enum.map(snapshot.retrying, &retry_entry_payload(&1, projects_by_slug, default_project_slug))
-        blocked = Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload(&1, projects_by_slug, default_project_slug))
-        work_errors = work_error_payloads(retrying)
-        stale_warnings = stale_warning_payloads(running, generated_at_datetime)
-        config_warnings = config_warning_payloads()
-        project_status_projects = project_status_projects(bound_projects, running, retrying)
-
-        %{
-          generated_at: generated_at,
-          counts: %{
-            running: length(running),
-            retrying: length(retrying),
-            blocked: length(blocked),
-            work_errors: length(work_errors),
-            config_warnings: length(config_warnings),
-            stale_warnings: length(stale_warnings)
-          },
-          project_statuses:
-            project_status_payloads(
-              project_status_projects,
-              running,
-              retrying,
-              work_errors,
-              config_warnings,
-              stale_warnings
-            ),
-          work_errors: work_errors,
-          config_warnings: config_warnings,
-          stale_warnings: stale_warnings,
-          running: running,
-          retrying: retrying,
-          blocked: blocked,
-          token_hotspot: token_hotspot_payload(running),
-          handoff_routes: Enum.map(Map.get(snapshot, :handoff_routes, []), &handoff_route_payload/1),
-          runtime_totals: snapshot.runtime_totals,
-          tracker: tracker_payload(Map.get(snapshot, :tracker)),
-          rate_limits: snapshot.rate_limits,
-          rate_limits_available: meaningful_rate_limits?(snapshot.rate_limits)
-        }
-
-      :timeout ->
-        %{generated_at: generated_at, error: %{code: "snapshot_timeout", message: "Snapshot timed out"}}
-
-      :unavailable ->
-        %{generated_at: generated_at, error: %{code: "snapshot_unavailable", message: "Snapshot unavailable"}}
+      %{} = snapshot -> state_payload_from_snapshot(snapshot, generated_at_datetime)
+      :timeout -> snapshot_error(generated_at_datetime, "snapshot_timeout", "Snapshot timed out")
+      :unavailable -> snapshot_error(generated_at_datetime, "snapshot_unavailable", "Snapshot unavailable")
     end
   end
+
+  @spec host_state_payload(GenServer.server(), GenServer.server(), timeout()) :: map()
+  def host_state_payload(scheduler, control_plane, snapshot_timeout_ms) do
+    generated_at_datetime = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    case host_snapshot(scheduler, control_plane, snapshot_timeout_ms) do
+      {:ok, snapshot, scheduler_status} ->
+        snapshot
+        |> state_payload_from_snapshot(generated_at_datetime)
+        |> Map.put(:scheduler, scheduler_status)
+
+      {:error, :timeout} ->
+        snapshot_error(generated_at_datetime, "snapshot_timeout", "Snapshot timed out")
+
+      {:error, _reason} ->
+        snapshot_error(generated_at_datetime, "snapshot_unavailable", "Snapshot unavailable")
+    end
+  end
+
+  defp state_payload_from_snapshot(snapshot, generated_at_datetime) do
+    generated_at = DateTime.to_iso8601(generated_at_datetime)
+    bound_projects = bound_project_payloads(snapshot)
+    default_project_slug = default_project_slug(bound_projects)
+    projects_by_slug = projects_by_slug(bound_projects)
+    running = Enum.map(snapshot.running, &running_entry_payload(&1, projects_by_slug, default_project_slug))
+    retrying = Enum.map(snapshot.retrying, &retry_entry_payload(&1, projects_by_slug, default_project_slug))
+    blocked = Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload(&1, projects_by_slug, default_project_slug))
+    work_errors = work_error_payloads(retrying)
+    stale_warnings = stale_warning_payloads(running, generated_at_datetime)
+    config_warnings = config_warning_payloads()
+    project_status_projects = project_status_projects(bound_projects, running, retrying)
+
+    %{
+      generated_at: generated_at,
+      counts: %{
+        running: length(running),
+        retrying: length(retrying),
+        blocked: length(blocked),
+        work_errors: length(work_errors),
+        config_warnings: length(config_warnings),
+        stale_warnings: length(stale_warnings)
+      },
+      project_statuses:
+        project_status_payloads(
+          project_status_projects,
+          running,
+          retrying,
+          work_errors,
+          config_warnings,
+          stale_warnings
+        ),
+      work_errors: work_errors,
+      config_warnings: config_warnings,
+      stale_warnings: stale_warnings,
+      running: running,
+      retrying: retrying,
+      blocked: blocked,
+      token_hotspot: token_hotspot_payload(running),
+      handoff_routes: Enum.map(Map.get(snapshot, :handoff_routes, []), &handoff_route_payload/1),
+      runtime_totals: snapshot.runtime_totals,
+      tracker: tracker_payload(Map.get(snapshot, :tracker)),
+      rate_limits: snapshot.rate_limits,
+      rate_limits_available: meaningful_rate_limits?(snapshot.rate_limits)
+    }
+  end
+
+  defp snapshot_error(generated_at_datetime, code, message) do
+    %{
+      generated_at: DateTime.to_iso8601(generated_at_datetime),
+      error: %{code: code, message: message}
+    }
+  end
+
+  defp host_snapshot(scheduler, control_plane, snapshot_timeout_ms) do
+    with {:ok, host} <- scheduler_snapshot(scheduler),
+         {:ok, runtime_snapshots} <- target_runtime_snapshots(host, snapshot_timeout_ms) do
+      durable_runs = control_plane_runs(control_plane)
+      budget_snapshots = control_plane_budgets(control_plane)
+      runtime_snapshots = attach_durable_run_identities(runtime_snapshots, durable_runs)
+      scheduler_status = SchedulerStatus.project(host, runtime_snapshots, durable_runs, budget_snapshots)
+      {:ok, aggregate_runtime_snapshots(runtime_snapshots), scheduler_status}
+    end
+  end
+
+  defp scheduler_snapshot(scheduler) do
+    {:ok, HostScheduler.snapshot(scheduler)}
+  catch
+    :exit, {:timeout, _reason} -> {:error, :timeout}
+    :exit, _reason -> {:error, :unavailable}
+  end
+
+  defp target_runtime_snapshots(host, snapshot_timeout_ms) do
+    host
+    |> Map.get(:targets, %{})
+    |> Enum.reduce_while({:ok, %{}}, fn {target_id, target}, {:ok, snapshots} ->
+      case target_runtime_snapshot(target, snapshot_timeout_ms) do
+        :timeout -> {:halt, {:error, :timeout}}
+        snapshot -> {:cont, {:ok, Map.put(snapshots, target_id, snapshot)}}
+      end
+    end)
+  end
+
+  defp target_runtime_snapshot(%{pid: pid}, snapshot_timeout_ms) when is_pid(pid) do
+    case Orchestrator.snapshot(pid, snapshot_timeout_ms) do
+      %{} = snapshot -> snapshot
+      :timeout -> :timeout
+      :unavailable -> empty_runtime_snapshot()
+    end
+  end
+
+  defp target_runtime_snapshot(_target, _snapshot_timeout_ms), do: empty_runtime_snapshot()
+
+  defp empty_runtime_snapshot do
+    %{
+      running: [],
+      retrying: [],
+      blocked: [],
+      handoff_routes: [],
+      runtime_totals: %{
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        seconds_running: 0
+      },
+      rate_limits: nil,
+      tracker: %{limited?: false, rate_limit: nil}
+    }
+  end
+
+  defp control_plane_runs(control_plane) do
+    case ControlPlane.inspect_runs(control_plane) do
+      {:ok, runs} -> runs
+      {:error, _reason} -> []
+    end
+  catch
+    :exit, _reason -> []
+  end
+
+  defp control_plane_budgets(control_plane) do
+    case ControlPlane.inspect_target_budgets(control_plane) do
+      {:ok, budgets} -> budgets
+      {:error, _reason} -> []
+    end
+  catch
+    :exit, _reason -> []
+  end
+
+  defp attach_durable_run_identities(runtime_snapshots, durable_runs) do
+    Map.new(runtime_snapshots, fn {target_id, snapshot} ->
+      target_runs = Enum.filter(durable_runs, &(&1.target_id == target_id))
+
+      snapshot =
+        snapshot
+        |> Map.update!(:running, &attach_durable_run_identities(&1, target_id, target_runs))
+        |> Map.update!(:retrying, &attach_durable_run_identities(&1, target_id, target_runs))
+        |> Map.update!(:blocked, &attach_durable_run_identities(&1, target_id, target_runs))
+
+      {target_id, snapshot}
+    end)
+  end
+
+  defp attach_durable_run_identities(entries, target_id, target_runs) do
+    Enum.map(entries, fn entry ->
+      run = Enum.find(target_runs, &(&1.tracker_issue_id == entry.issue_id))
+
+      entry
+      |> Map.put(:target_id, target_id)
+      |> put_if_present(:admitted_run_id, run && run.admitted_run_id)
+    end)
+  end
+
+  defp aggregate_runtime_snapshots(runtime_snapshots) do
+    snapshots = Map.values(runtime_snapshots)
+    limited_tracker = Enum.find(snapshots, &get_in(&1, [:tracker, :limited?]))
+
+    %{
+      running: Enum.flat_map(snapshots, &Map.get(&1, :running, [])),
+      retrying: Enum.flat_map(snapshots, &Map.get(&1, :retrying, [])),
+      blocked: Enum.flat_map(snapshots, &Map.get(&1, :blocked, [])),
+      handoff_routes: Enum.flat_map(snapshots, &Map.get(&1, :handoff_routes, [])),
+      runtime_totals: sum_runtime_totals(snapshots),
+      rate_limits: aggregate_rate_limits(runtime_snapshots),
+      tracker:
+        if(limited_tracker,
+          do: limited_tracker.tracker,
+          else: %{limited?: false, rate_limit: nil}
+        )
+    }
+  end
+
+  defp sum_runtime_totals(snapshots) do
+    Enum.reduce(
+      snapshots,
+      %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      fn snapshot, totals ->
+        runtime_totals = Map.get(snapshot, :runtime_totals, %{})
+
+        Map.new(totals, fn {key, current} ->
+          {key, current + numeric_value(Map.get(runtime_totals, key))}
+        end)
+      end
+    )
+  end
+
+  defp aggregate_rate_limits(runtime_snapshots) do
+    rate_limits =
+      runtime_snapshots
+      |> Enum.flat_map(fn {target_id, snapshot} ->
+        case Map.get(snapshot, :rate_limits) do
+          limits when is_map(limits) -> [{target_id, limits}]
+          _unavailable -> []
+        end
+      end)
+      |> Map.new()
+
+    if rate_limits == %{}, do: nil, else: rate_limits
+  end
+
+  defp numeric_value(value) when is_number(value), do: value
+  defp numeric_value(_value), do: 0
 
   @spec control_plane_payload(GenServer.server()) :: {:ok, map()} | {:error, term()}
   def control_plane_payload(control_plane) do
@@ -101,39 +281,88 @@ defmodule SymphonyElixirWeb.Presenter do
     :exit, reason -> {:error, reason}
   end
 
-  @spec issue_payload(String.t(), GenServer.name(), timeout()) :: {:ok, map()} | {:error, :issue_not_found}
-  def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
+  @spec issue_payload(String.t(), GenServer.name(), timeout()) ::
+          {:ok, map()} | {:error, :issue_not_found | :ambiguous_issue}
+  def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms)
+      when is_binary(issue_identifier) do
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
-      %{} = snapshot ->
-        bound_projects = bound_project_payloads(snapshot)
-        default_project_slug = default_project_slug(bound_projects)
-        projects_by_slug = projects_by_slug(bound_projects)
+      %{} = snapshot -> issue_payload_from_snapshot(snapshot, issue_identifier, nil)
+      _unavailable -> {:error, :issue_not_found}
+    end
+  end
 
+  @spec host_issue_payload(
+          String.t(),
+          String.t() | nil,
+          GenServer.server(),
+          GenServer.server(),
+          timeout()
+        ) :: {:ok, map()} | {:error, :issue_not_found | :ambiguous_issue}
+  def host_issue_payload(
+        issue_identifier,
+        target_id,
+        scheduler,
+        control_plane,
+        snapshot_timeout_ms
+      )
+      when is_binary(issue_identifier) and (is_binary(target_id) or is_nil(target_id)) do
+    case host_snapshot(scheduler, control_plane, snapshot_timeout_ms) do
+      {:ok, snapshot, _scheduler_status} ->
+        issue_payload_from_snapshot(snapshot, issue_identifier, target_id)
+
+      {:error, _reason} ->
+        {:error, :issue_not_found}
+    end
+  end
+
+  defp issue_payload_from_snapshot(snapshot, issue_identifier, target_id) do
+    bound_projects = bound_project_payloads(snapshot)
+    default_project_slug = default_project_slug(bound_projects)
+    projects_by_slug = projects_by_slug(bound_projects)
+
+    matches =
+      [:running, :retrying, :blocked]
+      |> Enum.flat_map(&Map.get(snapshot, &1, []))
+      |> Enum.filter(&issue_entry_match?(&1, issue_identifier, target_id))
+
+    target_ids =
+      matches
+      |> Enum.map(&Map.get(&1, :target_id))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    cond do
+      is_nil(target_id) and length(target_ids) > 1 ->
+        {:error, :ambiguous_issue}
+
+      matches == [] ->
+        {:error, :issue_not_found}
+
+      true ->
         running =
           snapshot.running
-          |> Enum.find(&(&1.identifier == issue_identifier))
+          |> Enum.find(&issue_entry_match?(&1, issue_identifier, target_id))
           |> maybe_put_project_defaults(projects_by_slug, default_project_slug)
 
         retry =
           snapshot.retrying
-          |> Enum.find(&(&1.identifier == issue_identifier))
+          |> Enum.find(&issue_entry_match?(&1, issue_identifier, target_id))
           |> maybe_put_project_defaults(projects_by_slug, default_project_slug)
 
         blocked =
           Map.get(snapshot, :blocked, [])
-          |> Enum.find(&(&1.identifier == issue_identifier))
+          |> Enum.find(&issue_entry_match?(&1, issue_identifier, target_id))
           |> maybe_put_project_defaults(projects_by_slug, default_project_slug)
 
-        if is_nil(running) and is_nil(retry) and is_nil(blocked) do
-          {:error, :issue_not_found}
-        else
-          {:ok, issue_payload_body(issue_identifier, running, retry, blocked)}
-        end
-
-      _ ->
-        {:error, :issue_not_found}
+        {:ok, issue_payload_body(issue_identifier, running, retry, blocked)}
     end
   end
+
+  defp issue_entry_match?(entry, issue_identifier, nil),
+    do: entry.identifier == issue_identifier
+
+  defp issue_entry_match?(entry, issue_identifier, target_id),
+    do: entry.identifier == issue_identifier and Map.get(entry, :target_id) == target_id
 
   @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
   def refresh_payload(orchestrator) do
@@ -169,10 +398,22 @@ defmodule SymphonyElixirWeb.Presenter do
       last_error: (blocked && blocked.error) || (retry && retry.error),
       tracked: %{}
     }
+    |> put_if_present(:target_id, entry_identity(running, retry, blocked, :target_id))
+    |> put_if_present(
+      :admitted_run_id,
+      entry_identity(running, retry, blocked, :admitted_run_id)
+    )
   end
 
   defp issue_id_from_entries(running, retry, blocked),
     do: (running && running.issue_id) || (retry && retry.issue_id) || (blocked && blocked.issue_id)
+
+  defp entry_identity(running, retry, blocked, key) do
+    Enum.find_value([running, retry, blocked], fn
+      entry when is_map(entry) -> Map.get(entry, key)
+      _missing -> nil
+    end)
+  end
 
   defp tracker_payload(%{limited?: limited?, rate_limit: rate_limit}) do
     %{
@@ -238,7 +479,6 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path),
       target: Map.get(entry, :target),
       policy_ref: Map.get(entry, :policy_ref),
-      policy: Map.get(entry, :policy),
       session_id: entry.session_id,
       startup: Map.get(entry, :startup, false),
       adapter: Map.get(entry, :adapter),
@@ -257,6 +497,8 @@ defmodule SymphonyElixirWeb.Presenter do
     }
     |> put_if_present(:last_progress_at, iso8601(Map.get(entry, :last_runtime_progress_timestamp)))
     |> put_if_present(:last_error_signature, Map.get(entry, :last_runtime_error_signature))
+    |> put_if_present(:target_id, Map.get(entry, :target_id))
+    |> put_if_present(:admitted_run_id, Map.get(entry, :admitted_run_id))
   end
 
   defp retry_entry_payload(entry, projects_by_slug, default_project_slug) do
@@ -277,11 +519,12 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       target: Map.get(entry, :target),
-      policy_ref: Map.get(entry, :policy_ref),
-      policy: Map.get(entry, :policy)
+      policy_ref: Map.get(entry, :policy_ref)
     }
     |> put_if_present(:session_id, Map.get(entry, :session_id))
     |> put_if_present(:last_error_signature, Map.get(entry, :last_error_signature))
+    |> put_if_present(:target_id, Map.get(entry, :target_id))
+    |> put_if_present(:admitted_run_id, Map.get(entry, :admitted_run_id))
   end
 
   defp blocked_entry_payload(entry, projects_by_slug, default_project_slug) do
@@ -300,7 +543,6 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(entry, :workspace_path),
       target: Map.get(entry, :target),
       policy_ref: Map.get(entry, :policy_ref),
-      policy: Map.get(entry, :policy),
       session_id: entry.session_id,
       profile: entry_project_profile(entry, project),
       pr_target: entry_project_pr_target(entry, project),
@@ -309,6 +551,8 @@ defmodule SymphonyElixirWeb.Presenter do
       last_message: summarize_message(entry.last_runtime_message),
       last_event_at: iso8601(entry.last_runtime_timestamp)
     }
+    |> put_if_present(:target_id, Map.get(entry, :target_id))
+    |> put_if_present(:admitted_run_id, Map.get(entry, :admitted_run_id))
   end
 
   defp handoff_route_payload(route) when is_map(route), do: route
@@ -319,7 +563,6 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(running, :workspace_path),
       target: Map.get(running, :target),
       policy_ref: Map.get(running, :policy_ref),
-      policy: Map.get(running, :policy),
       session_id: running.session_id,
       startup: Map.get(running, :startup, false),
       adapter: Map.get(running, :adapter),
@@ -353,8 +596,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(retry, :worker_host),
       workspace_path: Map.get(retry, :workspace_path),
       target: Map.get(retry, :target),
-      policy_ref: Map.get(retry, :policy_ref),
-      policy: Map.get(retry, :policy)
+      policy_ref: Map.get(retry, :policy_ref)
     }
     |> put_if_present(:session_id, Map.get(retry, :session_id))
     |> put_if_present(:last_error_signature, Map.get(retry, :last_error_signature))
@@ -366,7 +608,6 @@ defmodule SymphonyElixirWeb.Presenter do
       workspace_path: Map.get(blocked, :workspace_path),
       target: Map.get(blocked, :target),
       policy_ref: Map.get(blocked, :policy_ref),
-      policy: Map.get(blocked, :policy),
       session_id: blocked.session_id,
       project_slug: Map.get(blocked, :project_slug),
       profile: Map.get(blocked, :profile, @default_profile),

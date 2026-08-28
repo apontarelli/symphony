@@ -520,6 +520,14 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   @doc """
+  Returns credential-safe token reservation and charged-use totals by target.
+  """
+  @spec inspect_target_budgets(GenServer.server()) :: {:ok, [map()]} | {:error, Error.t()}
+  def inspect_target_budgets(server \\ __MODULE__) do
+    GenServer.call(server, :inspect_target_budgets, @call_timeout_ms)
+  end
+
+  @doc """
   Previews a fenced resume or abandon operation against current durable state.
   """
   @spec preview_run_action(GenServer.server(), :resume | :abandon, String.t()) ::
@@ -1027,6 +1035,17 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, result, state}
   end
 
+  def handle_call(:inspect_target_budgets, _from, state) do
+    result =
+      load_target_budget_snapshots(
+        state.connection,
+        state.path,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
   def handle_call({:preview_run_action, action, admitted_run_id}, _from, state) do
     result =
       preview_operator_run_action(
@@ -1422,6 +1441,108 @@ defmodule SymphonyElixir.ControlPlane do
       decode_operator_snapshots(rows, database_path)
     end
   end
+
+  defp load_target_budget_snapshots(connection, database_path, clock) do
+    with {:ok, now_ms} <- wall_clock_ms(clock, database_path),
+         {:ok, now} <- DateTime.from_unix(now_ms, :millisecond) do
+      load_target_budget_snapshots_for_date(connection, database_path, DateTime.to_date(now))
+    else
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp load_target_budget_snapshots_for_date(connection, database_path, today) do
+    admission_day = Date.to_iso8601(today)
+    admission_week = today |> Date.beginning_of_week(:monday) |> Date.to_iso8601()
+
+    sql = """
+    SELECT
+      target_id,
+      coalesce(sum(reserved_tokens), 0),
+      coalesce(sum(CASE WHEN admission_day = ?1 THEN reserved_tokens ELSE 0 END), 0),
+      coalesce(sum(CASE WHEN admission_week = ?2 THEN reserved_tokens ELSE 0 END), 0),
+      coalesce(sum(charged_tokens), 0),
+      coalesce(sum(CASE WHEN admission_day = ?1 THEN charged_tokens ELSE 0 END), 0),
+      coalesce(sum(CASE WHEN admission_week = ?2 THEN charged_tokens ELSE 0 END), 0),
+      min(CASE WHEN admission_day = ?1 THEN daily_limit END),
+      min(CASE WHEN admission_week = ?2 THEN weekly_limit END)
+    FROM run_token_budgets
+    GROUP BY target_id
+    ORDER BY target_id
+    """
+
+    with {:ok, rows} <-
+           domain_query(
+             connection,
+             sql,
+             [admission_day, admission_week],
+             database_path,
+             "cannot inspect target token budgets"
+           ) do
+      decode_target_budget_snapshots(rows, database_path)
+    end
+  end
+
+  defp decode_target_budget_snapshots(rows, database_path) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, snapshots} ->
+      case decode_target_budget_snapshot(row) do
+        {:ok, snapshot} ->
+          {:cont, {:ok, [snapshot | snapshots]}}
+
+        :error ->
+          {:halt, corrupt_store(database_path, :invalid_target_budget_snapshot)}
+      end
+    end)
+    |> case do
+      {:ok, snapshots} -> {:ok, Enum.reverse(snapshots)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp decode_target_budget_snapshot([
+         target_id,
+         reserved_tokens,
+         daily_reserved_tokens,
+         weekly_reserved_tokens,
+         charged_tokens,
+         daily_charged_tokens,
+         weekly_charged_tokens,
+         daily_limit,
+         weekly_limit
+       ]) do
+    with true <- valid_non_empty_string?(target_id),
+         true <-
+           Enum.all?(
+             [
+               reserved_tokens,
+               daily_reserved_tokens,
+               weekly_reserved_tokens,
+               charged_tokens,
+               daily_charged_tokens,
+               weekly_charged_tokens
+             ],
+             &is_integer/1
+           ),
+         true <- valid_optional_integer?(daily_limit),
+         true <- valid_optional_integer?(weekly_limit) do
+      {:ok,
+       %{
+         target_id: Redaction.redact_string(target_id),
+         reserved_tokens: reserved_tokens,
+         daily_reserved_tokens: daily_reserved_tokens,
+         weekly_reserved_tokens: weekly_reserved_tokens,
+         charged_tokens: charged_tokens,
+         daily_charged_tokens: daily_charged_tokens,
+         weekly_charged_tokens: weekly_charged_tokens,
+         daily_limit: daily_limit,
+         weekly_limit: weekly_limit
+       }}
+    else
+      _invalid -> :error
+    end
+  end
+
+  defp decode_target_budget_snapshot(_invalid), do: :error
 
   defp decode_operator_snapshots(rows, database_path) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, snapshots} ->

@@ -48,8 +48,10 @@ OpenAI project include:
 - Publish and handoff evidence: completed workspaces are checked for publishability, pushed under a
   deterministic branch or jj bookmark, attached to a GitHub PR, and routed with structured handoff
   evidence.
-- Dashboard and observability: the Elixir app can expose a Phoenix LiveView dashboard and JSON API
-  for running, retrying, blocked, token-usage, and handoff-route state.
+- Dashboard and observability: the Elixir app exposes target eligibility, queue pressure,
+  weighted-deficit credit, host/target capacity, token-budget use, tracker backoff, and
+  running/retrying/blocked state through one credential-safe Phoenix LiveView, JSON, and log
+  projection.
 - Product visual review routing: the optional `product_visual_review` workflow module can require
   or recommend visual QA evidence for UI-facing diffs.
 
@@ -110,9 +112,11 @@ export LINEAR_API_KEY=...
 ../bin/symphony host run --registry /path/to/targets.yml
 ```
 
-`symphony host run` starts all valid active targets from one registry generation. It enforces host,
-target, runner, poll, reviewer, and durable token-budget ceilings. The registry defaults to
-`~/.config/symphony/targets.yml`.
+`symphony host run` starts all valid active or draining targets from one verified registry
+generation. It enforces weighted fairness, host/target/runner/poll/reviewer ceilings, durable token
+budgets, and tracker-connection backoff. The dashboard and `GET /api/v1/state` expose those decisions
+without raw policy, credentials, secret references, prompts, or transition evidence. The registry
+defaults to `~/.config/symphony/targets.yml`.
 
 Project, team, and query/file targets are selected by the interactive builder or stored in saved run
 setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,

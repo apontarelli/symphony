@@ -830,9 +830,6 @@ defmodule SymphonyElixir.TargetContext do
     end
   end
 
-  defp attach_tracker_coordinator_path(_host, _tracker_connection),
-    do: {:error, :invalid_tracker_connection}
-
   defp registry_workspace_layout(%{"root" => root}, target_id)
        when is_binary(root) and is_binary(target_id) do
     if Path.basename(Path.expand(root)) == target_id, do: :flat, else: :target_scoped

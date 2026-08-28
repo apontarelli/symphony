@@ -214,7 +214,31 @@ defmodule SymphonyElixir.ControlPlaneTest do
               weekly_available_tokens: 25
             }} = ControlPlane.fetch_token_budget(first, admission.admitted_run_id)
 
+    assert {:ok,
+            [
+              %{
+                target_id: "alpha",
+                reserved_tokens: 75,
+                daily_reserved_tokens: 75,
+                weekly_reserved_tokens: 75,
+                charged_tokens: 0,
+                daily_charged_tokens: 0,
+                weekly_charged_tokens: 0,
+                daily_limit: 100,
+                weekly_limit: 100
+              }
+            ]} = ControlPlane.inspect_target_budgets(first)
+
     set_clock!(clock_state, unix_ms!("2026-08-28T12:00:00Z"))
+
+    assert {:ok,
+            [
+              %{
+                reserved_tokens: 75,
+                daily_reserved_tokens: 0,
+                weekly_reserved_tokens: 75
+              }
+            ]} = ControlPlane.inspect_target_budgets(first)
 
     next_day =
       execution_context!(config_root, "alpha", "issue-3", "SID-440-C", budget_limits: limits)

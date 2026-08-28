@@ -25,6 +25,9 @@ defmodule SymphonyElixir.RunAuthorityTest.FailingLifecycleControlPlane do
     send(test_pid, {:released_reacquired_lease, lease})
     {:reply, :ok, test_pid}
   end
+
+  def handle_call({:fetch_token_budget, _admitted_run_id}, _from, test_pid),
+    do: {:reply, {:error, :budget_store_failed}, test_pid}
 end
 
 defmodule SymphonyElixir.RunAuthorityTest do
@@ -35,6 +38,21 @@ defmodule SymphonyElixir.RunAuthorityTest do
   alias SymphonyElixir.{ExecutionContext, Orchestrator, RunAuthority, TargetContext}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.State
+  alias SymphonyElixir.RunAuthorityTest.FailingLifecycleControlPlane
+
+  test "token budget fetch returns durable store errors" do
+    {:ok, server} = FailingLifecycleControlPlane.start_link(self())
+
+    authority = %RunAuthority{
+      server: server,
+      owner_id: "owner",
+      admission: %{admitted_run_id: "run"},
+      lease: %{},
+      lifecycle: %{}
+    }
+
+    assert {:error, :budget_store_failed} = RunAuthority.fetch_token_budget(authority)
+  end
 
   test "owns lifecycle process and side-effect ordering through one fenced lease" do
     config_root = tmp_root!("run-authority")
