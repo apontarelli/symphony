@@ -13,7 +13,8 @@ defmodule SymphonyElixir.ControlPlaneTest do
     LifecycleTransition,
     ProcessOwnership,
     Recovery,
-    SideEffect
+    SideEffect,
+    TokenBudget
   }
 
   alias SymphonyElixir.ExecutionContext
@@ -30,7 +31,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert {:ok,
             %{
               path: ^database_path,
-              schema_version: 5,
+              schema_version: 6,
               status: :healthy
             }} = ControlPlane.health(server)
 
@@ -74,7 +75,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     on_exit(fn -> Enum.each(pids, &stop_process/1) end)
 
-    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 5}}, ControlPlane.health(pid)) end)
+    assert Enum.all?(pids, fn pid -> match?({:ok, %{schema_version: 6}}, ControlPlane.health(pid)) end)
   end
 
   test "busy handling is bounded across local processes" do
@@ -175,6 +176,270 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     refute database_bytes(database_path) =~ tracker_credential
     refute database_bytes(database_path) =~ runner_credential
+  end
+
+  test "concurrent admissions cannot exceed daily or weekly token balances" do
+    config_root = tmp_root!("control-plane-token-capacity")
+    now_ms = unix_ms!("2026-08-27T12:00:00Z")
+    {clock_state, clock} = test_clock!(now_ms)
+    first = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    second = start_control_plane!(config_root, clock: clock, busy_timeout: 2_000)
+    limits = token_limits(75, 100, 100)
+
+    contexts = [
+      execution_context!(config_root, "alpha", "issue-1", "SID-440-A", budget_limits: limits),
+      execution_context!(config_root, "alpha", "issue-2", "SID-440-B", budget_limits: limits)
+    ]
+
+    results =
+      [first, second]
+      |> Enum.zip(contexts)
+      |> Enum.map(fn {server, context} ->
+        Task.async(fn -> ControlPlane.admit_run(server, context) end)
+      end)
+      |> Enum.map(&Task.await(&1, 5_000))
+
+    assert Enum.count(results, &match?({:ok, _admission}, &1)) == 1
+    assert Enum.count(results, &(&1 == {:error, :daily_token_budget_exceeded})) == 1
+
+    [{:ok, admission}] = Enum.filter(results, &match?({:ok, _admission}, &1))
+
+    assert {:ok,
+            %TokenBudget{
+              admission_day: "2026-08-27",
+              admission_week: "2026-08-24",
+              reserved_tokens: 75,
+              charged_tokens: 0,
+              daily_available_tokens: 25,
+              weekly_available_tokens: 25
+            }} = ControlPlane.fetch_token_budget(first, admission.admitted_run_id)
+
+    set_clock!(clock_state, unix_ms!("2026-08-28T12:00:00Z"))
+
+    next_day =
+      execution_context!(config_root, "alpha", "issue-3", "SID-440-C", budget_limits: limits)
+
+    assert {:error, :weekly_token_budget_exceeded} =
+             ControlPlane.admit_run(first, next_day)
+  end
+
+  test "cumulative usage and reservation release require the current durable fence" do
+    config_root = tmp_root!("control-plane-token-fencing")
+    {_clock_state, clock} = test_clock!(unix_ms!("2026-08-27T13:00:00Z"))
+    server = start_control_plane!(config_root, clock: clock)
+    database_path = ControlPlane.path(config_root: config_root)
+    secret = "hostile-runtime-secret-value"
+
+    context =
+      execution_context!(config_root, "alpha", "issue-1", "SID-440", budget_limits: token_limits(100, 500, 1_000))
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+
+    assert {:ok, first_lease} =
+             ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-first")
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 2}} =
+             ControlPlane.transition_run(
+               server,
+               first_lease,
+               1,
+               :admitted,
+               :running,
+               %{}
+             )
+
+    for cumulative <- [40, 40, 20] do
+      assert {:ok, %TokenBudget{cumulative_tokens: 40, charged_tokens: 40}} =
+               ControlPlane.record_token_usage(server, first_lease, cumulative)
+    end
+
+    assert {:error, :invalid_token_usage} =
+             ControlPlane.record_token_usage(server, first_lease, %{"secret" => secret})
+
+    assert {:ok, current_lease} =
+             ControlPlane.transfer_lease(server, first_lease, "owner-current")
+
+    assert {:error, :stale_lease} =
+             ControlPlane.record_token_usage(server, first_lease, 60)
+
+    assert {:error, :stale_lease} =
+             ControlPlane.release_token_reservation(server, first_lease)
+
+    assert {:error, :process_termination_unverified} =
+             ControlPlane.release_token_reservation(server, current_lease)
+
+    identity = process_identity(44_001)
+
+    assert {:ok, %ProcessOwnership{state: :running}} =
+             ControlPlane.register_process_group(server, current_lease, identity)
+
+    assert {:error, :process_termination_unverified} =
+             ControlPlane.release_token_reservation(server, current_lease)
+
+    assert {:ok, %ProcessOwnership{state: :stopped}} =
+             ControlPlane.record_process_group_termination(
+               server,
+               current_lease,
+               44_001,
+               {:stopped, %{verified_by: "budget-test"}}
+             )
+
+    assert {:ok, %Lifecycle{state: :blocked, sequence: 3}} =
+             ControlPlane.transition_run(
+               server,
+               current_lease,
+               2,
+               :running,
+               :blocked,
+               %{reason: "target paused"}
+             )
+
+    assert {:ok,
+            %TokenBudget{
+              state: :released,
+              charged_tokens: 40,
+              reserved_tokens: 0,
+              daily_available_tokens: 460
+            }} = ControlPlane.release_token_reservation(server, current_lease)
+
+    assert {:ok, %Lifecycle{state: :running, sequence: 4}} =
+             ControlPlane.transition_run(
+               server,
+               current_lease,
+               3,
+               :blocked,
+               :running,
+               %{}
+             )
+
+    assert {:ok, %TokenBudget{state: :active, reserved_tokens: 60}} =
+             ControlPlane.acquire_token_reservation(server, current_lease)
+
+    assert {:ok, %Lifecycle{state: :completed}} =
+             ControlPlane.transition_run(
+               server,
+               current_lease,
+               4,
+               :running,
+               :completed,
+               %{disposition: :succeeded}
+             )
+
+    assert {:ok,
+            %TokenBudget{
+              state: :terminal,
+              cumulative_tokens: 40,
+              charged_tokens: 40,
+              reserved_tokens: 0
+            }} = ControlPlane.fetch_token_budget(server, admission.admitted_run_id)
+
+    refute database_bytes(database_path) =~ secret
+  end
+
+  test "an over-limit report charges the full reservation before rejection" do
+    config_root = tmp_root!("control-plane-token-exhaustion")
+    server = start_control_plane!(config_root)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-exhaustion", "SID-440-LIMIT", budget_limits: token_limits(100, 500, 1_000))
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+
+    assert {:ok, lease} =
+             ControlPlane.acquire_lease(server, admission.admitted_run_id, "owner-limit")
+
+    assert {:error, :token_budget_exhausted} =
+             ControlPlane.record_token_usage(server, lease, 101)
+
+    assert {:ok,
+            %TokenBudget{
+              state: :active,
+              cumulative_tokens: 100,
+              charged_tokens: 100,
+              reserved_tokens: 0
+            }} = ControlPlane.fetch_token_budget(server, admission.admitted_run_id)
+  end
+
+  test "restart retains active balances and UTC admission periods across a boundary" do
+    config_root = tmp_root!("control-plane-token-restart")
+    sunday_ms = unix_ms!("2026-08-30T23:59:59.900Z")
+    monday_ms = unix_ms!("2026-08-31T00:00:00.000Z")
+    {clock_state, clock} = test_clock!(sunday_ms)
+    server = start_control_plane!(config_root, clock: clock)
+    limits = token_limits(100, 100, 100)
+
+    first_context =
+      execution_context!(config_root, "alpha", "issue-sunday", "SID-440-S", budget_limits: limits)
+
+    assert {:ok, first_admission} = ControlPlane.admit_run(server, first_context)
+
+    assert {:ok, first_lease} =
+             ControlPlane.acquire_lease(server, first_admission.admitted_run_id, "owner-sunday")
+
+    assert {:ok, %TokenBudget{charged_tokens: 30, reserved_tokens: 70}} =
+             ControlPlane.record_token_usage(server, first_lease, 30)
+
+    stop_process(server)
+    set_clock!(clock_state, monday_ms)
+    reopened = start_control_plane!(config_root, clock: clock)
+
+    assert {:ok,
+            %TokenBudget{
+              admission_day: "2026-08-30",
+              admission_week: "2026-08-24",
+              charged_tokens: 30,
+              reserved_tokens: 70,
+              daily_available_tokens: 0,
+              weekly_available_tokens: 0
+            }} = ControlPlane.fetch_token_budget(reopened, first_admission.admitted_run_id)
+
+    monday_context =
+      execution_context!(config_root, "alpha", "issue-monday", "SID-440-M", budget_limits: limits)
+
+    assert {:ok, monday_admission} = ControlPlane.admit_run(reopened, monday_context)
+
+    assert {:ok,
+            %TokenBudget{
+              admission_day: "2026-08-31",
+              admission_week: "2026-08-31",
+              reserved_tokens: 100
+            }} = ControlPlane.fetch_token_budget(reopened, monday_admission.admitted_run_id)
+
+    stop_process(reopened)
+    restored_root = tmp_root!("control-plane-token-restored")
+    restored_path = ControlPlane.path(config_root: restored_root)
+    File.mkdir_p!(restored_root)
+    File.cp!(ControlPlane.path(config_root: config_root), restored_path)
+    File.chmod!(restored_path, 0o600)
+    restored = start_control_plane!(restored_root, clock: clock)
+
+    assert {:ok, %TokenBudget{charged_tokens: 30, reserved_tokens: 70}} =
+             ControlPlane.fetch_token_budget(restored, first_admission.admitted_run_id)
+  end
+
+  test "corrupt token balances stop reopen fail closed" do
+    config_root = tmp_root!("control-plane-token-corruption")
+    server = start_control_plane!(config_root)
+    database_path = ControlPlane.path(config_root: config_root)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-1", "SID-440", budget_limits: token_limits(100, 100, 100))
+
+    assert {:ok, _admission} = ControlPlane.admit_run(server, context)
+    stop_process(server)
+
+    execute_sql!(
+      database_path,
+      """
+      PRAGMA ignore_check_constraints = ON;
+      UPDATE run_token_budgets SET reserved_tokens = 101;
+      """
+    )
+
+    assert {:error, %Error{code: :corrupt_store, reason: reason}} =
+             start_unlinked(config_root: config_root, name: unique_name())
+
+    refute is_nil(reason)
   end
 
   test "conflicting generations, hashes, and target envelopes cannot replace an admission" do
@@ -2268,19 +2533,54 @@ defmodule SymphonyElixir.ControlPlaneTest do
 
     server = start_control_plane!(config_root)
 
-    assert {:ok, %{schema_version: 5, status: :healthy}} = ControlPlane.health(server)
+    assert {:ok, %{schema_version: 6, status: :healthy}} = ControlPlane.health(server)
     assert scalar_query!(database_path, "SELECT count(*) FROM run_leases") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_admissions") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycles") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_lifecycle_transitions") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM side_effect_intents") == 0
     assert scalar_query!(database_path, "SELECT count(*) FROM run_process_ownership") == 0
+    assert scalar_query!(database_path, "SELECT count(*) FROM run_token_budgets") == 0
+  end
+
+  test "version five migration fails closed when prior admissions configured token budgets" do
+    config_root = tmp_root!("control-plane-version-five-token-budget")
+    database_path = ControlPlane.path(config_root: config_root)
+    server = start_control_plane!(config_root)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-legacy-budget", "SID-440-LEGACY", budget_limits: token_limits(100, 500, 1_000))
+
+    assert {:ok, admission} = ControlPlane.admit_run(server, context)
+    stop_process(server)
+
+    execute_sql!(
+      database_path,
+      """
+      DROP TABLE run_token_budgets;
+      DELETE FROM schema_migrations WHERE version = 6;
+      PRAGMA user_version = 5;
+      """
+    )
+
+    assert {:error,
+            %Error{
+              code: :migration_failed,
+              path: ^database_path,
+              reason: admitted_run_id,
+              message: message
+            }} = start_unlinked(config_root: config_root, name: unique_name())
+
+    assert admitted_run_id == admission.admitted_run_id
+    assert message =~ "token usage was not persisted"
+    assert read_user_version!(database_path) == 5
+    assert scalar_query!(database_path, "SELECT count(*) FROM schema_migrations WHERE version = 6") == 0
   end
 
   test "a newer schema version stops startup with an actionable error" do
     config_root = tmp_root!("control-plane-newer-schema")
     database_path = ControlPlane.path(config_root: config_root)
-    seed_database!(database_path, "PRAGMA user_version = 6")
+    seed_database!(database_path, "PRAGMA user_version = 7")
 
     assert {:error,
             %Error{
@@ -2289,7 +2589,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
               message: message
             }} = start_unlinked(config_root: config_root, name: unique_name())
 
-    assert message =~ "schema version 6 is newer than supported version 5"
+    assert message =~ "schema version 7 is newer than supported version 6"
   end
 
   test "migration failure rolls back schema state and stops startup" do
@@ -2404,7 +2704,7 @@ defmodule SymphonyElixir.ControlPlaneTest do
             "vcs_publish" => "deny"
           }),
         capacity_limits: %{"max_concurrent_agents" => 1},
-        budget_limits: %{}
+        budget_limits: Keyword.get(opts, :budget_limits, %{})
       }
 
     issue = %Issue{
@@ -2446,6 +2746,19 @@ defmodule SymphonyElixir.ControlPlaneTest do
       "wrapper_pid" => process_group_id - 1,
       "started_at" => "Wed Aug 26 17:00:00 2026"
     }
+  end
+
+  defp token_limits(per_run, daily, weekly) do
+    %{
+      "per_run" => %{"max_total_tokens" => per_run},
+      "daily" => %{"max_total_tokens" => daily},
+      "weekly" => %{"max_total_tokens" => weekly}
+    }
+  end
+
+  defp unix_ms!(timestamp) do
+    {:ok, datetime, 0} = DateTime.from_iso8601(timestamp)
+    DateTime.to_unix(datetime, :millisecond)
   end
 
   defp hash(value) do

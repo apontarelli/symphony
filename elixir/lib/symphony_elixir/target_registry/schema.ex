@@ -40,6 +40,8 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
           {:ok, map()} | {:error, Error.t()}
   def transition_target(configured, target_id, action, requested_mode \\ nil)
 
+  @spec transition_target(map(), String.t(), lifecycle_action(), :explicit | :watch | nil) ::
+          {:ok, map()} | {:error, Error.t()}
   def transition_target(configured, target_id, action, requested_mode)
       when is_map(configured) and is_binary(target_id) do
     path = "$.targets.#{target_id}"

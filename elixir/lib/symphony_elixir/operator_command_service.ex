@@ -357,11 +357,13 @@ defmodule SymphonyElixir.OperatorCommandService do
         command.target_id,
         action,
         requested_mode,
-        registry_path,
-        plan_dir,
-        current_file,
-        current_document,
-        current_snapshot,
+        %{
+          registry_path: registry_path,
+          plan_dir: plan_dir,
+          current_file: current_file,
+          current_document: current_document,
+          current_snapshot: current_snapshot
+        },
         opts
       )
     end
@@ -1276,11 +1278,13 @@ defmodule SymphonyElixir.OperatorCommandService do
          target_id,
          action,
          requested_mode,
-         registry_path,
-         plan_dir,
-         current_file,
-         current_document,
-         current_snapshot,
+         %{
+           registry_path: registry_path,
+           plan_dir: plan_dir,
+           current_file: current_file,
+           current_document: current_document,
+           current_snapshot: current_snapshot
+         },
          opts
        ) do
     with true <- current_snapshot.globally_valid?,

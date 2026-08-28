@@ -7,7 +7,16 @@ defmodule SymphonyElixir.RunAuthority do
   """
 
   alias SymphonyElixir.ControlPlane
-  alias SymphonyElixir.ControlPlane.{Admission, Lease, Lifecycle, Recovery, SideEffect}
+
+  alias SymphonyElixir.ControlPlane.{
+    Admission,
+    Lease,
+    Lifecycle,
+    Recovery,
+    SideEffect,
+    TokenBudget
+  }
+
   alias SymphonyElixir.ExecutionContext
 
   @enforce_keys [:server, :owner_id, :admission, :lease, :lifecycle]
@@ -71,6 +80,51 @@ defmodule SymphonyElixir.RunAuthority do
            evidence
          ) do
       {:ok, next_lifecycle} -> {:ok, %{authority | lifecycle: next_lifecycle}}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec record_token_usage(t(), non_neg_integer()) ::
+          {:ok, t(), TokenBudget.t() | :unlimited} | {:error, term()}
+  def record_token_usage(%__MODULE__{} = authority, cumulative_total_tokens)
+      when is_integer(cumulative_total_tokens) and cumulative_total_tokens >= 0 do
+    case ControlPlane.record_token_usage(
+           authority.server,
+           authority.lease,
+           cumulative_total_tokens
+         ) do
+      {:ok, budget} -> {:ok, authority, budget}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec release_token_reservation(t()) ::
+          {:ok, t(), TokenBudget.t() | :unlimited} | {:error, term()}
+  def release_token_reservation(%__MODULE__{} = authority) do
+    case ControlPlane.release_token_reservation(authority.server, authority.lease) do
+      {:ok, budget} -> {:ok, authority, budget}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec acquire_token_reservation(t()) ::
+          {:ok, t(), TokenBudget.t() | :unlimited} | {:error, term()}
+  def acquire_token_reservation(%__MODULE__{} = authority) do
+    case ControlPlane.acquire_token_reservation(authority.server, authority.lease) do
+      {:ok, budget} -> {:ok, authority, budget}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @spec fetch_token_budget(t()) ::
+          {:ok, TokenBudget.t() | :unlimited} | {:error, term()}
+  def fetch_token_budget(%__MODULE__{} = authority) do
+    case ControlPlane.fetch_token_budget(
+           authority.server,
+           authority.admission.admitted_run_id
+         ) do
+      {:ok, budget} -> {:ok, budget}
+      {:error, :token_budget_not_configured} -> {:ok, :unlimited}
       {:error, _reason} = error -> error
     end
   end

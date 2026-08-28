@@ -312,9 +312,11 @@ defmodule SymphonyElixir.Orchestrator do
           state
           |> apply_runtime_token_delta(token_delta)
           |> apply_runtime_rate_limits(update)
+          |> then(&%{&1 | running: Map.put(running, run_id, updated_running_entry)})
+          |> persist_or_stop_token_usage(run_id, updated_running_entry)
 
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, run_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -2744,10 +2746,8 @@ defmodule SymphonyElixir.Orchestrator do
     recipient = self()
     run_id = ExecutionContext.run_id(context)
 
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run_context(context, issue, recipient, attempt: attempt)
-         end) do
-      {:ok, pid} ->
+    case start_agent_task(context, issue, recipient, attempt, durable_authority) do
+      {:ok, pid, durable_token_usage_baseline} ->
         ref = Process.monitor(pid)
 
         Logger.info("Dispatching issue to agent: #{execution_context_log(context)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{context.worker_host || "local"}")
@@ -2785,6 +2785,7 @@ defmodule SymphonyElixir.Orchestrator do
             workflow_config_sha256: nil,
             runtime_input_tokens: 0,
             runtime_output_tokens: 0,
+            durable_token_usage_baseline: durable_token_usage_baseline,
             runtime_total_tokens: 0,
             runtime_last_reported_input_tokens: 0,
             runtime_last_reported_output_tokens: 0,
@@ -2826,6 +2827,32 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp start_agent_task(context, issue, recipient, attempt, durable_authority) do
+    with {:ok, baseline} <- durable_token_usage_baseline(durable_authority),
+         {:ok, pid} <-
+           Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+             AgentRunner.run_context(context, issue, recipient, attempt: attempt)
+           end) do
+      {:ok, pid, baseline}
+    end
+  end
+
+  defp durable_token_usage_baseline(%RunAuthority{} = authority) do
+    case RunAuthority.fetch_token_budget(authority) do
+      {:ok, %ControlPlane.TokenBudget{cumulative_tokens: cumulative_tokens}} ->
+        {:ok, cumulative_tokens}
+
+      {:ok, :unlimited} ->
+        {:ok, 0}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp durable_token_usage_baseline(_authority),
+    do: {:error, :durable_authority_required}
 
   defp revalidate_issue_for_dispatch(
          %Issue{id: issue_id},
@@ -4100,6 +4127,32 @@ defmodule SymphonyElixir.Orchestrator do
       token_delta
     }
   end
+
+  defp persist_or_stop_token_usage(
+         %State{} = state,
+         run_id,
+         %{durable_authority: %RunAuthority{} = authority} = running_entry
+       ) do
+    cumulative_total_tokens =
+      Map.get(running_entry, :durable_token_usage_baseline, 0) +
+        Map.get(running_entry, :runtime_total_tokens, 0)
+
+    case RunAuthority.record_token_usage(authority, cumulative_total_tokens) do
+      {:ok, _authority, %ControlPlane.TokenBudget{reserved_tokens: 0}} ->
+        Logger.info("Stopping run at durable token ceiling run_id=#{inspect(run_id)}")
+        terminate_running_issue(state, run_id, false)
+
+      {:ok, _authority, _budget} ->
+        state
+
+      {:error, reason} ->
+        Logger.error("Stopping run after durable token usage failed run_id=#{inspect(run_id)}: #{inspect(reason)}")
+
+        terminate_running_issue(state, run_id, false)
+    end
+  end
+
+  defp persist_or_stop_token_usage(%State{} = state, _run_id, _running_entry), do: state
 
   defp maybe_release_startup_slot(running_entry, event)
        when event in [:session_started, :startup_failed] do

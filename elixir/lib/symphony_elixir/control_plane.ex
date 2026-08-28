@@ -16,7 +16,7 @@ defmodule SymphonyElixir.ControlPlane do
   alias SymphonyElixir.TargetContext
 
   @database_file "control-plane.sqlite3"
-  @schema_version 5
+  @schema_version 6
   @default_busy_timeout_ms 5_000
   @maximum_busy_timeout_ms 30_000
   @lease_duration_ms 30_000
@@ -119,6 +119,46 @@ defmodule SymphonyElixir.ControlPlane do
             owner_id: String.t(),
             fencing_token: pos_integer(),
             deadline_ms: integer()
+          }
+  end
+
+  defmodule TokenBudget do
+    @moduledoc false
+
+    @enforce_keys [
+      :admitted_run_id,
+      :target_id,
+      :admission_day,
+      :admission_week,
+      :per_run_limit,
+      :daily_limit,
+      :weekly_limit,
+      :cumulative_tokens,
+      :charged_tokens,
+      :reserved_tokens,
+      :state,
+      :daily_available_tokens,
+      :weekly_available_tokens,
+      :updated_at
+    ]
+    defstruct @enforce_keys
+
+    @type state :: :active | :released | :terminal
+    @type t :: %__MODULE__{
+            admitted_run_id: String.t(),
+            target_id: String.t(),
+            admission_day: String.t(),
+            admission_week: String.t(),
+            per_run_limit: pos_integer(),
+            daily_limit: pos_integer(),
+            weekly_limit: pos_integer(),
+            cumulative_tokens: non_neg_integer(),
+            charged_tokens: non_neg_integer(),
+            reserved_tokens: non_neg_integer(),
+            state: state(),
+            daily_available_tokens: non_neg_integer(),
+            weekly_available_tokens: non_neg_integer(),
+            updated_at: String.t()
           }
   end
 
@@ -353,6 +393,17 @@ defmodule SymphonyElixir.ControlPlane do
           | :process_termination_unverified
           | :stale_lease
           | Error.t()
+  @type token_budget_error ::
+          :admission_not_found
+          | :daily_token_budget_exceeded
+          | :invalid_lease
+          | :invalid_token_usage
+          | :stale_lease
+          | :token_budget_exhausted
+          | :token_budget_not_configured
+          | :token_budget_not_reserved
+          | :weekly_token_budget_exceeded
+          | Error.t()
   @type lifecycle_error ::
           :admission_not_found
           | :duplicate_transition
@@ -361,6 +412,7 @@ defmodule SymphonyElixir.ControlPlane do
           | :invalid_transition
           | :out_of_order_transition
           | :stale_lease
+          | token_budget_error()
           | Error.t()
   @type side_effect_error ::
           :admission_not_found
@@ -553,6 +605,50 @@ defmodule SymphonyElixir.ControlPlane do
           {:ok, Admission.t()} | {:error, admission_error()}
   def admit_run(server \\ __MODULE__, context) do
     GenServer.call(server, {:admit_run, context}, @call_timeout_ms)
+  end
+
+  @doc """
+  Returns the durable reservation, charged usage, and admission-period balances.
+  """
+  @spec fetch_token_budget(GenServer.server(), String.t()) ::
+          {:ok, TokenBudget.t()} | {:error, token_budget_error()}
+  def fetch_token_budget(server \\ __MODULE__, admitted_run_id) do
+    GenServer.call(server, {:fetch_token_budget, admitted_run_id}, @call_timeout_ms)
+  end
+
+  @doc """
+  Records a monotonic cumulative token total under the current durable fence.
+
+  Duplicate totals and lower out-of-order totals return the stored maximum.
+  """
+  @spec record_token_usage(GenServer.server(), Lease.t(), non_neg_integer()) ::
+          {:ok, TokenBudget.t() | :unlimited} | {:error, token_budget_error()}
+  def record_token_usage(server \\ __MODULE__, lease, cumulative_total_tokens) do
+    GenServer.call(
+      server,
+      {:record_token_usage, lease, cumulative_total_tokens},
+      @call_timeout_ms
+    )
+  end
+
+  @doc """
+  Releases the unused reservation after fenced process-stop evidence.
+
+  Charged cumulative usage remains allocated to the admission day and week.
+  """
+  @spec release_token_reservation(GenServer.server(), Lease.t()) ::
+          {:ok, TokenBudget.t() | :unlimited} | {:error, token_budget_error()}
+  def release_token_reservation(server \\ __MODULE__, lease) do
+    GenServer.call(server, {:release_token_reservation, lease}, @call_timeout_ms)
+  end
+
+  @doc """
+  Reacquires the run's remaining per-run ceiling before a paused run resumes.
+  """
+  @spec acquire_token_reservation(GenServer.server(), Lease.t()) ::
+          {:ok, TokenBudget.t() | :unlimited} | {:error, token_budget_error()}
+  def acquire_token_reservation(server \\ __MODULE__, lease) do
+    GenServer.call(server, {:acquire_token_reservation, lease}, @call_timeout_ms)
   end
 
   @doc """
@@ -993,7 +1089,9 @@ defmodule SymphonyElixir.ControlPlane do
 
   def handle_call({:admit_run, context}, _from, state) do
     result =
-      with {:ok, record} <- prepare_admission(context) do
+      with {:ok, now_ms} <- wall_clock_ms(state.clock, state.path),
+           {:ok, admitted_at} <- timestamp_from_ms(now_ms, state.path),
+           {:ok, record} <- prepare_admission(context, admitted_at) do
         persist_admission(state.connection, state.path, record)
       end
 
@@ -1002,6 +1100,48 @@ defmodule SymphonyElixir.ControlPlane do
 
   def handle_call({:fetch_admission, target_id, tracker_issue_id}, _from, state) do
     {:reply, load_admission(state.connection, state.path, target_id, tracker_issue_id), state}
+  end
+
+  def handle_call({:fetch_token_budget, admitted_run_id}, _from, state) do
+    result = load_token_budget(state.connection, state.path, admitted_run_id)
+    {:reply, result, state}
+  end
+
+  def handle_call({:record_token_usage, lease, cumulative_total_tokens}, _from, state) do
+    result =
+      persist_token_usage(
+        state.connection,
+        state.path,
+        lease,
+        cumulative_total_tokens,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:release_token_reservation, lease}, _from, state) do
+    result =
+      release_token_reservation(
+        state.connection,
+        state.path,
+        lease,
+        state.clock
+      )
+
+    {:reply, result, state}
+  end
+
+  def handle_call({:acquire_token_reservation, lease}, _from, state) do
+    result =
+      acquire_token_reservation(
+        state.connection,
+        state.path,
+        lease,
+        state.clock
+      )
+
+    {:reply, result, state}
   end
 
   def handle_call({:acquire_lease, admitted_run_id, owner_id}, _from, state) do
@@ -2732,10 +2872,111 @@ defmodule SymphonyElixir.ControlPlane do
     PRAGMA user_version = 5;
     """
 
-    execute(connection, migration, database_path, :migration_failed)
+    with :ok <- execute(connection, migration, database_path, :migration_failed) do
+      apply_migrations(connection, 5, database_path)
+    end
+  end
+
+  defp apply_migrations(connection, 5, database_path) do
+    migration = """
+    CREATE TABLE run_token_budgets (
+      admitted_run_id TEXT PRIMARY KEY,
+      target_id TEXT NOT NULL CHECK (length(target_id) > 0),
+      admission_day TEXT NOT NULL CHECK (length(admission_day) = 10),
+      admission_week TEXT NOT NULL CHECK (length(admission_week) = 10),
+      per_run_limit INTEGER NOT NULL CHECK (per_run_limit > 0),
+      daily_limit INTEGER NOT NULL CHECK (daily_limit >= per_run_limit),
+      weekly_limit INTEGER NOT NULL CHECK (weekly_limit >= daily_limit),
+      cumulative_tokens INTEGER NOT NULL DEFAULT 0 CHECK (
+        cumulative_tokens >= 0 AND cumulative_tokens <= per_run_limit
+      ),
+      charged_tokens INTEGER NOT NULL DEFAULT 0 CHECK (
+        charged_tokens >= 0 AND charged_tokens = cumulative_tokens
+      ),
+      reserved_tokens INTEGER NOT NULL CHECK (
+        reserved_tokens >= 0 AND
+        charged_tokens + reserved_tokens <= per_run_limit
+      ),
+      state TEXT NOT NULL CHECK (state IN ('active', 'released', 'terminal')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (
+        (state = 'active' AND charged_tokens + reserved_tokens = per_run_limit) OR
+        (state IN ('released', 'terminal') AND reserved_tokens = 0)
+      ),
+      FOREIGN KEY (admitted_run_id)
+        REFERENCES run_admissions (admitted_run_id)
+    );
+
+    CREATE INDEX run_token_budgets_daily
+      ON run_token_budgets (target_id, admission_day);
+    CREATE INDEX run_token_budgets_weekly
+      ON run_token_budgets (target_id, admission_week);
+
+    INSERT INTO schema_migrations (version, applied_at)
+    VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    PRAGMA user_version = 6;
+    """
+
+    with :ok <- ensure_token_budget_migration_safe(connection, database_path) do
+      execute(connection, migration, database_path, :migration_failed)
+    end
   end
 
   defp apply_migrations(_connection, @schema_version, _database_path), do: :ok
+
+  defp ensure_token_budget_migration_safe(connection, database_path) do
+    sql = """
+    SELECT admission.admitted_run_id, target.target_context_json
+    FROM run_admissions AS admission
+    JOIN target_generations AS target
+      ON target.target_id = admission.target_id
+     AND target.registry_generation = admission.registry_generation
+    """
+
+    case query(connection, sql) do
+      {:ok, rows} ->
+        validate_legacy_token_budget_rows(rows, database_path)
+
+      {:error, reason} ->
+        {:error,
+         error(
+           :migration_failed,
+           database_path,
+           "cannot inspect existing admissions before token budget migration",
+           reason
+         )}
+    end
+  end
+
+  defp validate_legacy_token_budget_rows([], _database_path), do: :ok
+
+  defp validate_legacy_token_budget_rows(
+         [[admitted_run_id, target_context_json] | rest],
+         database_path
+       )
+       when is_binary(admitted_run_id) and admitted_run_id != "" and
+              is_binary(target_context_json) do
+    case decode_json(target_context_json) do
+      {:ok, %{"budget_limits" => limits}} when is_map(limits) and map_size(limits) == 0 ->
+        validate_legacy_token_budget_rows(rest, database_path)
+
+      {:ok, %{"budget_limits" => limits}} when is_map(limits) ->
+        {:error,
+         error(
+           :migration_failed,
+           database_path,
+           "cannot safely migrate an admitted run whose token usage was not persisted by schema version 5",
+           admitted_run_id
+         )}
+
+      _invalid ->
+        corrupt_store(database_path, {:invalid_legacy_token_budget, admitted_run_id})
+    end
+  end
+
+  defp validate_legacy_token_budget_rows(_rows, database_path),
+    do: corrupt_store(database_path, :invalid_legacy_token_budget_rows)
 
   defp read_schema_version(connection, database_path) do
     case query(connection, "PRAGMA user_version") do
@@ -2767,7 +3008,8 @@ defmodule SymphonyElixir.ControlPlane do
          :ok <- validate_admission_schema(connection, database_path),
          :ok <- validate_lease_schema(connection, database_path),
          :ok <- validate_lifecycle_schema(connection, database_path),
-         :ok <- validate_side_effect_schema(connection, database_path) do
+         :ok <- validate_side_effect_schema(connection, database_path),
+         :ok <- validate_token_budget_schema(connection, database_path) do
       :ok
     else
       {:ok, rows} ->
@@ -2932,14 +3174,65 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
+  defp validate_token_budget_schema(connection, database_path) do
+    schema_sql = """
+    SELECT
+      budget.admitted_run_id,
+      budget.target_id,
+      budget.admission_day,
+      budget.admission_week,
+      budget.per_run_limit,
+      budget.daily_limit,
+      budget.weekly_limit,
+      budget.cumulative_tokens,
+      budget.charged_tokens,
+      budget.reserved_tokens,
+      budget.state,
+      budget.created_at,
+      budget.updated_at
+    FROM run_token_budgets AS budget
+    JOIN run_admissions AS admission
+      ON admission.admitted_run_id = budget.admitted_run_id
+     AND admission.target_id = budget.target_id
+    LIMIT 0
+    """
+
+    invariant_sql = """
+    SELECT target_id
+    FROM run_token_budgets
+    GROUP BY target_id, admission_day
+    HAVING sum(charged_tokens + reserved_tokens) > min(daily_limit)
+    UNION ALL
+    SELECT target_id
+    FROM run_token_budgets
+    GROUP BY target_id, admission_week
+    HAVING sum(charged_tokens + reserved_tokens) > min(weekly_limit)
+    LIMIT 1
+    """
+
+    with {:ok, []} <- query(connection, schema_sql),
+         {:ok, []} <- query(connection, invariant_sql) do
+      :ok
+    else
+      {:ok, rows} -> corrupt_store(database_path, {:invalid_token_budget_balances, rows})
+      {:error, reason} -> corrupt_store(database_path, {:invalid_token_budget_schema, reason})
+    end
+  end
+
   defp select_recoverable_run_ids(connection, database_path) do
     states = Enum.map_join(@recoverable_lifecycle_states, ", ", &"'#{Atom.to_string(&1)}'")
 
     sql = """
-    SELECT admitted_run_id
-    FROM run_lifecycles
-    WHERE state IN (#{states})
-    ORDER BY admitted_at ASC, admitted_run_id ASC
+    SELECT lifecycle.admitted_run_id
+    FROM run_lifecycles AS lifecycle
+    JOIN run_admissions AS admission
+      ON admission.admitted_run_id = lifecycle.admitted_run_id
+    WHERE lifecycle.state IN (#{states})
+    ORDER BY
+      lifecycle.admitted_at ASC,
+      admission.target_id ASC,
+      admission.tracker_issue_id ASC,
+      lifecycle.admitted_run_id ASC
     """
 
     case domain_query(
@@ -3414,6 +3707,21 @@ defmodule SymphonyElixir.ControlPlane do
              lease.fencing_token
            ),
          :ok <-
+           ensure_token_reservation_release_safe(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ),
+         {:ok, _budget} <-
+           release_current_token_reservation(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             now_ms,
+             :released
+           ),
+         :ok <-
            clear_lease_record(
              connection,
              database_path,
@@ -3795,6 +4103,17 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
+  defp finish_lease_transaction(
+         connection,
+         database_path,
+         {:token_budget_exhausted, budget}
+       ) do
+    case finish_transaction(connection, database_path, {:ok, budget}) do
+      {:ok, ^budget} -> {:error, :token_budget_exhausted}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp finish_lease_transaction(connection, database_path, result),
     do: finish_transaction(connection, database_path, result)
 
@@ -3889,6 +4208,580 @@ defmodule SymphonyElixir.ControlPlane do
 
   defp release_result({:ok, :released}), do: :ok
   defp release_result({:error, _reason} = error), do: error
+
+  defp persist_token_usage(connection, database_path, lease, cumulative_total_tokens, clock) do
+    with :ok <- validate_lease(lease),
+         true <- is_integer(cumulative_total_tokens) and cumulative_total_tokens >= 0 do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        record_fenced_token_usage(
+          connection,
+          database_path,
+          lease,
+          cumulative_total_tokens,
+          now_ms
+        )
+      end)
+    else
+      false -> {:error, :invalid_token_usage}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp record_fenced_token_usage(
+         connection,
+         database_path,
+         lease,
+         cumulative_total_tokens,
+         now_ms
+       ) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, lease, now_ms, database_path) do
+      record_current_token_usage(
+        connection,
+        database_path,
+        lease.admitted_run_id,
+        cumulative_total_tokens,
+        now_ms
+      )
+    end
+  end
+
+  defp release_token_reservation(connection, database_path, lease, clock) do
+    with :ok <- validate_lease(lease) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        release_fenced_token_reservation(connection, database_path, lease, now_ms)
+      end)
+    end
+  end
+
+  defp release_fenced_token_reservation(connection, database_path, lease, now_ms) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, lease, now_ms, database_path),
+         :ok <-
+           ensure_process_group_stopped(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ),
+         :ok <-
+           ensure_token_reservation_release_safe(
+             connection,
+             database_path,
+             lease.admitted_run_id,
+             lease.fencing_token
+           ) do
+      release_current_token_reservation(
+        connection,
+        database_path,
+        lease.admitted_run_id,
+        now_ms,
+        :released
+      )
+    end
+  end
+
+  defp acquire_token_reservation(connection, database_path, lease, clock) do
+    with :ok <- validate_lease(lease) do
+      lease_transaction(connection, database_path, clock, fn now_ms ->
+        acquire_fenced_token_reservation(connection, database_path, lease, now_ms)
+      end)
+    end
+  end
+
+  defp acquire_fenced_token_reservation(connection, database_path, lease, now_ms) do
+    with {:ok, lease_row} <-
+           select_lease_record(connection, database_path, lease.admitted_run_id),
+         {:ok, _deadline_ms} <-
+           authorize_lease(lease_row, lease, now_ms, database_path) do
+      acquire_current_token_reservation(
+        connection,
+        database_path,
+        lease.admitted_run_id,
+        now_ms
+      )
+    end
+  end
+
+  defp record_current_token_usage(
+         connection,
+         database_path,
+         admitted_run_id,
+         cumulative_total_tokens,
+         now_ms
+       ) do
+    with {:ok, budget} <-
+           select_token_budget(connection, database_path, admitted_run_id) do
+      record_selected_token_usage(
+        connection,
+        database_path,
+        budget,
+        cumulative_total_tokens,
+        now_ms
+      )
+    end
+  end
+
+  defp record_selected_token_usage(
+         _connection,
+         _database_path,
+         :unlimited,
+         _cumulative_total_tokens,
+         _now_ms
+       ),
+       do: {:ok, :unlimited}
+
+  defp record_selected_token_usage(
+         connection,
+         database_path,
+         %{state: :active} = budget,
+         cumulative_total_tokens,
+         _now_ms
+       )
+       when cumulative_total_tokens <= budget.cumulative_tokens do
+    token_budget_snapshot(connection, database_path, budget)
+  end
+
+  defp record_selected_token_usage(
+         connection,
+         database_path,
+         %{state: :active} = budget,
+         cumulative_total_tokens,
+         now_ms
+       )
+       when cumulative_total_tokens > budget.per_run_limit do
+    with {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_token_budget(
+             connection,
+             database_path,
+             budget.admitted_run_id,
+             budget.per_run_limit,
+             0,
+             :active,
+             updated_at
+           ),
+         {:ok, updated} <-
+           select_token_budget(connection, database_path, budget.admitted_run_id),
+         {:ok, snapshot} <- token_budget_snapshot(connection, database_path, updated) do
+      {:token_budget_exhausted, snapshot}
+    end
+  end
+
+  defp record_selected_token_usage(
+         connection,
+         database_path,
+         %{state: :active} = budget,
+         cumulative_total_tokens,
+         now_ms
+       ) do
+    reserved_tokens = budget.per_run_limit - cumulative_total_tokens
+
+    with {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_token_budget(
+             connection,
+             database_path,
+             budget.admitted_run_id,
+             cumulative_total_tokens,
+             reserved_tokens,
+             :active,
+             updated_at
+           ),
+         {:ok, updated} <-
+           select_token_budget(connection, database_path, budget.admitted_run_id) do
+      token_budget_snapshot(connection, database_path, updated)
+    end
+  end
+
+  defp record_selected_token_usage(
+         _connection,
+         _database_path,
+         %{state: state},
+         _cumulative_total_tokens,
+         _now_ms
+       )
+       when state in [:released, :terminal],
+       do: {:error, :token_budget_not_reserved}
+
+  defp acquire_current_token_reservation(connection, database_path, admitted_run_id, now_ms) do
+    with {:ok, budget} <- select_token_budget(connection, database_path, admitted_run_id) do
+      acquire_selected_token_reservation(connection, database_path, budget, now_ms)
+    end
+  end
+
+  defp acquire_selected_token_reservation(
+         _connection,
+         _database_path,
+         :unlimited,
+         _now_ms
+       ),
+       do: {:ok, :unlimited}
+
+  defp acquire_selected_token_reservation(connection, database_path, %{state: :active} = budget, _now_ms),
+    do: token_budget_snapshot(connection, database_path, budget)
+
+  defp acquire_selected_token_reservation(
+         _connection,
+         _database_path,
+         %{state: :terminal},
+         _now_ms
+       ),
+       do: {:error, :token_budget_not_reserved}
+
+  defp acquire_selected_token_reservation(
+         connection,
+         database_path,
+         %{state: :released} = budget,
+         now_ms
+       ) do
+    remaining_tokens = budget.per_run_limit - budget.cumulative_tokens
+
+    with true <- remaining_tokens > 0,
+         {:ok, {daily_allocated, stored_daily_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             budget.target_id,
+             :day,
+             budget.admission_day
+           ),
+         :ok <-
+           ensure_token_capacity(
+             daily_allocated,
+             remaining_tokens,
+             effective_period_limit(budget.daily_limit, stored_daily_limit),
+             :daily_token_budget_exceeded
+           ),
+         {:ok, {weekly_allocated, stored_weekly_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             budget.target_id,
+             :week,
+             budget.admission_week
+           ),
+         :ok <-
+           ensure_token_capacity(
+             weekly_allocated,
+             remaining_tokens,
+             effective_period_limit(budget.weekly_limit, stored_weekly_limit),
+             :weekly_token_budget_exceeded
+           ),
+         {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_token_budget(
+             connection,
+             database_path,
+             budget.admitted_run_id,
+             budget.cumulative_tokens,
+             remaining_tokens,
+             :active,
+             updated_at
+           ),
+         {:ok, updated} <-
+           select_token_budget(connection, database_path, budget.admitted_run_id) do
+      token_budget_snapshot(connection, database_path, updated)
+    else
+      false -> {:error, :token_budget_exhausted}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp release_current_token_reservation(
+         connection,
+         database_path,
+         admitted_run_id,
+         now_ms,
+         next_state
+       )
+       when next_state in [:released, :terminal] do
+    with {:ok, budget} <- select_token_budget(connection, database_path, admitted_run_id) do
+      release_selected_token_reservation(
+        connection,
+        database_path,
+        budget,
+        now_ms,
+        next_state
+      )
+    end
+  end
+
+  defp release_selected_token_reservation(
+         _connection,
+         _database_path,
+         :unlimited,
+         _now_ms,
+         _next_state
+       ),
+       do: {:ok, :unlimited}
+
+  defp release_selected_token_reservation(
+         connection,
+         database_path,
+         %{state: current_state} = budget,
+         _now_ms,
+         next_state
+       )
+       when current_state == next_state or current_state == :terminal do
+    token_budget_snapshot(connection, database_path, budget)
+  end
+
+  defp release_selected_token_reservation(
+         connection,
+         database_path,
+         budget,
+         now_ms,
+         next_state
+       ) do
+    with {:ok, updated_at} <- timestamp_from_ms(now_ms, database_path),
+         :ok <-
+           update_token_budget(
+             connection,
+             database_path,
+             budget.admitted_run_id,
+             budget.cumulative_tokens,
+             0,
+             next_state,
+             updated_at
+           ),
+         {:ok, updated} <-
+           select_token_budget(connection, database_path, budget.admitted_run_id) do
+      token_budget_snapshot(connection, database_path, updated)
+    end
+  end
+
+  defp update_token_budget(
+         connection,
+         database_path,
+         admitted_run_id,
+         cumulative_tokens,
+         reserved_tokens,
+         state,
+         updated_at
+       ) do
+    sql = """
+    UPDATE run_token_budgets
+    SET cumulative_tokens = ?1,
+        charged_tokens = ?1,
+        reserved_tokens = ?2,
+        state = ?3,
+        updated_at = ?4
+    WHERE admitted_run_id = ?5
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        cumulative_tokens,
+        reserved_tokens,
+        Atom.to_string(state),
+        updated_at,
+        admitted_run_id
+      ],
+      database_path,
+      "cannot persist token budget"
+    )
+  end
+
+  defp load_token_budget(connection, database_path, admitted_run_id)
+       when is_binary(admitted_run_id) and admitted_run_id != "" do
+    with {:ok, budget} <- select_token_budget(connection, database_path, admitted_run_id) do
+      case budget do
+        :unlimited -> {:error, :token_budget_not_configured}
+        stored -> token_budget_snapshot(connection, database_path, stored)
+      end
+    end
+  end
+
+  defp load_token_budget(_connection, _database_path, _admitted_run_id),
+    do: {:error, :invalid_lease}
+
+  defp select_token_budget(connection, database_path, admitted_run_id) do
+    sql = """
+    SELECT
+      admission.target_id,
+      budget.admission_day,
+      budget.admission_week,
+      budget.per_run_limit,
+      budget.daily_limit,
+      budget.weekly_limit,
+      budget.cumulative_tokens,
+      budget.charged_tokens,
+      budget.reserved_tokens,
+      budget.state,
+      budget.updated_at
+    FROM run_admissions AS admission
+    LEFT JOIN run_token_budgets AS budget
+      ON budget.admitted_run_id = admission.admitted_run_id
+    WHERE admission.admitted_run_id = ?1
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [admitted_run_id],
+           database_path,
+           "cannot read run token budget"
+         ) do
+      {:ok, []} ->
+        {:error, :admission_not_found}
+
+      {:ok, [[_target_id, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil]]} ->
+        {:ok, :unlimited}
+
+      {:ok, [row]} ->
+        decode_token_budget_row(admitted_run_id, row, database_path)
+
+      {:ok, _invalid_rows} ->
+        corrupt_store(database_path, :invalid_run_token_budget)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp decode_token_budget_row(
+         admitted_run_id,
+         [
+           target_id,
+           admission_day,
+           admission_week,
+           per_run_limit,
+           daily_limit,
+           weekly_limit,
+           cumulative_tokens,
+           charged_tokens,
+           reserved_tokens,
+           state,
+           updated_at
+         ],
+         database_path
+       ) do
+    with {:ok, decoded_state} <- decode_token_budget_state(state),
+         true <-
+           Enum.all?(
+             [admitted_run_id, target_id, admission_day, admission_week, updated_at],
+             &valid_non_empty_string?/1
+           ),
+         true <-
+           Enum.all?(
+             [
+               per_run_limit,
+               daily_limit,
+               weekly_limit,
+               cumulative_tokens,
+               charged_tokens,
+               reserved_tokens
+             ],
+             &is_integer/1
+           ) do
+      {:ok,
+       %{
+         admitted_run_id: admitted_run_id,
+         target_id: target_id,
+         admission_day: admission_day,
+         admission_week: admission_week,
+         per_run_limit: per_run_limit,
+         daily_limit: daily_limit,
+         weekly_limit: weekly_limit,
+         cumulative_tokens: cumulative_tokens,
+         charged_tokens: charged_tokens,
+         reserved_tokens: reserved_tokens,
+         state: decoded_state,
+         updated_at: updated_at
+       }}
+    else
+      _invalid -> corrupt_store(database_path, :invalid_run_token_budget)
+    end
+  end
+
+  defp decode_token_budget_state("active"), do: {:ok, :active}
+  defp decode_token_budget_state("released"), do: {:ok, :released}
+  defp decode_token_budget_state("terminal"), do: {:ok, :terminal}
+  defp decode_token_budget_state(_state), do: {:error, :invalid_token_budget_state}
+
+  defp token_budget_snapshot(connection, database_path, budget) do
+    with {:ok, {daily_allocated, stored_daily_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             budget.target_id,
+             :day,
+             budget.admission_day
+           ),
+         {:ok, {weekly_allocated, stored_weekly_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             budget.target_id,
+             :week,
+             budget.admission_week
+           ) do
+      daily_limit = effective_period_limit(budget.daily_limit, stored_daily_limit)
+      weekly_limit = effective_period_limit(budget.weekly_limit, stored_weekly_limit)
+
+      {:ok,
+       struct!(
+         TokenBudget,
+         Map.merge(budget, %{
+           daily_available_tokens: max(daily_limit - daily_allocated, 0),
+           weekly_available_tokens: max(weekly_limit - weekly_allocated, 0)
+         })
+       )}
+    end
+  end
+
+  defp period_token_balance(connection, database_path, target_id, period, value)
+       when period in [:day, :week] do
+    {period_column, limit_column} =
+      if period == :day,
+        do: {"admission_day", "daily_limit"},
+        else: {"admission_week", "weekly_limit"}
+
+    sql = """
+    SELECT
+      coalesce(sum(charged_tokens + reserved_tokens), 0),
+      min(#{limit_column})
+    FROM run_token_budgets
+    WHERE target_id = ?1 AND #{period_column} = ?2
+    """
+
+    case domain_query(
+           connection,
+           sql,
+           [target_id, value],
+           database_path,
+           "cannot read token budget balance"
+         ) do
+      {:ok, [[allocated, nil]]} when allocated == 0 ->
+        {:ok, {0, nil}}
+
+      {:ok, [[allocated, limit]]}
+      when is_integer(allocated) and allocated >= 0 and is_integer(limit) and limit > 0 ->
+        {:ok, {allocated, limit}}
+
+      {:ok, rows} ->
+        corrupt_store(database_path, {:invalid_token_budget_balance, rows})
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp effective_period_limit(configured_limit, nil), do: configured_limit
+  defp effective_period_limit(configured_limit, stored_limit), do: min(configured_limit, stored_limit)
+
+  defp ensure_token_capacity(allocated, requested, limit, _error)
+       when allocated + requested <= limit,
+       do: :ok
+
+  defp ensure_token_capacity(_allocated, _requested, _limit, error), do: {:error, error}
 
   defp load_lifecycle(connection, database_path, admitted_run_id)
        when is_binary(admitted_run_id) and admitted_run_id != "" do
@@ -4093,6 +4986,14 @@ defmodule SymphonyElixir.ControlPlane do
              request.evidence,
              cleanup_authority
            ),
+         {:ok, _budget} <-
+           prepare_token_budget_transition(
+             connection,
+             database_path,
+             lifecycle.admitted_run_id,
+             request.next_state,
+             now_ms
+           ),
          {:ok, occurred_at} <- timestamp_from_ms(now_ms, database_path),
          next_lifecycle =
            next_lifecycle(
@@ -4127,6 +5028,46 @@ defmodule SymphonyElixir.ControlPlane do
       {:ok, stored}
     end
   end
+
+  defp prepare_token_budget_transition(
+         connection,
+         database_path,
+         admitted_run_id,
+         :running,
+         now_ms
+       ),
+       do:
+         acquire_current_token_reservation(
+           connection,
+           database_path,
+           admitted_run_id,
+           now_ms
+         )
+
+  defp prepare_token_budget_transition(
+         connection,
+         database_path,
+         admitted_run_id,
+         :completed,
+         now_ms
+       ),
+       do:
+         release_current_token_reservation(
+           connection,
+           database_path,
+           admitted_run_id,
+           now_ms,
+           :terminal
+         )
+
+  defp prepare_token_budget_transition(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _next_state,
+         _now_ms
+       ),
+       do: {:ok, :unchanged}
 
   defp normalize_transition_evidence(:running, evidence, _cleanup_authority) do
     if map_size(evidence) == 0, do: {:ok, %{}}, else: {:error, :invalid_transition}
@@ -6002,6 +6943,66 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
+  defp ensure_token_reservation_release_safe(
+         connection,
+         database_path,
+         admitted_run_id,
+         fencing_token
+       ) do
+    with {:ok, budget} <- select_token_budget(connection, database_path, admitted_run_id) do
+      ensure_budget_process_stop_evidence(
+        connection,
+        database_path,
+        admitted_run_id,
+        fencing_token,
+        budget
+      )
+    end
+  end
+
+  defp ensure_budget_process_stop_evidence(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _fencing_token,
+         :unlimited
+       ),
+       do: :ok
+
+  defp ensure_budget_process_stop_evidence(
+         _connection,
+         _database_path,
+         _admitted_run_id,
+         _fencing_token,
+         %{state: state}
+       )
+       when state in [:released, :terminal],
+       do: :ok
+
+  defp ensure_budget_process_stop_evidence(
+         connection,
+         database_path,
+         admitted_run_id,
+         fencing_token,
+         %{state: :active}
+       ) do
+    with {:ok, {lifecycle, _cleanup_authority}} <-
+           select_lifecycle_by_run_id(connection, database_path, admitted_run_id),
+         {:ok, ownership} <-
+           select_process_ownership(
+             connection,
+             database_path,
+             admitted_run_id,
+             fencing_token
+           ) do
+      cond do
+        is_nil(lifecycle.started_at) -> :ok
+        match?(%ProcessOwnership{state: :stopped}, ownership) -> :ok
+        true -> {:error, :process_termination_unverified}
+      end
+    end
+  end
+
   defp insert_process_ownership(
          connection,
          database_path,
@@ -6219,9 +7220,15 @@ defmodule SymphonyElixir.ControlPlane do
   defp decode_process_ownership_state(_state), do: {:error, :invalid_process_ownership_state}
 
   defp prepare_admission(%ExecutionContext{} = context) do
+    prepare_admission(context, DateTime.utc_now() |> DateTime.to_iso8601())
+  end
+
+  defp prepare_admission(%ExecutionContext{} = context, admitted_at)
+       when is_binary(admitted_at) do
     with :ok <- ExecutionContext.validate(context),
          {:ok, references} <- credential_references(context),
          {:ok, provenance} <- ExecutionContext.safe_provenance(context),
+         {:ok, token_budget} <- prepare_token_budget(context.target.budget_limits, admitted_at),
          {:ok, target_context_json} <- encode_json(target_to_map(context.target)),
          {:ok, context_json} <- encode_json(execution_to_map(context)),
          {:ok, secret_references_json} <- encode_json(references),
@@ -6257,14 +7264,54 @@ defmodule SymphonyElixir.ControlPlane do
          context_json: context_json,
          provenance_json: provenance_json,
          secret_references_json: secret_references_json,
-         admitted_at: DateTime.utc_now() |> DateTime.to_iso8601()
+         token_budget: token_budget,
+         admitted_at: admitted_at
        }}
     else
       _invalid -> {:error, :invalid_admission}
     end
   end
 
-  defp prepare_admission(_context), do: {:error, :invalid_admission}
+  defp prepare_admission(_context, _admitted_at), do: {:error, :invalid_admission}
+
+  defp prepare_token_budget(limits, _admitted_at) when limits == %{}, do: {:ok, nil}
+
+  defp prepare_token_budget(
+         %{
+           "per_run" => %{"max_total_tokens" => per_run_limit},
+           "daily" => %{"max_total_tokens" => daily_limit},
+           "weekly" => %{"max_total_tokens" => weekly_limit}
+         },
+         admitted_at
+       )
+       when is_integer(per_run_limit) and per_run_limit > 0 and
+              is_integer(daily_limit) and daily_limit >= per_run_limit and
+              is_integer(weekly_limit) and weekly_limit >= daily_limit do
+    with {:ok, admission_day, admission_week} <- admission_periods(admitted_at) do
+      {:ok,
+       %{
+         admission_day: admission_day,
+         admission_week: admission_week,
+         per_run_limit: per_run_limit,
+         daily_limit: daily_limit,
+         weekly_limit: weekly_limit
+       }}
+    end
+  end
+
+  defp prepare_token_budget(_limits, _admitted_at), do: {:error, :invalid_token_budget}
+
+  defp admission_periods(admitted_at) do
+    case DateTime.from_iso8601(admitted_at) do
+      {:ok, admitted, 0} ->
+        date = DateTime.to_date(admitted)
+
+        {:ok, Date.to_iso8601(date), date |> Date.beginning_of_week(:monday) |> Date.to_iso8601()}
+
+      _invalid ->
+        {:error, :invalid_admission_period}
+    end
+  end
 
   defp persist_admission(connection, database_path, record) do
     with :ok <- execute(connection, "BEGIN IMMEDIATE", database_path, :transaction_failed) do
@@ -6353,8 +7400,10 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   defp persist_or_reuse_admission(connection, database_path, record, nil) do
-    with :ok <- insert_admission(connection, database_path, record),
+    with :ok <- ensure_initial_token_capacity(connection, database_path, record),
+         :ok <- insert_admission(connection, database_path, record),
          :ok <- insert_initial_lifecycle(connection, database_path, record),
+         :ok <- insert_initial_token_budget(connection, database_path, record),
          {:ok, row} <-
            select_admission(
              connection,
@@ -6466,6 +7515,85 @@ defmodule SymphonyElixir.ControlPlane do
         "cannot persist initial run transition"
       )
     end
+  end
+
+  defp ensure_initial_token_capacity(_connection, _database_path, %{token_budget: nil}),
+    do: :ok
+
+  defp ensure_initial_token_capacity(connection, database_path, record) do
+    budget = record.token_budget
+
+    with {:ok, {daily_allocated, stored_daily_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             record.target_id,
+             :day,
+             budget.admission_day
+           ),
+         :ok <-
+           ensure_token_capacity(
+             daily_allocated,
+             budget.per_run_limit,
+             effective_period_limit(budget.daily_limit, stored_daily_limit),
+             :daily_token_budget_exceeded
+           ),
+         {:ok, {weekly_allocated, stored_weekly_limit}} <-
+           period_token_balance(
+             connection,
+             database_path,
+             record.target_id,
+             :week,
+             budget.admission_week
+           ) do
+      ensure_token_capacity(
+        weekly_allocated,
+        budget.per_run_limit,
+        effective_period_limit(budget.weekly_limit, stored_weekly_limit),
+        :weekly_token_budget_exceeded
+      )
+    end
+  end
+
+  defp insert_initial_token_budget(_connection, _database_path, %{token_budget: nil}), do: :ok
+
+  defp insert_initial_token_budget(connection, database_path, record) do
+    budget = record.token_budget
+
+    sql = """
+    INSERT INTO run_token_budgets (
+      admitted_run_id,
+      target_id,
+      admission_day,
+      admission_week,
+      per_run_limit,
+      daily_limit,
+      weekly_limit,
+      cumulative_tokens,
+      charged_tokens,
+      reserved_tokens,
+      state,
+      created_at,
+      updated_at
+    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 0, ?5, 'active', ?8, ?8)
+    """
+
+    expect_no_rows(
+      connection,
+      sql,
+      [
+        record.admitted_run_id,
+        record.target_id,
+        budget.admission_day,
+        budget.admission_week,
+        budget.per_run_limit,
+        budget.daily_limit,
+        budget.weekly_limit,
+        record.admitted_at
+      ],
+      database_path,
+      "cannot persist initial token reservation"
+    )
   end
 
   defp load_admission(connection, database_path, target_id, tracker_issue_id)

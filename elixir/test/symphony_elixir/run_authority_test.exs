@@ -2,7 +2,7 @@ defmodule SymphonyElixir.RunAuthorityTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ControlPlane
-  alias SymphonyElixir.ControlPlane.SideEffect
+  alias SymphonyElixir.ControlPlane.{SideEffect, TokenBudget}
   alias SymphonyElixir.{ExecutionContext, Orchestrator, RunAuthority, TargetContext}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.State
@@ -147,6 +147,53 @@ defmodule SymphonyElixir.RunAuthorityTest do
                %{},
                operation
              )
+  end
+
+  test "owns fenced token usage pause release and reactivation" do
+    config_root = tmp_root!("run-authority-token-budget")
+    server = start_control_plane!(config_root)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-budget", "SID-440",
+        budget_limits: %{
+          "per_run" => %{"max_total_tokens" => 100},
+          "daily" => %{"max_total_tokens" => 500},
+          "weekly" => %{"max_total_tokens" => 1_000}
+        }
+      )
+
+    assert {:ok, admitted} = RunAuthority.admit(server, "owner-budget", context)
+    assert {:ok, running} = RunAuthority.transition(admitted, :running, %{})
+
+    assert {:ok, ^running, %TokenBudget{charged_tokens: 25, reserved_tokens: 75}} =
+             RunAuthority.record_token_usage(running, 25)
+
+    assert {:ok, %TokenBudget{cumulative_tokens: 25}} =
+             RunAuthority.fetch_token_budget(running)
+
+    assert {:error, :process_termination_unverified} =
+             RunAuthority.release_token_reservation(running)
+
+    identity = process_identity(61_101)
+    assert {:ok, registered} = RunAuthority.register_process(running, identity)
+
+    assert {:ok, stopped} =
+             RunAuthority.record_process_stopped(
+               registered,
+               identity["process_group_id"],
+               %{verified_by: "budget-test"}
+             )
+
+    assert {:ok, ^stopped, %TokenBudget{state: :released, reserved_tokens: 0}} =
+             RunAuthority.release_token_reservation(stopped)
+
+    assert {:ok, ^stopped, %TokenBudget{state: :active, reserved_tokens: 75}} =
+             RunAuthority.acquire_token_reservation(stopped)
+
+    assert :ok = RunAuthority.release(stopped)
+    assert {:error, :stale_lease} = RunAuthority.record_token_usage(stopped, 30)
+    assert {:error, :stale_lease} = RunAuthority.release_token_reservation(stopped)
+    assert {:error, :stale_lease} = RunAuthority.acquire_token_reservation(stopped)
   end
 
   test "replays the persisted completion result without changing a block to a pass" do
@@ -346,7 +393,7 @@ defmodule SymphonyElixir.RunAuthorityTest do
         "pull_request_write" => "allow"
       },
       capacity_limits: %{"max_concurrent_agents" => 1},
-      budget_limits: %{}
+      budget_limits: Keyword.get(opts, :budget_limits, %{})
     }
 
     issue = %Issue{

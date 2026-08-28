@@ -378,6 +378,16 @@ admission of the same envelope returns the original run ID; changed hashes or au
 without replacement. Only validated tracker and runner secret references are stored. Credential
 values resolve only after a fenced owner acquires the run.
 
+Admission also reserves the run's full remaining per-run token ceiling against the target's UTC
+admission day and ISO week. Daily and weekly checks run inside the same immediate transaction, so
+concurrent admissions cannot overdraw either balance. Runtime usage writes carry the current lease
+and fencing token and store only the monotonic cumulative token total. Charged usage increases while
+the unused reservation decreases, which keeps active allocation constant and makes duplicate or
+out-of-order reports idempotent. Terminal completion retains charged usage and releases unused
+capacity. Lease or explicit reservation release requires verified process-stop evidence; a later
+running transition must reacquire the remaining ceiling. Reservations, charged totals, and balances
+survive restart and backup restore without storing raw runtime payloads.
+
 Each admitted run has one exclusive durable lease. A lease lasts 30 seconds and the owner should
 renew it every 10 seconds. Acquire, renew, transfer, release, and expiry use immediate SQLite
 transactions. Every new owner receives a fencing token greater than all prior tokens for that run;
