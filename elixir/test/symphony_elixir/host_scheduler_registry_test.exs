@@ -66,6 +66,77 @@ defmodule SymphonyElixir.HostSchedulerRegistryTest do
     refute_receive {:"$gen_cast", {:dispatch_grant, %Grant{}}}, 50
   end
 
+  test "reload fences pause and drain before explicit reactivation" do
+    generation_a = hash("lifecycle-active")
+    generation_b = hash("lifecycle-paused")
+    generation_c = hash("lifecycle-draining")
+    generation_d = hash("lifecycle-reactivated")
+    active = target_context("/tmp", "alpha", generation_a, "shared", :active)
+    paused = target_context("/tmp", "alpha", generation_b, "shared", :paused)
+    draining = target_context("/tmp", "alpha", generation_c, "shared", :draining)
+    reactivated = target_context("/tmp", "alpha", generation_d, "shared", :active)
+
+    {:ok, source} =
+      Agent.start_link(fn -> {:ok, loaded(%{"alpha" => active}, generation_a, polls: 1)} end)
+
+    scheduler = unique_name(LifecycleReload)
+
+    start_supervised!(
+      {HostScheduler,
+       name: scheduler, registry_path: "/synthetic/lifecycle-registry.yml", registry_loader: fn _path -> Agent.get(source, & &1) end, registry_reload_interval_ms: 10, target_supervisor: false}
+    )
+
+    HostScheduler.register_target(scheduler, active, self())
+    assert %Grant{} = active_grant = receive_grant()
+    assert :ok = HostScheduler.reserve_dispatch(active_grant)
+
+    Agent.update(source, fn _current ->
+      {:ok, loaded(%{"alpha" => paused}, generation_b, polls: 1)}
+    end)
+
+    assert_receive {:"$gen_cast", {:apply_target_context, ^paused}}, 1_000
+
+    assert eventually(fn ->
+             case HostScheduler.snapshot(scheduler) do
+               %{
+                 counts: %{agents: 1, startups: 1, polls: 0},
+                 targets: %{"alpha" => %{state: :paused, generation: ^generation_b}}
+               } = snapshot ->
+                 snapshot
+
+               _other ->
+                 nil
+             end
+           end)
+
+    assert {:error, :stale_grant} = HostScheduler.reserve_dispatch(active_grant)
+    assert %{queued: true, coalesced: true} = HostScheduler.request_poll(scheduler, "alpha")
+    assert :ok = HostScheduler.release_all(active_grant)
+    assert eventually(fn -> HostScheduler.snapshot(scheduler).counts.agents == 0 end)
+
+    Agent.update(source, fn _current ->
+      {:ok, loaded(%{"alpha" => draining}, generation_c, polls: 1)}
+    end)
+
+    assert_receive {:"$gen_cast", {:apply_target_context, ^draining}}, 1_000
+    assert %{queued: true, coalesced: true} = HostScheduler.request_poll(scheduler, "alpha")
+    assert %{queued: true, coalesced: false} = HostScheduler.request_retry(scheduler, "alpha")
+    assert %Grant{registry_generation: ^generation_c} = draining_grant = receive_grant()
+    assert :ok = HostScheduler.finish_poll(draining_grant, false)
+
+    Agent.update(source, fn _current ->
+      {:ok, loaded(%{"alpha" => reactivated}, generation_d, polls: 1)}
+    end)
+
+    assert_receive {:"$gen_cast", {:apply_target_context, ^reactivated}}, 1_000
+    assert %{queued: true, coalesced: true} = HostScheduler.request_poll(scheduler, "alpha")
+    refute_receive {:"$gen_cast", {:dispatch_grant, %Grant{}}}, 30
+
+    :ok = HostScheduler.activate_target(scheduler, reactivated, false)
+    assert %Grant{registry_generation: ^generation_d} = resumed_grant = receive_grant()
+    assert :ok = HostScheduler.finish_poll(resumed_grant, false)
+  end
+
   test "reload failure fences grants and stale target registration" do
     generation_a = hash("generation-a")
     generation_b = hash("generation-b")

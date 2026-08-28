@@ -173,6 +173,7 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           state
           |> recover_durable_runs()
+          |> resume_target_paused_admissions()
           |> schedule_durable_lease_renewal()
 
         state = maybe_start_polling(state)
@@ -212,7 +213,8 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when not is_nil(scheduler) do
     :ok = HostScheduler.register_target(scheduler, target_context, self())
-    %{state | next_poll_due_at_ms: nil}
+    state = %{state | next_poll_due_at_ms: nil}
+    activate_scheduler_target(state)
   end
 
   defp maybe_start_polling(%State{target_context: %TargetContext{}} = state),
@@ -226,6 +228,29 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec dispatch_grant(GenServer.server(), Grant.t()) :: :ok
   def dispatch_grant(server, %Grant{} = grant), do: GenServer.cast(server, {:dispatch_grant, grant})
+  @spec apply_target_context(GenServer.server(), TargetContext.t()) :: :ok
+  def apply_target_context(server, %TargetContext{} = context),
+    do: GenServer.cast(server, {:apply_target_context, context})
+
+  @impl true
+  def handle_cast(
+        {:apply_target_context, %TargetContext{target_id: target_id} = context},
+        %State{target_context: %TargetContext{target_id: target_id}} = state
+      ) do
+    state =
+      state
+      |> release_pending_target_grant()
+      |> cancel_target_polling()
+      |> Map.put(:target_context, context)
+      |> Map.put(:run_mode, target_run_mode(context))
+      |> apply_target_lifecycle()
+      |> activate_scheduler_target()
+
+    notify_dashboard()
+    {:noreply, state}
+  end
+
+  def handle_cast({:apply_target_context, %TargetContext{}}, state), do: {:noreply, state}
 
   @impl true
   def handle_cast(
@@ -380,6 +405,9 @@ defmodule SymphonyElixir.Orchestrator do
         %{running: running} = state
       ) do
     case Map.get(running, run_id) do
+      %{pause_fenced?: true} ->
+        {:noreply, state}
+
       nil ->
         {:noreply, state}
 
@@ -410,7 +438,7 @@ defmodule SymphonyElixir.Orchestrator do
       )
       when not is_nil(scheduler) do
     due_host_retries = Map.put(state.due_host_retries, run_id, retry_token)
-    _request = HostScheduler.request_poll(scheduler, target_id)
+    _request = HostScheduler.request_retry(scheduler, target_id)
     notify_dashboard()
     {:noreply, %{state | due_host_retries: due_host_retries}}
   end
@@ -972,6 +1000,10 @@ defmodule SymphonyElixir.Orchestrator do
   @spec integrate_durable_recovery_for_test(map(), State.t()) :: State.t()
   def integrate_durable_recovery_for_test(recovery, %State{} = state),
     do: integrate_durable_recovery(recovery, state)
+
+  @doc false
+  @spec renew_durable_leases_for_test(State.t()) :: State.t()
+  def renew_durable_leases_for_test(%State{} = state), do: renew_durable_leases(state)
 
   @doc false
   @spec fenced_external_result_for_test(ControlPlane.SideEffect.t()) :: map()
@@ -2316,6 +2348,38 @@ defmodule SymphonyElixir.Orchestrator do
          pinned_context,
          _context,
          owner_id,
+         %RunAuthority{
+           lifecycle: %{state: :blocked, blocked_reason: "target_paused"}
+         } = authority
+       ) do
+    release_durable_authority(authority)
+    release_coordinator_lease(pinned_context, owner_id)
+    run_id = ExecutionContext.run_id(pinned_context)
+
+    entry = %{
+      identifier: pinned_context.issue_identifier,
+      issue: nil,
+      execution_context: pinned_context,
+      durable_authority: authority,
+      worker_host: pinned_context.worker_host,
+      workspace_path: pinned_context.workspace_path,
+      session_id: nil
+    }
+
+    state = move_paused_entry(state, run_id, entry, "target_paused")
+
+    handle_tracker_fetch_error(state, reason, :dispatch_revalidation, fn ->
+      Logger.warning("Paused admission refresh failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+    end)
+  end
+
+  defp handle_dispatch_revalidation(
+         {:error, reason},
+         state,
+         _attempt,
+         pinned_context,
+         _context,
+         owner_id,
          authority
        ) do
     release_durable_authority(authority)
@@ -2363,6 +2427,34 @@ defmodule SymphonyElixir.Orchestrator do
     Logger.warning("Skipping dispatch; credentials are unavailable for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
     release_coordinator_lease(pinned_context, owner_id)
     state
+  end
+
+  defp handle_durable_dispatch_error(
+         {:error, reason},
+         state,
+         issue,
+         pinned_context,
+         owner_id,
+         %RunAuthority{
+           lifecycle: %{state: :blocked, blocked_reason: "target_paused"}
+         } = authority
+       ) do
+    Logger.warning("Paused admission resume failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+    release_durable_authority(authority)
+    release_coordinator_lease(pinned_context, owner_id)
+    run_id = ExecutionContext.run_id(pinned_context)
+
+    entry = %{
+      identifier: pinned_context.issue_identifier,
+      issue: issue,
+      execution_context: pinned_context,
+      durable_authority: authority,
+      worker_host: pinned_context.worker_host,
+      workspace_path: pinned_context.workspace_path,
+      session_id: nil
+    }
+
+    move_paused_entry(state, run_id, entry, "target_paused")
   end
 
   defp handle_durable_dispatch_error(
@@ -2441,6 +2533,240 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp coordinator_owner_id(_state), do: default_coordinator_owner_id(__MODULE__)
 
+  defp release_pending_target_grant(%State{host_scheduler: %{grant: %Grant{} = grant} = host_scheduler} = state) do
+    :ok = HostScheduler.release_all(grant)
+
+    %{
+      state
+      | host_scheduler: %{host_scheduler | grant: nil},
+        poll_check_in_progress: false
+    }
+  end
+
+  defp release_pending_target_grant(%State{} = state), do: state
+
+  defp cancel_target_polling(%State{} = state) do
+    if is_reference(state.tick_timer_ref), do: Process.cancel_timer(state.tick_timer_ref)
+
+    %{
+      state
+      | tick_timer_ref: nil,
+        tick_token: nil,
+        next_poll_due_at_ms: nil,
+        poll_check_in_progress: false
+    }
+  end
+
+  defp apply_target_lifecycle(%State{target_context: %TargetContext{state: :active}} = state),
+    do: resume_target_paused_admissions(state)
+
+  defp apply_target_lifecycle(%State{target_context: %TargetContext{state: :paused}} = state),
+    do: pause_target_admissions(state, "target_paused")
+
+  defp apply_target_lifecycle(%State{target_context: %TargetContext{state: :retired}} = state),
+    do: pause_target_admissions(state, "target_retired")
+
+  defp apply_target_lifecycle(%State{} = state), do: state
+
+  defp activate_scheduler_target(
+         %State{
+           host_scheduler: %{server: scheduler},
+           target_context: %TargetContext{state: :active} = context
+         } = state
+       )
+       when not is_nil(scheduler) do
+    :ok = HostScheduler.activate_target(scheduler, context, map_size(state.due_host_retries) > 0)
+    state
+  end
+
+  defp activate_scheduler_target(%State{} = state), do: state
+
+  defp pause_target_admissions(%State{} = state, reason) do
+    state =
+      Enum.reduce(Map.keys(state.running), state, fn run_id, state ->
+        pause_running_admission(state, run_id, reason)
+      end)
+
+    state =
+      Enum.reduce(Map.keys(state.retry_attempts), state, fn run_id, state ->
+        pause_retry_admission(state, run_id, reason)
+      end)
+
+    %{state | due_host_retries: %{}}
+  end
+
+  defp pause_running_admission(%State{} = state, run_id, reason) do
+    case Map.get(state.running, run_id) do
+      nil ->
+        state
+
+      running_entry ->
+        case stop_and_verify_durable_process(running_entry) do
+          {:ok, stopped_entry} ->
+            finish_paused_running_admission(state, run_id, stopped_entry, reason)
+
+          {:unverifiable, fenced_entry, error} ->
+            fence_uncertain_paused_admission(state, run_id, fenced_entry, error)
+
+          {:error, _reason} ->
+            fence_uncertain_paused_admission(
+              state,
+              run_id,
+              running_entry,
+              "process group termination is unverifiable"
+            )
+        end
+    end
+  end
+
+  defp finish_paused_running_admission(state, run_id, running_entry, reason) do
+    stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+    running_entry = transition_durable_entry(running_entry, :blocked, %{reason: reason})
+    release_durable_authority(Map.get(running_entry, :durable_authority))
+    release_host_grant(running_entry)
+    release_entry_coordinator_lease(state, running_entry)
+
+    move_paused_entry(state, run_id, running_entry, reason)
+  end
+
+  defp fence_uncertain_paused_admission(state, run_id, running_entry, error) do
+    if is_reference(Map.get(running_entry, :ref)) do
+      Process.demonitor(running_entry.ref, [:flush])
+    end
+
+    running_entry =
+      running_entry
+      |> transition_durable_entry(:blocked, %{reason: error})
+      |> Map.put(:pause_fenced?, true)
+      |> Map.put(:ref, nil)
+
+    blocked_entry = paused_blocked_entry(run_id, running_entry, error)
+
+    %{
+      state
+      | running: Map.put(state.running, run_id, running_entry),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
+  defp pause_retry_admission(%State{} = state, run_id, reason) do
+    case Map.get(state.retry_attempts, run_id) do
+      nil ->
+        state
+
+      retry_entry ->
+        if is_reference(retry_entry[:timer_ref]), do: Process.cancel_timer(retry_entry.timer_ref)
+        retry_entry = transition_durable_entry(retry_entry, :blocked, %{reason: reason})
+        release_durable_authority(Map.get(retry_entry, :durable_authority))
+        release_entry_coordinator_lease(state, retry_entry)
+        move_paused_entry(state, run_id, retry_entry, reason)
+    end
+  end
+
+  defp move_paused_entry(state, run_id, entry, reason) do
+    blocked_entry = paused_blocked_entry(run_id, entry, reason)
+
+    %{
+      state
+      | running: Map.delete(state.running, run_id),
+        retry_attempts: Map.delete(state.retry_attempts, run_id),
+        due_host_retries: Map.delete(state.due_host_retries, run_id),
+        claimed: MapSet.delete(state.claimed, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
+  defp paused_blocked_entry(run_id, entry, reason) do
+    context = Map.get(entry, :execution_context)
+
+    %{
+      issue_id: issue_id_from_run_id(run_id),
+      identifier: Map.get(entry, :identifier, issue_id_from_run_id(run_id)),
+      issue: Map.get(entry, :issue),
+      execution_context: context,
+      durable_authority: Map.get(entry, :durable_authority),
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path),
+      session_id: Map.get(entry, :session_id),
+      error: reason,
+      blocked_at: DateTime.utc_now(),
+      last_runtime_message: Map.get(entry, :last_runtime_message),
+      last_runtime_event: Map.get(entry, :last_runtime_event),
+      last_runtime_timestamp: Map.get(entry, :last_runtime_timestamp)
+    }
+  end
+
+  defp release_entry_coordinator_lease(state, %{execution_context: %ExecutionContext{} = context}),
+    do: release_coordinator_lease(context, coordinator_owner_id(state))
+
+  defp release_entry_coordinator_lease(_state, _entry), do: :ok
+
+  defp resume_target_paused_admissions(%State{target_context: %TargetContext{state: :active}} = state) do
+    state.blocked
+    |> Enum.sort_by(fn {run_id, _entry} -> inspect(run_id) end)
+    |> Enum.reduce(state, fn {run_id, entry}, state ->
+      if target_paused_entry?(entry) do
+        queue_target_paused_resume(state, run_id, entry)
+      else
+        state
+      end
+    end)
+  end
+
+  defp resume_target_paused_admissions(%State{} = state), do: state
+
+  defp target_paused_entry?(%{
+         durable_authority: %RunAuthority{
+           lifecycle: %{state: :blocked, blocked_reason: "target_paused"}
+         }
+       }),
+       do: true
+
+  defp target_paused_entry?(%{error: "target_paused"}), do: true
+  defp target_paused_entry?(_entry), do: false
+
+  defp queue_target_paused_resume(state, run_id, entry) do
+    retry_token = make_ref()
+    authority = Map.get(entry, :durable_authority)
+
+    attempt =
+      case authority do
+        %RunAuthority{lifecycle: %{retry_attempt: retry_attempt}}
+        when is_integer(retry_attempt) and retry_attempt > 0 ->
+          retry_attempt
+
+        _missing_attempt ->
+          1
+      end
+
+    retry_entry = %{
+      attempt: attempt,
+      timer_ref: nil,
+      retry_token: retry_token,
+      due_at_ms: System.system_time(:millisecond),
+      identifier: Map.get(entry, :identifier),
+      issue_url: nil,
+      error: "target_paused",
+      session_id: Map.get(entry, :session_id),
+      last_error_signature: nil,
+      worker_host: Map.get(entry, :worker_host),
+      workspace_path: Map.get(entry, :workspace_path),
+      execution_context: Map.get(entry, :execution_context),
+      durable_authority: authority,
+      profile: Map.get(entry, :profile),
+      target: Map.get(entry, :target),
+      policy_ref: Map.get(entry, :policy_ref)
+    }
+
+    %{
+      state
+      | blocked: Map.delete(state.blocked, run_id),
+        claimed: MapSet.delete(state.claimed, run_id),
+        retry_attempts: Map.put(state.retry_attempts, run_id, retry_entry),
+        due_host_retries: Map.put(state.due_host_retries, run_id, retry_token)
+    }
+  end
+
   defp configured_control_plane(opts) do
     case Keyword.fetch(opts, :control_plane) do
       {:ok, false} -> nil
@@ -2451,6 +2777,15 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp prepare_durable_authority(%State{control_plane: nil}, _context, _authority),
     do: {:error, :durable_control_plane_required}
+
+  defp prepare_durable_authority(
+         %State{} = state,
+         _context,
+         %RunAuthority{
+           lifecycle: %{state: :blocked, blocked_reason: "target_paused"}
+         } = authority
+       ),
+       do: RunAuthority.reacquire(authority, coordinator_owner_id(state))
 
   defp prepare_durable_authority(
          %State{},
@@ -2489,7 +2824,13 @@ defmodule SymphonyElixir.Orchestrator do
   defp recover_durable_runs(%State{control_plane: nil} = state), do: state
 
   defp recover_durable_runs(%State{control_plane: server} = state) do
-    case RunAuthority.recover(server, coordinator_owner_id(state)) do
+    opts =
+      case state.target_context do
+        %TargetContext{target_id: target_id} -> [target_id: target_id]
+        _missing_target -> []
+      end
+
+    case RunAuthority.recover(server, coordinator_owner_id(state), opts) do
       {:ok, recoveries} ->
         Enum.reduce(recoveries, state, &integrate_durable_recovery/2)
 
@@ -2681,6 +3022,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp register_durable_process(%State{} = state, run_id, identity) do
     case Map.get(state.running, run_id) do
+      %{pause_fenced?: true} ->
+        state
+
       %{durable_authority: %RunAuthority{} = authority} = running_entry ->
         case RunAuthority.register_process(authority, identity) do
           {:ok, registered} ->
@@ -2759,11 +3103,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp record_verified_process_stop(
          {:unverifiable, evidence},
-         _authority,
-         _running_entry,
-         _process_group_id
-       ),
-       do: {:error, {:process_termination_unverifiable, evidence}}
+         authority,
+         running_entry,
+         process_group_id
+       ) do
+    case RunAuthority.record_process_unverifiable(
+           authority,
+           process_group_id,
+           evidence
+         ) do
+      {:ok, blocked} ->
+        entry = Map.put(running_entry, :durable_authority, blocked)
+        {:unverifiable, entry, "process group termination is unverifiable"}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp record_durable_process_stopped(
          %State{} = state,
@@ -2779,8 +3135,7 @@ defmodule SymphonyElixir.Orchestrator do
                evidence
              ) do
           {:ok, stopped} ->
-            updated = Map.put(running_entry, :durable_authority, stopped)
-            %{state | running: Map.put(state.running, run_id, updated)}
+            finish_recorded_process_stop(state, run_id, running_entry, stopped)
 
           {:error, reason} ->
             stop_and_block_issue(
@@ -2794,6 +3149,15 @@ defmodule SymphonyElixir.Orchestrator do
       _no_durable_run ->
         state
     end
+  end
+
+  defp finish_recorded_process_stop(state, run_id, running_entry, stopped) do
+    updated = Map.put(running_entry, :durable_authority, stopped)
+    state = %{state | running: Map.put(state.running, run_id, updated)}
+
+    if Map.get(updated, :pause_fenced?),
+      do: finish_paused_running_admission(state, run_id, updated, "target_paused"),
+      else: state
   end
 
   defp block_durable_identity_failure(%State{} = state, run_id, error) do
@@ -2842,12 +3206,7 @@ defmodule SymphonyElixir.Orchestrator do
             %{state | running: Map.put(state.running, run_id, updated)}
 
           {:error, reason} ->
-            stop_and_block_issue(
-              state,
-              run_id,
-              running_entry,
-              "durable lease renewal failed: #{inspect(reason)}"
-            )
+            fence_lost_running_authority(state, run_id, running_entry, reason)
         end
 
       _no_durable_run ->
@@ -2865,18 +3224,63 @@ defmodule SymphonyElixir.Orchestrator do
 
           {:error, reason} ->
             Logger.error("Durable retry lease renewal failed run_id=#{inspect(run_id)}: #{inspect(reason)}")
-
-            block_retry_metadata(
-              state,
-              run_id,
-              retry_entry,
-              "durable retry lease renewal failed"
-            )
+            fence_lost_retry_authority(state, run_id, retry_entry, reason)
         end
 
       _no_durable_run ->
         state
     end
+  end
+
+  defp fence_lost_running_authority(state, run_id, running_entry, reason) do
+    case Map.get(running_entry, :durable_process_identity) do
+      %{} = identity ->
+        case ProcessSupervisor.terminate_recovered_group(identity) do
+          {:stopped, _evidence} ->
+            stop_running_task(Map.get(running_entry, :pid), Map.get(running_entry, :ref))
+
+          {:unverifiable, _evidence} ->
+            demonitor_uncertain_task(running_entry)
+        end
+
+      _missing_identity ->
+        demonitor_uncertain_task(running_entry)
+    end
+
+    release_host_grant(running_entry)
+    release_entry_coordinator_lease(state, running_entry)
+    error = "durable lease lost: #{inspect(reason)}"
+    blocked_entry = paused_blocked_entry(run_id, running_entry, error)
+
+    %{
+      state
+      | running: Map.delete(state.running, run_id),
+        claimed: MapSet.delete(state.claimed, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
+  defp fence_lost_retry_authority(state, run_id, retry_entry, reason) do
+    if is_reference(retry_entry[:timer_ref]), do: Process.cancel_timer(retry_entry.timer_ref)
+    release_entry_coordinator_lease(state, retry_entry)
+    error = "durable lease lost: #{inspect(reason)}"
+    blocked_entry = paused_blocked_entry(run_id, retry_entry, error)
+
+    %{
+      state
+      | retry_attempts: Map.delete(state.retry_attempts, run_id),
+        due_host_retries: Map.delete(state.due_host_retries, run_id),
+        claimed: MapSet.delete(state.claimed, run_id),
+        blocked: Map.put(state.blocked, run_id, blocked_entry)
+    }
+  end
+
+  defp demonitor_uncertain_task(running_entry) do
+    if is_reference(Map.get(running_entry, :ref)) do
+      Process.demonitor(running_entry.ref, [:flush])
+    end
+
+    :ok
   end
 
   defp block_retry_metadata(state, run_id, metadata, error) do
@@ -3953,13 +4357,37 @@ defmodule SymphonyElixir.Orchestrator do
         do: max(state.poll_interval_ms, backoff_ms),
         else: state.poll_interval_ms
 
-    %{
+    state = %{
       state
       | host_scheduler: %{host_scheduler | grant: nil},
         poll_check_in_progress: false,
-        next_poll_due_at_ms: if(continue?, do: System.monotonic_time(:millisecond) + next_delay_ms, else: nil)
+        next_poll_due_at_ms:
+          if(continue?,
+            do: System.monotonic_time(:millisecond) + next_delay_ms,
+            else: nil
+          )
     }
+
+    request_next_host_retry(state)
   end
+
+  defp request_next_host_retry(
+         %State{
+           due_host_retries: due,
+           host_scheduler: %{server: scheduler},
+           target_context: %TargetContext{
+             target_id: target_id,
+             state: target_state
+           }
+         } = state
+       )
+       when map_size(due) > 0 and not is_nil(scheduler) and
+              target_state in [:active, :draining] do
+    _request = HostScheduler.request_retry(scheduler, target_id)
+    state
+  end
+
+  defp request_next_host_retry(%State{} = state), do: state
 
   defp maybe_dispatch_due_host_retry(%State{due_host_retries: due} = state)
        when map_size(due) == 0,

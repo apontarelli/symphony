@@ -1564,14 +1564,23 @@ is:
 
 `max_credit_rounds * sum(all configured target weights)`
 
-successful grant decisions. `symphony host run` applies this policy across all composed, valid,
-active targets. Paused, draining, retired, stale-generation, rate-limited, or policy-invalid targets
-do not receive new grants. Connection backoff applies to all targets that use that tracker
-connection and does not block another connection.
+successful grant decisions. `symphony host run` applies new-admission polling only to composed,
+valid, active targets. Draining targets receive only grants required to finish pinned durable retry
+work. Paused, retired, stale-generation, rate-limited, or policy-invalid targets do not receive
+grants. Connection backoff applies to all targets that use that tracker connection and does not
+block another connection.
 
 Registry reload MUST read and compose one complete file generation before replacing scheduler
 state. A reload failure keeps the last verified generation visible, marks generation proof
 unavailable, and blocks new grants until a complete read verifies the current generation again.
+An `active -> paused` reload invalidates pending polls and grants before cancellation. The target
+orchestrator signals only a process group whose persisted identity still verifies, records fenced
+stop evidence, blocks the admission with reason `target_paused`, and then releases the tracker
+claim, scheduler slots, token reservation, and lease. Unverifiable process ownership blocks the run
+and target without signaling the uncertain process or releasing stop-dependent resources.
+Reactivation queues pinned `target_paused` admissions before candidate polling; each resume acquires
+a new fenced lease and token reservation before it can use current scheduler capacity.
+
 
 
 Backlog grooming is a separate intake workflow, not implementation dispatch. A backlog watcher MAY

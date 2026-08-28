@@ -50,7 +50,16 @@ defmodule SymphonyElixir.HostScheduler do
     @moduledoc false
 
     @enforce_keys [:context, :limits]
-    defstruct [:context, :limits, :pid, :monitor, :next_poll_due_at_ms, managed?: false]
+    defstruct [
+      :context,
+      :limits,
+      :pid,
+      :monitor,
+      :next_poll_due_at_ms,
+      activation_pending?: false,
+      managed?: false,
+      retry_requested?: false
+    ]
   end
 
   defmodule State do
@@ -106,6 +115,20 @@ defmodule SymphonyElixir.HostScheduler do
   @spec request_poll(GenServer.server(), String.t()) :: %{queued: true, coalesced: boolean()}
   def request_poll(server, target_id) when is_binary(target_id) do
     GenServer.call(server, {:request_poll, target_id})
+  end
+
+  @spec request_retry(GenServer.server(), String.t()) :: %{queued: true, coalesced: boolean()}
+  def request_retry(server, target_id) when is_binary(target_id) do
+    GenServer.call(server, {:request_retry, target_id})
+  end
+
+  @spec activate_target(GenServer.server(), TargetContext.t(), boolean()) :: :ok
+  def activate_target(server, %TargetContext{} = context, resume_pending?)
+      when is_boolean(resume_pending?) do
+    GenServer.cast(
+      server,
+      {:activate_target, context.target_id, context.registry_generation, resume_pending?}
+    )
   end
 
   @spec reserve_dispatch(Grant.t()) :: :ok | {:error, :capacity | :stale_grant}
@@ -221,28 +244,44 @@ defmodule SymphonyElixir.HostScheduler do
     {:noreply, state}
   end
 
+  def handle_cast(
+        {:activate_target, target_id, registry_generation, resume_pending?},
+        state
+      ) do
+    state =
+      case Map.fetch(state.targets, target_id) do
+        {:ok,
+         %TargetState{
+           context: %TargetContext{
+             state: :active,
+             registry_generation: ^registry_generation
+           }
+         } = target} ->
+          target = %{
+            target
+            | activation_pending?: false,
+              retry_requested?: target.retry_requested? or resume_pending?,
+              next_poll_due_at_ms: monotonic_ms()
+          }
+
+          state |> put_target(target_id, target) |> schedule_dispatch()
+
+        _inactive_or_stale ->
+          state
+      end
+
+    {:noreply, state}
+  end
+
   @impl true
   def handle_call({:request_poll, target_id}, _from, state) do
-    case Map.fetch(state.targets, target_id) do
-      {:ok, %TargetState{} = target} ->
-        coalesced =
-          not grantable_target?(state, target) or target_poll_in_progress?(state, target_id) or
-            due_now?(target.next_poll_due_at_ms)
+    {reply, state} = queue_target_poll(state, target_id, :poll)
+    {:reply, reply, state}
+  end
 
-        state =
-          if coalesced do
-            state
-          else
-            state
-            |> put_target(target_id, %{target | next_poll_due_at_ms: monotonic_ms()})
-            |> schedule_dispatch()
-          end
-
-        {:reply, %{queued: true, coalesced: coalesced}, state}
-
-      :error ->
-        {:reply, %{queued: true, coalesced: true}, state}
-    end
+  def handle_call({:request_retry, target_id}, _from, state) do
+    {reply, state} = queue_target_poll(state, target_id, :retry)
+    {:reply, reply, state}
   end
 
   def handle_call({:reserve_dispatch, %Grant{} = grant}, _from, state) do
@@ -314,6 +353,54 @@ defmodule SymphonyElixir.HostScheduler do
        },
        targets: target_snapshots(state)
      }, state}
+  end
+
+  defp queue_target_poll(state, target_id, purpose) do
+    case Map.fetch(state.targets, target_id) do
+      {:ok, %TargetState{} = target} ->
+        queue_target_poll(state, target_id, target, purpose)
+
+      :error ->
+        {%{queued: true, coalesced: true}, state}
+    end
+  end
+
+  defp queue_target_poll(state, target_id, target, :poll) do
+    coalesced =
+      not grantable_target?(state, target) or target_poll_in_progress?(state, target_id) or
+        due_now?(target.next_poll_due_at_ms)
+
+    state =
+      if coalesced do
+        state
+      else
+        state
+        |> put_target(target_id, %{target | next_poll_due_at_ms: monotonic_ms()})
+        |> schedule_dispatch()
+      end
+
+    {%{queued: true, coalesced: coalesced}, state}
+  end
+
+  defp queue_target_poll(state, target_id, target, :retry) do
+    coalesced =
+      target.retry_requested? or target_poll_in_progress?(state, target_id) or
+        not retryable_target?(state, target)
+
+    state =
+      if retryable_target?(state, target) do
+        state
+        |> put_target(target_id, %{
+          target
+          | retry_requested?: true,
+            next_poll_due_at_ms: monotonic_ms()
+        })
+        |> schedule_dispatch()
+      else
+        state
+      end
+
+    {%{queued: true, coalesced: coalesced}, state}
   end
 
   defp reserve_dispatch_reply(state, grant, entry) do
@@ -423,14 +510,15 @@ defmodule SymphonyElixir.HostScheduler do
     else
       case Policy.new(registry_weights(loaded), max_credit_rounds(snapshot.host, [])) do
         {:ok, policy} ->
+          desired_targets = target_states(contexts, snapshot.host, %{})
+
           state
-          |> retire_current_targets()
           |> Map.put(:registry_generation, snapshot.generation)
           |> Map.put(:registry_verified?, true)
           |> Map.put(:registry_error, nil)
           |> Map.put(:host_limits, scheduler_limits(snapshot.host, contexts, %{}))
-          |> Map.put(:targets, target_states(contexts, snapshot.host, %{}))
           |> Map.put(:policy, policy)
+          |> reconcile_loaded_targets(desired_targets)
           |> start_targets()
           |> stop_idle_retired_targets()
 
@@ -440,9 +528,84 @@ defmodule SymphonyElixir.HostScheduler do
     end
   end
 
+  defp reconcile_loaded_targets(state, desired_targets) do
+    {remaining, targets, grants, retired_targets} =
+      Enum.reduce(
+        state.targets,
+        {desired_targets, %{}, state.grants, state.retired_targets},
+        fn {target_id, current}, {remaining, targets, grants, retired_targets} ->
+          case Map.pop(remaining, target_id) do
+            {%TargetState{} = desired, remaining} ->
+              target = retain_target_runtime(state, current, desired)
+              notify_target_context(target, desired.context)
+
+              {
+                remaining,
+                Map.put(targets, target_id, target),
+                retire_target_grants(grants, current),
+                retired_targets
+              }
+
+            {nil, remaining} ->
+              {
+                remaining,
+                targets,
+                retire_target_grants(grants, current),
+                put_retired_target(retired_targets, current)
+              }
+          end
+        end
+      )
+
+    targets = Map.merge(targets, remaining)
+
+    cancel_poll_timer(%{
+      state
+      | targets: targets,
+        grants: grants,
+        retired_targets: retired_targets
+    })
+  end
+
+  defp retain_target_runtime(state, current, desired) do
+    activation_pending? =
+      desired.context.state == :active and current.context.state != :active
+
+    retry_requested? =
+      current.retry_requested? and desired.context.state in [:active, :draining]
+
+    next_poll_due_at_ms =
+      cond do
+        activation_pending? -> nil
+        retry_requested? -> monotonic_ms()
+        desired.context.state == :active -> initial_poll_due(state, desired.context)
+        true -> nil
+      end
+
+    %{
+      desired
+      | pid: current.pid,
+        monitor: current.monitor,
+        activation_pending?: activation_pending?,
+        managed?: current.managed?,
+        retry_requested?: retry_requested?,
+        next_poll_due_at_ms: next_poll_due_at_ms
+    }
+  end
+
+  defp notify_target_context(%TargetState{pid: pid}, context) when is_pid(pid) do
+    if Process.alive?(pid), do: Orchestrator.apply_target_context(pid, context)
+    :ok
+  end
+
+  defp notify_target_context(_target, _context), do: :ok
+
   defp start_targets(%State{} = state) do
     Enum.reduce(Map.keys(state.targets) |> Enum.sort(), state, fn target_id, state ->
       case Map.fetch!(state.targets, target_id) do
+        %TargetState{pid: pid} when is_pid(pid) ->
+          state
+
         %TargetState{context: %TargetContext{state: target_state}} = target
         when target_state in [:active, :draining] ->
           start_target(state, target_id, target)
@@ -513,10 +676,14 @@ defmodule SymphonyElixir.HostScheduler do
 
   defp ensure_target_poll_due(state, target_id) do
     case Map.fetch(state.targets, target_id) do
-      {:ok, %TargetState{next_poll_due_at_ms: nil} = target} ->
+      {:ok,
+       %TargetState{
+         activation_pending?: false,
+         next_poll_due_at_ms: nil
+       } = target} ->
         put_target(state, target_id, %{target | next_poll_due_at_ms: initial_poll_due(state, target.context)})
 
-      _already_due ->
+      _already_due_or_pending ->
         state
     end
   end
@@ -526,17 +693,6 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   defp initial_poll_due(_state, _context), do: nil
-
-  defp retire_current_targets(state) do
-    {grants, retired_targets} =
-      Enum.reduce(state.targets, {state.grants, state.retired_targets}, fn {_target_id, target}, {grants, retired} ->
-        grants = retire_target_grants(grants, target)
-        retired = put_retired_target(retired, target)
-        {grants, retired}
-      end)
-
-    cancel_poll_timer(%{state | targets: %{}, grants: grants, retired_targets: retired_targets})
-  end
 
   defp retire_target_grants(grants, target) do
     grants
@@ -649,7 +805,11 @@ defmodule SymphonyElixir.HostScheduler do
     Orchestrator.dispatch_grant(target.pid, grant)
 
     state
-    |> put_target(target_id, %{target | next_poll_due_at_ms: nil})
+    |> put_target(target_id, %{
+      target
+      | next_poll_due_at_ms: nil,
+        retry_requested?: false
+    })
     |> Map.put(:next_grant_id, state.next_grant_id + 1)
     |> Map.put(:grants, Map.put(state.grants, grant.id, entry))
   end
@@ -657,7 +817,7 @@ defmodule SymphonyElixir.HostScheduler do
   defp eligible_target_ids(state, now_ms) do
     state.targets
     |> Enum.flat_map(fn {target_id, target} ->
-      if grantable_target?(state, target) and due_at?(target.next_poll_due_at_ms, now_ms) and
+      if dispatchable_target?(state, target) and due_at?(target.next_poll_due_at_ms, now_ms) and
            not target_poll_in_progress?(state, target_id) and
            not connection_backoff_active?(state, target.context, now_ms) do
         [target_id]
@@ -668,10 +828,43 @@ defmodule SymphonyElixir.HostScheduler do
     |> Enum.sort()
   end
 
-  defp grantable_target?(state, %TargetState{context: context, pid: pid}) do
-    state.registry_verified? and is_pid(pid) and Process.alive?(pid) and context.state == :active and
+  defp grantable_target?(
+         state,
+         %TargetState{activation_pending?: false, context: context, pid: pid}
+       ) do
+    current_target_process?(state, context, pid) and context.state == :active
+  end
+
+  defp grantable_target?(_state, _target), do: false
+
+  defp dispatchable_target?(
+         state,
+         %TargetState{
+           activation_pending?: false,
+           context: context,
+           pid: pid,
+           retry_requested?: retry_requested?
+         }
+       ) do
+    current_target_process?(state, context, pid) and
+      (context.state == :active or (context.state == :draining and retry_requested?))
+  end
+
+  defp dispatchable_target?(_state, _target), do: false
+
+  defp current_target_process?(state, context, pid) do
+    state.registry_verified? and is_pid(pid) and Process.alive?(pid) and
       context.registry_generation == state.registry_generation
   end
+
+  defp retryable_target?(
+         state,
+         %TargetState{context: %TargetContext{state: target_state} = context, pid: pid}
+       )
+       when target_state in [:active, :draining],
+       do: current_target_process?(state, context, pid)
+
+  defp retryable_target?(_state, _target), do: false
 
   defp target_poll_in_progress?(state, target_id) do
     Enum.any?(state.grants, fn {_id, entry} -> entry.poll and entry.grant.target_id == target_id end)
@@ -688,16 +881,19 @@ defmodule SymphonyElixir.HostScheduler do
         now_ms = monotonic_ms()
 
         {next_due, state} =
-          case result do
-            true ->
+          case {target.context.state, result} do
+            {:active, true} ->
               {now_ms + target.limits.poll_interval_ms, state}
 
-            false ->
-              {nil, state}
-
-            {:defer, delay_ms} ->
+            {:active, {:defer, delay_ms}} ->
               state = put_connection_backoff(state, target.context, now_ms + delay_ms)
               {now_ms + max(target.limits.poll_interval_ms, delay_ms), state}
+
+            {_state, _result} when target.retry_requested? ->
+              {now_ms, state}
+
+            {_state, _result} ->
+              {nil, state}
           end
 
         put_target(state, grant.target_id, %{target | next_poll_due_at_ms: next_due})
@@ -741,7 +937,7 @@ defmodule SymphonyElixir.HostScheduler do
     do: state.registry_verified? and slot_counts(state).polls < state.host_limits.polls.max_concurrent
 
   defp target_dispatch_delay(state, {target_id, target}, now_ms) do
-    if grantable_target?(state, target) and not target_poll_in_progress?(state, target_id) and
+    if dispatchable_target?(state, target) and not target_poll_in_progress?(state, target_id) and
          is_integer(target.next_poll_due_at_ms) do
       due_at = target_dispatch_due_at(state, target)
       [max(0, due_at - now_ms)]
@@ -818,7 +1014,7 @@ defmodule SymphonyElixir.HostScheduler do
   defp reviewer_capacity_available?(state, target_id) do
     case Map.get(state.targets, target_id) do
       %TargetState{} = target ->
-        grantable_target?(state, target) and
+        (grantable_target?(state, target) or draining_target_busy?(state, target)) and
           slot_counts(state).reviewers < state.host_limits.reviewers and
           target_slot_counts(state, target_id).reviewers < target.limits.reviewers
 
@@ -826,6 +1022,20 @@ defmodule SymphonyElixir.HostScheduler do
         false
     end
   end
+
+  defp draining_target_busy?(
+         state,
+         %TargetState{
+           pid: pid,
+           context: %TargetContext{target_id: target_id, state: :draining}
+         }
+       ) do
+    Enum.any?(state.grants, fn {_grant_id, entry} ->
+      entry.agent and entry.grant.target_id == target_id and entry.grant.target_pid == pid
+    end)
+  end
+
+  defp draining_target_busy?(_state, _target), do: false
 
   defp runner_capacity_available?(_state, nil), do: true
 
@@ -1067,8 +1277,8 @@ defmodule SymphonyElixir.HostScheduler do
   defp budget_proof(_authority), do: {:error, :budget_reservation}
 
   defp valid_budget_proof?(
-         %{target_id: target_id, generation: generation, reserved?: true},
-         %Grant{target_id: target_id, registry_generation: generation}
+         %{target_id: target_id, reserved?: true},
+         %Grant{target_id: target_id}
        ),
        do: true
 

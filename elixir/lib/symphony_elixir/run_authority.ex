@@ -55,6 +55,45 @@ defmodule SymphonyElixir.RunAuthority do
     end
   end
 
+  @spec reacquire(t(), String.t()) :: {:ok, t()} | {:error, term()}
+  def reacquire(%__MODULE__{} = authority, owner_id) when is_binary(owner_id) do
+    with {:ok, lease} <-
+           ControlPlane.acquire_lease(
+             authority.server,
+             authority.admission.admitted_run_id,
+             owner_id
+           ) do
+      reacquired = %{authority | owner_id: owner_id, lease: lease}
+
+      case ControlPlane.fetch_lifecycle(
+             authority.server,
+             authority.admission.admitted_run_id
+           ) do
+        {:ok, lifecycle} ->
+          reacquired
+          |> Map.put(:lifecycle, lifecycle)
+          |> acquire_reacquired_budget()
+
+        {:error, _reason} = error ->
+          _ = release(reacquired)
+          error
+      end
+    end
+  end
+
+  def reacquire(%__MODULE__{}, _owner_id), do: {:error, :invalid_owner}
+
+  defp acquire_reacquired_budget(authority) do
+    case acquire_token_reservation(authority) do
+      {:ok, reacquired, _budget} ->
+        {:ok, reacquired}
+
+      {:error, _reason} = error ->
+        _ = release(authority)
+        error
+    end
+  end
+
   @spec renew(t()) :: {:ok, t()} | {:error, term()}
   def renew(%__MODULE__{} = authority) do
     case ControlPlane.renew_lease(authority.server, authority.lease) do
@@ -148,6 +187,25 @@ defmodule SymphonyElixir.RunAuthority do
          ) do
       {:ok, _ownership} -> {:ok, authority}
       {:error, _reason} = error -> error
+    end
+  end
+
+  @spec record_process_unverifiable(t(), pos_integer(), map()) :: {:ok, t()} | {:error, term()}
+  def record_process_unverifiable(%__MODULE__{} = authority, process_group_id, evidence)
+      when is_integer(process_group_id) and process_group_id > 0 and is_map(evidence) do
+    with {:ok, _ownership} <-
+           ControlPlane.record_process_group_termination(
+             authority.server,
+             authority.lease,
+             process_group_id,
+             {:unverifiable, evidence}
+           ),
+         {:ok, lifecycle} <-
+           ControlPlane.fetch_lifecycle(
+             authority.server,
+             authority.admission.admitted_run_id
+           ) do
+      {:ok, %{authority | lifecycle: lifecycle}}
     end
   end
 

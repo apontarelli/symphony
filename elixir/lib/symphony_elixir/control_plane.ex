@@ -933,10 +933,12 @@ defmodule SymphonyElixir.ControlPlane do
       Keyword.get(opts, :process_terminator, &terminate_recorded_process_group/1)
 
     credential_opts = Keyword.take(opts, [:env_fetcher])
+    target_id = Keyword.get(opts, :target_id)
 
     with :ok <- validate_recovery_request(owner_id, process_terminator),
+         :ok <- validate_recovery_target_id(target_id),
          {:ok, admitted_run_ids} <-
-           GenServer.call(server, :list_recoverable_runs, @call_timeout_ms) do
+           GenServer.call(server, {:list_recoverable_runs, target_id}, @call_timeout_ms) do
       recover_admitted_runs(
         server,
         admitted_run_ids,
@@ -1192,8 +1194,8 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, result, state}
   end
 
-  def handle_call(:list_recoverable_runs, _from, state) do
-    {:reply, select_recoverable_run_ids(state.connection, state.path), state}
+  def handle_call({:list_recoverable_runs, target_id}, _from, state) do
+    {:reply, select_recoverable_run_ids(state.connection, state.path, target_id), state}
   end
 
   def handle_call({:fence_run_for_recovery, admitted_run_id, owner_id}, _from, state) do
@@ -2019,6 +2021,10 @@ defmodule SymphonyElixir.ControlPlane do
       _invalid -> {:error, :invalid_recovery}
     end
   end
+
+  defp validate_recovery_target_id(nil), do: :ok
+  defp validate_recovery_target_id(target_id) when is_binary(target_id) and target_id != "", do: :ok
+  defp validate_recovery_target_id(_target_id), do: {:error, :invalid_recovery}
 
   defp recover_admitted_runs(
          _server,
@@ -3219,15 +3225,20 @@ defmodule SymphonyElixir.ControlPlane do
     end
   end
 
-  defp select_recoverable_run_ids(connection, database_path) do
+  defp select_recoverable_run_ids(connection, database_path, target_id) do
     states = Enum.map_join(@recoverable_lifecycle_states, ", ", &"'#{Atom.to_string(&1)}'")
+
+    {target_filter, params} =
+      if is_binary(target_id),
+        do: {" AND admission.target_id = ?1", [target_id]},
+        else: {"", []}
 
     sql = """
     SELECT lifecycle.admitted_run_id
     FROM run_lifecycles AS lifecycle
     JOIN run_admissions AS admission
       ON admission.admitted_run_id = lifecycle.admitted_run_id
-    WHERE lifecycle.state IN (#{states})
+    WHERE lifecycle.state IN (#{states})#{target_filter}
     ORDER BY
       lifecycle.admitted_at ASC,
       admission.target_id ASC,
@@ -3238,7 +3249,7 @@ defmodule SymphonyElixir.ControlPlane do
     case domain_query(
            connection,
            sql,
-           [],
+           params,
            database_path,
            "cannot list recoverable runs"
          ) do

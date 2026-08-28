@@ -281,13 +281,21 @@ dispatch rejection, startup failure, worker exit, cancellation, and lease loss.
 Weighted dispatch uses stable target ID order and positive integer target weights. Saved credit is
 capped at `weight * max_credit_rounds`. A continuously eligible target receives a grant within
 `max_credit_rounds * sum(all configured target weights)` successful grant decisions after host
-capacity becomes available. Paused, draining, retired, invalid, stale-generation, rate-limited, and
-policy-denied targets receive no new grant.
+capacity becomes available. Draining targets receive only grants for pinned durable retry work.
+Paused, retired, invalid, stale-generation, rate-limited, and policy-denied targets receive no
+grant.
 
 Tracker rate-limit backoff is keyed by registry tracker connection. Targets that share a connection
 share its backoff; targets on another connection remain eligible. Active-run identity remains
 `{target_id, issue_id}`, so overlapping tracker issue IDs stay distinct in admissions, leases,
 workspaces, reservations, retries, artifacts, and status.
+Registry lifecycle changes apply to the existing target orchestrator. Pause invalidates pending
+polls and grants first, terminates only a verified owned process group, records `target_paused`, and
+releases claims, slots, reservations, and leases after fenced stop evidence. Unverifiable ownership
+leaves stop-dependent resources fenced and does not signal the uncertain process. Activation
+reacquires each paused admission's lease and token reservation from its pinned context before the
+scheduler enables new candidate polling.
+
 
 For each runtime dispatch, the orchestrator commits the pinned admission and acquires its durable
 lease before it resolves current credentials or revalidates tracker state. It renews the lease every

@@ -2156,6 +2156,32 @@ defmodule SymphonyElixir.ControlPlaneTest do
     assert cleanup_authority == cleanup_before_restart.cleanup_authority
   end
 
+  test "restart recovery scopes durable runs to one target" do
+    config_root = tmp_root!("control-plane-target-recovery")
+    server = start_control_plane!(config_root)
+    alpha_context = execution_context!(config_root, "alpha", "shared", "SID-443-A")
+    beta_context = execution_context!(config_root, "beta", "shared", "SID-443-B")
+
+    assert {:ok, alpha} = ControlPlane.admit_run(server, alpha_context)
+    assert {:ok, beta} = ControlPlane.admit_run(server, beta_context)
+    stop_process(server)
+    reopened = start_control_plane!(config_root)
+
+    assert {:ok, [%Recovery{admission: %{admitted_run_id: alpha_run_id}}]} =
+             ControlPlane.recover_runs(reopened, "alpha-owner", target_id: "alpha")
+
+    assert alpha_run_id == alpha.admitted_run_id
+
+    assert {:ok, [%Recovery{admission: %{admitted_run_id: beta_run_id}}]} =
+             ControlPlane.recover_runs(reopened, "beta-owner", target_id: "beta")
+
+    assert beta_run_id == beta.admitted_run_id
+    refute alpha_run_id == beta_run_id
+
+    assert {:error, :invalid_recovery} =
+             ControlPlane.recover_runs(reopened, "invalid-owner", target_id: "")
+  end
+
   test "missing credentials block only the affected recovered run" do
     config_root = tmp_root!("control-plane-recovery-credentials")
     server = start_control_plane!(config_root)
