@@ -1,25 +1,39 @@
 defmodule SymphonyElixir.HostScheduler do
   @moduledoc """
-  Host-owned poll timing, weighted scheduling, and slot accounting.
+  Registry-generation owner for target polling, weighted grants, and host slots.
 
-  A poll grant is current only while it remains in this process. A target must
-  reserve the grant before one dispatch attempt. Release operations are
-  idempotent, so overlapping worker-exit, cancellation, and lease-loss paths
-  cannot return a slot twice.
+  Poll grants are issued one at a time by weighted deficit round-robin. Every
+  grant is fenced to one target process and one verified registry generation.
+  Agent, startup, reviewer, poll, runner, and target ceilings are accounted in
+  this process so overlapping release paths cannot return a slot twice.
   """
 
   use GenServer
   require Logger
 
+  alias SymphonyElixir.ControlPlane.TokenBudget
+  alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.HostScheduler.Policy
-  alias SymphonyElixir.{Orchestrator, TargetContext, TargetSupervisor}
+  alias SymphonyElixir.HostScheduler.Registry
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.RunAuthority
+  alias SymphonyElixir.TargetContext
+  alias SymphonyElixir.TargetSupervisor
 
   @default_max_credit_rounds 4
+  @default_registry_reload_interval_ms 1_000
 
   defmodule Grant do
     @moduledoc false
 
-    @enforce_keys [:id, :scheduler, :target_id, :target_pid, :issued_at]
+    @enforce_keys [
+      :id,
+      :scheduler,
+      :target_id,
+      :target_pid,
+      :registry_generation,
+      :issued_at
+    ]
     defstruct @enforce_keys
 
     @type t :: %__MODULE__{
@@ -27,8 +41,16 @@ defmodule SymphonyElixir.HostScheduler do
             scheduler: GenServer.server(),
             target_id: String.t(),
             target_pid: pid(),
+            registry_generation: String.t(),
             issued_at: DateTime.t()
           }
+  end
+
+  defmodule TargetState do
+    @moduledoc false
+
+    @enforce_keys [:context, :limits]
+    defstruct [:context, :limits, :pid, :monitor, :next_poll_due_at_ms, managed?: false]
   end
 
   defmodule State do
@@ -38,21 +60,28 @@ defmodule SymphonyElixir.HostScheduler do
       :name,
       :target_supervisor,
       :orchestrator_opts,
-      :target_context,
-      :poll_interval_ms,
-      :limits,
+      :registry_loader,
+      :registry_reload_interval_ms,
+      :host_limits,
+      :targets,
       :policy
     ]
     defstruct @enforce_keys ++
                 [
-                  :target_pid,
-                  :target_monitor,
-                  :timer_ref,
-                  :timer_token,
+                  :registry_path,
+                  :registry_generation,
+                  :registry_error,
+                  :reload_timer_ref,
+                  :reload_timer_token,
+                  :poll_timer_ref,
+                  :poll_timer_token,
                   :next_poll_due_at_ms,
+                  registry_verified?: true,
                   next_grant_id: 1,
                   grants: %{},
-                  reviewers: %{}
+                  reviewers: %{},
+                  retired_targets: %{},
+                  connection_backoffs: %{}
                 ]
 
     @type t :: %__MODULE__{}
@@ -64,10 +93,14 @@ defmodule SymphonyElixir.HostScheduler do
     GenServer.start_link(__MODULE__, Keyword.put(opts, :name, name), name: name)
   end
 
-  @spec register_target(GenServer.server(), String.t(), pid()) :: :ok
-  def register_target(server, target_id, target_pid)
-      when is_binary(target_id) and is_pid(target_pid) do
-    GenServer.cast(server, {:register_target, target_id, target_pid})
+  @spec register_target(GenServer.server(), TargetContext.t(), pid()) :: :ok
+  def register_target(
+        server,
+        %TargetContext{target_id: target_id, registry_generation: registry_generation},
+        target_pid
+      )
+      when is_binary(target_id) and is_binary(registry_generation) and is_pid(target_pid) do
+    GenServer.cast(server, {:register_target, target_id, registry_generation, target_pid})
   end
 
   @spec request_poll(GenServer.server(), String.t()) :: %{queued: true, coalesced: boolean()}
@@ -80,9 +113,21 @@ defmodule SymphonyElixir.HostScheduler do
     GenServer.call(scheduler, {:reserve_dispatch, grant})
   end
 
-  @spec finish_poll(Grant.t(), boolean()) :: :ok
-  def finish_poll(%Grant{scheduler: scheduler} = grant, continue?) when is_boolean(continue?) do
-    GenServer.call(scheduler, {:finish_poll, grant, continue?})
+  @spec confirm_budget(Grant.t(), RunAuthority.t()) ::
+          :ok | {:error, :budget_reservation | :stale_grant}
+  def confirm_budget(%Grant{scheduler: scheduler} = grant, %RunAuthority{} = authority) do
+    case budget_proof(authority) do
+      {:ok, proof} -> GenServer.call(scheduler, {:confirm_budget, grant, proof})
+      {:error, _reason} -> {:error, :budget_reservation}
+    end
+  end
+
+  @spec finish_poll(Grant.t(), boolean() | {:defer, pos_integer()}) :: :ok
+  def finish_poll(%Grant{scheduler: scheduler} = grant, result)
+      when is_boolean(result) or
+             (is_tuple(result) and tuple_size(result) == 2 and elem(result, 0) == :defer and
+                is_integer(elem(result, 1)) and elem(result, 1) > 0) do
+    GenServer.call(scheduler, {:finish_poll, grant, result})
   end
 
   @spec release_dispatch(Grant.t()) :: :ok
@@ -116,196 +161,618 @@ defmodule SymphonyElixir.HostScheduler do
 
   @impl true
   def init(opts) do
-    target_context = Keyword.get(opts, :target_context)
-    limits = scheduler_limits(target_context, Keyword.get(opts, :limits, %{}))
-    poll_interval_ms = limits.polls.interval_ms
-    target_id = target_id(target_context)
-    targets = if target_id, do: [{target_id, Keyword.get(opts, :target_weight, 1)}], else: []
+    registry_path = Keyword.get(opts, :registry_path)
+    registry_loader = Keyword.get(opts, :registry_loader, &Registry.load/1)
 
-    case Policy.new(
-           targets,
-           Keyword.get(opts, :max_credit_rounds, @default_max_credit_rounds)
-         ) do
-      {:ok, policy} ->
-        state = %State{
-          name: Keyword.fetch!(opts, :name),
-          target_supervisor: Keyword.get(opts, :target_supervisor, TargetSupervisor),
-          orchestrator_opts: Keyword.get(opts, :orchestrator_opts, []),
-          target_context: target_context,
-          poll_interval_ms: poll_interval_ms,
-          limits: limits,
-          policy: policy
-        }
+    with {:ok, runtime} <- initial_runtime(registry_path, registry_loader, opts),
+         {:ok, policy} <-
+           Policy.new(
+             runtime.weights,
+             max_credit_rounds(runtime.host, opts)
+           ) do
+      state = %State{
+        name: Keyword.fetch!(opts, :name),
+        target_supervisor: Keyword.get(opts, :target_supervisor, TargetSupervisor),
+        orchestrator_opts: Keyword.get(opts, :orchestrator_opts, []),
+        registry_path: registry_path,
+        registry_loader: registry_loader,
+        registry_reload_interval_ms:
+          positive_integer(
+            Keyword.get(opts, :registry_reload_interval_ms),
+            @default_registry_reload_interval_ms
+          ),
+        registry_generation: runtime.generation,
+        host_limits: scheduler_limits(runtime.host, runtime.contexts, Keyword.get(opts, :limits, %{})),
+        targets: target_states(runtime.contexts, runtime.host, Keyword.get(opts, :limits, %{})),
+        policy: policy
+      }
 
-        {:ok, state, {:continue, :start_target}}
-
-      {:error, reason} ->
-        {:stop, reason}
-    end
-  end
-
-  @impl true
-  def handle_continue(:start_target, %State{target_context: nil} = state), do: {:noreply, state}
-
-  def handle_continue(:start_target, %State{target_supervisor: false} = state),
-    do: {:noreply, state}
-
-  def handle_continue(:start_target, %State{} = state) do
-    opts =
-      state.orchestrator_opts
-      |> Keyword.put(:target_context, state.target_context)
-      |> Keyword.put(:host_scheduler, state.name)
-
-    case TargetSupervisor.start_target(state.target_supervisor, opts) do
-      {:ok, pid} -> {:noreply, register_target_process(state, pid)}
-      {:error, {:already_started, pid}} -> {:noreply, register_target_process(state, pid)}
-      {:error, reason} -> {:stop, {:target_start_failed, reason}, state}
-    end
-  end
-
-  @impl true
-  def handle_cast({:register_target, target_id, pid}, %State{} = state) do
-    if target_id == target_id(state.target_context) do
-      {:noreply, register_target_process(state, pid)}
+      {:ok, state, {:continue, :start_targets}}
     else
-      {:noreply, state}
+      {:error, reason} -> {:stop, reason}
     end
+  end
+
+  @impl true
+  def handle_continue(:start_targets, %State{} = state) do
+    state = state |> start_targets() |> schedule_registry_reload() |> schedule_dispatch()
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_cast(
+        {:register_target, target_id, registry_generation, pid},
+        %State{} = state
+      ) do
+    state =
+      case Map.fetch(state.targets, target_id) do
+        {:ok,
+         %TargetState{
+           context: %TargetContext{registry_generation: ^registry_generation}
+         } = target} ->
+          state
+          |> replace_target_process(target_id, target, pid, false)
+          |> schedule_dispatch()
+
+        _missing_or_stale ->
+          state
+      end
+
+    {:noreply, state}
   end
 
   @impl true
   def handle_call({:request_poll, target_id}, _from, state) do
-    matches? = target_id == target_id(state.target_context)
-    coalesced = not matches? or poll_in_progress?(state) or poll_due?(state)
-    state = if matches? and not coalesced, do: schedule_poll(state, 0), else: state
-    {:reply, %{queued: true, coalesced: coalesced}, state}
+    case Map.fetch(state.targets, target_id) do
+      {:ok, %TargetState{} = target} ->
+        coalesced =
+          not grantable_target?(state, target) or target_poll_in_progress?(state, target_id) or
+            due_now?(target.next_poll_due_at_ms)
+
+        state =
+          if coalesced do
+            state
+          else
+            state
+            |> put_target(target_id, %{target | next_poll_due_at_ms: monotonic_ms()})
+            |> schedule_dispatch()
+          end
+
+        {:reply, %{queued: true, coalesced: coalesced}, state}
+
+      :error ->
+        {:reply, %{queued: true, coalesced: true}, state}
+    end
   end
 
   def handle_call({:reserve_dispatch, %Grant{} = grant}, _from, state) do
     case Map.get(state.grants, grant.id) do
       %{grant: ^grant, poll: true, dispatch_attempted: false} = entry ->
-        if dispatch_capacity_available?(state) do
-          updated = %{entry | agent: true, startup: true, dispatch_attempted: true}
-          {:reply, :ok, put_grant(state, grant.id, updated)}
-        else
-          {:reply, {:error, :capacity}, state}
-        end
+        reserve_dispatch_reply(state, grant, entry)
 
       _missing_or_used ->
         {:reply, {:error, :stale_grant}, state}
     end
   end
 
-  def handle_call({:finish_poll, %Grant{} = grant, continue?}, _from, state) do
-    state = release_slots(state, grant, [:poll])
-    state = if continue?, do: schedule_poll(state, state.poll_interval_ms), else: cancel_poll(state)
+  def handle_call({:confirm_budget, %Grant{} = grant, proof}, _from, state) do
+    case Map.get(state.grants, grant.id) do
+      %{grant: ^grant, agent: true, startup: true, budget_confirmed: false} = entry ->
+        confirm_budget_reply(state, grant, proof, entry)
+
+      %{grant: ^grant, budget_confirmed: true} ->
+        confirmed_budget_reply(state, grant)
+
+      _missing_or_unreserved ->
+        {:reply, {:error, :stale_grant}, state}
+    end
+  end
+
+  def handle_call({:finish_poll, %Grant{} = grant, result}, _from, state) do
+    state =
+      state
+      |> release_slots(grant, [:poll])
+      |> schedule_target_after_poll(grant, result)
+      |> schedule_dispatch()
+
     {:reply, :ok, state}
   end
 
   def handle_call({:release_slots, %Grant{} = grant, slots}, _from, state) do
-    {:reply, :ok, release_slots(state, grant, slots)}
+    state = state |> release_slots(grant, slots) |> stop_idle_retired_targets() |> schedule_dispatch()
+    {:reply, :ok, state}
   end
 
   def handle_call({:reserve_reviewer, target_id, owner}, _from, state) do
-    if target_id == target_id(state.target_context) and map_size(state.reviewers) < state.limits.reviewers do
+    if reviewer_capacity_available?(state, target_id) do
       reservation = make_ref()
-      {:reply, {:ok, reservation}, %{state | reviewers: Map.put(state.reviewers, reservation, owner)}}
+      reviewer = %{target_id: target_id, owner: owner}
+      {:reply, {:ok, reservation}, %{state | reviewers: Map.put(state.reviewers, reservation, reviewer)}}
     else
       {:reply, {:error, :capacity}, state}
     end
   end
 
   def handle_call({:release_reviewer, reservation}, _from, state) do
-    {:reply, :ok, %{state | reviewers: Map.delete(state.reviewers, reservation)}}
+    state = %{state | reviewers: Map.delete(state.reviewers, reservation)} |> stop_idle_retired_targets()
+    {:reply, :ok, state}
   end
 
   def handle_call(:snapshot, _from, state) do
     {:reply,
      %{
        counts: slot_counts(state),
-       limits: state.limits,
+       limits: state.host_limits,
        grants: map_size(state.grants),
        next_poll_in_ms: next_poll_in_ms(state),
-       policy: state.policy
+       policy: state.policy,
+       registry: %{
+         path: state.registry_path,
+         generation: state.registry_generation,
+         verified?: state.registry_verified?,
+         error: state.registry_error
+       },
+       targets: target_snapshots(state)
      }, state}
   end
 
-  @impl true
-  def handle_info({:poll_tick, token}, %State{timer_token: token} = state) do
-    state = %{state | timer_ref: nil, timer_token: nil, next_poll_due_at_ms: nil}
-
-    case issue_poll_grant(state) do
-      {:ok, state} -> {:noreply, state}
-      {:idle, state} -> {:noreply, schedule_poll(state, state.poll_interval_ms)}
+  defp reserve_dispatch_reply(state, grant, entry) do
+    if current_grant?(state, grant) and dispatch_capacity_available?(state, entry) do
+      updated = %{entry | agent: true, startup: true, dispatch_attempted: true}
+      {:reply, :ok, put_grant(state, grant.id, updated)}
+    else
+      reason = if current_grant?(state, grant), do: :capacity, else: :stale_grant
+      {:reply, {:error, reason}, state}
     end
+  end
+
+  defp confirm_budget_reply(state, grant, proof, entry) do
+    if current_grant?(state, grant) and valid_budget_proof?(proof, grant) do
+      {:reply, :ok, put_grant(state, grant.id, %{entry | budget_confirmed: true})}
+    else
+      reason = if current_grant?(state, grant), do: :budget_reservation, else: :stale_grant
+      {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp confirmed_budget_reply(state, grant) do
+    if current_grant?(state, grant),
+      do: {:reply, :ok, state},
+      else: {:reply, {:error, :stale_grant}, state}
+  end
+
+  @impl true
+  def handle_info({:poll_tick, token}, %State{poll_timer_token: token} = state) do
+    state = %{state | poll_timer_ref: nil, poll_timer_token: nil, next_poll_due_at_ms: nil}
+    {:noreply, state |> issue_available_poll_grants() |> schedule_dispatch()}
   end
 
   def handle_info({:poll_tick, _stale_token}, state), do: {:noreply, state}
 
-  def handle_info({:DOWN, reference, :process, pid, _reason}, %State{} = state) do
-    if reference == state.target_monitor and pid == state.target_pid,
-      do: {:noreply, clear_target_process(state)},
-      else: {:noreply, state}
-  end
+  def handle_info({:registry_reload, token}, %State{reload_timer_token: token} = state) do
+    state = %{state | reload_timer_ref: nil, reload_timer_token: nil}
 
-  defp register_target_process(%State{target_pid: pid} = state, pid) when is_pid(pid) do
-    if is_reference(state.timer_ref), do: state, else: schedule_poll(state, 0)
-  end
-
-  defp register_target_process(%State{} = state, pid) when is_pid(pid) do
-    state = clear_target_process(state)
-    monitor = Process.monitor(pid)
-
-    state
-    |> Map.put(:target_pid, pid)
-    |> Map.put(:target_monitor, monitor)
-    |> schedule_poll(0)
-  end
-
-  defp clear_target_process(%State{target_pid: pid} = state) when is_pid(pid) do
-    if is_reference(state.target_monitor), do: Process.demonitor(state.target_monitor, [:flush])
-    grants = Map.reject(state.grants, fn {_id, entry} -> entry.grant.target_pid == pid end)
-    reviewers = Map.reject(state.reviewers, fn {_reservation, owner} -> owner == pid end)
-
-    %{state | target_pid: nil, target_monitor: nil, grants: grants, reviewers: reviewers}
-    |> cancel_poll()
-  end
-
-  defp clear_target_process(state), do: state
-
-  defp issue_poll_grant(%State{target_pid: pid} = state) when is_pid(pid) do
-    target_id = target_id(state.target_context)
-
-    if slot_counts(state).polls < state.limits.polls.max_concurrent do
-      case Policy.next(state.policy, [target_id]) do
-        {:grant, ^target_id, policy} ->
-          grant = %Grant{
-            id: state.next_grant_id,
-            scheduler: state.name,
-            target_id: target_id,
-            target_pid: pid,
-            issued_at: DateTime.utc_now()
-          }
-
-          entry = %{grant: grant, poll: true, agent: false, startup: false, dispatch_attempted: false}
-          Orchestrator.dispatch_grant(pid, grant)
-
-          {:ok,
-           %{
-             state
-             | policy: policy,
-               next_grant_id: state.next_grant_id + 1,
-               grants: Map.put(state.grants, grant.id, entry)
-           }}
-
-        {:idle, policy} ->
-          {:idle, %{state | policy: policy}}
+    state =
+      case load_registry(state) do
+        {:ok, loaded} -> apply_loaded_registry(state, loaded)
+        {:error, reason} -> %{state | registry_verified?: false, registry_error: reason}
       end
-    else
-      {:idle, state}
+
+    {:noreply, state |> schedule_registry_reload() |> schedule_dispatch()}
+  end
+
+  def handle_info({:registry_reload, _stale_token}, state), do: {:noreply, state}
+
+  def handle_info({:DOWN, reference, :process, pid, _reason}, %State{} = state) do
+    state =
+      cond do
+        Map.has_key?(state.retired_targets, pid) ->
+          clear_retired_process(state, pid, reference)
+
+        target_id = current_target_for_monitor(state, reference, pid) ->
+          clear_current_target_process(state, target_id, pid)
+
+        true ->
+          state
+      end
+
+    {:noreply, schedule_dispatch(state)}
+  end
+
+  defp initial_runtime(nil, _registry_loader, opts) do
+    target_context = Keyword.get(opts, :target_context)
+    contexts = if match?(%TargetContext{}, target_context), do: %{target_context.target_id => target_context}, else: %{}
+    weight = Keyword.get(opts, :target_weight, 1)
+    weights = Enum.map(contexts, fn {target_id, _context} -> {target_id, weight} end)
+
+    {:ok, %{contexts: contexts, generation: target_generation(target_context), host: nil, weights: weights}}
+  end
+
+  defp initial_runtime(registry_path, registry_loader, _opts) when is_binary(registry_path) do
+    case invoke_registry_loader(registry_loader, registry_path) do
+      {:ok, %{snapshot: snapshot, contexts: contexts} = loaded} ->
+        {:ok,
+         %{
+           contexts: contexts,
+           generation: snapshot.generation,
+           host: snapshot.host,
+           weights: registry_weights(loaded)
+         }}
+
+      {:error, reason} ->
+        {:error, {:registry_start_failed, reason}}
+
+      other ->
+        {:error, {:registry_start_failed, {:invalid_loader_result, other}}}
     end
   end
 
-  defp issue_poll_grant(state), do: {:idle, state}
+  defp initial_runtime(_registry_path, _registry_loader, _opts), do: {:error, :invalid_registry_path}
+
+  defp invoke_registry_loader(loader, path) when is_function(loader, 1), do: loader.(path)
+  defp invoke_registry_loader(_loader, _path), do: {:error, :invalid_registry_loader}
+
+  defp load_registry(%State{registry_path: path, registry_loader: loader}) when is_binary(path),
+    do: invoke_registry_loader(loader, path)
+
+  defp load_registry(_state), do: {:error, :registry_not_configured}
+
+  defp apply_loaded_registry(state, %{snapshot: snapshot, contexts: contexts} = loaded) do
+    if snapshot.generation == state.registry_generation do
+      %{state | registry_verified?: true, registry_error: nil}
+    else
+      case Policy.new(registry_weights(loaded), max_credit_rounds(snapshot.host, [])) do
+        {:ok, policy} ->
+          state
+          |> retire_current_targets()
+          |> Map.put(:registry_generation, snapshot.generation)
+          |> Map.put(:registry_verified?, true)
+          |> Map.put(:registry_error, nil)
+          |> Map.put(:host_limits, scheduler_limits(snapshot.host, contexts, %{}))
+          |> Map.put(:targets, target_states(contexts, snapshot.host, %{}))
+          |> Map.put(:policy, policy)
+          |> start_targets()
+          |> stop_idle_retired_targets()
+
+        {:error, reason} ->
+          %{state | registry_verified?: false, registry_error: reason}
+      end
+    end
+  end
+
+  defp start_targets(%State{} = state) do
+    Enum.reduce(Map.keys(state.targets) |> Enum.sort(), state, fn target_id, state ->
+      case Map.fetch!(state.targets, target_id) do
+        %TargetState{context: %TargetContext{state: target_state}} = target
+        when target_state in [:active, :draining] ->
+          start_target(state, target_id, target)
+
+        _inactive ->
+          state
+      end
+    end)
+  end
+
+  defp start_target(%State{target_supervisor: false} = state, _target_id, _target), do: state
+
+  defp start_target(%State{} = state, target_id, %TargetState{} = target) do
+    opts =
+      state.orchestrator_opts
+      |> Keyword.put(:target_context, target.context)
+      |> Keyword.put(:host_scheduler, state.name)
+      |> target_process_name(state, target_id, target.context.registry_generation)
+
+    case TargetSupervisor.start_target(state.target_supervisor, opts) do
+      {:ok, pid} ->
+        replace_target_process(state, target_id, target, pid, true)
+
+      {:error, {:already_started, pid}} ->
+        replace_target_process(state, target_id, target, pid, true)
+
+      {:error, reason} ->
+        Logger.error("Target process start failed target_id=#{target_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp target_process_name(opts, %State{registry_path: nil}, _target_id, _generation),
+    do: opts
+
+  defp target_process_name(opts, %State{} = state, target_id, generation) do
+    Keyword.put(
+      opts,
+      :name,
+      {:global, {SymphonyElixir.Orchestrator, state.name, target_id, generation}}
+    )
+  end
+
+  defp replace_target_process(state, target_id, %TargetState{pid: pid} = target, pid, managed?)
+       when is_pid(pid) do
+    target = %{target | managed?: target.managed? or managed?}
+
+    state
+    |> put_target(target_id, target)
+    |> ensure_target_poll_due(target_id)
+  end
+
+  defp replace_target_process(state, target_id, %TargetState{} = target, pid, managed?)
+       when is_pid(pid) do
+    state = clear_current_target_process(state, target_id, target.pid)
+    monitor = Process.monitor(pid)
+
+    updated = %{
+      target
+      | pid: pid,
+        monitor: monitor,
+        managed?: managed?,
+        next_poll_due_at_ms: initial_poll_due(state, target.context)
+    }
+
+    put_target(state, target_id, updated)
+  end
+
+  defp ensure_target_poll_due(state, target_id) do
+    case Map.fetch(state.targets, target_id) do
+      {:ok, %TargetState{next_poll_due_at_ms: nil} = target} ->
+        put_target(state, target_id, %{target | next_poll_due_at_ms: initial_poll_due(state, target.context)})
+
+      _already_due ->
+        state
+    end
+  end
+
+  defp initial_poll_due(state, %TargetContext{state: :active}) do
+    if state.registry_verified?, do: monotonic_ms(), else: nil
+  end
+
+  defp initial_poll_due(_state, _context), do: nil
+
+  defp retire_current_targets(state) do
+    {grants, retired_targets} =
+      Enum.reduce(state.targets, {state.grants, state.retired_targets}, fn {_target_id, target}, {grants, retired} ->
+        grants = retire_target_grants(grants, target)
+        retired = put_retired_target(retired, target)
+        {grants, retired}
+      end)
+
+    cancel_poll_timer(%{state | targets: %{}, grants: grants, retired_targets: retired_targets})
+  end
+
+  defp retire_target_grants(grants, target) do
+    grants
+    |> Map.new(fn {grant_id, entry} ->
+      if entry.grant.target_pid == target.pid,
+        do: {grant_id, %{entry | poll: false}},
+        else: {grant_id, entry}
+    end)
+    |> Map.reject(fn {_grant_id, entry} -> not entry.agent and not entry.startup and not entry.poll end)
+  end
+
+  defp put_retired_target(retired, %TargetState{pid: pid} = target) when is_pid(pid) do
+    Map.put(retired, pid, %{
+      target_id: target.context.target_id,
+      monitor: target.monitor,
+      managed?: target.managed?
+    })
+  end
+
+  defp put_retired_target(retired, _target), do: retired
+
+  defp clear_current_target_process(state, _target_id, nil), do: state
+
+  defp clear_current_target_process(state, target_id, pid) when is_pid(pid) do
+    case Map.fetch(state.targets, target_id) do
+      {:ok, %TargetState{pid: ^pid} = target} ->
+        if is_reference(target.monitor), do: Process.demonitor(target.monitor, [:flush])
+
+        state
+        |> clear_process_resources(pid)
+        |> put_target(target_id, %{
+          target
+          | pid: nil,
+            monitor: nil,
+            next_poll_due_at_ms: nil,
+            managed?: false
+        })
+
+      _other ->
+        state
+    end
+  end
+
+  defp clear_retired_process(state, pid, reference) do
+    case Map.get(state.retired_targets, pid) do
+      %{monitor: ^reference} ->
+        state
+        |> clear_process_resources(pid)
+        |> Map.update!(:retired_targets, &Map.delete(&1, pid))
+
+      _other ->
+        state
+    end
+  end
+
+  defp clear_process_resources(state, pid) do
+    grants = Map.reject(state.grants, fn {_id, entry} -> entry.grant.target_pid == pid end)
+    reviewers = Map.reject(state.reviewers, fn {_reservation, reviewer} -> reviewer.owner == pid end)
+    %{state | grants: grants, reviewers: reviewers}
+  end
+
+  defp current_target_for_monitor(state, reference, pid) do
+    Enum.find_value(state.targets, fn {target_id, target} ->
+      if target.monitor == reference and target.pid == pid, do: target_id, else: nil
+    end)
+  end
+
+  defp issue_available_poll_grants(state) do
+    if state.registry_verified? and slot_counts(state).polls < state.host_limits.polls.max_concurrent do
+      now_ms = monotonic_ms()
+      eligible = eligible_target_ids(state, now_ms)
+
+      case Policy.next(state.policy, eligible) do
+        {:grant, target_id, policy} ->
+          state
+          |> Map.put(:policy, policy)
+          |> issue_poll_grant(target_id)
+          |> issue_available_poll_grants()
+
+        {:idle, policy} ->
+          %{state | policy: policy}
+      end
+    else
+      state
+    end
+  end
+
+  defp issue_poll_grant(state, target_id) do
+    target = Map.fetch!(state.targets, target_id)
+
+    grant = %Grant{
+      id: state.next_grant_id,
+      scheduler: state.name,
+      target_id: target_id,
+      target_pid: target.pid,
+      registry_generation: target.context.registry_generation,
+      issued_at: DateTime.utc_now()
+    }
+
+    entry = %{
+      grant: grant,
+      poll: true,
+      agent: false,
+      startup: false,
+      dispatch_attempted: false,
+      budget_confirmed: false,
+      runner_id: target_runner_id(target.context)
+    }
+
+    Orchestrator.dispatch_grant(target.pid, grant)
+
+    state
+    |> put_target(target_id, %{target | next_poll_due_at_ms: nil})
+    |> Map.put(:next_grant_id, state.next_grant_id + 1)
+    |> Map.put(:grants, Map.put(state.grants, grant.id, entry))
+  end
+
+  defp eligible_target_ids(state, now_ms) do
+    state.targets
+    |> Enum.flat_map(fn {target_id, target} ->
+      if grantable_target?(state, target) and due_at?(target.next_poll_due_at_ms, now_ms) and
+           not target_poll_in_progress?(state, target_id) and
+           not connection_backoff_active?(state, target.context, now_ms) do
+        [target_id]
+      else
+        []
+      end
+    end)
+    |> Enum.sort()
+  end
+
+  defp grantable_target?(state, %TargetState{context: context, pid: pid}) do
+    state.registry_verified? and is_pid(pid) and Process.alive?(pid) and context.state == :active and
+      context.registry_generation == state.registry_generation
+  end
+
+  defp target_poll_in_progress?(state, target_id) do
+    Enum.any?(state.grants, fn {_id, entry} -> entry.poll and entry.grant.target_id == target_id end)
+  end
+
+  defp schedule_target_after_poll(state, grant, result) do
+    case Map.fetch(state.targets, grant.target_id) do
+      {:ok,
+       %TargetState{
+         pid: pid,
+         context: %TargetContext{registry_generation: generation}
+       } = target}
+      when pid == grant.target_pid and generation == grant.registry_generation ->
+        now_ms = monotonic_ms()
+
+        {next_due, state} =
+          case result do
+            true ->
+              {now_ms + target.limits.poll_interval_ms, state}
+
+            false ->
+              {nil, state}
+
+            {:defer, delay_ms} ->
+              state = put_connection_backoff(state, target.context, now_ms + delay_ms)
+              {now_ms + max(target.limits.poll_interval_ms, delay_ms), state}
+          end
+
+        put_target(state, grant.target_id, %{target | next_poll_due_at_ms: next_due})
+
+      _stale_target ->
+        state
+    end
+  end
+
+  defp schedule_dispatch(%State{} = state) do
+    state = cancel_poll_timer(state)
+
+    case next_dispatch_delay(state) do
+      nil ->
+        state
+
+      delay_ms ->
+        token = make_ref()
+        timer_ref = Process.send_after(self(), {:poll_tick, token}, delay_ms)
+
+        %{
+          state
+          | poll_timer_ref: timer_ref,
+            poll_timer_token: token,
+            next_poll_due_at_ms: monotonic_ms() + delay_ms
+        }
+    end
+  end
+
+  defp next_dispatch_delay(state) do
+    if poll_capacity_available?(state) do
+      now_ms = monotonic_ms()
+
+      state.targets
+      |> Enum.flat_map(&target_dispatch_delay(state, &1, now_ms))
+      |> Enum.min(fn -> nil end)
+    end
+  end
+
+  defp poll_capacity_available?(state),
+    do: state.registry_verified? and slot_counts(state).polls < state.host_limits.polls.max_concurrent
+
+  defp target_dispatch_delay(state, {target_id, target}, now_ms) do
+    if grantable_target?(state, target) and not target_poll_in_progress?(state, target_id) and
+         is_integer(target.next_poll_due_at_ms) do
+      due_at = target_dispatch_due_at(state, target)
+      [max(0, due_at - now_ms)]
+    else
+      []
+    end
+  end
+
+  defp target_dispatch_due_at(state, target) do
+    case connection_backoff_until(state, target.context) do
+      nil -> target.next_poll_due_at_ms
+      backoff_until -> max(target.next_poll_due_at_ms, backoff_until)
+    end
+  end
+
+  defp cancel_poll_timer(%State{poll_timer_ref: timer_ref} = state) when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    %{state | poll_timer_ref: nil, poll_timer_token: nil, next_poll_due_at_ms: nil}
+  end
+
+  defp cancel_poll_timer(state),
+    do: %{state | poll_timer_ref: nil, poll_timer_token: nil, next_poll_due_at_ms: nil}
+
+  defp schedule_registry_reload(%State{registry_path: path} = state) when is_binary(path) do
+    if is_reference(state.reload_timer_ref), do: Process.cancel_timer(state.reload_timer_ref)
+    token = make_ref()
+    timer_ref = Process.send_after(self(), {:registry_reload, token}, state.registry_reload_interval_ms)
+    %{state | reload_timer_ref: timer_ref, reload_timer_token: token}
+  end
+
+  defp schedule_registry_reload(state), do: state
 
   defp release_slots(state, %Grant{} = grant, slots) do
     case Map.get(state.grants, grant.id) do
@@ -324,9 +791,66 @@ defmodule SymphonyElixir.HostScheduler do
       else: %{state | grants: Map.delete(state.grants, grant_id)}
   end
 
-  defp dispatch_capacity_available?(state) do
-    counts = slot_counts(state)
-    counts.agents < state.limits.agents and counts.startups < state.limits.startups
+  defp current_grant?(state, %Grant{} = grant) do
+    state.registry_verified? and grant.registry_generation == state.registry_generation and
+      case Map.get(state.targets, grant.target_id) do
+        %TargetState{pid: pid, context: %TargetContext{registry_generation: generation}} ->
+          pid == grant.target_pid and generation == grant.registry_generation
+
+        _missing ->
+          false
+      end
+  end
+
+  defp dispatch_capacity_available?(state, entry) do
+    target_id = entry.grant.target_id
+    target = Map.get(state.targets, target_id)
+    host_counts = slot_counts(state)
+    target_counts = target_slot_counts(state, target_id)
+
+    match?(%TargetState{}, target) and host_counts.agents < state.host_limits.agents and
+      host_counts.startups < state.host_limits.startups and
+      target_counts.agents < target.limits.agents and
+      target_counts.startups < target.limits.startups and
+      runner_capacity_available?(state, entry.runner_id)
+  end
+
+  defp reviewer_capacity_available?(state, target_id) do
+    case Map.get(state.targets, target_id) do
+      %TargetState{} = target ->
+        grantable_target?(state, target) and
+          slot_counts(state).reviewers < state.host_limits.reviewers and
+          target_slot_counts(state, target_id).reviewers < target.limits.reviewers
+
+      _missing ->
+        false
+    end
+  end
+
+  defp runner_capacity_available?(_state, nil), do: true
+
+  defp runner_capacity_available?(state, runner_id) do
+    case Map.get(state.host_limits.runners, runner_id) do
+      %{agents: agent_limit, startups: startup_limit} ->
+        counts = runner_slot_counts(state, runner_id)
+        counts.agents < agent_limit and counts.startups < startup_limit
+
+      _unconfigured ->
+        true
+    end
+  end
+
+  defp runner_slot_counts(state, runner_id) do
+    Enum.reduce(state.grants, %{agents: 0, startups: 0}, fn {_id, entry}, counts ->
+      if entry.runner_id == runner_id do
+        %{
+          agents: counts.agents + if(entry.agent, do: 1, else: 0),
+          startups: counts.startups + if(entry.startup, do: 1, else: 0)
+        }
+      else
+        counts
+      end
+    end)
   end
 
   defp slot_counts(state) do
@@ -341,68 +865,246 @@ defmodule SymphonyElixir.HostScheduler do
     end)
   end
 
-  defp scheduler_limits(target_context, configured) when is_map(configured) do
-    target_limits = if match?(%TargetContext{}, target_context), do: target_context.capacity_limits, else: %{}
-    agents = positive_limit(configured, :agents, target_limits, "max_concurrent_agents", 1)
-    startups = positive_limit(configured, :startups, target_limits, "max_concurrent_startups", 1)
+  defp target_slot_counts(state, target_id) do
+    grant_counts =
+      Enum.reduce(state.grants, %{agents: 0, startups: 0, polls: 0}, fn {_id, entry}, counts ->
+        if entry.grant.target_id == target_id do
+          %{
+            agents: counts.agents + if(entry.agent, do: 1, else: 0),
+            startups: counts.startups + if(entry.startup, do: 1, else: 0),
+            polls: counts.polls + if(entry.poll, do: 1, else: 0)
+          }
+        else
+          counts
+        end
+      end)
+
+    reviewers = Enum.count(state.reviewers, fn {_reservation, reviewer} -> reviewer.target_id == target_id end)
+    Map.put(grant_counts, :reviewers, reviewers)
+  end
+
+  defp stop_idle_retired_targets(state) do
+    Enum.reduce(state.retired_targets, state, &stop_idle_retired_target/2)
+  end
+
+  defp stop_idle_retired_target({pid, retired}, state) do
+    if retired_process_busy?(state, pid) do
+      state
+    else
+      terminate_retired_target(state, pid, retired)
+    end
+  end
+
+  defp retired_process_busy?(state, pid) do
+    Enum.any?(state.grants, fn {_id, entry} -> entry.grant.target_pid == pid end) or
+      Enum.any?(state.reviewers, fn {_id, reviewer} -> reviewer.owner == pid end)
+  end
+
+  defp terminate_retired_target(state, pid, retired) do
+    if retired.managed? and state.target_supervisor != false do
+      _ = DynamicSupervisor.terminate_child(state.target_supervisor, pid)
+    end
+
+    if is_reference(retired.monitor), do: Process.demonitor(retired.monitor, [:flush])
+    %{state | retired_targets: Map.delete(state.retired_targets, pid)}
+  end
+
+  defp put_connection_backoff(state, context, until_ms) do
+    case tracker_connection_id(context) do
+      nil -> state
+      connection_id -> %{state | connection_backoffs: Map.put(state.connection_backoffs, connection_id, until_ms)}
+    end
+  end
+
+  defp connection_backoff_active?(state, context, now_ms) do
+    case connection_backoff_until(state, context) do
+      until_ms when is_integer(until_ms) -> until_ms > now_ms
+      nil -> false
+    end
+  end
+
+  defp connection_backoff_until(state, context) do
+    case tracker_connection_id(context) do
+      nil -> nil
+      connection_id -> Map.get(state.connection_backoffs, connection_id)
+    end
+  end
+
+  defp tracker_connection_id(%TargetContext{tracker_connection: %{"id" => id}}) when is_binary(id), do: id
+  defp tracker_connection_id(_context), do: nil
+
+  defp scheduler_limits(host, contexts, configured) when is_map(configured) do
+    host_capacity = if is_map(host), do: Map.get(host, "capacity", %{}), else: %{}
+    host_polling = if is_map(host), do: Map.get(host, "polling", %{}), else: %{}
+    fallback_context = contexts |> Map.values() |> List.first()
+    fallback_limits = if match?(%TargetContext{}, fallback_context), do: fallback_context.capacity_limits, else: %{}
+    fallback_agents = positive_integer(Map.get(fallback_limits, "max_concurrent_agents"), 1)
+    fallback_startups = positive_integer(Map.get(fallback_limits, "max_concurrent_startups"), 1)
+
+    agents =
+      positive_integer(
+        Map.get(configured, :agents),
+        positive_integer(Map.get(host_capacity, "max_concurrent_agents"), fallback_agents)
+      )
+
+    startups =
+      positive_integer(
+        Map.get(configured, :startups),
+        positive_integer(Map.get(host_capacity, "max_concurrent_startups"), fallback_startups)
+      )
 
     %{
       agents: agents,
       startups: startups,
-      reviewers: positive_integer(Map.get(configured, :reviewers), agents),
+      reviewers:
+        positive_integer(
+          Map.get(configured, :reviewers),
+          positive_integer(Map.get(host_capacity, "max_concurrent_reviewers"), agents)
+        ),
       polls: %{
-        max_concurrent: positive_integer(get_in(configured, [:polls, :max_concurrent]), 1),
+        max_concurrent:
+          positive_integer(
+            get_in(configured, [:polls, :max_concurrent]),
+            positive_integer(Map.get(host_polling, "max_concurrent_target_polls"), 1)
+          ),
         interval_ms:
           positive_integer(
             get_in(configured, [:polls, :interval_ms]),
-            positive_integer(Map.get(target_limits, "poll_interval_ms"), 1_000)
+            positive_integer(
+              Map.get(host_polling, "interval_ms"),
+              positive_integer(Map.get(fallback_limits, "poll_interval_ms"), 1_000)
+            )
           )
-      }
+      },
+      runners: runner_limits(host)
     }
   end
 
-  defp positive_limit(configured, configured_key, target_limits, target_key, fallback) do
-    positive_integer(Map.get(configured, configured_key), positive_integer(Map.get(target_limits, target_key), fallback))
+  defp target_states(contexts, host, configured) do
+    host_poll_interval = scheduler_limits(host, contexts, configured).polls.interval_ms
+
+    Map.new(contexts, fn {target_id, context} ->
+      limits = context.capacity_limits
+
+      {target_id,
+       %TargetState{
+         context: context,
+         limits: %{
+           agents: positive_integer(Map.get(limits, "max_concurrent_agents"), 1),
+           startups: positive_integer(Map.get(limits, "max_concurrent_startups"), 1),
+           reviewers:
+             positive_integer(
+               Map.get(limits, "max_concurrent_reviewers"),
+               positive_integer(Map.get(limits, "max_concurrent_agents"), 1)
+             ),
+           poll_interval_ms: positive_integer(Map.get(limits, "poll_interval_ms"), host_poll_interval)
+         }
+       }}
+    end)
   end
+
+  defp runner_limits(%{"runners" => runners}) when is_map(runners) do
+    Map.new(runners, fn {runner_id, limits} ->
+      {runner_id,
+       %{
+         agents: positive_integer(Map.get(limits, "max_concurrent_agents"), 1),
+         startups: positive_integer(Map.get(limits, "max_concurrent_startups"), 1)
+       }}
+    end)
+  end
+
+  defp runner_limits(_host), do: %{}
+
+  defp max_credit_rounds(%{"scheduling" => scheduling}, _opts) when is_map(scheduling),
+    do: positive_integer(Map.get(scheduling, "max_credit_rounds"), @default_max_credit_rounds)
+
+  defp max_credit_rounds(_host, opts),
+    do: positive_integer(Keyword.get(opts, :max_credit_rounds), @default_max_credit_rounds)
+
+  defp registry_weights(%{weights: weights}) when is_list(weights), do: weights
+
+  defp registry_weights(%{snapshot: snapshot, contexts: contexts}) do
+    contexts
+    |> Map.keys()
+    |> Enum.sort()
+    |> Enum.map(fn target_id ->
+      weight =
+        snapshot.targets
+        |> Map.fetch!(target_id)
+        |> Map.get(:effective_policy, %{})
+        |> get_in(["scheduling", "weight"])
+
+      {target_id, positive_integer(weight, 1)}
+    end)
+  end
+
+  defp target_runner_id(%TargetContext{runner_policy: %{"default" => runner_id}}) when is_binary(runner_id),
+    do: runner_id
+
+  defp target_runner_id(_context), do: nil
+
+  defp target_generation(%TargetContext{registry_generation: generation}), do: generation
+  defp target_generation(_context), do: nil
+
+  defp budget_proof(
+         %RunAuthority{
+           admission: %{context: %ExecutionContext{target: %TargetContext{} = target}}
+         } = authority
+       ) do
+    case RunAuthority.fetch_token_budget(authority) do
+      {:ok, :unlimited} when target.budget_limits == %{} ->
+        {:ok, %{target_id: target.target_id, generation: target.registry_generation, reserved?: true}}
+
+      {:ok, %TokenBudget{target_id: target_id, state: :active, reserved_tokens: reserved_tokens}}
+      when target_id == target.target_id and reserved_tokens > 0 ->
+        {:ok, %{target_id: target.target_id, generation: target.registry_generation, reserved?: true}}
+
+      _missing_or_invalid ->
+        {:error, :budget_reservation}
+    end
+  end
+
+  defp budget_proof(_authority), do: {:error, :budget_reservation}
+
+  defp valid_budget_proof?(
+         %{target_id: target_id, generation: generation, reserved?: true},
+         %Grant{target_id: target_id, registry_generation: generation}
+       ),
+       do: true
+
+  defp valid_budget_proof?(_proof, _grant), do: false
+
+  defp target_snapshots(state) do
+    Map.new(state.targets, fn {target_id, target} ->
+      counts = target_slot_counts(state, target_id)
+
+      {target_id,
+       %{
+         state: target.context.state,
+         generation: target.context.registry_generation,
+         pid: target.pid,
+         counts: counts,
+         next_poll_in_ms: due_in_ms(target.next_poll_due_at_ms)
+       }}
+    end)
+  end
+
+  defp put_target(state, target_id, target),
+    do: %{state | targets: Map.put(state.targets, target_id, target)}
+
+  defp due_now?(due_at) when is_integer(due_at), do: due_at <= monotonic_ms()
+  defp due_now?(_due_at), do: false
+
+  defp due_at?(due_at, now_ms) when is_integer(due_at), do: due_at <= now_ms
+  defp due_at?(_due_at, _now_ms), do: false
+
+  defp next_poll_in_ms(%State{next_poll_due_at_ms: due_at}), do: due_in_ms(due_at)
+
+  defp due_in_ms(nil), do: nil
+  defp due_in_ms(due_at) when is_integer(due_at), do: max(0, due_at - monotonic_ms())
 
   defp positive_integer(value, _fallback) when is_integer(value) and value > 0, do: value
   defp positive_integer(_value, fallback), do: fallback
 
-  defp target_id(%TargetContext{target_id: target_id}), do: target_id
-  defp target_id(_target_context), do: nil
-
-  defp schedule_poll(%State{target_pid: pid} = state, delay_ms)
-       when is_pid(pid) and is_integer(delay_ms) and delay_ms >= 0 do
-    state = cancel_poll(state)
-    token = make_ref()
-    timer_ref = Process.send_after(self(), {:poll_tick, token}, delay_ms)
-
-    %{
-      state
-      | timer_ref: timer_ref,
-        timer_token: token,
-        next_poll_due_at_ms: System.monotonic_time(:millisecond) + delay_ms
-    }
-  end
-
-  defp schedule_poll(state, _delay_ms), do: state
-
-  defp cancel_poll(%State{timer_ref: timer_ref} = state) when is_reference(timer_ref) do
-    Process.cancel_timer(timer_ref)
-    %{state | timer_ref: nil, timer_token: nil, next_poll_due_at_ms: nil}
-  end
-
-  defp cancel_poll(state), do: %{state | timer_ref: nil, timer_token: nil, next_poll_due_at_ms: nil}
-
-  defp poll_in_progress?(state), do: slot_counts(state).polls > 0
-
-  defp poll_due?(%State{next_poll_due_at_ms: due_at}) when is_integer(due_at),
-    do: due_at <= System.monotonic_time(:millisecond)
-
-  defp poll_due?(_state), do: false
-
-  defp next_poll_in_ms(%State{next_poll_due_at_ms: nil}), do: nil
-
-  defp next_poll_in_ms(%State{next_poll_due_at_ms: due_at}),
-    do: max(0, due_at - System.monotonic_time(:millisecond))
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 end

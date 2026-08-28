@@ -11,6 +11,7 @@ Usage:
   symphony run <saved-name> [--preview] [--config-root <path>] [--yes]
   symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes] [restrictive options]
   symphony run --workflow /path/to/symphony.runtime.yml [options]
+  symphony host run [--registry <path>] [--env-file <path>|--no-env-file]
   symphony host target <add|import|plan|patch|activate|pause|drain|retire> [options]
 
 Commands:
@@ -19,7 +20,7 @@ Commands:
   list                         List saved workflows for the active repo without starting Symphony.
   run <saved-name>             Preview, confirm, and start a saved workflow.
   run --workflow <path>        Start an explicit runtime file.
-  host                         Preview and confirm target registry changes.
+  host run                     Start all eligible targets from one verified registry generation.
 
 Options:
   --preview                    Resolve and print a saved workflow without side effects.
@@ -34,6 +35,7 @@ Options:
   --max-startups <count>       Lower per-run startup capacity.
   --no-land                    Restrict this run away from auto-land.
   --human-review-only          Route completed work to human review.
+  --registry <path>            Target registry. Default: ~/.config/symphony/targets.yml.
   --config-root <path>         Saved workflow config root. Default: ~/.config/symphony.
   --save <lowercase-slug>      Save a newly built workflow; collisions fail.
   --yes                        Skip the start confirmation.
@@ -232,6 +234,70 @@ run_workflow_cli() {
   exec mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "$@"
 }
 
+run_host_cli() {
+  local repo_root="$1"
+  shift
+
+  local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local env_file="${SYMPHONY_ENV_FILE:-"$HOME/.config/symphony/.env"}"
+  local caller_root="$PWD"
+  local use_env_file=1
+  local cli_args=(host run)
+  local arg value
+
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+
+    case "$arg" in
+      --registry)
+        require_value "$arg" "${2:-}"
+        value="$(expand_path "$2")"
+        cli_args+=("$arg" "$(absolute_path "$value")")
+        shift 2
+        ;;
+      --env-file)
+        require_value "$arg" "${2:-}"
+        env_file="$2"
+        shift 2
+        ;;
+      --no-env-file)
+        use_env_file=0
+        shift
+        ;;
+      --help)
+        use_env_file=0
+        cli_args+=("$1")
+        shift
+        ;;
+      --skip-build)
+        export SYMPHONY_SKIP_BUILD=1
+        shift
+        ;;
+      *)
+        cli_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  symphony_home="$(absolute_path "$(expand_path "$symphony_home")")"
+  env_file="$(absolute_path "$(expand_path "$env_file")")"
+  prepare_elixir_cli "$symphony_home"
+
+  if [[ "$use_env_file" == "1" ]]; then
+    [[ -f "$env_file" ]] || die "env file not found: $env_file; copy symphony.env.example there or pass --no-env-file"
+    command -v op >/dev/null 2>&1 || {
+      printf 'error: op not found on PATH\n' >&2
+      printf 'hint: install the 1Password CLI or pass --no-env-file\n' >&2
+      exit 127
+    }
+
+    exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" op run --env-file "$env_file" -- mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${cli_args[@]}"
+  else
+    exec env "SYMPHONY_HOME=$symphony_home" "SYMPHONY_RUN_REPO_ROOT=$caller_root" mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${cli_args[@]}"
+  fi
+}
+
 run_list_cli() {
   local repo_root="$1"
   shift
@@ -355,6 +421,11 @@ main() {
   if [[ "${1:-}" == "__run" ]]; then
     shift
     run_elixir "$repo_root" "$@"
+  fi
+
+  if [[ "${1:-}" == "host" && "${2:-}" == "run" ]]; then
+    shift 2
+    run_host_cli "$repo_root" "$@"
   fi
 
   if [[ "${1:-}" == "workflow" || "${1:-}" == "setup" || "${1:-}" == "host" ]]; then

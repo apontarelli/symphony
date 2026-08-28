@@ -145,9 +145,17 @@ defmodule SymphonyElixir.CLI do
     host_evaluate = Map.get(deps, :host_evaluate, &SymphonyElixir.HostCLI.evaluate/1)
 
     case host_evaluate.(host_args) do
-      {:ok, output} when is_binary(output) -> {:ok, output}
-      {:error, message} when is_binary(message) -> {:error, message}
-      _other -> {:error, "host_dependency_error"}
+      :ok ->
+        if List.first(host_args) == "run", do: :ok, else: {:error, "host_dependency_error"}
+
+      {:ok, output} when is_binary(output) ->
+        {:ok, output}
+
+      {:error, message} when is_binary(message) ->
+        {:error, message}
+
+      _other ->
+        {:error, "host_dependency_error"}
     end
   rescue
     _exception -> {:error, "host_dependency_error"}
@@ -328,6 +336,7 @@ defmodule SymphonyElixir.CLI do
       symphony run [ISSUE-ID ...] [--repo <path>] [--save <lowercase-slug>] [--preview] [--yes]
         [--max-agents <count>] [--max-startups <count>] [--no-land] [--human-review-only]
       symphony run --workflow <path> [--mode watch|drain|issue_batch] [options]
+      symphony host run [--registry <path>]
       symphony host target <add|import|plan|patch|activate|pause|drain|retire> [options]
       symphony control-plane <inspect|resume|abandon|prune> [options]
     """

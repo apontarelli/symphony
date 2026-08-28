@@ -146,7 +146,16 @@ defmodule SymphonyElixir.TargetContextTest do
              )
 
     expected_tracker =
-      put_in(target.effective_policy["tracker_connection"], ["policy", "api_key"], "resolved-api-key")
+      target.effective_policy["tracker_connection"]
+      |> put_in(["policy", "api_key"], "resolved-api-key")
+      |> Map.put(
+        "coordinator_state_path",
+        Path.join([
+          loaded.host["state_root"],
+          "tracker-connections",
+          target.effective_policy["tracker_connection"]["id"] <> ".state"
+        ])
+      )
 
     assert context == %TargetContext{
              target_id: "alpha",

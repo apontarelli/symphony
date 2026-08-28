@@ -145,17 +145,21 @@ defmodule SymphonyElixir.Tracker do
   defp context_adapter(%TargetContext{}), do: {:error, :invalid_tracker_context}
 
   defp context_coordinator_state_path(%TargetContext{
+         tracker_connection: %{"coordinator_state_path" => state_path}
+       })
+       when is_binary(state_path) do
+    if nonblank_string?(state_path),
+      do: {:ok, Path.expand(state_path)},
+      else: {:error, :invalid_tracker_context}
+  end
+
+  defp context_coordinator_state_path(%TargetContext{
          worktree_policy: %{"root" => root}
        })
        when is_binary(root) do
-    if nonblank_string?(root) do
-      {:ok,
-       root
-       |> Path.expand()
-       |> Path.join(".symphony/tracker_coordinator.state")}
-    else
-      {:error, :invalid_tracker_context}
-    end
+    if nonblank_string?(root),
+      do: {:ok, Path.join(Path.expand(root), ".symphony/tracker_coordinator.state")},
+      else: {:error, :invalid_tracker_context}
   end
 
   defp context_coordinator_state_path(%TargetContext{}),

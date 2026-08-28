@@ -107,7 +107,12 @@ export LINEAR_API_KEY=...
 ../bin/symphony run SID-123 SID-124 --repo /path/to/target-repo --preview --no-env-file
 ../bin/symphony run SID-123 --repo /path/to/target-repo --save sid-123 --no-env-file
 ../bin/symphony run SID-426 --repo /path/to/target-repo --preview --max-agents 1 --max-startups 1 --no-land --human-review-only --no-env-file
+../bin/symphony host run --registry /path/to/targets.yml
 ```
+
+`symphony host run` starts all valid active targets from one registry generation. It enforces host,
+target, runner, poll, reviewer, and durable token-budget ceilings. The registry defaults to
+`~/.config/symphony/targets.yml`.
 
 Project, team, and query/file targets are selected by the interactive builder or stored in saved run
 setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,

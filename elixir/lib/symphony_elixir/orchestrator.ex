@@ -207,11 +207,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_start_polling(
          %State{
            host_scheduler: %{server: scheduler},
-           target_context: %TargetContext{target_id: target_id}
+           target_context: %TargetContext{} = target_context
          } = state
        )
        when not is_nil(scheduler) do
-    :ok = HostScheduler.register_target(scheduler, target_id, self())
+    :ok = HostScheduler.register_target(scheduler, target_context, self())
     %{state | next_poll_due_at_ms: nil}
   end
 
@@ -229,9 +229,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   @impl true
   def handle_cast(
-        {:dispatch_grant, %Grant{target_id: target_id, target_pid: target_pid} = grant},
+        {:dispatch_grant,
+         %Grant{
+           target_id: target_id,
+           target_pid: target_pid,
+           registry_generation: registry_generation
+         } = grant},
         %State{
-          target_context: %TargetContext{target_id: target_id},
+          target_context: %TargetContext{
+            target_id: target_id,
+            registry_generation: registry_generation
+          },
           host_scheduler: %{grant: nil} = host_scheduler
         } = state
       )
@@ -713,6 +721,15 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.drop([:remaining_ms, :limited_until_ms])
     |> Map.put(:limited_until_ms, System.monotonic_time(:millisecond) + remaining_ms)
     |> Map.put(:retry_after_ms, remaining_ms)
+  end
+
+  defp tracker_coordinator_opts(%State{
+         target_context: %TargetContext{
+           tracker_connection: %{"coordinator_state_path" => state_path}
+         }
+       })
+       when is_binary(state_path) do
+    [state_path: Path.expand(state_path)]
   end
 
   defp tracker_coordinator_opts(%State{
@@ -2145,14 +2162,27 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case prepare_durable_authority(state, pinned_context, durable_authority) do
       {:ok, authority} ->
-        resolve_claimed_dispatch(
-          state,
-          issue,
-          attempt,
-          pinned_context,
-          owner_id,
-          authority
-        )
+        case confirm_host_budget(state, authority) do
+          :ok ->
+            resolve_claimed_dispatch(
+              state,
+              issue,
+              attempt,
+              pinned_context,
+              owner_id,
+              authority
+            )
+
+          {:error, _reason} = error ->
+            handle_durable_dispatch_error(
+              error,
+              state,
+              issue,
+              pinned_context,
+              owner_id,
+              authority
+            )
+        end
 
       error ->
         handle_durable_dispatch_error(
@@ -2165,6 +2195,14 @@ defmodule SymphonyElixir.Orchestrator do
         )
     end
   end
+
+  defp confirm_host_budget(
+         %State{host_scheduler: %{grant: %Grant{} = grant}},
+         %RunAuthority{} = authority
+       ),
+       do: HostScheduler.confirm_budget(grant, authority)
+
+  defp confirm_host_budget(%State{}, %RunAuthority{}), do: :ok
 
   defp resolve_claimed_dispatch(
          state,
@@ -3896,13 +3934,30 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp finish_host_poll(%State{host_scheduler: %{grant: %Grant{} = grant} = host_scheduler} = state) do
     continue? = continue_polling?(state)
-    :ok = HostScheduler.finish_poll(grant, continue?)
+
+    backoff_ms =
+      tracker_rate_limit_remaining_ms(
+        state.tracker_rate_limit,
+        System.monotonic_time(:millisecond)
+      )
+
+    poll_result =
+      if continue? and is_integer(backoff_ms) and backoff_ms > 0,
+        do: {:defer, backoff_ms},
+        else: continue?
+
+    :ok = HostScheduler.finish_poll(grant, poll_result)
+
+    next_delay_ms =
+      if match?({:defer, _delay_ms}, poll_result),
+        do: max(state.poll_interval_ms, backoff_ms),
+        else: state.poll_interval_ms
 
     %{
       state
       | host_scheduler: %{host_scheduler | grant: nil},
         poll_check_in_progress: false,
-        next_poll_due_at_ms: if(continue?, do: System.monotonic_time(:millisecond) + state.poll_interval_ms, else: nil)
+        next_poll_due_at_ms: if(continue?, do: System.monotonic_time(:millisecond) + next_delay_ms, else: nil)
     }
   end
 

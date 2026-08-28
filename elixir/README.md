@@ -204,6 +204,7 @@ symlink `../bin/symphony` into a directory already on `PATH`.
 Operators can author and control local host target registry entries with these commands:
 
 ```text
+symphony host run [--registry <path>]
 symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
 symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
 symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -243,10 +244,11 @@ Activation requires `explicit` or `watch` dispatch mode and reuses an existing v
 accept general patches. A configured active state does not bypass registry validation or enable
 dispatch by itself.
 
-Target activation currently updates registry posture only. It does not add registry-backed polling,
-queues, dispatch, or automatic host-policy bootstrap. Existing `symphony run` paths do not consume
-the registry, but each selected single target now runs through the host scheduler described below.
-Initial host policy/bootstrap remains a direct, fully validated YAML operation.
+`symphony host run` reads and composes one registry generation, resolves each valid target into an
+immutable `TargetContext`, and starts one target orchestrator for every active or draining target.
+Only active targets receive new grants. The default registry is used when `--registry` is omitted.
+If a later reload fails, the daemon keeps the last verified generation visible but blocks new grants
+until it can verify the current file generation again.
 
 ## Execution context isolation (Phase 2)
 
@@ -268,17 +270,24 @@ orchestrator under `SymphonyElixir.TargetSupervisor`, and register that target w
 `SymphonyElixir.HostScheduler`. Preview, restrictive overrides, issue-batch, watch, and drain
 semantics remain target-scoped and unchanged.
 
-`HostScheduler` owns poll timing, weighted-deficit credit and cursor state, and host agent, startup,
-reviewer, and poll counts. It issues an external grant before a target can poll. One current grant
-can reserve at most one dispatch attempt. The target orchestrator retains issue lifecycle, target
-and Linear-state capacity checks, runtime events, retries, quality, delivery, and fenced side
-effects. Grant release is idempotent across dispatch rejection, startup failure, worker exit,
-cancellation, and lease loss.
+`HostScheduler` owns registry reload, poll timing, weighted-deficit credit and cursor state, and host
+and target agent, startup, reviewer, runner, and poll counts. It binds each poll grant to one target
+process and the exact verified registry generation. One current grant can reserve at most one
+dispatch attempt, and an agent does not start until the durable target budget reservation is
+confirmed. The target orchestrator retains issue lifecycle, Linear-state capacity checks, runtime
+events, retries, quality, delivery, and fenced side effects. Grant release is idempotent across
+dispatch rejection, startup failure, worker exit, cancellation, and lease loss.
 
-The current host still activates one selected target. The local durable control-plane store supports
-pinned admissions, leases, fenced lifecycle transitions, side-effect intents, local process
-ownership, and restart recovery through this topology. Registry-backed multi-target activation and
-dispatch remain deferred.
+Weighted dispatch uses stable target ID order and positive integer target weights. Saved credit is
+capped at `weight * max_credit_rounds`. A continuously eligible target receives a grant within
+`max_credit_rounds * sum(all configured target weights)` successful grant decisions after host
+capacity becomes available. Paused, draining, retired, invalid, stale-generation, rate-limited, and
+policy-denied targets receive no new grant.
+
+Tracker rate-limit backoff is keyed by registry tracker connection. Targets that share a connection
+share its backoff; targets on another connection remain eligible. Active-run identity remains
+`{target_id, issue_id}`, so overlapping tracker issue IDs stay distinct in admissions, leases,
+workspaces, reservations, retries, artifacts, and status.
 
 For each runtime dispatch, the orchestrator commits the pinned admission and acquires its durable
 lease before it resolves current credentials or revalidates tracker state. It renews the lease every

@@ -775,7 +775,9 @@ defmodule SymphonyElixir.TargetContext do
          :ok <- Composition.verify_composed_target(snapshot, target_id),
          {:ok, policy} <- policy_projection(target.effective_policy, target.repo_manifest),
          {:ok, tracker_connection} <-
-           project_tracker_secret(policy.tracker_connection, credential_mode, opts) do
+           project_tracker_secret(policy.tracker_connection, credential_mode, opts),
+         {:ok, tracker_connection} <-
+           attach_tracker_coordinator_path(snapshot.host, tracker_connection) do
       {:ok,
        struct!(__MODULE__,
          target_id: target_id,
@@ -809,6 +811,27 @@ defmodule SymphonyElixir.TargetContext do
 
   defp build_context(_snapshot, _target_id, _opts, _credential_mode),
     do: {:error, :invalid_snapshot}
+
+  defp attach_tracker_coordinator_path(
+         %{"state_root" => state_root},
+         %{"id" => connection_id} = tracker_connection
+       )
+       when is_binary(state_root) and is_binary(connection_id) do
+    if nonblank_string?(state_root) and Regex.match?(@target_id_regex, connection_id) do
+      path =
+        state_root
+        |> Path.expand()
+        |> Path.join("tracker-connections")
+        |> Path.join(connection_id <> ".state")
+
+      {:ok, Map.put(tracker_connection, "coordinator_state_path", path)}
+    else
+      {:error, :invalid_tracker_connection}
+    end
+  end
+
+  defp attach_tracker_coordinator_path(_host, _tracker_connection),
+    do: {:error, :invalid_tracker_connection}
 
   defp registry_workspace_layout(%{"root" => root}, target_id)
        when is_binary(root) and is_binary(target_id) do

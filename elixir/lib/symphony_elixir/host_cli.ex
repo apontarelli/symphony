@@ -1,14 +1,17 @@
 defmodule SymphonyElixir.HostCLI do
   @moduledoc false
 
+  alias SymphonyElixir.HostScheduler.Registry
   alias SymphonyElixir.OperatorCommandService
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
   alias SymphonyElixir.TargetRegistry.Preview
   alias SymphonyElixir.TargetRegistry.Yaml
+  require Logger
 
   @host_usage """
   Usage:
+    symphony host run [--registry <path>]
     symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
     symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -23,6 +26,11 @@ defmodule SymphonyElixir.HostCLI do
     symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target retire <id> [--registry <path>] [--json]
     symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @run_usage """
+  Usage:
+    symphony host run [--registry <path>]
   """
 
   @add_usage """
@@ -110,19 +118,29 @@ defmodule SymphonyElixir.HostCLI do
           optional(:confirm) => confirm_fn(),
           optional(:read_file) => (String.t() -> {:ok, String.t()} | {:error, term()}),
           optional(:yaml_decode) => (String.t() -> {:ok, map()} | {:error, term()}),
-          optional(:json_encode) => (term() -> {:ok, String.t()} | {:error, term()})
+          optional(:json_encode) => (term() -> {:ok, String.t()} | {:error, term()}),
+          optional(:load_registry) => (String.t() -> {:ok, map()} | {:error, term()}),
+          optional(:start_host) => (String.t(), map() -> :ok | {:error, term()})
         }
 
-  @spec evaluate([String.t()]) :: {:ok, String.t()} | {:error, String.t()}
+  @spec evaluate([String.t()]) :: :ok | {:ok, String.t()} | {:error, String.t()}
   def evaluate(args), do: evaluate(args, %{})
 
-  @spec evaluate([String.t()], deps()) :: {:ok, String.t()} | {:error, String.t()}
+  @spec evaluate([String.t()], deps()) :: :ok | {:ok, String.t()} | {:error, String.t()}
   def evaluate([], _deps) do
     {:error, host_usage()}
   end
 
   def evaluate(["--help"], _deps) do
     {:ok, host_usage()}
+  end
+
+  def evaluate(["run", "--help"], _deps) do
+    {:ok, run_usage()}
+  end
+
+  def evaluate(["run" | args], deps) do
+    evaluate_run(args, deps)
   end
 
   def evaluate(["target", "--help"], _deps) do
@@ -180,6 +198,80 @@ defmodule SymphonyElixir.HostCLI do
   def evaluate(_args, _deps) do
     {:error, host_usage()}
   end
+
+  defp evaluate_run(args, deps) do
+    with :ok <- prevalidate_argv(args, [:registry]),
+         {opts, [], []} <- OptionParser.parse(args, strict: [registry: :keep]),
+         true <- valid_singleton_counts?(opts, [:registry]),
+         {:ok, registry_path} <- resolve_registry_path(registry_opt(opts)),
+         {:ok, loaded} <- load_host_registry(registry_path, deps),
+         :ok <- start_host_runtime(registry_path, loaded, deps) do
+      :ok
+    else
+      {:error, {:registry_load_failed, reason}} ->
+        {:error, "host_registry_load_failed: #{inspect(reason)}"}
+
+      {:error, {:host_start_failed, reason}} ->
+        {:error, "host_start_failed: #{inspect(reason)}"}
+
+      _invalid ->
+        {:error, run_usage()}
+    end
+  end
+
+  defp load_host_registry(registry_path, deps) do
+    loader = Map.get(deps, :load_registry, &Registry.load/1)
+
+    case safe_invoke(fn -> loader.(registry_path) end) do
+      {:ok, {:ok, %{snapshot: _snapshot, contexts: _contexts} = loaded}} ->
+        {:ok, loaded}
+
+      {:ok, {:error, reason}} ->
+        {:error, {:registry_load_failed, reason}}
+
+      {:ok, other} ->
+        {:error, {:registry_load_failed, {:invalid_loader_result, other}}}
+
+      {:error, reason} ->
+        {:error, {:registry_load_failed, reason}}
+    end
+  end
+
+  defp start_host_runtime(registry_path, loaded, deps) do
+    starter = Map.get(deps, :start_host, &default_start_host/2)
+
+    case safe_invoke(fn -> starter.(registry_path, loaded) end) do
+      {:ok, :ok} -> :ok
+      {:ok, {:error, reason}} -> {:error, {:host_start_failed, reason}}
+      {:ok, other} -> {:error, {:host_start_failed, {:invalid_starter_result, other}}}
+      {:error, reason} -> {:error, {:host_start_failed, reason}}
+    end
+  end
+
+  defp default_start_host(
+         registry_path,
+         %{
+           snapshot: %{generation: generation, host: %{"state_root" => state_root}},
+           contexts: contexts
+         }
+       )
+       when is_binary(generation) and is_binary(state_root) and is_map(contexts) do
+    Application.put_env(:symphony_elixir, :host_registry_path, registry_path)
+    Application.put_env(:symphony_elixir, :control_plane_config_root, Path.expand(state_root))
+    Application.put_env(:symphony_elixir, :validate_startup, false)
+
+    case Application.ensure_all_started(:symphony_elixir) do
+      {:ok, _applications} ->
+        Logger.info("Registry host started registry_path=#{registry_path} registry_generation=#{generation} targets=#{map_size(contexts)}")
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp default_start_host(_registry_path, _loaded), do: {:error, :invalid_registry_snapshot}
 
   defp evaluate_lifecycle(action, args, deps) do
     usage = lifecycle_usage(action)
@@ -1237,7 +1329,7 @@ defmodule SymphonyElixir.HostCLI do
       "  registry path: #{plan["registry_path"]}",
       "  created at: #{plan["created_at"]}",
       if(preview_body != "", do: "  preview:\n#{preview_body}", else: nil),
-      "  Note: Phase 1 has no polling, queues, active host runs, or host side effects."
+      "  Note: confirmation changes registry state; running hosts adopt only a later fully verified generation."
     ]
 
     sections
@@ -1311,6 +1403,7 @@ defmodule SymphonyElixir.HostCLI do
   end
 
   defp host_usage, do: @host_usage |> String.trim()
+  defp run_usage, do: @run_usage |> String.trim()
   defp add_usage, do: @add_usage |> String.trim()
   defp import_usage, do: @import_usage |> String.trim()
   defp plan_usage, do: @plan_usage |> String.trim()

@@ -23,7 +23,7 @@ defmodule SymphonyElixir.HostSchedulerTest do
        }}
     )
 
-    assert :ok = HostScheduler.register_target(scheduler, target.target_id, self())
+    assert :ok = HostScheduler.register_target(scheduler, target, self())
     assert_receive {:"$gen_cast", {:dispatch_grant, %Grant{} = grant}}, 1_000
     assert HostScheduler.snapshot(scheduler).counts == %{agents: 0, startups: 0, reviewers: 0, polls: 1}
 
@@ -65,7 +65,7 @@ defmodule SymphonyElixir.HostSchedulerTest do
        }}
     )
 
-    HostScheduler.register_target(scheduler, target.target_id, self())
+    HostScheduler.register_target(scheduler, target, self())
     assert_receive {:"$gen_cast", {:dispatch_grant, %Grant{} = first}}, 1_000
     assert :ok = HostScheduler.reserve_dispatch(first)
     assert :ok = HostScheduler.finish_poll(first, true)
@@ -93,10 +93,10 @@ defmodule SymphonyElixir.HostSchedulerTest do
     start_supervised!({HostScheduler, scheduler_options})
 
     assert %{queued: true, coalesced: true} = HostScheduler.request_poll(scheduler, "wrong-target")
-    HostScheduler.register_target(scheduler, "wrong-target", self())
+    HostScheduler.register_target(scheduler, %{target | target_id: "wrong-target"}, self())
     refute_receive {:forwarded_grant, _grant}, 20
 
-    HostScheduler.register_target(scheduler, target.target_id, target_pid)
+    HostScheduler.register_target(scheduler, target, target_pid)
     assert_receive {:forwarded_grant, %Grant{} = grant}, 1_000
     assert :ok = HostScheduler.reserve_dispatch(grant)
     assert %{queued: true, coalesced: true} = HostScheduler.request_poll(scheduler, target.target_id)
@@ -132,12 +132,12 @@ defmodule SymphonyElixir.HostSchedulerTest do
 
     start_supervised!({HostScheduler, scheduler_options})
 
-    HostScheduler.register_target(scheduler, target.target_id, first_target)
+    HostScheduler.register_target(scheduler, target, first_target)
     assert_receive {:forwarded_grant, %Grant{} = first_grant}, 1_000
     assert :ok = HostScheduler.reserve_dispatch(first_grant)
     assert {:ok, _reviewer} = HostScheduler.reserve_reviewer(scheduler, target.target_id, first_target)
 
-    HostScheduler.register_target(scheduler, target.target_id, second_target)
+    HostScheduler.register_target(scheduler, target, second_target)
     assert_receive {:forwarded_grant, %Grant{} = second_grant}, 1_000
 
     assert {:error, :stale_grant} = HostScheduler.reserve_dispatch(first_grant)
@@ -166,7 +166,7 @@ defmodule SymphonyElixir.HostSchedulerTest do
 
     start_supervised!({HostScheduler, scheduler_options})
 
-    HostScheduler.register_target(scheduler, target.target_id, self())
+    HostScheduler.register_target(scheduler, target, self())
     assert_receive {:"$gen_cast", {:dispatch_grant, %Grant{} = first}}, 1_000
     assert :ok = HostScheduler.finish_poll(first, false)
 

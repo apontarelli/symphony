@@ -641,6 +641,15 @@ defmodule SymphonyElixir.CLITest do
     assert_received {:host_evaluate, ["target", "add", "my-id"]}
   end
 
+  test "host run accepts the daemon startup result" do
+    deps =
+      Map.merge(daemon_forbidden_deps(), %{
+        host_evaluate: fn ["run", "--registry", "/runtime.yml"] -> :ok end
+      })
+
+    assert :ok = CLI.evaluate(["host", "run", "--registry", "/runtime.yml"], deps)
+  end
+
   test "injected control_plane_evaluate receives operator args and result passes through" do
     parent = self()
 

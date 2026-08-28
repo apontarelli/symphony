@@ -13,6 +13,7 @@ defmodule SymphonyElixir.HostCLITest do
 
   @host_usage """
   Usage:
+    symphony host run [--registry <path>]
     symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
     symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -75,6 +76,45 @@ defmodule SymphonyElixir.HostCLITest do
     refute_received :plan_called
     refute_received :confirm_action_called
     refute_received :read_file_called
+  end
+
+  test "host run loads one registry snapshot and starts the daemon" do
+    parent = self()
+    registry_path = Path.expand("runtime-registry.yml")
+    loaded = %{snapshot: %{host: %{"state_root" => "/runtime-state"}}, contexts: %{}}
+
+    deps = %{
+      load_registry: fn path ->
+        send(parent, {:registry_loaded, path})
+        {:ok, loaded}
+      end,
+      start_host: fn path, snapshot ->
+        send(parent, {:host_started, path, snapshot})
+        :ok
+      end
+    }
+
+    assert :ok = HostCLI.evaluate(["run", "--registry", registry_path], deps)
+    assert_received {:registry_loaded, ^registry_path}
+    assert_received {:host_started, ^registry_path, ^loaded}
+  end
+
+  test "host run help and invalid repeated registry are side-effect free" do
+    deps = %{
+      load_registry: fn _path -> flunk("registry must not load") end,
+      start_host: fn _path, _loaded -> flunk("host must not start") end
+    }
+
+    assert {:ok, usage} = HostCLI.evaluate(["run", "--help"], deps)
+    assert usage == "Usage:\n  symphony host run [--registry <path>]"
+
+    assert {:error, repeated_usage} =
+             HostCLI.evaluate(
+               ["run", "--registry", "/one.yml", "--registry", "/two.yml"],
+               deps
+             )
+
+    assert repeated_usage == usage
   end
 
   test "target add without id returns command-specific usage" do
@@ -540,10 +580,9 @@ defmodule SymphonyElixir.HostCLITest do
     assert output =~ "applicable: false"
     assert output =~ "expected generation: sha256:0000000000000000000000000000000000000000000000000000000000000000"
     assert output =~ "proposed generation: sha256:1111111111111111111111111111111111111111111111111111111111111111"
-    assert output =~ "Phase 1 has no polling"
-    assert output =~ "queues"
-    assert output =~ "active host runs"
-    assert output =~ "host side effects"
+    assert output =~ "confirmation changes registry state"
+    assert output =~ "running hosts adopt"
+    assert output =~ "fully verified generation"
   end
 
   test "target add preview with --registry passes registry_path in opts" do
@@ -2839,7 +2878,7 @@ defmodule SymphonyElixir.HostCLITest do
         proposed generation: sha256:1111111111111111111111111111111111111111111111111111111111111111
         registry path: #{registry_path}
         created at: 2026-01-01T00:00:00Z
-        Note: Phase 1 has no polling, queues, active host runs, or host side effects.
+        Note: confirmation changes registry state; running hosts adopt only a later fully verified generation.
       """
       |> String.trim()
 
