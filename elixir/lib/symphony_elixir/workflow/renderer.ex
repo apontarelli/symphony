@@ -17,6 +17,8 @@ defmodule SymphonyElixir.Workflow.Renderer do
       validation_lines(get_in(manifest, ["validation", "commands"]) || []),
       "publish target:",
       publish_target_lines(manifest),
+      "auto-land:",
+      auto_land_lines(manifest),
       "harness.codex_home: #{harness_summary(manifest)}"
     ]
 
@@ -45,6 +47,8 @@ defmodule SymphonyElixir.Workflow.Renderer do
         "  harness.codex_home: #{harness_summary(manifest)}",
         "publish target:",
         publish_target_lines(manifest),
+        "auto-land:",
+        auto_land_lines(manifest),
         "docs:",
         value_lines(get_in(manifest, ["docs", "entrypoints"]) || []),
         "validation:",
@@ -108,6 +112,22 @@ defmodule SymphonyElixir.Workflow.Renderer do
         ["  - none"]
     end
   end
+
+  defp auto_land_lines(%{"auto_land" => auto_land}) when is_map(auto_land) do
+    [
+      "  posture: #{Map.get(auto_land, "posture") || "off"}",
+      "  dry_run: #{Map.get(auto_land, "dry_run", true)}",
+      "  required_checks:",
+      nested_value_lines(Map.get(auto_land, "required_checks", [])),
+      "  force_human_review_paths:",
+      nested_value_lines(Map.get(auto_land, "force_human_review_paths", []))
+    ]
+  end
+
+  defp auto_land_lines(_manifest), do: ["  - none"]
+
+  defp nested_value_lines([]), do: ["    - none"]
+  defp nested_value_lines(values), do: Enum.map(values, &"    - #{&1}")
 
   defp harness_summary(manifest) do
     case get_in(manifest, ["harness", "codex_home"]) do

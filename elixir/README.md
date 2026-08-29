@@ -591,12 +591,23 @@ or rollback-plan proof, monitoring source, and incident issue creation path. A g
 check is not sufficient for strict or production-web auto-land.
 
 `auto_land.force_human_review_labels` always routes matching issues to human review, even when
-evidence is otherwise sufficient. `auto_land.dry_run` defaults to `true`, so Symphony classifies and
-records an auto-land decision without merging. Setting `auto_land.dry_run: false` is the opt-in for
-guarded real auto-land: the classifier can move eligible work to `Merging`, where the existing land
-flow performs final check and review polling before merge. The project remains responsible for how
-deployments are performed, how rollback or rollback-plan proof is generated, where monitoring
-signals originate, and how incident intake creates tracker work.
+evidence is otherwise sufficient. `auto_land.force_human_review_paths` is a list of
+repository-relative path patterns. `*` matches within one path segment and `**` matches across path
+segments. If a host-verified changed file matches a configured pattern, Symphony routes the complete
+change to `Human Review`. A semantic change to the `auto_land` section is also protected. A change
+elsewhere in `symphony.yml` is not protected when the host proves that the effective `auto_land`
+policy is unchanged. Missing or inconsistent host changed-file evidence blocks auto-land.
+
+`auto_land.dry_run` defaults to `true`, so Symphony classifies and records an auto-land decision
+without merging. Setting `auto_land.dry_run: false` is the opt-in for guarded real auto-land: the
+classifier can move eligible work to `Merging`, where the existing land flow performs final check
+and review polling before merge. The project remains responsible for how deployments are performed,
+how rollback or rollback-plan proof is generated, where monitoring signals originate, and how
+incident intake creates tracker work.
+
+For protected changes, a human authorizes landing by moving the Linear issue from `Human Review` to
+`Merging`. Symphony then revalidates pull request checks, reviews, sync state, and mergeability before
+the merge.
 
 Optional flags:
 

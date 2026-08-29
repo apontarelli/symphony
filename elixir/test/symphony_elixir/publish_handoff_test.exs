@@ -33,12 +33,15 @@ defmodule SymphonyElixir.PublishHandoffTest do
       )
 
     assert result.status == :passed
+    assert result.change_manifest_verified
+    assert result.changed_files == ["lib/source.ex"]
     assert result.repository == "https://github.com/apontarelli/symphony"
     assert result.github_repository == "apontarelli/symphony"
     assert result.base_branch == "main"
     assert result.branch == "ticket/sid-309"
     assert result.pr_url == "https://github.com/apontarelli/symphony/pull/309"
     assert result.linear_issue == %{id: "issue-SID-309", identifier: "SID-309", url: "https://linear.example/SID-309"}
+    assert_receive {:publish_command, :jj_changed_files, "jj", ["diff", "--name-only", "--from", "main@origin", "--to", "@"]}
 
     assert_receive {:publish_command, :jj_describe, "jj", ["describe", "-m", "chore(SID-309): publish Symphony workspace changes"]}
     assert_receive {:publish_command, :jj_bookmark, "jj", ["bookmark", "set", "ticket/sid-309", "-r", "@"]}
@@ -541,7 +544,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert result.status == :blocked
     assert result.failure.reason == :change_manifest_mismatch
     assert result.failure.metadata.vcs_only == [".env"]
-    assert_receive {:publish_command, :jj_changed_files, "jj", ["diff", "--name-only", "-r", "@"]}
+    assert_receive {:publish_command, :jj_changed_files, "jj", ["diff", "--name-only", "--from", "main@origin", "--to", "@"]}
     refute_receive {:publish_command, :jj_push, _command, _args}, 50
   end
 
@@ -729,6 +732,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
         "pr_url" => " ",
         "linear_issue" => "not a map",
         "failure" => "plain failure",
+        "changed_files" => "not a list",
         123 => [%{"summary" => "nested"}]
       })
 
@@ -736,6 +740,7 @@ defmodule SymphonyElixir.PublishHandoffTest do
     assert unknown_status.pr_url == nil
     assert unknown_status.linear_issue == %{}
     assert unknown_status.failure == %{summary: "plain failure"}
+    assert unknown_status.changed_files == []
 
     blocked =
       PublishHandoffEvidence.normalize(%{

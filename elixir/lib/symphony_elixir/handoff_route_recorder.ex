@@ -5,6 +5,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
   alias SymphonyElixir.{Config, ExecutionContext, HandoffManifest, HandoffRoute, PathSafety, QualityGate, Tracker}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Workflow.Manifest, as: WorkflowManifest
   alias SymphonyElixir.WorkflowModules.ProductVisualReview
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
 
@@ -144,17 +145,33 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
       |> completion_field(:review, %{})
       |> then(&QualityGate.review(quality_gate, &1))
 
+    policy = routing_policy(completion, routing_context)
+    publish_handoff = completion_field(completion, :publish_handoff, nil)
+
+    authority = %{
+      policy: policy,
+      changed_files: changed_files_from_manifest_check(manifest_check),
+      changed_files_status: changed_files_status(manifest_check, publish_handoff),
+      policy_change_status:
+        auto_land_policy_change_status(
+          changed_files_from_manifest_check(manifest_check),
+          workspace,
+          policy
+        )
+    }
+
     %{
       checks: checks,
       review: review,
       changed_surfaces: completion_field(completion, :changed_surfaces, []),
-      policy: routing_policy(completion, routing_context),
+      policy: policy,
+      authority: authority,
       issue_labels: routing_labels(completion, routing_context),
       artifacts: completion_field(completion, :artifacts, []),
       decision: completion_field(completion, :decision, %{}),
       pr_feedback: completion_field(completion, :pr_feedback, nil),
       publish_preflight: completion_field(completion, :publish_preflight, nil),
-      publish_handoff: completion_field(completion, :publish_handoff, nil),
+      publish_handoff: publish_handoff,
       product_visual_review: product_visual_review_evidence(completion, manifest_check, routing_context, issue),
       blocker: blocker || QualityGate.blocker(quality_gate)
     }
@@ -568,6 +585,55 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
   end
 
   defp changed_files_from_manifest_check(_check), do: []
+
+  defp changed_files_status(
+         %{name: @manifest_check_name, status: :passed} = manifest_check,
+         publish_handoff
+       )
+       when is_map(publish_handoff) do
+    manifest_files = changed_files_from_manifest_check(manifest_check)
+    published_files = context_field(publish_handoff, :changed_files, [])
+
+    if normalize_token(context_field(publish_handoff, :status, nil)) == "passed" and
+         context_field(publish_handoff, :change_manifest_verified, false) == true and
+         is_list(published_files) and
+         MapSet.equal?(MapSet.new(manifest_files), MapSet.new(published_files)) do
+      :verified
+    else
+      :unverified
+    end
+  end
+
+  defp changed_files_status(_manifest_check, _publish_handoff), do: :unverified
+
+  defp auto_land_policy_change_status(changed_files, workspace, policy)
+       when is_list(changed_files) and is_binary(workspace) do
+    if "symphony.yml" in changed_files do
+      case WorkflowManifest.read(workspace) do
+        {:ok, manifest} ->
+          classify_auto_land_policy_change(manifest, policy)
+
+        {:error, _reason} ->
+          :unverified
+      end
+    else
+      :unchanged
+    end
+  end
+
+  defp auto_land_policy_change_status(_changed_files, _workspace, _policy), do: :unverified
+
+  defp classify_auto_land_policy_change(manifest, policy) do
+    if Map.get(manifest, "auto_land") == pinned_auto_land(policy),
+      do: :unchanged,
+      else: :changed
+  end
+
+  defp pinned_auto_land(policy) do
+    policy
+    |> context_field(:manifest, %{})
+    |> context_field(:auto_land, context_field(policy, :auto_land, nil))
+  end
 
   defp append_handoff_manifest_check(checks, nil) do
     checks = if is_list(checks), do: checks, else: []

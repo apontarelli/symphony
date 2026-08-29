@@ -40,6 +40,18 @@ automation:
   profile: default
   completion_requirements:
     - Run the strongest feasible validation gate before handoff.
+auto_land:
+  posture: permissive
+  dry_run: false
+  force_human_review_paths:
+    - elixir/lib/symphony_elixir/control_plane.ex
+    - elixir/lib/symphony_elixir/run_authority.ex
+    - elixir/lib/symphony_elixir/handoff_route.ex
+    - elixir/lib/symphony_elixir/handoff_route/**
+    - elixir/lib/symphony_elixir/handoff_route_recorder.ex
+    - elixir/lib/symphony_elixir/publish_handoff.ex
+    - elixir/lib/symphony_elixir/workflow/manifest.ex
+    - elixir/lib/symphony_elixir/workflow/landing_authority.ex
 issue_markers:
   labels:
     - repo:symphony

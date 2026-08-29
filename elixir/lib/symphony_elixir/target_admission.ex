@@ -556,6 +556,7 @@ defmodule SymphonyElixir.TargetAdmission do
       {"dry_run", &boolean_policy_value/2},
       {"required_checks", &string_list_policy_value/2},
       {"force_human_review_labels", &string_list_policy_value/2},
+      {"force_human_review_paths", &string_list_policy_value/2},
       {"blocked_state", &binary_policy_value/2}
     ])
   end

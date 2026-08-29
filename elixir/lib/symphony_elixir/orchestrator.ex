@@ -3979,11 +3979,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp restore_durable_map_keys(value), do: value
 
   defp restore_durable_field("true", key)
-       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation],
+       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation, :change_manifest_verified],
        do: true
 
   defp restore_durable_field("false", key)
-       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation],
+       when key in [:attempted, :workspace_vcs_metadata, :remote_push, :pr_creation, :change_manifest_verified],
        do: false
 
   defp restore_durable_field(value, _key), do: value
@@ -4083,10 +4083,8 @@ defmodule SymphonyElixir.Orchestrator do
   defp publish_handoff_policy?(policy) when is_map(policy),
     do: not is_nil(PublishTarget.resolve_policy(policy))
 
-  defp publish_handoff_needed?(completion) do
-    HandoffRouteRecorder.completion_metadata?(completion) and
-      is_nil(completion_field(completion, :publish_handoff))
-  end
+  defp publish_handoff_needed?(completion),
+    do: HandoffRouteRecorder.completion_metadata?(completion)
 
   defp maybe_store_publish_handoff(%{status: :passed} = publish_handoff, running_entry) do
     put_publish_handoff(running_entry, publish_handoff)

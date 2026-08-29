@@ -2,12 +2,13 @@ defmodule SymphonyElixir.HandoffRouteTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{HandoffRoute, HandoffRouteRecorder}
-  alias SymphonyElixir.HandoffRoute.ProductVisualReviewEvidence
+  alias SymphonyElixir.HandoffRoute.{AuthorityPolicy, ProductVisualReviewEvidence}
+  alias SymphonyElixir.Workflow.Manifest
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
 
   test "classifies dry-run auto-land as eligible while keeping handoff conservative" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :clean},
         changed_surfaces: [:docs, :tests],
@@ -27,12 +28,12 @@ defmodule SymphonyElixir.HandoffRouteTest do
            } = HandoffRoute.to_map(decision)
 
     assert Enum.any?(evidence, &(&1.summary =~ "All checks passed"))
-    assert Enum.any?(evidence, &(&1.summary =~ "low-risk"))
+    assert Enum.any?(evidence, &(&1.summary =~ "Changed surfaces: docs, tests"))
   end
 
   test "classifies explicitly opted-in permissive local work as guarded real auto-land" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(),
         review: %{status: :clean},
@@ -57,7 +58,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "classifies explicitly opted-in strict production work only with recovery evidence" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(strict_recovery_checks()),
         pr_feedback: clean_pr_feedback(),
         review: %{status: :clean},
@@ -79,7 +80,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "blocks real auto-land when PR feedback sweep evidence is missing" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -100,7 +101,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "does not accept bare pr_feedback check tokens as sweep evidence" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: real_auto_land_checks(),
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -121,7 +122,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "routes stale sync or actionable PR feedback evidence to rework before real auto-land" do
     sync_failed =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: replace_check(auto_land_checks(), "sync", :failed, "Branch is stale against main."),
         pr_feedback: clean_pr_feedback(),
         review: %{status: :clean},
@@ -133,7 +134,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     feedback_failed =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: outstanding_pr_feedback(),
         review: %{status: :clean},
@@ -152,7 +153,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "routes structured PR feedback by normalized status and unresolved counts" do
     addressed =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback("addressed", "0"),
         review: %{status: :clean},
@@ -161,7 +162,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     pushback_posted =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback("pushback_posted"),
         review: %{status: :clean},
@@ -170,7 +171,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     unresolved_count =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(:none, 0, top_level_count: 1),
         review: %{status: :clean},
@@ -185,7 +186,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "blocks malformed structured PR feedback instead of treating it as proof" do
     incomplete_channel =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: %{status: :none, top_level_comments: "not checked"},
         review: %{status: :clean},
@@ -194,7 +195,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     non_map_feedback =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: "not feedback",
         review: %{status: :clean},
@@ -203,7 +204,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     unsupported_status =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback("not_applicable"),
         review: %{status: :clean},
@@ -212,7 +213,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     unknown_status =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback("commented"),
         review: %{status: :clean},
@@ -221,7 +222,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     non_string_status =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(12),
         review: %{status: :clean},
@@ -230,7 +231,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     malformed_count =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(:none, "unparsed"),
         review: %{status: :clean},
@@ -239,7 +240,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
       })
 
     non_integer_count =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(:none, []),
         review: %{status: :clean},
@@ -264,7 +265,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "blocks strict real auto-land when production recovery evidence is missing" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(~w(deployment_status monitoring_source incident_issue_creation)),
         pr_feedback: clean_pr_feedback(),
         review: %{status: :clean},
@@ -286,7 +287,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "posture off prevents real auto-land even when legacy enabled flag is true" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         pr_feedback: clean_pr_feedback(),
         review: %{status: :clean},
@@ -302,7 +303,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "classifies top-level auto-land enablement as auto-land eligible" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -314,7 +315,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "does not classify missing check evidence as auto-land eligible" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [],
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -328,7 +329,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "does not use manifest validation as the only auto-land check" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "change_manifest", status: :passed}],
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -340,7 +341,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "manifest auto-land policy blocks handoff when required evidence is missing" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [
           %{name: "tests", status: :passed},
           %{name: "quality_gates", status: :passed},
@@ -369,7 +370,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "manifest auto-land policy records passed evidence when every required check is present" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(["security-review"]),
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -389,7 +390,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "manifest auto-land force-human-review labels route to human review" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: auto_land_checks(),
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -410,7 +411,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "auto-land posture off routes through human review" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "tests", status: :passed}],
         review: %{status: :clean},
         changed_surfaces: [:docs],
@@ -421,24 +422,128 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert decision.target_state == "Human Review"
   end
 
-  test "routes risky completed work to human review with risk evidence" do
+  test "routes repository-protected paths to human review with authority evidence" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: "passed"}],
         review: %{status: "clean"},
         changed_surfaces: [:workflow, :backend],
-        policy: %{auto_land: %{enabled: true}}
+        authority: verified_authority(["lib/authority/lease.ex"]),
+        policy: %{
+          auto_land: %{
+            enabled: true,
+            force_human_review_paths: ["lib/authority/**"]
+          }
+        }
       })
 
     assert decision.route == :human_review
     assert decision.target_state == "Human Review"
-    assert decision.summary =~ "Human review"
-    assert Enum.any?(decision.evidence, &(&1.kind == :changed_surface and &1.status == :risky))
+    assert decision.summary =~ "repository-protected"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :authority_policy and &1.status == :applied and
+                 &1.metadata.matched_files == ["lib/authority/lease.ex"])
+           )
+  end
+
+  test "does not treat broad source categories as landing authority" do
+    decision =
+      classify(%{
+        checks: [%{name: "mix test", status: "passed"}],
+        review: %{status: "clean"},
+        changed_surfaces: [:workflow, :backend, :elixir],
+        policy: %{auto_land: %{enabled: true}}
+      })
+
+    assert decision.route == :auto_land
+    assert Enum.any?(decision.evidence, &(&1.kind == :changed_surface and &1.status == :observed))
+  end
+
+  test "fails closed when host changed-file completeness is unverified" do
+    decision =
+      HandoffRoute.classify(%{
+        checks: [%{name: "mix test", status: :passed}],
+        review: %{status: :clean},
+        authority: %{
+          changed_files: ["lib/safe.ex"],
+          changed_files_status: :unverified,
+          policy_change_status: :unchanged
+        },
+        policy: %{auto_land: %{enabled: true}}
+      })
+
+    assert decision.route == :blocked
+    assert decision.target_state == "Human Review"
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :authority_policy and &1.status == :missing and
+                 :changed_files_unverified in &1.metadata.missing_evidence)
+           )
+  end
+
+  test "routes auto-land policy changes to human review" do
+    decision =
+      classify(%{
+        checks: [%{name: "mix test", status: :passed}],
+        review: %{status: :clean},
+        authority: verified_authority(["symphony.yml"], :changed),
+        policy: %{auto_land: %{enabled: true}}
+      })
+
+    assert decision.route == :human_review
+
+    assert Enum.any?(
+             decision.evidence,
+             &(&1.kind == :authority_policy and &1.status == :applied and
+                 &1.metadata.auto_land_policy_changed)
+           )
+  end
+
+  test "normalizes authority evidence and reports combined protected changes" do
+    authority =
+      AuthorityPolicy.evaluate(%{
+        "changed_files" => ["./lib/authority/lease.ex", 123],
+        "changed_files_status" => "verified",
+        "policy_change_status" => "changed",
+        "policy" => %{
+          "auto_land" => %{"force_human_review_paths" => ["lib/authority/**"]}
+        }
+      })
+
+    assert authority.evidence_complete?
+    assert authority.requires_human_review?
+    assert authority.matched_files == ["lib/authority/lease.ex"]
+    assert [%{summary: summary}] = authority.evidence
+    assert summary =~ "protected paths matched"
+    assert summary =~ "auto-land policy changed"
+
+    malformed =
+      AuthorityPolicy.evaluate(%{
+        changed_files_status: "unknown",
+        policy_change_status: "unchanged",
+        policy: %{auto_land: %{force_human_review_paths: "lib/authority/**"}}
+      })
+
+    refute malformed.evidence_complete?
+    assert malformed.matched_files == []
+    refute AuthorityPolicy.evaluate(:invalid).evidence_complete?
+
+    off_decision =
+      HandoffRoute.classify(%{
+        authority: "invalid",
+        policy: %{auto_land: %{posture: "off"}}
+      })
+
+    assert off_decision.route == :human_review
+    assert Enum.any?(off_decision.evidence, &(&1.kind == :authority_policy and &1.status == :missing))
   end
 
   test "routes failed checks and review feedback to rework" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :failed, summary: "2 failures"}],
         review: %{status: :fix_required, findings: ["Inline reviewer requested a guard."]},
         changed_surfaces: [:elixir],
@@ -454,7 +559,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "routes external blockers to blocked handoff with required action" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         blocker: %{
           reason: "Missing required Linear permission",
           required_action: "Grant comment edit access"
@@ -471,7 +576,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "decision-needed handoffs carry options and recommendation fields" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :decision_needed},
         changed_surfaces: [:domain],
@@ -501,7 +606,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "routes decision-needed handoffs without concrete options to rework" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :decision_needed},
         decision: %{question: "Choose a deployment path"}
@@ -519,7 +624,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "routes decision-needed handoffs without concrete recommendation to rework" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :decision_needed},
         decision: %{
@@ -541,7 +646,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "rejects malformed decision options before selecting decision-needed route" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :decision_needed},
         decision: %{
@@ -568,7 +673,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "rejects mixed valid and malformed decision options before selecting decision-needed route" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :decision_needed},
         decision: %{
@@ -592,7 +697,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "product and visual handoffs use spec route name and preserve artifact links" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "mix test", status: :passed}],
         review: %{status: :clean},
         changed_surfaces: [:external_user_ui],
@@ -1053,7 +1158,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "product visual review evidence handles missing recommended review and local-only artifacts" do
     recommended =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{
@@ -1072,7 +1177,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert summary =~ "issue labels indicate product-facing work"
 
     blocked =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{
@@ -1091,7 +1196,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
              Enum.find(blocked.evidence, &(&1.kind == :product_visual_review))
 
     malformed =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: "not a map",
@@ -1193,7 +1298,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "product visual review rejects non-durable absolute artifact references" do
     blocked =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{
@@ -1238,7 +1343,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "top-level product artifacts reject local paths while preserving durable links" do
     decision =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         artifacts: [
@@ -1256,7 +1361,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert ProductVisualReviewEvidence.artifacts("not normalized evidence") == []
 
     skipped =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{requirement: :required, status: :skipped, reason: "agent skipped visual QA"}
@@ -1265,7 +1370,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert skipped.route == :blocked
 
     required_unknown =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{requirement: :required, status: "unknown", artifacts: "not a list"}
@@ -1274,7 +1379,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert required_unknown.route == :blocked
 
     blocked_with_rejection =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{
@@ -1290,7 +1395,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
              Enum.find(blocked_with_rejection.evidence, &(&1.kind == :product_visual_review))
 
     unknown =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "all", status: :passed}],
         review: %{status: :clean},
         product_visual_review: %{
@@ -1533,7 +1638,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
   test "normalizes malformed optional route input conservatively" do
     blocked =
-      HandoffRoute.classify(%{
+      classify(%{
         "checks" => "not a list",
         "review" => "not a map",
         "changed_surfaces" => "not a list",
@@ -1548,7 +1653,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(blocked.evidence, &(&1.kind == :check and &1.status == :missing))
 
     conservative =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{"name" => "custom gate", "status" => 12, 42 => "ignored"}],
         review: %{status: :commented},
         changed_surfaces: ["unknown surface"],
@@ -1637,6 +1742,11 @@ defmodule SymphonyElixir.HandoffRouteTest do
         review: %{status: :clean},
         changed_surfaces: [:docs],
         changed_files: ["lib/safe.ex"],
+        publish_handoff: %{
+          status: :passed,
+          change_manifest_verified: true,
+          changed_files: ["lib/safe.ex"]
+        },
         policy: %{
           project: %{criticality: "prototype", deployment_coupling: "none"},
           auto_land: %{posture: "permissive", dry_run: false}
@@ -1726,6 +1836,121 @@ defmodule SymphonyElixir.HandoffRouteTest do
       assert invalid_context_uses_completion_policy.target_state == "Merging"
       assert camel_feedback.route == :auto_land
       assert camel_feedback.target_state == "Merging"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "recorder compares changed auto-land policy against the pinned manifest" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-route-policy-change-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace = Path.join(test_root, "workspace")
+      File.mkdir_p!(workspace)
+      manifest_path = Path.join(workspace, "symphony.yml")
+
+      File.write!(
+        manifest_path,
+        """
+        version: 1
+        project:
+          repository: github.com/example/project
+        delivery:
+          pr_target: main
+        auto_land:
+          posture: permissive
+          dry_run: false
+          force_human_review_paths:
+            - lib/authority/**
+        """
+      )
+
+      assert {:ok, pinned_manifest} =
+               Manifest.read(workspace)
+
+      pinned_auto_land = pinned_manifest["auto_land"]
+
+      completion = %{
+        checks: auto_land_checks(),
+        pr_feedback: clean_pr_feedback(),
+        review: %{status: :clean},
+        changed_files: ["symphony.yml"],
+        publish_handoff: %{
+          status: :passed,
+          change_manifest_verified: true,
+          changed_files: ["symphony.yml"]
+        }
+      }
+
+      routing_context = %{
+        policy: %{
+          manifest: %{"auto_land" => pinned_auto_land},
+          auto_land: pinned_auto_land
+        },
+        labels: []
+      }
+
+      unrelated_manifest_change =
+        HandoffRouteRecorder.classify_completion_for_test(
+          completion,
+          nil,
+          workspace,
+          nil,
+          routing_context
+        )
+
+      assert unrelated_manifest_change.route == :auto_land
+      assert unrelated_manifest_change.target_state == "Merging"
+
+      File.write!(
+        manifest_path,
+        """
+        version: 1
+        project:
+          repository: github.com/example/project
+        delivery:
+          pr_target: main
+        auto_land:
+          posture: permissive
+          dry_run: true
+          force_human_review_paths:
+            - lib/authority/**
+        """
+      )
+
+      protected_policy_change =
+        HandoffRouteRecorder.classify_completion_for_test(
+          completion,
+          nil,
+          workspace,
+          nil,
+          routing_context
+        )
+
+      assert protected_policy_change.route == :human_review
+
+      assert Enum.any?(
+               protected_policy_change.evidence,
+               &(&1.kind == :authority_policy and &1.metadata.auto_land_policy_changed)
+             )
+
+      File.write!(manifest_path, "[")
+
+      unreadable_policy_change =
+        HandoffRouteRecorder.classify_completion_for_test(
+          completion,
+          nil,
+          workspace,
+          nil,
+          routing_context
+        )
+
+      assert unreadable_policy_change.route == :blocked
+      assert Enum.any?(unreadable_policy_change.evidence, &(&1.kind == :authority_policy and &1.status == :missing))
     after
       File.rm_rf(test_root)
     end
@@ -1865,12 +2090,12 @@ defmodule SymphonyElixir.HandoffRouteTest do
   end
 
   test "normalizes malformed publish preflight metadata conservatively" do
-    malformed = HandoffRoute.classify(%{publish_preflight: "not a map"})
+    malformed = classify(%{publish_preflight: "not a map"})
     assert malformed.route == :human_review
     refute Enum.any?(malformed.evidence, &(&1.kind == :publish_preflight))
 
     no_failures =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "tests", status: :passed}],
         publish_preflight: %{
           failures: "not a list",
@@ -1883,7 +2108,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(no_failures.evidence, &(&1.kind == :publish_preflight and &1.status == :passed))
 
     invalid_failures =
-      HandoffRoute.classify(%{
+      classify(%{
         checks: [%{name: "tests", status: :passed}],
         publish_preflight: %{
           failures: [%{}, "not a map"],
@@ -1896,7 +2121,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     assert Enum.any?(invalid_failures.evidence, &(&1.kind == :publish_preflight and &1.status == :passed))
 
     malformed_fields =
-      HandoffRoute.classify(%{
+      classify(%{
         publish_preflight: %{
           123 => "ignored",
           status: 123,
@@ -2142,6 +2367,18 @@ defmodule SymphonyElixir.HandoffRouteTest do
              evidence.kind == :check and
                get_in(evidence.metadata, [:failures, Access.at(0), :metadata, :worker_host]) == "worker-a"
            end)
+  end
+
+  defp classify(input) do
+    HandoffRoute.classify(Map.put_new(input, :authority, verified_authority()))
+  end
+
+  defp verified_authority(changed_files \\ ["README.md"], policy_change_status \\ :unchanged) do
+    %{
+      changed_files: changed_files,
+      changed_files_status: :verified,
+      policy_change_status: policy_change_status
+    }
   end
 
   defp auto_land_checks(extra_checks \\ []) do

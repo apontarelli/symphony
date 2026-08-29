@@ -7,6 +7,8 @@ defmodule SymphonyElixir.HandoffRoute.PublishHandoffEvidence do
     "branch" => :branch,
     "change_id" => :change_id,
     "command" => :command,
+    "change_manifest_verified" => :change_manifest_verified,
+    "changed_files" => :changed_files,
     "commit_sha" => :commit_sha,
     "details" => :details,
     "exit_status" => :exit_status,
@@ -35,6 +37,8 @@ defmodule SymphonyElixir.HandoffRoute.PublishHandoffEvidence do
           branch: String.t() | nil,
           change_id: String.t() | nil,
           commit_sha: String.t() | nil,
+          change_manifest_verified: boolean(),
+          changed_files: [String.t()],
           validation_summary: String.t() | nil,
           linear_issue: map(),
           failure: map() | nil
@@ -53,6 +57,8 @@ defmodule SymphonyElixir.HandoffRoute.PublishHandoffEvidence do
       branch: publish_handoff |> fetch(:branch, nil) |> optional_trimmed_string(),
       change_id: publish_handoff |> fetch(:change_id, nil) |> optional_trimmed_string(),
       commit_sha: publish_handoff |> fetch(:commit_sha, nil) |> optional_trimmed_string(),
+      change_manifest_verified: fetch(publish_handoff, :change_manifest_verified, false) == true,
+      changed_files: publish_handoff |> fetch(:changed_files, []) |> normalize_string_list(),
       validation_summary: publish_handoff |> fetch(:validation_summary, nil) |> optional_trimmed_string(),
       linear_issue: publish_handoff |> fetch(:linear_issue, %{}) |> normalize_map(),
       failure: publish_handoff |> fetch(:failure, nil) |> normalize_failure()
@@ -108,6 +114,8 @@ defmodule SymphonyElixir.HandoffRoute.PublishHandoffEvidence do
       branch: publish_handoff.branch,
       change_id: publish_handoff.change_id,
       commit_sha: publish_handoff.commit_sha,
+      change_manifest_verified: publish_handoff.change_manifest_verified,
+      changed_files: publish_handoff.changed_files,
       validation_summary: publish_handoff.validation_summary,
       linear_issue: publish_handoff.linear_issue,
       failure: publish_handoff.failure
@@ -143,6 +151,16 @@ defmodule SymphonyElixir.HandoffRoute.PublishHandoffEvidence do
   defp normalize_value(value) when is_map(value), do: normalize_map(value)
   defp normalize_value(value) when is_list(value), do: Enum.map(value, &normalize_value/1)
   defp normalize_value(value), do: value
+
+  defp normalize_string_list(values) when is_list(values) do
+    values
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  defp normalize_string_list(_values), do: []
 
   defp fetch(map, key, default) when is_map(map) do
     Map.get(map, key, Map.get(map, to_string(key), default))

@@ -704,6 +704,8 @@ defmodule SymphonyElixir.TargetRegistry.ImportTest do
         Map.put(@current_repo_manifest, "auto_land", "enabled"),
         Map.put(@current_repo_manifest, "auto_land", %{"required_checks" => "all"}),
         Map.put(@current_repo_manifest, "auto_land", %{"required_checks" => [42]}),
+        Map.put(@current_repo_manifest, "auto_land", %{"force_human_review_paths" => "lib/authority/**"}),
+        Map.put(@current_repo_manifest, "auto_land", %{"force_human_review_paths" => [42]}),
         put_in(@current_repo_manifest, ["issue_markers", "labels"], [42]),
         put_in(@current_repo_manifest, ["issue_markers", "labels"], "repo:symphony"),
         Map.put(@current_repo_manifest, "invalid_utf8", <<0xFF>>),

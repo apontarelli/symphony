@@ -338,7 +338,8 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   defp valid_auto_land?(nil), do: true
 
   defp valid_auto_land?(auto_land) when is_map(auto_land) do
-    string_list?(Map.get(auto_land, "required_checks", []))
+    string_list?(Map.get(auto_land, "required_checks", [])) and
+      string_list?(Map.get(auto_land, "force_human_review_paths", []))
   end
 
   defp valid_auto_land?(_auto_land), do: false
