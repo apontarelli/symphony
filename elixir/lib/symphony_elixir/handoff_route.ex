@@ -8,6 +8,7 @@ defmodule SymphonyElixir.HandoffRoute do
   """
 
   alias SymphonyElixir.HandoffRoute.{
+    AuthorityPolicy,
     AutoLandPolicy,
     ProductVisualReviewEvidence,
     PublishHandoffEvidence,
@@ -80,24 +81,6 @@ defmodule SymphonyElixir.HandoffRoute do
           }
   end
 
-  @risky_surfaces MapSet.new([
-                    :api,
-                    :auth,
-                    :backend,
-                    :billing,
-                    :config,
-                    :database,
-                    :domain,
-                    :elixir,
-                    :migration,
-                    :external_user_ui,
-                    :product,
-                    :visual,
-                    :visual_design,
-                    :web_ui,
-                    :workflow
-                  ])
-
   @product_surfaces MapSet.new([:external_user_ui, :product, :visual, :visual_design, :web_ui])
   @artifact_review_kinds MapSet.new([
                            :interaction_notes,
@@ -114,11 +97,14 @@ defmodule SymphonyElixir.HandoffRoute do
   @decision_statuses MapSet.new([:decision_needed, :needs_decision, :needs_input])
   @known_keys %{
     "artifacts" => :artifacts,
+    "authority" => :authority,
     "auto_land" => :auto_land,
     "auto_land_enabled" => :auto_land_enabled,
     "blocker" => :blocker,
     "blocked_state" => :blocked_state,
     "changed_surfaces" => :changed_surfaces,
+    "changed_files" => :changed_files,
+    "changed_files_status" => :changed_files_status,
     "checks" => :checks,
     "criticality" => :criticality,
     "decision" => :decision,
@@ -146,6 +132,7 @@ defmodule SymphonyElixir.HandoffRoute do
     "name" => :name,
     "options" => :options,
     "policy" => :policy,
+    "policy_change_status" => :policy_change_status,
     "posture" => :posture,
     "pr_feedback" => :pr_feedback,
     "pr_number" => :pr_number,
@@ -244,7 +231,7 @@ defmodule SymphonyElixir.HandoffRoute do
       product_visual_review?(context) ->
         product_visual_review_decision(context)
 
-      risky?(context) ->
+      human_review_required?(context) ->
         human_review_decision(context)
 
       auto_land_candidate?(context) ->
@@ -307,6 +294,16 @@ defmodule SymphonyElixir.HandoffRoute do
     review = fetch(input, :review, %{}) |> normalize_review()
     changed_surfaces = fetch(input, :changed_surfaces, []) |> normalize_surfaces()
     policy = fetch(input, :policy, %{}) |> normalize_map()
+
+    authority =
+      input
+      |> fetch(:authority, %{})
+      |> then(fn
+        authority when is_map(authority) -> Map.put(authority, :policy, policy)
+        _authority -> %{policy: policy}
+      end)
+      |> AuthorityPolicy.evaluate()
+
     artifacts = fetch(input, :artifacts, []) |> normalize_artifacts()
     decision = fetch(input, :decision, %{}) |> normalize_decision()
     publish_preflight = fetch(input, :publish_preflight, nil) |> PublishPreflightEvidence.normalize()
@@ -327,6 +324,7 @@ defmodule SymphonyElixir.HandoffRoute do
       checks: checks,
       review: review,
       changed_surfaces: changed_surfaces,
+      authority: authority,
       policy: policy,
       artifacts: artifacts,
       blocker: blocker,
@@ -343,6 +341,7 @@ defmodule SymphonyElixir.HandoffRoute do
       checks: checks,
       review: review,
       changed_surfaces: changed_surfaces,
+      authority: authority,
       policy: policy,
       artifacts: artifacts,
       decision: decision,
@@ -376,6 +375,17 @@ defmodule SymphonyElixir.HandoffRoute do
       target_state: context.auto_land.blocked_state,
       summary: "Missing required auto-land evidence.",
       recommendation: "Record the missing evidence before final route classification.",
+      evidence: context.evidence,
+      artifacts: context.artifacts
+    }
+  end
+
+  defp missing_authority_evidence_decision(context) do
+    %Decision{
+      route: :blocked,
+      target_state: context.auto_land.blocked_state,
+      summary: "Missing required authority-routing evidence.",
+      recommendation: "Prove the complete host-validated changed-file set before final route classification.",
       evidence: context.evidence,
       artifacts: context.artifacts
     }
@@ -419,7 +429,7 @@ defmodule SymphonyElixir.HandoffRoute do
     %Decision{
       route: :human_review,
       target_state: "Human Review",
-      summary: "Human review required for risky or policy-protected work.",
+      summary: "Human review required for a repository-protected change.",
       recommendation: "Review evidence, then approve for Merging or request Rework.",
       evidence: context.evidence,
       artifacts: context.artifacts
@@ -471,6 +481,7 @@ defmodule SymphonyElixir.HandoffRoute do
   defp pre_review_route_needed?(context) do
     auto_land_force_human_review_label?(context) or
       missing_auto_land_evidence?(context) or
+      missing_authority_evidence?(context) or
       decision_needed?(context)
   end
 
@@ -481,6 +492,9 @@ defmodule SymphonyElixir.HandoffRoute do
 
       missing_auto_land_evidence?(context) ->
         missing_auto_land_evidence_decision(context)
+
+      missing_authority_evidence?(context) ->
+        missing_authority_evidence_decision(context)
 
       true ->
         decision_needed_decision(context)
@@ -524,18 +538,17 @@ defmodule SymphonyElixir.HandoffRoute do
 
   defp product_visual_review_requested?(_product_visual_review), do: false
 
-  defp risky?(context) do
-    Enum.any?(context.changed_surfaces, &MapSet.member?(@risky_surfaces, &1)) or
-      policy_requires_human_review?(context.policy)
+  defp human_review_required?(context) do
+    context.authority.requires_human_review? or policy_requires_human_review?(context.policy)
   end
 
   defp auto_land_candidate?(context) do
     substantive_auto_land_checks(context.checks) != [] and
       context.auto_land.enabled? and
       not missing_auto_land_evidence?(context) and
+      context.authority.evidence_complete? and
       Enum.all?(context.checks, &(Map.get(&1, :status) in @passed_statuses)) and
-      Map.get(context.review, :status) in @passed_statuses and
-      not risky?(context)
+      Map.get(context.review, :status) in @passed_statuses
   end
 
   defp substantive_auto_land_checks(checks) do
@@ -551,6 +564,9 @@ defmodule SymphonyElixir.HandoffRoute do
 
   defp missing_auto_land_evidence?(context), do: context.auto_land.missing_checks != []
 
+  defp missing_authority_evidence?(context),
+    do: context.auto_land.enabled? and not context.authority.evidence_complete?
+
   defp base_evidence(context) do
     []
     |> Kernel.++(blocker_evidence(context.blocker))
@@ -563,6 +579,7 @@ defmodule SymphonyElixir.HandoffRoute do
     |> Kernel.++(ProductVisualReviewEvidence.evidence(context.product_visual_review))
     |> Kernel.++(policy_evidence(context.policy))
     |> Kernel.++(context.auto_land.evidence)
+    |> Kernel.++(context.authority.evidence)
     |> Kernel.++(artifact_evidence(context.artifacts))
   end
 
@@ -669,18 +686,11 @@ defmodule SymphonyElixir.HandoffRoute do
   defp surface_evidence([]), do: []
 
   defp surface_evidence(surfaces) do
-    status =
-      if Enum.any?(surfaces, &MapSet.member?(@risky_surfaces, &1)) do
-        :risky
-      else
-        :low_risk
-      end
-
     [
       %Evidence{
         kind: :changed_surface,
-        status: status,
-        summary: "Changed surfaces are #{status_label(status)}: #{Enum.map_join(surfaces, ", ", &Atom.to_string/1)}"
+        status: :observed,
+        summary: "Changed surfaces: #{Enum.map_join(surfaces, ", ", &Atom.to_string/1)}"
       }
     ]
   end
@@ -1057,9 +1067,6 @@ defmodule SymphonyElixir.HandoffRoute do
   defp review_summary(%{status: :fix_required, findings: findings}), do: "Review requires fixes: #{Enum.join(findings, "; ")}"
   defp review_summary(%{status: :decision_needed}), do: "Review requires an operator decision."
   defp review_summary(review), do: "Review status: #{review.status}"
-
-  defp status_label(:low_risk), do: "low-risk"
-  defp status_label(status), do: Atom.to_string(status)
 
   defp option_lines([]), do: ["- None."]
 

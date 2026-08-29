@@ -583,6 +583,7 @@ defmodule SymphonyElixir.TargetContext do
       "blocked_state" => &nonblank_string?/1,
       "dry_run" => &is_boolean/1,
       "force_human_review_labels" => &string_list?/1,
+      "force_human_review_paths" => &string_list?/1,
       "posture" => &nonblank_string?/1,
       "required_checks" => &string_list?/1
     }

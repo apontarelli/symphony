@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.Workflow.ModuleRegistry do
   @moduledoc false
 
+  alias SymphonyElixir.Workflow.LandingAuthority
   alias SymphonyElixir.Workflow.PublishTarget
   alias SymphonyElixir.WorkflowModules.ProductVisualReview
   alias SymphonyElixir.WorkflowModules.ProductVisualReview.Config, as: ProductVisualReviewConfig
@@ -93,524 +94,473 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   }
 
   @modules [
-    %{
-      id: "repo.docs",
-      version: "v1",
-      summary: "Repo instruction and durable docs routing.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "repo.docs@v1"},
-      config: %{},
-      prompt_sections: [
-        "Treat the manifest docs entrypoints as the first repo-specific instructions to read before changing code."
-      ],
-      content: nil,
-      description: "repo instruction and durable docs routing"
-    },
-    %{
-      id: "validation.commands",
-      version: "v1",
-      summary: "Operator-defined validation gates.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "validation.commands@v1"},
-      config: %{},
-      prompt_sections: [
-        "Use the manifest validation commands as the repo-owned quality gates for touched surfaces."
-      ],
-      content: nil,
-      description: "operator-defined validation gates"
-    },
-    %{
-      id: "tracker.linear",
-      version: "v1",
-      summary: "Linear tracker issue context and handoff states.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "tracker.linear@v1"},
-      config: %{
-        "tracker" => %{
-          "kind" => "linear",
-          "endpoint" => "https://api.linear.app/graphql",
-          "api_key" => "$LINEAR_API_KEY",
-          "project_id" => nil,
-          "project_slug" => nil,
-          "team_key" => nil,
-          "workspace_slug" => nil,
-          "active_states" => ["Todo", "In Progress", "Merging", "Rework"],
-          "terminal_states" => @terminal_states
-        }
-      },
-      prompt_sections: [
-        "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
-        "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
-        "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command.",
-        "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
-      ],
-      content: nil,
-      description: "Linear tracker issue context and handoff states"
-    },
-    %{
-      id: "workspace",
-      version: "v1",
-      summary: "Workspace checkout and lifecycle hooks.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "workspace@v1"},
-      config: %{
-        "workspace" => %{"root" => "~/code/symphony-workspaces"},
-        "hooks" => %{"timeout_ms" => 60_000}
-      },
-      prompt_sections: [
-        "Work only inside the assigned repository workspace."
-      ],
-      content: nil,
-      description: "workspace checkout and lifecycle hooks"
-    },
-    %{
-      id: "codex.harness",
-      version: "v1",
-      summary: "Isolated Codex harness CODEX_HOME policy.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "codex.harness@v1"},
-      config: %{
-        "agent" => %{
-          "default_runner" => "codex",
-          "max_concurrent_agents" => 10,
-          "max_concurrent_startups" => 2,
-          "max_turns" => 20,
-          "max_retry_backoff_ms" => 300_000
-        },
-        "runners" => %{
-          "codex" => %{
-            "kind" => "codex_app_server",
-            "command" => ["codex", "app-server"],
-            "model" => "gpt-5.6-sol",
-            "approval_policy" => "never",
-            "thread_sandbox" => "workspace-write",
-            "turn_timeout_ms" => 3_600_000,
-            "read_timeout_ms" => 30_000,
-            "stall_timeout_ms" => 300_000,
-            "execution_profiles" => %{
-              "source_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "medium", "budget" => "standard"},
-              "test_reviewer" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
-              "runtime_qa" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
-              "product_visual_review" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"},
-              "docs_reviewer" => %{"model" => "gpt-5.6-luna", "reasoning_effort" => "medium", "budget" => "standard"},
-              "security_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"}
-            }
-          }
-        },
-        "quality_gate" => %{
-          "enabled" => true,
-          "source_max_concurrency" => 3,
-          "max_repair_passes" => 1,
-          "runtime_isolation" => "serialized",
-          "reviewer_timeout_ms" => 1_200_000,
-          "reviewer_max_retries" => 0,
-          "host_visual_qa" => %{
-            "enabled" => true,
-            "timeout_ms" => 300_000
-          }
-        }
-      },
-      prompt_sections: [
-        "Run Codex with the configured runtime settings for implementation turns."
-      ],
-      content: nil,
-      description: "isolated Codex harness CODEX_HOME policy"
-    },
-    %{
-      id: "delivery.github_pr",
-      version: "v1",
-      summary: "GitHub pull request delivery defaults.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "delivery.github_pr@v1"},
-      config: %{},
-      prompt_sections: [
-        "Use GitHub pull requests as the delivery artifact when handing work to human review."
-      ],
-      content: nil,
-      description: "GitHub pull request delivery defaults"
-    },
-    %{
-      id: "observability",
-      version: "v1",
-      summary: "Operator-visible status and dashboard evidence.",
-      default?: false,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "observability@v1"},
-      config: %{
-        "observability" => %{
-          "dashboard_enabled" => true,
-          "refresh_ms" => 1_000,
-          "render_interval_ms" => 16
-        }
-      },
-      prompt_sections: [
-        "Use the dashboard and status APIs as operator-visible evidence when relevant."
-      ],
-      content: nil,
-      description: "operator-visible status and dashboard evidence"
-    },
-    %{
-      id: "product_visual_review",
-      version: "v1",
-      summary: "Product-facing visual QA routing and evidence.",
-      default?: false,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "product_visual_review@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: nil,
-      description: "product-facing visual QA routing and evidence"
-    },
-    %{
-      id: "linear-operation",
-      version: "v1",
-      summary: "Linear issue state, metadata, workpad, attachment, and comment operation.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "linear-operation@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Use Linear as the source of truth for issue state and review handoff.
+             %{
+               id: "repo.docs",
+               version: "v1",
+               summary: "Repo instruction and durable docs routing.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "repo.docs@v1"},
+               config: %{},
+               prompt_sections: [
+                 "Treat the manifest docs entrypoints as the first repo-specific instructions to read before changing code."
+               ],
+               content: nil,
+               description: "repo instruction and durable docs routing"
+             },
+             %{
+               id: "validation.commands",
+               version: "v1",
+               summary: "Operator-defined validation gates.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "validation.commands@v1"},
+               config: %{},
+               prompt_sections: [
+                 "Use the manifest validation commands as the repo-owned quality gates for touched surfaces."
+               ],
+               content: nil,
+               description: "operator-defined validation gates"
+             },
+             %{
+               id: "tracker.linear",
+               version: "v1",
+               summary: "Linear tracker issue context and handoff states.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "tracker.linear@v1"},
+               config: %{
+                 "tracker" => %{
+                   "kind" => "linear",
+                   "endpoint" => "https://api.linear.app/graphql",
+                   "api_key" => "$LINEAR_API_KEY",
+                   "project_id" => nil,
+                   "project_slug" => nil,
+                   "team_key" => nil,
+                   "workspace_slug" => nil,
+                   "active_states" => ["Todo", "In Progress", "Merging", "Rework"],
+                   "terminal_states" => @terminal_states
+                 }
+               },
+               prompt_sections: [
+                 "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
+                 "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
+                 "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command.",
+                 "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
+               ],
+               content: nil,
+               description: "Linear tracker issue context and handoff states"
+             },
+             %{
+               id: "workspace",
+               version: "v1",
+               summary: "Workspace checkout and lifecycle hooks.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "workspace@v1"},
+               config: %{
+                 "workspace" => %{"root" => "~/code/symphony-workspaces"},
+                 "hooks" => %{"timeout_ms" => 60_000}
+               },
+               prompt_sections: [
+                 "Work only inside the assigned repository workspace."
+               ],
+               content: nil,
+               description: "workspace checkout and lifecycle hooks"
+             },
+             %{
+               id: "codex.harness",
+               version: "v1",
+               summary: "Isolated Codex harness CODEX_HOME policy.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "codex.harness@v1"},
+               config: %{
+                 "agent" => %{
+                   "default_runner" => "codex",
+                   "max_concurrent_agents" => 10,
+                   "max_concurrent_startups" => 2,
+                   "max_turns" => 20,
+                   "max_retry_backoff_ms" => 300_000
+                 },
+                 "runners" => %{
+                   "codex" => %{
+                     "kind" => "codex_app_server",
+                     "command" => ["codex", "app-server"],
+                     "model" => "gpt-5.6-sol",
+                     "approval_policy" => "never",
+                     "thread_sandbox" => "workspace-write",
+                     "turn_timeout_ms" => 3_600_000,
+                     "read_timeout_ms" => 30_000,
+                     "stall_timeout_ms" => 300_000,
+                     "execution_profiles" => %{
+                       "source_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "medium", "budget" => "standard"},
+                       "test_reviewer" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
+                       "runtime_qa" => %{"model" => "gpt-5.6-terra", "reasoning_effort" => "medium", "budget" => "standard"},
+                       "product_visual_review" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"},
+                       "docs_reviewer" => %{"model" => "gpt-5.6-luna", "reasoning_effort" => "medium", "budget" => "standard"},
+                       "security_reviewer" => %{"model" => "gpt-5.6-sol", "reasoning_effort" => "high", "budget" => "standard"}
+                     }
+                   }
+                 },
+                 "quality_gate" => %{
+                   "enabled" => true,
+                   "source_max_concurrency" => 3,
+                   "max_repair_passes" => 1,
+                   "runtime_isolation" => "serialized",
+                   "reviewer_timeout_ms" => 1_200_000,
+                   "reviewer_max_retries" => 0,
+                   "host_visual_qa" => %{
+                     "enabled" => true,
+                     "timeout_ms" => 300_000
+                   }
+                 }
+               },
+               prompt_sections: [
+                 "Run Codex with the configured runtime settings for implementation turns."
+               ],
+               content: nil,
+               description: "isolated Codex harness CODEX_HOME policy"
+             },
+             %{
+               id: "delivery.github_pr",
+               version: "v1",
+               summary: "GitHub pull request delivery defaults.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "delivery.github_pr@v1"},
+               config: %{},
+               prompt_sections: [
+                 "Use GitHub pull requests as the delivery artifact when handing work to human review."
+               ],
+               content: nil,
+               description: "GitHub pull request delivery defaults"
+             },
+             %{
+               id: "observability",
+               version: "v1",
+               summary: "Operator-visible status and dashboard evidence.",
+               default?: false,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "observability@v1"},
+               config: %{
+                 "observability" => %{
+                   "dashboard_enabled" => true,
+                   "refresh_ms" => 1_000,
+                   "render_interval_ms" => 16
+                 }
+               },
+               prompt_sections: [
+                 "Use the dashboard and status APIs as operator-visible evidence when relevant."
+               ],
+               content: nil,
+               description: "operator-visible status and dashboard evidence"
+             },
+             %{
+               id: "product_visual_review",
+               version: "v1",
+               summary: "Product-facing visual QA routing and evidence.",
+               default?: false,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "product_visual_review@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: nil,
+               description: "product-facing visual QA routing and evidence"
+             },
+             %{
+               id: "linear-operation",
+               version: "v1",
+               summary: "Linear issue state, metadata, workpad, attachment, and comment operation.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "linear-operation@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               Use Linear as the source of truth for issue state and review handoff.
 
-      Start by fetching the explicit issue identifier. Route by the current state: Backlog is
-      ineligible, Todo moves to In Progress before implementation, In Progress continues execution,
-      Human Review waits for review, Rework restarts the implementation loop, Merging runs the
-      land loop, and terminal states stop.
+               Start by fetching the explicit issue identifier. Route by the current state: Backlog is
+               ineligible, Todo moves to In Progress before implementation, In Progress continues execution,
+               Human Review waits for review, Rework restarts the implementation loop, Merging runs the
+               land loop, and terminal states stop.
 
-      Maintain exactly one active issue comment headed `## Codex Workpad`. Reuse that comment for
-      plan, acceptance criteria, validation, blocker notes, and handoff evidence. Keep issue
-      metadata current, attach the PR as a first-class issue link when possible, and avoid extra
-      progress-summary comments.
+               Maintain exactly one active issue comment headed `## Codex Workpad`. Reuse that comment for
+               plan, acceptance criteria, validation, blocker notes, and handoff evidence. Keep issue
+               metadata current, attach the PR as a first-class issue link when possible, and avoid extra
+               progress-summary comments.
 
-      Prefer structured Linear tools when available. Use the runtime `linear_graphql` client for raw
-      GraphQL operations when a structured tool does not expose the needed field or mutation. Do not
-      use a Linear CLI fallback.
-      """,
-      description: "Linear issue state, metadata, workpad, attachment, and comment operation"
-    },
-    %{
-      id: "implementation-loop",
-      version: "v1",
-      summary: "Planning, reproduction, implementation, validation, and workpad execution loop.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "implementation-loop@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Before implementation, reconcile the workpad with a hierarchical plan, explicit acceptance
-      criteria, validation commands, and a compact environment stamp. Mirror ticket-authored
-      Validation, Test Plan, or Testing sections as required checklist items.
+               Prefer structured Linear tools when available. Use the runtime `linear_graphql` client for raw
+               GraphQL operations when a structured tool does not expose the needed field or mutation. Do not
+               use a Linear CLI fallback.
+               """,
+               description: "Linear issue state, metadata, workpad, attachment, and comment operation"
+             },
+             %{
+               id: "implementation-loop",
+               version: "v1",
+               summary: "Planning, reproduction, implementation, validation, and workpad execution loop.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "implementation-loop@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               Before implementation, reconcile the workpad with a hierarchical plan, explicit acceptance
+               criteria, validation commands, and a compact environment stamp. Mirror ticket-authored
+               Validation, Test Plan, or Testing sections as required checklist items.
 
-      Use this required workpad template and keep it updated in place:
+               Use this required workpad template and keep it updated in place:
 
-      ````md
-      ## Codex Workpad
+               ````md
+               ## Codex Workpad
 
-      ```text
-      <host>:<abs-workdir>@<short-sha>
-      ```
+               ```text
+               <host>:<abs-workdir>@<short-sha>
+               ```
 
-      ### Plan
+               ### Plan
 
-      - [ ] 1. Parent task
-        - [ ] 1.1 Child task
+               - [ ] 1. Parent task
+                 - [ ] 1.1 Child task
 
-      ### Acceptance Criteria
+               ### Acceptance Criteria
 
-      - [ ] Criterion
+               - [ ] Criterion
 
-      ### Validation
+               ### Validation
 
-      - [ ] targeted tests: `<command>`
+               - [ ] targeted tests: `<command>`
 
-      ### Notes
+               ### Notes
 
-      - <timestamped progress note>
+               - <timestamped progress note>
 
-      ### Confusions
+               ### Confusions
 
-      - None.
-      ````
+               - None.
+               ````
 
-      Reproduce the current behavior before source edits. The reproduction can be a command,
-      deterministic rendered output, screenshot, or failing test. Record the signal in the workpad.
+               Reproduce the current behavior before source edits. The reproduction can be a command,
+               deterministic rendered output, screenshot, or failing test. Record the signal in the workpad.
 
-      Use test-first development only when expected behavior is clear and the change has a
-      meaningful public seam, such as bug reproduction, domain rules, storage behavior, API or
-      workflow contracts, permission logic, or non-trivial refactors.
+               Use test-first development only when expected behavior is clear and the change has a
+               meaningful public seam, such as bug reproduction, domain rules, storage behavior, API or
+               workflow contracts, permission logic, or non-trivial refactors.
 
-      Do not force TDD for docs-only, harness/config, cosmetic, prototype, mechanical, or unclear
-      product work; record the reason briefly in the workpad when skipping it.
+               Do not force TDD for docs-only, harness/config, cosmetic, prototype, mechanical, or unclear
+               product work; record the reason briefly in the workpad when skipping it.
 
-      Implement the smallest change that satisfies the issue. Keep the workpad checklist current
-      after each meaningful milestone. If tests are added or changed, use high-signal tests that
-      protect observable behavior and avoid framework or wiring assertions.
+               Implement the smallest change that satisfies the issue. Keep the workpad checklist current
+               after each meaningful milestone. If tests are added or changed, use high-signal tests that
+               protect observable behavior and avoid framework or wiring assertions.
 
-      Prefer simple, obvious designs. Treat wrappers, pass-through helpers, generic interfaces,
-      compatibility layers, and speculative abstractions as liabilities unless they remove real
-      complexity, encode a useful boundary, or protect shipped behavior.
+               Prefer simple, obvious designs. Treat wrappers, pass-through helpers, generic interfaces,
+               compatibility layers, and speculative abstractions as liabilities unless they remove real
+               complexity, encode a useful boundary, or protect shipped behavior.
 
-      For app, CLI, UI, or operator workflow changes, plan runtime QA against the changed journey
-      before handoff. If the journey cannot run because of required external systems, record the
-      exact blocked leg and human-verification need instead of calling the work complete.
+               For app, CLI, UI, or operator workflow changes, plan runtime QA against the changed journey
+               before handoff. If the journey cannot run because of required external systems, record the
+               exact blocked leg and human-verification need instead of calling the work complete.
 
-      For meaningful out-of-scope work, create a separate Backlog issue instead of expanding scope.
-      """,
-      description: "Planning, reproduction, implementation, validation, and workpad execution loop"
-    },
-    %{
-      id: "vcs-commit-push",
-      version: "v1",
-      summary: "Version-control inspection, commit description, branch publication, and PR creation.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "vcs-commit-push@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Prefer Jujutsu when the workspace is a jj repository. Use git only when the repository is not
-      jj-backed or a tool explicitly requires git compatibility. Inspect status and diff before
-      committing or publishing.
+               For meaningful out-of-scope work, create a separate Backlog issue instead of expanding scope.
+               """,
+               description: "Planning, reproduction, implementation, validation, and workpad execution loop"
+             },
+             %{
+               id: "vcs-commit-push",
+               version: "v1",
+               summary: "Version-control inspection, commit description, branch publication, and PR creation.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "vcs-commit-push@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               Prefer Jujutsu when the workspace is a jj repository. Use git only when the repository is not
+               jj-backed or a tool explicitly requires git compatibility. Inspect status and diff before
+               committing or publishing.
 
-      Commit and publish only after implementation validation, required quality gates, and automated review
-      have no unresolved fix-required findings. Keep PR link evidence in Linear or the workpad before
-      final handoff routing.
+               Commit and publish only after implementation validation, required quality gates, and automated review
+               have no unresolved fix-required findings. Keep PR link evidence in Linear or the workpad before
+               final handoff routing.
 
-      Describe the current change with a Conventional Commit subject that includes the ticket ID,
-      for example `feat(SID-292): create core workflow modules`. Commit only intended files and
-      leave unrelated workspace changes untouched.
+               Describe the current change with a Conventional Commit subject that includes the ticket ID,
+               for example `feat(SID-292): create core workflow modules`. Commit only intended files and
+               leave unrelated workspace changes untouched.
 
-      Publish one bookmark or branch per ticket. Create or update the PR against the workflow policy
-      delivery target. If the target is not main, set the PR base to that target and do not merge or
-      promote work to main in v1. Ensure the PR title, body, labels, and Linear attachment reflect
-      the current scope. Include a `Reviewer Testing` section with one to three PM/designer/operator
-      checks that point a human reviewer to the changed path, screen, command, or expected state. Do
-      not expand this into full UAT or edge-case acceptance criteria; keep exhaustive proof in the
-      validation and quality-gate evidence.
-      """,
-      description: "Version-control inspection, commit description, branch publication, and PR creation"
-    },
-    %{
-      id: "pull-sync",
-      version: "v1",
-      summary: "Mainline sync, merge conflict handling, and workpad sync evidence.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "pull-sync@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Before implementation and before handoff, fetch the delivery target from origin. If the current
-      change has no meaningful edits, start from the latest target. If it has edits, merge the latest
-      target into the current change and resolve conflicts by preserving repo contracts.
+               Publish one bookmark or branch per ticket. Create or update the PR against the workflow policy
+               delivery target. If the target is not main, set the PR base to that target and do not merge or
+               promote work to main in v1. Ensure the PR title, body, labels, and Linear attachment reflect
+               the current scope. Include a `Reviewer Testing` section with one to three PM/designer/operator
+               checks that point a human reviewer to the changed path, screen, command, or expected state. Do
+               not expand this into full UAT or edge-case acceptance criteria; keep exhaustive proof in the
+               validation and quality-gate evidence.
+               """,
+               description: "Version-control inspection, commit description, branch publication, and PR creation"
+             },
+             %{
+               id: "pull-sync",
+               version: "v1",
+               summary: "Mainline sync, merge conflict handling, and workpad sync evidence.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "pull-sync@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               Before implementation and before handoff, fetch the delivery target from origin. If the current
+               change has no meaningful edits, start from the latest target. If it has edits, merge the latest
+               target into the current change and resolve conflicts by preserving repo contracts.
 
-      Record sync evidence in the workpad: merge or fetch source, clean versus conflicts-resolved
-      result, and resulting short change or commit ID. After conflict resolution, rerun affected
-      validation before publishing.
-      """,
-      description: "Mainline sync, merge conflict handling, and workpad sync evidence"
-    },
-    %{
-      id: "quality-gates",
-      version: "v1",
-      summary: "Conditional validation gates before handoff.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "quality-gates@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      After implementation validation, classify the diff before handoff. Run expensive gates only
-      when the issue, labels, touched files, or risk profile require them.
+               Record sync evidence in the workpad: merge or fetch source, clean versus conflicts-resolved
+               result, and resulting short change or commit ID. After conflict resolution, rerun affected
+               validation before publishing.
+               """,
+               description: "Mainline sync, merge conflict handling, and workpad sync evidence"
+             },
+             %{
+               id: "quality-gates",
+               version: "v1",
+               summary: "Conditional validation gates before handoff.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "quality-gates@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               After implementation validation, classify the diff before handoff. Run expensive gates only
+               when the issue, labels, touched files, or risk profile require them.
 
-      Required gates are changed-scope by default. Tests added or changed require a test-quality
-      review of the touched scope. App, CLI, UI, or operator workflow changes require scenario QA to
-      the true end state when runtime evidence is feasible. Product-facing UI changes require
-      product visual review when that module is selected. Docs, commands, setup, CI, deployment,
-      architecture, workflow, or runbooks require a touched-scope document alignment check.
-      Security, auth, billing, persistence, migrations, external side effects, data integrity, or
-      shared architecture seams require deeper automated review.
+               Required gates are changed-scope by default. Tests added or changed require a test-quality
+               review of the touched scope. App, CLI, UI, or operator workflow changes require scenario QA to
+               the true end state when runtime evidence is feasible. Product-facing UI changes require
+               product visual review when that module is selected. Docs, commands, setup, CI, deployment,
+               architecture, workflow, or runbooks require a touched-scope document alignment check.
+               Security, auth, billing, persistence, migrations, external side effects, data integrity, or
+               shared architecture seams require deeper automated review.
 
-      Record the classifier result, required gates, command evidence, and pass/fix/block decision in
-      the workpad. Do not move to Human Review while a required gate has unresolved fix-required
-      findings.
-      """,
-      description: "Conditional validation gates before handoff"
-    },
-    %{
-      id: "automated-review",
-      version: "v1",
-      summary: "Pre-handoff automated review and finding triage.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "automated-review@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Before handoff, run an independent automated review over the current diff, issue context,
-      workpad, validation evidence, and relevant repo instructions. Prefer read-only reviewers for
-      correctness, validation gaps, and maintainability when those resources are available.
+               Record the classifier result, required gates, command evidence, and pass/fix/block decision in
+               the workpad. Do not move to Human Review while a required gate has unresolved fix-required
+               findings.
+               """,
+               description: "Conditional validation gates before handoff"
+             },
+             %{
+               id: "automated-review",
+               version: "v1",
+               summary: "Pre-handoff automated review and finding triage.",
+               default?: true,
+               compatibility: @compatibility,
+               pins: %{registry: @registry_pin, module: "automated-review@v1"},
+               config: %{},
+               prompt_sections: [],
+               content: """
+               Before handoff, run an independent automated review over the current diff, issue context,
+               workpad, validation evidence, and relevant repo instructions. Prefer read-only reviewers for
+               correctness, validation gaps, and maintainability when those resources are available.
 
-      Review the changed scope with these lenses when relevant: correctness/regression risk,
-      tests and validation quality, API/contracts/data flow, security and external side effects,
-      performance or migrations, maintainability/code-quality/deslop, and source-of-truth drift.
-      Verify surprising claims against the code before keeping them.
+               Review the changed scope with these lenses when relevant: correctness/regression risk,
+               tests and validation quality, API/contracts/data flow, security and external side effects,
+               performance or migrations, maintainability/code-quality/deslop, and source-of-truth drift.
+               Verify surprising claims against the code before keeping them.
 
-      Classify findings as fix-required, human-input-required, follow-up, or no-action.
-      Fix-required findings block handoff until addressed and revalidated. Human-input-required
-      findings are only for decisions or access that cannot be resolved autonomously. Follow-up
-      findings must not expand the current ticket unless they invalidate acceptance criteria.
+               Classify findings as fix-required, human-input-required, follow-up, or no-action.
+               Fix-required findings block handoff until addressed and revalidated. Human-input-required
+               findings are only for decisions or access that cannot be resolved autonomously. Follow-up
+               findings must not expand the current ticket unless they invalidate acceptance criteria.
 
-      Fix-required findings start another repair pass: fix the root cause, update or add honest
-      regression coverage when behavior changed, rerun affected validation, and repeat review on the
-      touched scope until no fix-required findings remain. Record review mode, reviewers, findings,
-      fixes, rejected false positives, follow-ups, and final decision in the workpad.
+               Fix-required findings start another repair pass: fix the root cause, update or add honest
+               regression coverage when behavior changed, rerun affected validation, and repeat review on the
+               touched scope until no fix-required findings remain. Record review mode, reviewers, findings,
+               fixes, rejected false positives, follow-ups, and final decision in the workpad.
 
-      Before moving to Human Review, run a PR feedback sweep when a PR is attached or exists for the
-      current branch. Identify the PR number, read top-level PR comments with `gh pr view --comments`,
-      read inline review comments with `gh api repos/<owner>/<repo>/pulls/<pr>/comments`, and read
-      review summaries/states with `gh pr view --json reviews`. Treat every actionable human or bot
-      comment as blocking until code, tests, or docs are updated to address it, or an explicit
-      justified pushback reply is posted on the thread. Update the workpad with each feedback item
-      and resolution, rerun validation after feedback-driven changes, and repeat until no
-      outstanding actionable feedback remains.
-      """,
-      description: "Pre-handoff automated review and finding triage"
-    },
-    %{
-      id: "auto-land-routing",
-      version: "v1",
-      summary: "Guarded auto-land classification before final ticket routing.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "auto-land-routing@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Before final routing, run Auto-land route classification with the current workflow policy,
-      issue labels, validation evidence, PR checks, structured PR feedback sweep, automated review result, and
-      sync result.
+               Before moving to Human Review, run a PR feedback sweep when a PR is attached or exists for the
+               current branch. Identify the PR number, read top-level PR comments with `gh pr view --comments`,
+               read inline review comments with `gh api repos/<owner>/<repo>/pulls/<pr>/comments`, and read
+               review summaries/states with `gh pr view --json reviews`. Treat every actionable human or bot
+               comment as blocking until code, tests, or docs are updated to address it, or an explicit
+               justified pushback reply is posted on the thread. Update the workpad with each feedback item
+               and resolution, rerun validation after feedback-driven changes, and repeat until no
+               outstanding actionable feedback remains.
+               """,
+               description: "Pre-handoff automated review and finding triage"
+             }
+           ] ++
+             LandingAuthority.modules(@compatibility, @registry_pin) ++
+             [
+               %{
+                 id: "rework",
+                 version: "v1",
+                 summary: "Reviewer-requested rework reset flow.",
+                 default?: true,
+                 compatibility: @compatibility,
+                 pins: %{registry: @registry_pin, module: "rework@v1"},
+                 config: %{},
+                 prompt_sections: [],
+                 content: """
+                 Treat Rework as a full approach reset. Re-read the issue, workpad, PR feedback, inline review
+                 comments, and human comments. Identify what will change in this attempt before editing code.
 
-      Record structured completion evidence for the handoff route classifier: validation checks,
-      quality gates, scenario QA or blocked human-verification notes when relevant, product visual
-      review evidence when selected, automated review, structured PR feedback sweep, route
-      classification, sync evidence, issue labels, changed_files or change_manifest.changed_files,
-      and any project-specific required auto-land checks. Changed file paths must be relative,
-      normalized workspace paths; host validation rejects absolute paths, traversal, symlink escapes,
-      generated runtime state, caches, logs, temporary app data, local secret files, and
-      operator-local config. Record the selected handoff route in the workpad. When a PR exists, also
-      record the decision in a PR handoff comment or existing PR handoff location.
+                 Close or supersede the prior PR when workflow policy requires a fresh attempt. Create a fresh
+                 branch or bookmark from the delivery target, create a new workpad if the prior one is removed,
+                 rebuild the plan, reproduce the issue again when needed, and run the complete
+                 implement-validate-review-publish loop.
+                 """,
+                 description: "Reviewer-requested rework reset flow"
+               },
+               %{
+                 id: "project-closeout",
+                 version: "v1",
+                 summary: "Project closeout validation, durable docs reconciliation, and follow-up creation.",
+                 default?: true,
+                 compatibility: @compatibility,
+                 pins: %{registry: @registry_pin, module: "project-closeout@v1"},
+                 config: %{},
+                 prompt_sections: [],
+                 content: """
+                 Issues labeled Project Closeout run after implementation work is complete. Read the Linear
+                 Project PDR, list every in-scope user story/problem, and validate each one with concrete
+                 evidence from tests, manual QA, screenshots, metrics, review artifacts, or operator checks.
+                 Record the result in a Story Validation Matrix with columns: user story/problem, disposition,
+                 evidence, and gaps/follow-up. Use stable story text from the PDR so future host-owned
+                 validators can fan out by matrix row without synthetic identifiers.
 
-      Treat dry-run auto-land as a visibility route: record that Symphony selected dry-run
-      auto-land, move the issue to Human Review for visibility, and do not merge. Treat real
-      auto-land as guarded landing only when the project explicitly sets `auto_land.dry_run: false`
-      and all required evidence is present; route the issue to Merging so the existing land flow
-      performs final check/review polling and the merge. If the decision selects human_review,
-      rework, or blocked, move the issue to the selected state after recording diagnostics.
-      """,
-      description: "Guarded auto-land classification before final ticket routing"
-    },
-    %{
-      id: "land-merge",
-      version: "v1",
-      summary: "Approved PR landing and merge loop.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "land-merge@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      When the issue reaches Merging, locate the attached PR, confirm local validation is green, and
-      inspect mergeability. If the PR conflicts with the delivery target, sync, resolve conflicts,
-      revalidate, and push the update.
+                 Closeout may edit durable repository docs when needed, but it should not reopen solved
+                 implementation scope. Summarize shipped, validated, deferred, and blocked items in the
+                 workpad with validation evidence. Create follow-up issues for deferred gaps when needed.
+                 Valid dispositions are validated, failed, deferred, and blocked. Closeout cannot complete
+                 while any in-scope story/problem is failed or blocked.
 
-      Poll checks and review feedback until all blocking signals are clear. If checks fail, inspect
-      logs, fix the issue, commit, push, and restart the watch. Merge only when checks are green,
-      actionable feedback is resolved, and the target policy allows the merge. After merge, move the
-      issue to Done.
-      """,
-      description: "Approved PR landing and merge loop"
-    },
-    %{
-      id: "rework",
-      version: "v1",
-      summary: "Reviewer-requested rework reset flow.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "rework@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Treat Rework as a full approach reset. Re-read the issue, workpad, PR feedback, inline review
-      comments, and human comments. Identify what will change in this attempt before editing code.
+                 If unresolved implementation blockers remain, record the blocker relationship gap in the
+                 workpad and stop closeout until implementation is complete. If the PDR lacks in-scope user
+                 stories/problems, stop and ask for project planning cleanup instead of inventing scope.
+                 """,
+                 description: "Project closeout validation, durable docs reconciliation, and follow-up creation"
+               },
+               %{
+                 id: "debug-run-recovery",
+                 version: "v1",
+                 summary: "Runtime incident diagnosis, stuck-run recovery, and blocker handling.",
+                 default?: true,
+                 compatibility: @compatibility,
+                 pins: %{registry: @registry_pin, module: "debug-run-recovery@v1"},
+                 config: %{},
+                 prompt_sections: [],
+                 content: """
+                 For stuck runs, retries, daemon failures, app-server failures, or infrastructure hangs, collect
+                 diagnostics before retrying broad operations. Capture affected tool, arguments, repo root,
+                 issue or session id, timestamp, process count when relevant, and log evidence.
 
-      Close or supersede the prior PR when workflow policy requires a fresh attempt. Create a fresh
-      branch or bookmark from the delivery target, create a new workpad if the prior one is removed,
-      rebuild the plan, reproduce the issue again when needed, and run the complete
-      implement-validate-review-publish loop.
-      """,
-      description: "Reviewer-requested rework reset flow"
-    },
-    %{
-      id: "project-closeout",
-      version: "v1",
-      summary: "Project closeout validation, durable docs reconciliation, and follow-up creation.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "project-closeout@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      Issues labeled Project Closeout run after implementation work is complete. Read the Linear
-      Project PDR, list every in-scope user story/problem, and validate each one with concrete
-      evidence from tests, manual QA, screenshots, metrics, review artifacts, or operator checks.
-      Record the result in a Story Validation Matrix with columns: user story/problem, disposition,
-      evidence, and gaps/follow-up. Use stable story text from the PDR so future host-owned
-      validators can fan out by matrix row without synthetic identifiers.
-
-      Closeout may edit durable repository docs when needed, but it should not reopen solved
-      implementation scope. Summarize shipped, validated, deferred, and blocked items in the
-      workpad with validation evidence. Create follow-up issues for deferred gaps when needed.
-      Valid dispositions are validated, failed, deferred, and blocked. Closeout cannot complete
-      while any in-scope story/problem is failed or blocked.
-
-      If unresolved implementation blockers remain, record the blocker relationship gap in the
-      workpad and stop closeout until implementation is complete. If the PDR lacks in-scope user
-      stories/problems, stop and ask for project planning cleanup instead of inventing scope.
-      """,
-      description: "Project closeout validation, durable docs reconciliation, and follow-up creation"
-    },
-    %{
-      id: "debug-run-recovery",
-      version: "v1",
-      summary: "Runtime incident diagnosis, stuck-run recovery, and blocker handling.",
-      default?: true,
-      compatibility: @compatibility,
-      pins: %{registry: @registry_pin, module: "debug-run-recovery@v1"},
-      config: %{},
-      prompt_sections: [],
-      content: """
-      For stuck runs, retries, daemon failures, app-server failures, or infrastructure hangs, collect
-      diagnostics before retrying broad operations. Capture affected tool, arguments, repo root,
-      issue or session id, timestamp, process count when relevant, and log evidence.
-
-      Correlate Linear issue identifiers, thread IDs, turn IDs, and session IDs across runtime logs.
-      Classify failures as startup, turn failure, timeout, stall, unsupported tool call, or missing
-      access. Prefer fixing the failing runtime wrapper or workflow contract over routing around it.
-      Use the blocked-access path only for true missing required tools, auth, permissions, or
-      secrets.
-      """,
-      description: "Runtime incident diagnosis, stuck-run recovery, and blocker handling"
-    }
-  ]
+                 Correlate Linear issue identifiers, thread IDs, turn IDs, and session IDs across runtime logs.
+                 Classify failures as startup, turn failure, timeout, stall, unsupported tool call, or missing
+                 access. Prefer fixing the failing runtime wrapper or workflow contract over routing around it.
+                 Use the blocked-access path only for true missing required tools, auth, permissions, or
+                 secrets.
+                 """,
+                 description: "Runtime incident diagnosis, stuck-run recovery, and blocker handling"
+               }
+             ]
 
   @module_by_id Map.new(@modules, &{&1.id, &1})
 

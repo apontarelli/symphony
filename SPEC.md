@@ -471,6 +471,7 @@ Manifest fields for the default preset:
 - `auto_land.required_checks` (list of strings, default `[]`)
 - `auto_land.force_human_review_labels` (list of strings, default includes `force-human-review`,
   `human-review`, `manual-review`, and `no-auto-land`)
+- `auto_land.force_human_review_paths` (list of repository-relative glob patterns, default `[]`)
 - `auto_land.blocked_state` (string, default `Human Review`)
 - `auto_land.dry_run` (boolean, default `true`)
 - `review_routing` (object)
@@ -673,6 +674,12 @@ Fields:
 - `force_human_review_labels` (list of strings)
   - Default: `force-human-review`, `human-review`, `manual-review`, `no-auto-land`.
   - Any matching issue label forces the route to human review.
+- `force_human_review_paths` (list of strings)
+  - Default: `[]`.
+  - Entries are repository-relative path patterns. `*` matches within one path segment and `**`
+    matches across path segments.
+  - A host-verified changed file that matches any entry forces the complete change to human review.
+  - Absolute paths, parent traversal, negation, and unsupported glob syntax are invalid.
 - `blocked_state` (string)
   - Default: `Human Review`.
   - Target tracker state for missing required evidence when the workflow applies the decision.
@@ -683,6 +690,12 @@ Fields:
   - When false, the repository has explicitly opted into guarded real auto-land. A successful
     `auto_land` decision MAY move the issue to `Merging`, where the land flow performs final
     check/review polling and the merge.
+
+Changing the effective `auto_land` policy is itself authority-sensitive and forces human review.
+Changing another part of `symphony.yml` does not force human review when the host can prove that the
+effective `auto_land` policy is unchanged. Auto-land eligibility requires complete, host-verified
+changed-file evidence; missing or inconsistent evidence is blocked rather than treated as an empty
+change set.
 
 Default required evidence:
 
@@ -707,6 +720,10 @@ Decision routes:
 - `human_review`: posture is `off`, or a force-human-review label matched.
 - `rework`: one or more required evidence checks failed.
 - `blocked`: one or more required evidence checks are missing.
+
+A human approves an authority-sensitive change by moving its issue from `Human Review` to `Merging`.
+The landing flow MUST revalidate the pull request checks, reviews, sync state, and mergeability before
+merge. The tracker transition authorizes the landing attempt; it does not bypass those checks.
 
 #### 5.3.9 `review_routing` (object, OPTIONAL extension)
 

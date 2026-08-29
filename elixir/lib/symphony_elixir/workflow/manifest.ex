@@ -507,6 +507,12 @@ defmodule SymphonyElixir.Workflow.Manifest do
     {force_human_review_labels, label_errors} =
       string_list_field(raw, "force_human_review_labels", "auto_land.force_human_review_labels", default: @default_force_human_review_labels)
 
+    {force_human_review_paths, path_errors} =
+      string_list_field(raw, "force_human_review_paths", "auto_land.force_human_review_paths", default: [])
+
+    force_human_review_paths = Enum.uniq(force_human_review_paths)
+    path_errors = path_errors ++ force_human_review_path_errors(force_human_review_paths)
+
     {blocked_state, blocked_state_errors} = string_field(raw, "blocked_state", "auto_land.blocked_state", default: "Human Review")
     {dry_run, dry_run_errors} = boolean_field(raw, "dry_run", "auto_land.dry_run", default: true)
 
@@ -514,6 +520,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
       %{
         "required_checks" => required_checks,
         "force_human_review_labels" => force_human_review_labels,
+        "force_human_review_paths" => force_human_review_paths,
         "blocked_state" => blocked_state,
         "dry_run" => dry_run
       }
@@ -523,12 +530,44 @@ defmodule SymphonyElixir.Workflow.Manifest do
       posture_errors ++
         required_check_errors ++
         label_errors ++
+        path_errors ++
         blocked_state_errors ++ dry_run_errors
 
     {auto_land, errors}
   end
 
   defp normalize_auto_land(_raw), do: {nil, [type_error("auto_land", "must be a map")]}
+
+  defp force_human_review_path_errors(paths) do
+    paths
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {pattern, index} ->
+      path = "auto_land.force_human_review_paths[#{index}]"
+
+      cond do
+        Path.type(pattern) == :absolute ->
+          [type_error(path, "must be relative to the repository root")]
+
+        String.starts_with?(pattern, ["./", "!"]) ->
+          [type_error(path, "must not start with `./` or `!`")]
+
+        String.ends_with?(pattern, "/") ->
+          [type_error(path, "must name a path or end a directory pattern with `/**`")]
+
+        String.contains?(pattern, ["\\", <<0>>, "\n", "\r"]) ->
+          [type_error(path, "contains unsupported path characters")]
+
+        String.contains?(pattern, ["?", "[", "]", "{", "}"]) ->
+          [type_error(path, "supports only literal path segments, `*`, and `**` wildcards")]
+
+        Enum.any?(Path.split(pattern), &(&1 in [".", ".."])) ->
+          [type_error(path, "must not contain `.` or `..` path segments")]
+
+        true ->
+          []
+      end
+    end)
+  end
 
   defp workflow_modules(raw) do
     case indexed_string_list_field(raw, "modules", "workflow.modules", default: []) do

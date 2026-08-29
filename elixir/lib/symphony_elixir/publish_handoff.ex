@@ -55,6 +55,8 @@ defmodule SymphonyElixir.PublishHandoff do
           commit_sha: String.t() | nil,
           validation_summary: String.t() | nil,
           linear_issue: map(),
+          changed_files: [String.t()],
+          change_manifest_verified: boolean(),
           failure: failure() | nil
         }
 
@@ -103,10 +105,19 @@ defmodule SymphonyElixir.PublishHandoff do
           Path.t() | nil,
           map(),
           Issue.t() | map() | nil,
+          map()
+        ) :: result()
+  def run_for_test(workspace, policy, issue, completion),
+    do: run_for_test(workspace, policy, issue, completion, [])
+
+  @spec run_for_test(
+          Path.t() | nil,
+          map(),
+          Issue.t() | map() | nil,
           map(),
           keyword()
         ) :: result()
-  def run_for_test(workspace, policy, issue, completion, opts \\ []) do
+  def run_for_test(workspace, policy, issue, completion, opts) do
     opts =
       opts
       |> Keyword.put_new(:timeout_ms, Config.settings!().hooks.timeout_ms)
@@ -155,7 +166,9 @@ defmodule SymphonyElixir.PublishHandoff do
       commit_sha: nil,
       validation_summary: validation_summary,
       linear_issue: linear_issue,
-      failure: nil
+      failure: nil,
+      changed_files: [],
+      change_manifest_verified: false
     }
 
     with :ok <- require_delivery_authority(context),
@@ -166,6 +179,12 @@ defmodule SymphonyElixir.PublishHandoff do
          {:ok, manifest_result} <- validate_change_manifest(completion, workspace),
          pr_body <- pr_body(issue, target, branch, validation_summary, manifest_result.changed_files),
          :ok <- validate_pr_body(pr_body) do
+      verified_result_base = %{
+        result_base
+        | changed_files: manifest_result.changed_files,
+          change_manifest_verified: true
+      }
+
       publish_context =
         Map.merge(context, %{
           target: target,
@@ -184,7 +203,7 @@ defmodule SymphonyElixir.PublishHandoff do
            :ok <- validate_vcs_payload(mode, publish_context) do
         publish_with_vcs(mode, publish_context)
       end
-      |> merge_result(result_base)
+      |> merge_result(verified_result_base)
     else
       {:blocked, failure} -> %{result_base | failure: failure}
     end
@@ -427,7 +446,17 @@ defmodule SymphonyElixir.PublishHandoff do
   end
 
   defp validate_vcs_payload("jj", context) do
-    with {:ok, output} <- command_ok(context, :jj_changed_files, "jj", ["diff", "--name-only", "-r", "@"]) do
+    base_ref = "#{context.target.base_branch}@origin"
+
+    with {:ok, output} <-
+           command_ok(context, :jj_changed_files, "jj", [
+             "diff",
+             "--name-only",
+             "--from",
+             base_ref,
+             "--to",
+             "@"
+           ]) do
       compare_changed_files(context, changed_files_from_output(output))
     end
   end

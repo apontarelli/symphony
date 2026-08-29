@@ -1173,13 +1173,15 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       AutoLand.changeset(%AutoLand{}, %{
         "posture" => " ",
         "required_checks" => [nil, " Tests ", "tests", ""],
-        "force_human_review_labels" => [" Manual-Review ", "manual-review", ""]
+        "force_human_review_labels" => [" Manual-Review ", "manual-review", ""],
+        "force_human_review_paths" => [nil, " lib/Authority/** ", "lib/Authority/**", ""]
       })
 
     assert {:ok, auto_land} = Changeset.apply_action(changeset, :validate)
     assert auto_land.posture == nil
     assert auto_land.required_checks == ["tests"]
     assert auto_land.force_human_review_labels == ["manual-review"]
+    assert auto_land.force_human_review_paths == ["lib/Authority/**"]
   end
 
   test "auto-land config accepts explicit real landing opt-in" do

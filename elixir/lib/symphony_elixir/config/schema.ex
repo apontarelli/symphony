@@ -463,6 +463,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:posture, :string)
       field(:required_checks, {:array, :string}, default: [])
       field(:force_human_review_labels, {:array, :string}, default: @default_force_human_review_labels)
+      field(:force_human_review_paths, {:array, :string}, default: [])
       field(:blocked_state, :string, default: "Human Review")
       field(:dry_run, :boolean, default: true)
     end
@@ -476,6 +477,7 @@ defmodule SymphonyElixir.Config.Schema do
           :posture,
           :required_checks,
           :force_human_review_labels,
+          :force_human_review_paths,
           :blocked_state,
           :dry_run
         ],
@@ -484,6 +486,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> update_change(:posture, &normalize_optional_token/1)
       |> update_change(:required_checks, &normalize_token_list/1)
       |> update_change(:force_human_review_labels, &normalize_token_list/1)
+      |> update_change(:force_human_review_paths, &normalize_path_list/1)
       |> validate_posture()
     end
 
@@ -514,6 +517,14 @@ defmodule SymphonyElixir.Config.Schema do
       values
       |> Enum.map(&normalize_optional_token/1)
       |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+    end
+
+    defp normalize_path_list(values) when is_list(values) do
+      values
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
       |> Enum.uniq()
     end
   end

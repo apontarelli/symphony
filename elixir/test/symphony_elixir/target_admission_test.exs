@@ -995,6 +995,7 @@ defmodule SymphonyElixir.TargetAdmissionTest do
     assert rotated_secrets.registry_generation == first.registry_generation
     assert rotated_secrets.repo_manifest_hash == first.repo_manifest_hash
     assert rotated_issue_policy["policy_ref"] == first_issue_policy["policy_ref"]
+    assert first_issue_policy["auto_land"]["force_human_review_paths"] == ["lib/authority/**"]
 
     for secret <- ["nested-policy-secret-one", "nested-policy-secret-two"],
         value <- [
@@ -1029,6 +1030,7 @@ defmodule SymphonyElixir.TargetAdmissionTest do
     malformed_policies = [
       {%{auto_land: "permissive"}, ["auto_land"], :expected_map},
       {%{auto_land: %{posture: "permissive", dry_run: "false"}}, ["auto_land", "dry_run"], :expected_boolean},
+      {%{auto_land: %{force_human_review_paths: "lib/authority/**"}}, ["auto_land", "force_human_review_paths"], :expected_list},
       {%{review: %{mode: 1}}, ["review", "mode"], :expected_string},
       {%{checks: 1}, ["checks"], :expected_list},
       {%{checks: [%{name: "format"}]}, ["checks", 0], :expected_named_check},
@@ -1207,7 +1209,12 @@ defmodule SymphonyElixir.TargetAdmissionTest do
     default_policy = %{
       private: %{credentials: %{token: secret}},
       review: %{mode: "strict", api_key: secret, credentials: %{token: secret}},
-      auto_land: %{posture: "permissive", dry_run: false, credentials: %{token: secret}},
+      auto_land: %{
+        posture: "permissive",
+        dry_run: false,
+        force_human_review_paths: ["lib/authority/**"],
+        credentials: %{token: secret}
+      },
       delivery: %{pr_target: "main"},
       capabilities: %{required: ["github_pr"], credentials: %{token: secret}},
       checks: ["format"],

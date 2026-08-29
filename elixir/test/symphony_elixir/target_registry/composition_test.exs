@@ -83,6 +83,9 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
     defp inject_compile_fault(compiled, "manifest_required_checks_not_list"),
       do: put_in(compiled, [:config, "manifest", "auto_land", "required_checks"], "not-a-list")
 
+    defp inject_compile_fault(compiled, "manifest_review_paths_not_list"),
+      do: put_in(compiled, [:config, "manifest", "auto_land", "force_human_review_paths"], "not-a-list")
+
     defp inject_compile_fault(compiled, "manifest_auto_land_invalid"),
       do: put_in(compiled, [:config, "manifest", "auto_land"], "not-a-map")
 
@@ -1237,6 +1240,7 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
       manifest_labels_not_list
       manifest_repository_not_string
       manifest_required_checks_not_list
+      manifest_review_paths_not_list
       manifest_auto_land_invalid
       manifest_improper_list
       manifest_json_improper_list

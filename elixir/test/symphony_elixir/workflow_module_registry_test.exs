@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.WorkflowModuleRegistryTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.Workflow.ModuleRegistry
+  alias SymphonyElixir.Workflow.{LandingAuthority, ModuleRegistry}
 
   @default_module_ids [
     "linear-operation",
@@ -16,6 +16,14 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     "project-closeout",
     "debug-run-recovery"
   ]
+
+  test "landing authority owns the auto-land and merge workflow modules" do
+    modules = LandingAuthority.modules(%{workflow_schema: "v1"}, "registry@v1")
+
+    assert Enum.map(modules, & &1.id) == ["auto-land-routing", "land-merge"]
+    assert Enum.all?(modules, &(&1.compatibility == %{workflow_schema: "v1"}))
+    assert Enum.all?(modules, &(&1.pins.registry == "registry@v1"))
+  end
 
   test "core module registry exposes v1 default modules with metadata" do
     assert length(ModuleRegistry.core_modules()) == length(@default_module_ids)

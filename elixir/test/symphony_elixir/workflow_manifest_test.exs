@@ -608,6 +608,9 @@ defmodule SymphonyElixir.WorkflowManifestTest do
           - security-review
         force_human_review_labels:
           - manual-review
+        force_human_review_paths:
+          - lib/authority/**
+          - priv/repo/migrations/*
         blocked_state: Human Review
         dry_run: true
       """)
@@ -618,6 +621,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
       "posture" => "permissive",
       "required_checks" => ["security-review"],
       "force_human_review_labels" => ["manual-review"],
+      "force_human_review_paths" => ["lib/authority/**", "priv/repo/migrations/*"],
       "blocked_state" => "Human Review",
       "dry_run" => true
     }
@@ -641,6 +645,12 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.auto_land.posture == "permissive"
     assert settings.auto_land.required_checks == ["security-review"]
     assert settings.auto_land.force_human_review_labels == ["manual-review"]
+    assert settings.auto_land.force_human_review_paths == ["lib/authority/**", "priv/repo/migrations/*"]
+
+    assert {:ok, manifest} = Manifest.read(path)
+    preview = Renderer.print(Path.dirname(path), manifest, Manifest.validate(Path.dirname(path), manifest), false)
+    assert preview =~ "auto-land:\n  posture: permissive\n  dry_run: true"
+    assert preview =~ "  force_human_review_paths:\n    - lib/authority/**\n    - priv/repo/migrations/*"
   end
 
   test "auto-land policy compiles documented default force-human-review labels" do
@@ -733,6 +743,35 @@ defmodule SymphonyElixir.WorkflowManifestTest do
                }
              ]}} =
              Manifest.load_map(Map.put(manifest, "auto_land", %{"dry_run" => "yes"}))
+  end
+
+  test "auto-land protected paths reject ambiguous or unsafe patterns" do
+    manifest = %{
+      "project" => %{
+        "slug" => "target",
+        "repository" => "github.com/example/target"
+      },
+      "delivery" => %{"pr_target" => "main"},
+      "auto_land" => %{
+        "force_human_review_paths" => [
+          "/absolute/path",
+          "../outside",
+          "./lib/authority.ex",
+          "lib/[ab].ex",
+          "lib/authority/"
+        ]
+      }
+    }
+
+    assert {:error, {:invalid_manifest, diagnostics}} = Manifest.load_map(manifest)
+
+    assert Enum.map(diagnostics, & &1.path) == [
+             "auto_land.force_human_review_paths[0]",
+             "auto_land.force_human_review_paths[1]",
+             "auto_land.force_human_review_paths[2]",
+             "auto_land.force_human_review_paths[3]",
+             "auto_land.force_human_review_paths[4]"
+           ]
   end
 
   test "legacy manifest vocabulary is rejected instead of translated" do
