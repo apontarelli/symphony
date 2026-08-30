@@ -1682,6 +1682,23 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
+  test "add plans retain required target budget limits", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Add{target_id: "alpha", target: patch_target(tmp_dir)},
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?
+    assert {:ok, envelope} = PlanStore.read(Path.join(tmp_dir, "target-plans"), plan.id)
+
+    assert get_in(envelope, ["command", "target", "budgets"]) ==
+             patch_target(tmp_dir)["budgets"]
+  end
+
+  @tag :tmp_dir
   test "command and call boundaries reject malformed values without raising", %{tmp_dir: tmp_dir} do
     registry_path = write_registry(tmp_dir, %{})
     generation = "sha256:" <> String.duplicate("0", 64)

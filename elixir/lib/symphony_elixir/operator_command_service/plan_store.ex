@@ -784,6 +784,8 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
     end)
   end
 
+  defp forbidden_key?("max_total_tokens"), do: false
+
   defp forbidden_key?(key) do
     normalized =
       key
