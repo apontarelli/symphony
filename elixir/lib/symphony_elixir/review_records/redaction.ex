@@ -35,6 +35,43 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
   def json_ready(value) when is_binary(value), do: redact_string(value)
   def json_ready(value), do: value
 
+  @doc """
+  Redacts secret-bearing keys, labeled secret values, and exact in-memory secrets
+  without changing map keys or other value types.
+  """
+  @spec redact_secrets(term(), [String.t()]) :: term()
+
+  def redact_secrets(map, exact_values) when is_map(map) and is_list(exact_values) do
+    Map.new(map, fn {key, value} ->
+      if Regex.match?(@secret_key, key_name(key)) do
+        {key, "<redacted:secret>"}
+      else
+        {key, redact_secrets(value, exact_values)}
+      end
+    end)
+  end
+
+  def redact_secrets(values, exact_values) when is_list(values),
+    do: Enum.map(values, &redact_secrets(&1, exact_values))
+
+  def redact_secrets(value, exact_values) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.map(&redact_secrets(&1, exact_values))
+    |> List.to_tuple()
+  end
+
+  def redact_secrets(value, exact_values) when is_binary(value) do
+    exact_values
+    |> Enum.filter(&(is_binary(&1) and &1 != ""))
+    |> Enum.sort_by(&byte_size/1, :desc)
+    |> Enum.reduce(redact_secret_values(value), fn secret, redacted ->
+      String.replace(redacted, secret, "<redacted:secret>")
+    end)
+  end
+
+  def redact_secrets(value, _exact_values), do: value
+
   @spec redact_string(term()) :: String.t()
   def redact_string(value) when is_binary(value) do
     value

@@ -36,8 +36,9 @@ framework. Reference protocol and implementation sources:
 
 ## OMP ACP Runner
 
-An `omp_acp` runner requires an operator-owned OMP profile, an explicit `provider/model` selector,
-and an explicit thinking selector. The command defaults to `["omp", "acp"]`.
+An `omp_acp` runner requires an operator-owned named OMP profile, an explicit `provider/model`
+selector, an explicit thinking selector, and a pinned permission map. Keep profile credentials in
+OMP. Workflow and target state contain only the profile name.
 
 ```yaml
 runtime:
@@ -47,14 +48,24 @@ runtime:
     omp:
       kind: omp_acp
       profile: symphony
-      model: openai-codex/gpt-5.6-sol
+      model: openai/gpt-5.6-sol
       thinking: high
+      permissions:
+        "*": block
+        read: allow
+        edit: allow
+        execute: deny
 ```
 
+The command defaults to `["omp", "--no-extensions", "--no-skills", "acp"]`. Custom commands must
+contain both isolation flags. OMP therefore does not discover global extensions or skills.
+Symphony does not pass `--no-rules`; OMP still loads repository `AGENTS.md` rules from the canonical
+workspace.
+
 Before activation, create and authenticate the named OMP profile outside the repository. Symphony
-sets `OMP_PROFILE` to the configured reference. It stores OMP session data below
+sets `OMP_PROFILE` to the configured reference. It stores each run in a mode-`0700` directory below
 `<workspace-root>/.symphony/omp_sessions/<issue>-<session>` and never writes runner state into the
-checkout.
+checkout. Concurrent runs have separate directories, OMP processes, and ACP session identities.
 `LINEAR_API_KEY` is removed from the OMP child environment.
 
 Each adapter session owns one `omp acp` process group, one ACP session, and one loopback HTTP MCP
@@ -65,15 +76,44 @@ Symphony.
 
 Startup performs ACP `initialize`, requires protocol version `1` and HTTP MCP support, creates a
 new session with the canonical workspace, and sets the pinned `model` and `thinking` configuration
-options. Continuation turns reuse that live ACP session. Symphony does not resume an ACP session
-after host restart.
+options. Continuation turns reuse that live ACP session. Symphony does not persist ACP resume data.
+Recovery verifies and terminates the recorded process group before it creates a new OMP process and
+ACP session. An unverifiable process identity blocks recovery instead of reattaching.
+
+ACP permission requests use the pinned runner `permissions` map. The exact ACP tool kind takes
+precedence over `"*"`. `allow` selects only an `allow_once` option. `deny` selects only
+`reject_once`, emits `blocked`, cancels the prompt, and fails the turn. `block`, a missing policy,
+or an unavailable one-time option returns a cancelled permission response and the same fail-closed
+lifecycle. Symphony never selects `allow_always` or `reject_always`.
 
 ACP assistant chunks become `message_delta`; reasoning, plans, configuration, mode, session, and
 usage updates become `turn_progress`; tool calls and terminal tool updates become `tool_call` and
-`tool_result`; prompt stop reasons become `turn_completed` or `turn_failed`. Permission requests
-are rejected conservatively and emit `blocked` plus `turn_failed`. Unknown required requests,
-malformed messages, unsupported protocol versions, stalls, timeouts, and process exits fail closed.
-Stop requests `session/close`, then terminates the owned process group and loopback bridge.
+`tool_result`; prompt stop reasons become `turn_completed` or `turn_failed`. Questions,
+`session/request_input`, and elicitation requests emit actionable `blocked` evidence and fail the
+turn. Other unknown required requests, malformed messages, unsupported protocol versions, stalls,
+timeouts, and process exits also fail closed.
+
+Before an OMP event or turn result leaves the adapter, the shared redaction policy removes
+secret-bearing map values, labeled bearer or credential strings, and the exact per-session MCP
+token. This applies to native ACP envelopes, normalized payloads, usage, reasons, startup errors,
+and returned native results. Stop requests `session/close`, then terminates the owned process group
+and loopback bridge.
+
+Run the installed-runtime smoke after the profile is authenticated:
+
+```bash
+SYMPHONY_OMP_PROFILE=symphony \
+SYMPHONY_OMP_MODEL=openai/gpt-5.6-sol \
+SYMPHONY_OMP_THINKING=high \
+make -C elixir omp-live
+```
+
+The smoke creates a temporary repository rule, starts the real installed `omp acp`, completes one
+model turn, verifies the rule marker and ACP usage, and verifies process cleanup. If ACP reports an
+unknown model, refresh the isolated profile catalog with
+`omp --profile symphony --no-extensions models refresh`, then list exact selectors with
+`omp --profile symphony --no-extensions models openai --json`. Do not place tokens, API keys, or
+profile database content in workflow files or test output.
 
 ## Selected OpenCode Surface
 

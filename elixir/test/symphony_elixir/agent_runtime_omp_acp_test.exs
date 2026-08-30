@@ -11,6 +11,10 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetContext
 
+  @live_omp_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_OMP_ACP") != "1",
+                          do: "set SYMPHONY_RUN_LIVE_OMP_ACP=1 to enable the installed OMP ACP smoke turn"
+                        )
+
   setup do
     root =
       Path.join(
@@ -48,8 +52,11 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert AgentRuntime.capabilities(execution_context) == %{
              adapter: "omp_acp",
              client_tools: ["linear_graphql"],
+             global_extensions: false,
+             global_skills: false,
              local_only: true,
-             model: "openai-codex/gpt-5.6-sol",
+             model: "openai/gpt-5.6-sol",
+             permission_policy: true,
              pinned: true,
              protocol: "acp-v1",
              session_resume: false
@@ -115,12 +122,15 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert trace =~ "ENV_OMP_PROFILE:symphony-test"
     assert trace =~ "ENV_LINEAR_API_KEY:"
     assert trace =~ "PI_CODING_AGENT_SESSION_DIR:#{session.adapter_session.session_dir}"
+    assert trace =~ "ARG:--no-extensions"
+    assert trace =~ "ARG:--no-skills"
+    assert trace =~ "PWD:#{session.adapter_session.workspace}"
 
     assert trace_request?(trace, "session/set_config_option", fn request ->
              request["params"] == %{
                "sessionId" => "omp-session",
                "configId" => "model",
-               "value" => "openai-codex/gpt-5.6-sol"
+               "value" => "openai/gpt-5.6-sol"
              }
            end)
 
@@ -129,22 +139,29 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
            end)
   end
 
-  test "permission requests fail closed with a rejection", context do
-    execution_context = execution_context(context, "permission")
+  test "pinned permission policy denies an ACP request with stable evidence", context do
+    execution_context = execution_context(context, "permission", %{"edit" => "deny"})
     issue = issue()
     test_pid = self()
 
     assert {:ok, session} = OmpAcp.start(execution_context, issue, [])
 
     try do
-      assert {:error, {:permission_required, params}} =
+      assert {:error, {:permission_denied, "edit"}} =
                OmpAcp.send_turn(session, "Request permission", issue, on_event: fn event -> send(test_pid, {:event, event}) end)
-
-      assert params["toolCall"]["toolCallId"] == "permission-call"
 
       events = receive_events()
       assert Enum.map(events, & &1.event) == [:session_started, :turn_started, :blocked, :turn_failed]
-      assert %Event{reason: :permission_required} = Enum.at(events, 2)
+
+      assert %Event{
+               reason: :permission_denied,
+               payload: %{
+                 call_id: "permission-call",
+                 decision: :deny,
+                 policy_key: "edit",
+                 tool_kind: "edit"
+               }
+             } = Enum.at(events, 2)
     after
       assert :ok = OmpAcp.stop(session)
     end
@@ -163,6 +180,139 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
                  false
              end
            end)
+  end
+
+  test "pinned permission policy allows only the requested operation once", context do
+    execution_context = execution_context(context, "permission", %{"edit" => "allow", "*" => "deny"})
+    test_pid = self()
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+
+    try do
+      assert {:ok, %{stop_reason: "end_turn"}} =
+               OmpAcp.send_turn(session, "Request permission", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      events = receive_events()
+
+      assert %Event{
+               event: :turn_progress,
+               payload: %{decision: :allow, option_id: "allow", policy_key: "edit"}
+             } = Enum.at(events, 2)
+
+      refute Enum.any?(events, &(&1.event == :blocked))
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
+
+    assert eventually(fn ->
+             context.trace
+             |> File.read!()
+             |> trace_request?(nil, fn request ->
+               request["id"] == 999 and
+                 request["result"] == %{
+                   "outcome" => %{"outcome" => "selected", "optionId" => "allow"}
+                 }
+             end)
+           end)
+  end
+
+  test "missing permission policy blocks without approving the operation", context do
+    execution_context = execution_context(context, "permission", %{})
+    test_pid = self()
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+
+    try do
+      assert {:error, {:permission_policy_missing, "edit"}} =
+               OmpAcp.send_turn(session, "Request permission", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      assert %Event{reason: :permission_policy_missing, payload: %{decision: :missing}} =
+               receive_events() |> Enum.at(2)
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
+  end
+
+  test "interactive elicitation becomes an actionable blocked event", context do
+    execution_context = execution_context(context, "question")
+    test_pid = self()
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+
+    try do
+      assert {:error, {:operator_input_required, "session/request_input"}} =
+               OmpAcp.send_turn(session, "Ask a question", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      assert %Event{
+               event: :blocked,
+               reason: :operator_input_required,
+               payload: %{action: action, method: "session/request_input"}
+             } = receive_events() |> Enum.at(2)
+
+      assert action =~ "outside the unattended run"
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
+  end
+
+  test "events and turn results redact the per-session bridge token", context do
+    execution_context = execution_context(context, "secret")
+    test_pid = self()
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+    bridge_token = session.bridge.token
+
+    try do
+      assert {:ok, result} =
+               OmpAcp.send_turn(session, "Echo the bridge secret", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      persisted =
+        Jason.encode!(%{events: Enum.map(receive_events(), &Map.from_struct/1), result: result})
+
+      refute persisted =~ bridge_token
+      assert persisted =~ "<redacted:secret>"
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
+  end
+
+  test "concurrent runs use separate session directories and ACP identities", context do
+    first_context = execution_context(context, "identity")
+    second_context = execution_context(context, "identity")
+
+    assert {:ok, first} = OmpAcp.start(first_context, issue(), [])
+    assert {:ok, second} = OmpAcp.start(second_context, issue(), [])
+
+    try do
+      refute first.session_dir == second.session_dir
+      refute first.session_id == second.session_id
+      refute first.process.os_pid == second.process.os_pid
+    after
+      assert :ok = OmpAcp.stop(first)
+      assert :ok = OmpAcp.stop(second)
+    end
+  end
+
+  test "recovery identity fences the prior process before a fresh ACP session", context do
+    if SymphonyElixir.ProcessSupervisor.descendant_cleanup_supported?() do
+      execution_context = execution_context(context, "identity")
+      assert {:ok, prior} = OmpAcp.start(execution_context, issue(), [])
+      assert {:ok, identity} = SymphonyElixir.ProcessSupervisor.recovery_identity(prior.process)
+
+      assert {:stopped, evidence} =
+               SymphonyElixir.ProcessSupervisor.terminate_recovered_group(identity)
+
+      assert evidence.result == "terminated"
+      assert {:ok, fresh} = OmpAcp.start(execution_context, issue(), [])
+
+      try do
+        refute fresh.session_id == prior.session_id
+        refute fresh.session_dir == prior.session_dir
+      after
+        assert :ok = OmpAcp.stop(prior)
+        assert :ok = OmpAcp.stop(fresh)
+      end
+    end
   end
 
   test "malformed ACP output fails the turn and cancels the session", context do
@@ -259,18 +409,69 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     end
   end
 
+  @tag skip: @live_omp_skip_reason
+  @tag timeout: 180_000
+  test "installed OMP ACP completes a guarded turn with repository rules and usage", context do
+    profile = System.fetch_env!("SYMPHONY_OMP_PROFILE")
+    model = System.fetch_env!("SYMPHONY_OMP_MODEL")
+    thinking = System.get_env("SYMPHONY_OMP_THINKING", "high")
+
+    File.write!(
+      Path.join(context.workspace, "AGENTS.md"),
+      "For this repository, reply with exactly SYMPHONY_OMP_LIVE_OK when the user asks for the live marker.\n"
+    )
+
+    runner = %{
+      "kind" => "omp_acp",
+      "command" => ["omp", "--no-extensions", "--no-skills", "acp"],
+      "model" => model,
+      "permissions" => %{"*" => "deny"},
+      "profile" => profile,
+      "thinking" => thinking,
+      "turn_timeout_ms" => 120_000,
+      "read_timeout_ms" => 30_000,
+      "stall_timeout_ms" => 60_000,
+      "startup_timeout_ms" => 30_000,
+      "execution_profiles" => %{}
+    }
+
+    execution_context = execution_context_with_runner(context, runner)
+    test_pid = self()
+
+    assert {:ok, session} = AgentRuntime.start_session(execution_context, issue())
+    os_pid = session.adapter_session.process.os_pid
+
+    try do
+      assert {:ok, %{stop_reason: "end_turn", usage: usage}} =
+               AgentRuntime.send_turn(session, "Return the live marker.", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      events = receive_events()
+      text = events |> Enum.map(& &1.payload[:text]) |> Enum.reject(&is_nil/1) |> Enum.join()
+
+      assert text =~ "SYMPHONY_OMP_LIVE_OK"
+      assert is_map(usage) and map_size(usage) > 0
+      assert Enum.any?(events, &(&1.event == :turn_completed))
+    after
+      assert :ok = AgentRuntime.stop_session(session)
+    end
+
+    assert eventually(fn -> not os_pid_alive?(os_pid) end)
+  end
+
   test "runner catalog normalizes OMP defaults and rejects unpinned settings" do
     assert {:ok, %{"omp" => runner}} =
              Schema.validate_runner_catalog(%{
                "omp" => %{
                  "kind" => "omp_acp",
-                 "model" => "openai-codex/gpt-5.6-sol",
+                 "model" => "openai/gpt-5.6-sol",
+                 "permissions" => %{"read" => "allow"},
                  "profile" => "symphony",
                  "thinking" => "high"
                }
              })
 
-    assert runner["command"] == ["omp", "acp"]
+    assert runner["command"] == ["omp", "--no-extensions", "--no-skills", "acp"]
+    assert runner["permissions"] == %{"read" => "allow"}
     assert runner["startup_timeout_ms"] == 30_000
 
     assert {:error, errors} =
@@ -291,20 +492,71 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
              Schema.validate_runner_catalog(%{
                "omp" => %{
                  "kind" => "omp_acp",
-                 "model" => "openai-codex/gpt-5.6-sol",
+                 "model" => "openai/gpt-5.6-sol",
                  "profile" => "symphony",
                  "thinking" => true
                }
              })
 
     assert Enum.any?(thinking_errors, &String.contains?(&1, ".thinking must be a string"))
+
+    assert {:error, hardening_errors} =
+             Schema.validate_runner_catalog(%{
+               "omp" => %{
+                 "kind" => "omp_acp",
+                 "command" => ["omp", "acp"],
+                 "model" => "openai/gpt-5.6-sol",
+                 "permissions" => %{"edit" => "ask"},
+                 "profile" => "symphony",
+                 "thinking" => "high"
+               }
+             })
+
+    assert Enum.any?(hardening_errors, &String.contains?(&1, ".command must include --no-extensions and --no-skills"))
+    assert Enum.any?(hardening_errors, &String.contains?(&1, ".permissions.edit must be one of: allow, block, deny"))
+
+    assert {:error, type_errors} =
+             Schema.validate_runner_catalog(%{
+               "omp" => %{
+                 "kind" => "omp_acp",
+                 "command" => "omp acp",
+                 "model" => "openai/gpt-5.6-sol",
+                 "permissions" => [],
+                 "profile" => "symphony",
+                 "thinking" => "high"
+               }
+             })
+
+    assert Enum.any?(type_errors, &String.contains?(&1, ".command must be a list"))
+    assert Enum.any?(type_errors, &String.contains?(&1, ".permissions must be a map"))
+
+    assert {:error, blank_key_errors} =
+             Schema.validate_runner_catalog(%{
+               "omp" => %{
+                 "kind" => "omp_acp",
+                 "model" => "openai/gpt-5.6-sol",
+                 "permissions" => %{" " => "allow"},
+                 "profile" => "symphony",
+                 "thinking" => "high"
+               }
+             })
+
+    assert Enum.any?(blank_key_errors, &String.contains?(&1, ".permissions keys must be non-empty strings"))
   end
 
-  defp execution_context(context, scenario) do
+  defp execution_context(context, scenario, permissions \\ %{"*" => "deny"}) do
     runner = %{
       "kind" => "omp_acp",
-      "command" => [context.binary, scenario, context.trace, context.child_pid_file],
-      "model" => "openai-codex/gpt-5.6-sol",
+      "command" => [
+        context.binary,
+        "--no-extensions",
+        "--no-skills",
+        scenario,
+        context.trace,
+        context.child_pid_file
+      ],
+      "model" => "openai/gpt-5.6-sol",
+      "permissions" => permissions,
       "profile" => "symphony-test",
       "thinking" => "high",
       "turn_timeout_ms" => 1_000,
@@ -314,6 +566,10 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       "execution_profiles" => %{}
     }
 
+    execution_context_with_runner(context, runner)
+  end
+
+  defp execution_context_with_runner(context, runner) do
     target = %TargetContext{
       target_id: "omp-test",
       workspace_layout: :flat,
@@ -382,11 +638,20 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
   defp fake_omp_script do
     ~S"""
     #!/bin/sh
+    printf 'ARG:%s\n' "$1" >> "$4"
+    printf 'ARG:%s\n' "$2" >> "$4"
+    shift 2
     scenario="$1"
     trace="$2"
     child_pid_file="$3"
     prompt_id=""
     permission_pending=0
+    session_id="omp-session"
+    bridge_token=""
+
+    if [ "$scenario" = "identity" ]; then
+      session_id="omp-session-$$"
+    fi
 
     printf 'PWD:%s\n' "$PWD" >> "$trace"
     printf 'ENV_OMP_PROFILE:%s\n' "${OMP_PROFILE:-}" >> "$trace"
@@ -419,7 +684,8 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
           fi
           ;;
         *'"method":"session/new"'*)
-          printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"omp-session\",\"configOptions\":[]}}"
+          bridge_token=$(printf '%s' "$line" | sed -n 's/.*Bearer \([^"]*\).*/\1/p')
+          printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"$session_id\",\"configOptions\":[]}}"
           ;;
         *'"method":"session/set_config_option"'*)
           printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[]}}"
@@ -432,7 +698,14 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
               ;;
             permission)
               permission_pending=1
-              printf '%s\n' '{"jsonrpc":"2.0","id":999,"method":"session/request_permission","params":{"sessionId":"omp-session","toolCall":{"toolCallId":"permission-call","title":"write","kind":"edit"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"reject","name":"Reject","kind":"reject_once"}]}}'
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":999,\"method\":\"session/request_permission\",\"params\":{\"sessionId\":\"$session_id\",\"toolCall\":{\"toolCallId\":\"permission-call\",\"title\":\"write\",\"kind\":\"edit\"},\"options\":[{\"optionId\":\"allow\",\"name\":\"Allow\",\"kind\":\"allow_once\"},{\"optionId\":\"reject\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}"
+              ;;
+            question)
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":998,\"method\":\"session/request_input\",\"params\":{\"sessionId\":\"$session_id\",\"question\":\"Choose a deployment\"}}"
+              ;;
+            secret)
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Authorization: Bearer $bridge_token\"},\"messageId\":\"message-secret\"}}}"
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\",\"credential\":\"$bridge_token\"}}"
               ;;
             *)
               printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"omp-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"},"messageId":"message-1"}}}'
