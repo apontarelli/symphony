@@ -108,12 +108,53 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       assert %Event{payload: %{kind: :plan}} = Enum.at(events, 6)
       assert %Event{usage: %{"used" => 10}} = Enum.at(events, 7)
 
+      headers = [{"authorization", "Bearer " <> adapter_session.bridge.token}]
+
+      call =
+        rpc_request(99, "tools/call", %{
+          "name" => "linear_graphql",
+          "arguments" => %{"query" => "query BetweenTurns { viewer { id } }"}
+        })
+
+      assert {:ok,
+              %{
+                status: 200,
+                body: %{
+                  "result" => %{
+                    "content" => [%{"type" => "text", "text" => "ok"}],
+                    "isError" => false
+                  }
+                }
+              }} = Req.post(adapter_session.bridge.url, headers: headers, json: call)
+
       assert {:ok, %{stop_reason: "end_turn"}} =
                AgentRuntime.send_turn(session, "Continue", issue, on_event: on_event)
 
       continuation_events = receive_events()
       refute Enum.any?(continuation_events, &(&1.event == :session_started))
       assert hd(continuation_events).event == :turn_started
+
+      default_call =
+        rpc_request(100, "tools/call", %{
+          "name" => "linear_graphql",
+          "arguments" => %{}
+        })
+
+      assert {:ok,
+              %{
+                status: 200,
+                body: %{
+                  "result" => %{
+                    "content" => [
+                      %{"type" => "text", "text" => default_error}
+                    ],
+                    "isError" => true
+                  }
+                }
+              }} = Req.post(adapter_session.bridge.url, headers: headers, json: default_call)
+
+      assert default_error =~ "`linear_graphql` requires a non-empty `query` string."
+      refute default_error =~ "unavailable outside an active turn"
     after
       assert :ok = AgentRuntime.stop_session(session)
     end
@@ -137,6 +178,38 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert trace_request?(trace, "session/set_config_option", fn request ->
              request["params"]["configId"] == "thinking" and request["params"]["value"] == "high"
            end)
+  end
+
+  test "default Linear executor resolves only the session target credential", context do
+    variable = "SYMPHONY_OMP_MISSING_TARGET_TOKEN"
+    System.delete_env(variable)
+
+    execution_context =
+      context
+      |> execution_context("success")
+      |> put_in(
+        [Access.key!(:target), Access.key!(:tracker_connection)],
+        %{
+          "id" => "linear",
+          "policy" => %{
+            "kind" => "linear",
+            "endpoint" => "https://linear.example/graphql",
+            "api_key" => "$#{variable}"
+          }
+        }
+      )
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+
+    try do
+      assert {:error, :missing_secret} =
+               OmpAcp.send_turn(session, "Use Linear", issue(), [])
+
+      assert get_in(session, [:execution_context, Access.key!(:target), Access.key!(:tracker_connection), "policy", "api_key"]) ==
+               "$#{variable}"
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
   end
 
   test "pinned permission policy denies an ACP request with stable evidence", context do
@@ -583,7 +656,14 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
         "manifest_source_dir" => context.root,
         "workflow_module_resolution" => %{}
       },
-      tracker_connection: %{},
+      tracker_connection: %{
+        "id" => "linear",
+        "policy" => %{
+          "kind" => "linear",
+          "endpoint" => "https://linear.example/graphql",
+          "api_key" => "target-linear-token"
+        }
+      },
       run_target: %{},
       worktree_policy: %{
         "root" => context.workspace_root,

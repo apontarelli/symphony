@@ -153,6 +153,21 @@ defmodule SymphonyElixir.RunSetupTest do
     assert preview =~ "runtime project project-id is outside repo allowed_projects: allowed-project"
   end
 
+  test "preview accepts an unlabeled dedicated project target" do
+    repo = repo_setup!("symphony-run-setup-unlabeled-project")
+    runtime_path = Path.join(repo, "symphony.runtime.yml")
+    write_workflow_file!(runtime_path)
+
+    assert {:ok, setup} = RunSetup.resolve(cwd: repo)
+
+    preview = RunSetup.preview(setup)
+
+    assert preview =~ "tracker: linear project_slug=project; required labels: none"
+    assert preview =~ "marker intersection: none"
+    refute preview =~ "repo marker labels not required by runtime target"
+    refute preview =~ "runtime project"
+  end
+
   test "preview can use symphony.yml as the runtime fallback" do
     repo = repo_setup!("symphony-run-setup-repo-fallback")
     runtime_path = Path.join(repo, "symphony.yml")

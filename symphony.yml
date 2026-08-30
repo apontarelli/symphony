@@ -1,8 +1,10 @@
 version: 1
 # This committed manifest is this fork's dogfood configuration for running Symphony on itself.
-# For another repository, generate a fresh manifest with `symphony setup init` and replace the
-# repository, validation, delivery, capability, and issue marker values with project-local values.
-# Keep tracker scope, workspace roots, runner commands, and host runtime settings in local setup.
+# Its dedicated Linear Project target carries repository identity, so implementation issues do not
+# need a repository label. For another repository, generate a fresh manifest with `symphony setup
+# init` and replace the repository, validation, delivery, capability, and marker values with
+# project-local values. Keep tracker scope, workspace roots, runner commands, and host runtime
+# settings in local setup.
 project:
   slug: symphony
   name: Symphony
@@ -52,9 +54,6 @@ auto_land:
     - elixir/lib/symphony_elixir/publish_handoff.ex
     - elixir/lib/symphony_elixir/workflow/manifest.ex
     - elixir/lib/symphony_elixir/workflow/landing_authority.ex
-issue_markers:
-  labels:
-    - repo:symphony
 capabilities:
   required:
     - linear

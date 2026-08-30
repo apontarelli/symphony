@@ -3,7 +3,8 @@
 Symphony is an experimental service for turning issue-tracker work into isolated,
 autonomous coding-agent runs. It polls Linear, creates a per-issue workspace, launches the
 configured `AgentRuntime` runner, and records validation, review, publish, and handoff evidence
-back to the tracker. The production adapters target Codex app-server and local OpenCode server.
+back to the tracker. The production adapters target Codex app-server, OMP ACP, and local OpenCode
+server.
 
 This is my personal, independent public fork of the
 [OpenAI Symphony](https://github.com/openai/symphony) prototype. It is not an official OpenAI
@@ -125,6 +126,12 @@ runs accept `--max-agents`, `--max-startups`, `--no-land`, and `--human-review-o
 overrides can only lower the selected capacity and cannot exceed local deployment ceilings.
 Capacity belongs to the run setup or CLI launch override, never to the checked-in repo setup
 manifest.
+
+A dedicated Linear Project target can omit repository marker labels when that project belongs to
+one repository. Team and query/file targets require nonempty issue markers. A project that contains
+work for more than one repository must use one target per repository or explicit repository markers;
+an unmarked mixed-repository target is not safe. Planning and follow-up automation must add
+execution labels only when the selected target policy requires them.
 
 `setup migrate` can convert an existing checked-in runtime setup into local config plus a saved
 workflow. It intentionally requires an explicit `--repo`. The command previews by default and

@@ -1000,6 +1000,10 @@ Run target:
 - Legacy `runtime.tracker.project_id`, `runtime.tracker.project_slug`, and
   `runtime.tracker.team_key` MAY be interpreted as compatibility fallbacks when `runtime.target` is
   absent. New run setup files SHOULD use `runtime.target`.
+- A `project` target MAY omit repository markers only when the operator binds that Linear Project
+  exclusively to one repository. A project shared by multiple repositories MUST use separate
+  repository targets or explicit issue markers. `team` and `query` targets MUST define nonempty
+  issue markers.
 
 Dispatchability is a tracker-state contract:
 
@@ -1009,6 +1013,9 @@ Dispatchability is a tracker-state contract:
 - `Todo` is the default ready-for-dispatch state.
 - Labels explain why a Backlog issue is not dispatchable; they do not make an issue dispatchable unless
   required labels are explicitly configured.
+- Planning, grooming, implementation, and closeout workflows that create issues MUST add repository
+  or execution labels only when the selected target's required-label or marker policy requires them.
+  An unmarked dedicated project target conveys repository identity without an execution label.
 - A dedicated grooming workflow may promote a Backlog issue to `Todo` only after the issue has bounded
   scope, explicit acceptance criteria, a validation path, named repo context or entrypoints, no
   remaining `needs-info` or `human-only` label, and no remaining `needs-grooming` label. Promotion
@@ -1336,7 +1343,9 @@ it.
 - `capabilities` (object): required runner capability names only; it does not select a concrete
   runner.
 - `issue_markers` (object): durable issue labels and allowed project markers for policy/preview
-  validation; it does not select the active Linear polling target.
+  validation; it does not select the active Linear polling target. The object MAY be empty for a
+  dedicated single-repository project target, MUST be nonempty for team or query targets, and MUST
+  be nonempty when one project target could otherwise admit issues for multiple repositories.
 - `harness` (object): optional implementation-owned harness root; `null` means the implementation
   derives a managed harness root.
 - `auto_land` and `review_routing` (objects): durable repository policy inputs.
@@ -2294,7 +2303,10 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
   `team: { key: { eq: $teamKey } }` for project/team targets; query targets use the supplied native
   filter object.
 - Team and query targets require repo `issue_markers.labels` or `issue_markers.allowed_projects`.
-  When markers exist, project, team, and query targets are intersected with those labels/projects.
+  A project target MAY have no markers only when its Linear Project is dedicated to one repository.
+  A project shared across repositories MUST use separate repository targets or explicit markers;
+  an unmarked mixed-repository target is not safe.
+- When markers exist, project, team, and query targets are intersected with those labels/projects.
   Explicit issue targets return marker mismatch warnings instead of silently dropping mismatched
   requested issues.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`

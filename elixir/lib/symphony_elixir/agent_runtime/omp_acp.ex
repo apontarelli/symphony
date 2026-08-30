@@ -9,8 +9,12 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   @behaviour SymphonyElixir.AgentRuntime
 
   alias SymphonyElixir.AgentRuntime.{Event, OmpMcpBridge}
-  alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor}
+  alias SymphonyElixir.Codex.DynamicTool
+  alias SymphonyElixir.ExecutionContext
+  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.{PathSafety, ProcessSupervisor}
   alias SymphonyElixir.ReviewRecords.Redaction
+  alias SymphonyElixir.TargetContext
 
   @runtime :omp_acp
   @protocol_version 1
@@ -68,17 +72,13 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     with :ok <- validate_turn_options(opts),
          :ok <- validate_session(session),
          {:ok, on_event} <- event_handler(opts),
-         {:ok, tool_executor} <- tool_executor(opts) do
+         {:ok, tool_executor} <- tool_executor(session, opts) do
       timeout_ms = turn_timeout(session, opts)
       OmpMcpBridge.set_tool_executor(session.bridge, tool_executor)
 
-      try do
-        emit_session_started_once(session, on_event)
-        emit_event(on_event, :turn_started, session, %{prompt_bytes: byte_size(prompt)})
-        prompt_turn(session, prompt, on_event, timeout_ms)
-      after
-        OmpMcpBridge.set_tool_executor(session.bridge, nil)
-      end
+      emit_session_started_once(session, on_event)
+      emit_event(on_event, :turn_started, session, %{prompt_bytes: byte_size(prompt)})
+      prompt_turn(session, prompt, on_event, timeout_ms)
     end
   end
 
@@ -796,13 +796,31 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     end
   end
 
-  defp tool_executor(opts) do
+  defp tool_executor(session, opts) do
     case Keyword.get(opts, :tool_executor) do
-      nil -> {:ok, nil}
+      nil -> target_tool_executor(session)
       executor when is_function(executor, 2) -> {:ok, executor}
       _invalid -> {:error, :invalid_agent_runtime_options}
     end
   end
+
+  defp target_tool_executor(%{
+         execution_context: %ExecutionContext{target: %TargetContext{} = target}
+       }) do
+    with {:ok, resolved_target} <- TargetContext.resolve_tracker_credentials(target) do
+      linear_client = fn query, variables, opts ->
+        Client.graphql(resolved_target, query, variables, opts)
+      end
+
+      {:ok,
+       fn tool, arguments ->
+         DynamicTool.execute(tool, arguments, linear_client: linear_client)
+       end}
+    end
+  end
+
+  defp target_tool_executor(_session),
+    do: {:error, :invalid_agent_runtime_session}
 
   defp turn_timeout(%{execution_context: %ExecutionContext{timeout_ms: timeout_ms}}, _opts), do: timeout_ms
   defp turn_timeout(session, opts), do: Keyword.get(opts, :turn_timeout_ms, session.turn_timeout_ms)
