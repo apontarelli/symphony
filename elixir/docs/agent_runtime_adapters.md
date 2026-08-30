@@ -1,4 +1,4 @@
-# AgentRuntime Adapter Planning
+# AgentRuntime Adapters
 
 This document records production adapter planning for the Elixir implementation.
 [`../SPEC.md`](../../SPEC.md) owns the generic `AgentRuntime` contract; this file records the
@@ -7,47 +7,73 @@ work closed by SID-344.
 
 ## Current Posture
 
-- Codex app-server and local OpenCode server are production adapters; Codex remains the dogfood
-  default.
-- `SymphonyElixir.Config.Schema` accepts `codex_app_server` and `opencode_server` runner kinds.
+- Codex app-server, local OpenCode server, and local Oh My Pi ACP are production adapters; Codex
+  remains the default.
+- `SymphonyElixir.Config.Schema` accepts `codex_app_server`, `opencode_server`, and `omp_acp`
+  runner kinds.
 - `SymphonyElixir.AgentRuntime` selects the adapter from a validated `ExecutionContext`, and each
   session retains that exact runner, profile, model, worker, timeout, and policy snapshot.
 - Runtime adapters expose context-only start, turn, stop, and capability entry points. Adapter
   selection never returns to `runtime.agent.default_runner` after admission.
-- `opencode_server` is local-worker only. Remote selection fails before launch with
-  `{:unsupported_remote_runner, "opencode_server", worker_host}`.
-- SID-382 closed runner schema and dispatch. SID-383 added the local HTTP lifecycle, normalized
-  events, blocking/timeout handling, and fake-server contract coverage.
+- `opencode_server` and `omp_acp` are local-worker only. Remote selection fails before launch.
+- SID-382 and SID-383 established OpenCode schema, lifecycle, event mapping, and contract coverage.
+  SID-452 added the OMP ACP v1 transport and its authenticated Linear tool bridge.
 
-## Decision
+## Adapter Decisions
 
-OpenCode is the next approved production adapter target.
+OpenCode uses `opencode serve` over loopback HTTP. Its native session, permission, event, and
+dispose APIs fit Symphony's long-running worker lifecycle.
 
-Rationale:
+Oh My Pi uses `omp acp` over newline-delimited JSON-RPC on stdio. Symphony implements the stable
+ACP protocol version `1` directly and keeps the adapter private instead of adding a generic ACP
+framework. Reference protocol and implementation sources:
 
-- OpenCode has documented programmatic interfaces that can support an unattended adapter:
-  `opencode run` for non-interactive prompts, `opencode serve` for a headless HTTP/OpenAPI server,
-  and `opencode acp` for a JSON-RPC stdio protocol.
-- The headless server surface exposes session, message, permission, abort, diff, health, event, and
-  dispose operations, which maps better to Symphony's long-running worker model than a single
-  command invocation.
-- OpenCode's permission model is explicit (`allow`, `ask`, `deny`) and can be configured through
-  project or injected config, giving Symphony a concrete surface for unattended policy mapping.
-- OpenCode reads project `AGENTS.md`, so it preserves the repo-grounded instruction model Symphony
-  already relies on.
-
-Oh My Pi remains deferred. There is no checked-in runtime contract, executable protocol, auth model,
-or operator value statement in this repository comparable to the OpenCode surfaces above. Revisit it
-after the OpenCode adapter proves the second-runtime path or after a concrete Oh My Pi protocol doc
-exists.
-
-Reference sources for the OpenCode assessment:
-
-- https://opencode.ai/docs/cli/
+- https://agentclientprotocol.com/
+- https://github.com/agentclientprotocol/agent-client-protocol
+- https://github.com/can1357/oh-my-pi
 - https://opencode.ai/docs/server/
-- https://opencode.ai/docs/acp/
 - https://opencode.ai/docs/permissions/
-- https://opencode.ai/docs/config/
+
+## OMP ACP Runner
+
+An `omp_acp` runner requires an operator-owned OMP profile, an explicit `provider/model` selector,
+and an explicit thinking selector. The command defaults to `["omp", "acp"]`.
+
+```yaml
+runtime:
+  agent:
+    default_runner: omp
+  runners:
+    omp:
+      kind: omp_acp
+      profile: symphony
+      model: openai-codex/gpt-5.6-sol
+      thinking: high
+```
+
+Before activation, create and authenticate the named OMP profile outside the repository. Symphony
+sets `OMP_PROFILE` to the configured reference. It stores OMP session data below
+`<workspace-root>/.symphony/omp_sessions/<issue>-<session>` and never writes runner state into the
+checkout.
+`LINEAR_API_KEY` is removed from the OMP child environment.
+
+Each adapter session owns one `omp acp` process group, one ACP session, and one loopback HTTP MCP
+bridge. The bridge binds only to `127.0.0.1` on an ephemeral port and requires a random bearer token.
+It exposes only `linear_graphql` and delegates calls to Symphony's host-owned `tool_executor`.
+The bearer token is passed as an ACP MCP-server header; the Linear credential remains inside
+Symphony.
+
+Startup performs ACP `initialize`, requires protocol version `1` and HTTP MCP support, creates a
+new session with the canonical workspace, and sets the pinned `model` and `thinking` configuration
+options. Continuation turns reuse that live ACP session. Symphony does not resume an ACP session
+after host restart.
+
+ACP assistant chunks become `message_delta`; reasoning, plans, configuration, mode, session, and
+usage updates become `turn_progress`; tool calls and terminal tool updates become `tool_call` and
+`tool_result`; prompt stop reasons become `turn_completed` or `turn_failed`. Permission requests
+are rejected conservatively and emit `blocked` plus `turn_failed`. Unknown required requests,
+malformed messages, unsupported protocol versions, stalls, timeouts, and process exits fail closed.
+Stop requests `session/close`, then terminates the owned process group and loopback bridge.
 
 ## Selected OpenCode Surface
 

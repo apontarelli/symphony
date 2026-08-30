@@ -8,7 +8,7 @@ defmodule SymphonyElixir.AgentRuntime do
   """
   require Logger
 
-  alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OpenCodeServer}
+  alias SymphonyElixir.AgentRuntime.{CodexAppServer, Event, OmpAcp, OpenCodeServer}
   alias SymphonyElixir.{ExecutionContext, ProcessSupervisor}
 
   @type adapter_config :: term()
@@ -277,6 +277,6 @@ defmodule SymphonyElixir.AgentRuntime do
   end
 
   defp default_adapter_registry do
-    %{"codex_app_server" => CodexAppServer, "opencode_server" => OpenCodeServer}
+    %{"codex_app_server" => CodexAppServer, "omp_acp" => OmpAcp, "opencode_server" => OpenCodeServer}
   end
 end

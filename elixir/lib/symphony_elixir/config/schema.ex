@@ -44,8 +44,13 @@ defmodule SymphonyElixir.Config.Schema do
                                  "startup_timeout_ms"
                                ])
                              )
+  @omp_runner_v1_fields MapSet.union(
+                          @runner_common_v1_fields,
+                          MapSet.new(["profile", "thinking", "startup_timeout_ms"])
+                        )
   @default_runner_name "codex"
-  @supported_runner_kinds MapSet.new(["codex_app_server", "opencode_server"])
+  @supported_runner_kinds MapSet.new(["codex_app_server", "omp_acp", "opencode_server"])
+  @omp_thinking_values MapSet.new(~w(inherit off minimal low medium high xhigh max auto))
   @opencode_loopback_hosts MapSet.new(["127.0.0.1", "localhost", "::1"])
   @default_runner_config %{
     "kind" => "codex_app_server",
@@ -68,6 +73,15 @@ defmodule SymphonyElixir.Config.Schema do
     "startup_timeout_ms" => 30_000,
     "execution_profiles" => %{},
     "permissions" => %{}
+  }
+  @omp_runner_defaults %{
+    "kind" => "omp_acp",
+    "command" => ["omp", "acp"],
+    "turn_timeout_ms" => 3_600_000,
+    "read_timeout_ms" => 30_000,
+    "stall_timeout_ms" => 300_000,
+    "startup_timeout_ms" => 30_000,
+    "execution_profiles" => %{}
   }
   @default_runners %{@default_runner_name => @default_runner_config}
 
@@ -924,10 +938,13 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp runner_defaults("codex_app_server"), do: @default_runner_config
   defp runner_defaults("opencode_server"), do: @opencode_runner_defaults
+  defp runner_defaults("omp_acp"), do: @omp_runner_defaults
   defp runner_defaults(kind), do: %{"kind" => kind}
 
-  defp restore_nil_runner_defaults(runner, "opencode_server") do
-    Enum.reduce(@opencode_runner_defaults, runner, fn {field, default}, acc ->
+  defp restore_nil_runner_defaults(runner, kind) when kind in ["opencode_server", "omp_acp"] do
+    defaults = if kind == "opencode_server", do: @opencode_runner_defaults, else: @omp_runner_defaults
+
+    Enum.reduce(defaults, runner, fn {field, default}, acc ->
       if is_nil(Map.get(acc, field)), do: Map.put(acc, field, default), else: acc
     end)
   end
@@ -1096,6 +1113,7 @@ defmodule SymphonyElixir.Config.Schema do
       case kind do
         "codex_app_server" -> codex_runner_validation_errors(name, runner)
         "opencode_server" -> opencode_runner_validation_errors(name, runner)
+        "omp_acp" -> omp_runner_validation_errors(name, runner)
         _kind -> []
       end
 
@@ -1116,6 +1134,7 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp runner_field?("codex_app_server", field), do: MapSet.member?(@codex_runner_v1_fields, field)
   defp runner_field?("opencode_server", field), do: MapSet.member?(@opencode_runner_v1_fields, field)
+  defp runner_field?("omp_acp", field), do: MapSet.member?(@omp_runner_v1_fields, field)
   defp runner_field?(_kind, field), do: MapSet.member?(@runner_common_v1_fields, field)
 
   defp codex_runner_validation_errors(name, runner) do
@@ -1139,6 +1158,14 @@ defmodule SymphonyElixir.Config.Schema do
     ]
     |> Enum.reject(&is_nil/1)
     |> Kernel.++(validate_opencode_server_auth(name, Map.get(runner, "server_auth")))
+  end
+
+  defp omp_runner_validation_errors(name, runner) do
+    [
+      validate_runner_non_empty_string(name, "profile", Map.get(runner, "profile")),
+      validate_omp_thinking(name, Map.get(runner, "thinking")),
+      validate_runner_positive_integer(name, "startup_timeout_ms", Map.get(runner, "startup_timeout_ms"))
+    ]
   end
 
   defp validate_runner_kind(name, value) when is_binary(value) do
@@ -1180,10 +1207,14 @@ defmodule SymphonyElixir.Config.Schema do
   defp validate_runner_command(name, _value), do: "runtime.runners.#{name}.command must be a list"
 
   defp validate_runner_model(name, "codex_app_server", value), do: validate_runner_string(name, "model", value)
+  defp validate_runner_model(name, "omp_acp", value), do: validate_provider_model(name, value)
 
   defp validate_runner_model(_name, "opencode_server", nil), do: nil
 
-  defp validate_runner_model(name, "opencode_server", value) when is_binary(value) do
+  defp validate_runner_model(name, "opencode_server", value), do: validate_provider_model(name, value)
+  defp validate_runner_model(_name, _kind, _value), do: nil
+
+  defp validate_provider_model(name, value) when is_binary(value) do
     case String.trim(value) do
       "" ->
         "runtime.runners.#{name}.model must be a non-empty string"
@@ -1196,10 +1227,20 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp validate_runner_model(name, "opencode_server", _value),
+  defp validate_provider_model(name, _value),
     do: "runtime.runners.#{name}.model must be a non-empty string"
 
-  defp validate_runner_model(_name, _kind, _value), do: nil
+  defp validate_omp_thinking(name, value) when is_binary(value) do
+    if MapSet.member?(@omp_thinking_values, value) do
+      nil
+    else
+      values = @omp_thinking_values |> Enum.sort() |> Enum.join(", ")
+      "runtime.runners.#{name}.thinking must be one of: #{values}"
+    end
+  end
+
+  defp validate_omp_thinking(name, _value),
+    do: "runtime.runners.#{name}.thinking must be a string"
 
   defp validate_opencode_hostname(name, value) do
     case validate_runner_non_empty_string(name, "hostname", value) do

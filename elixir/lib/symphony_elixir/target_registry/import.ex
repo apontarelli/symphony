@@ -16,14 +16,15 @@ defmodule SymphonyElixir.TargetRegistry.Import do
     kind command approval_policy thread_sandbox turn_sandbox_policy
     turn_timeout_ms read_timeout_ms stall_timeout_ms max_concurrent_startups
     agent hostname port config_dir config_path config_content server_auth permissions
-    startup_timeout_ms
+    profile thinking startup_timeout_ms
   )
   @safe_runner_setting_fields ~w(model)
   @safe_execution_profile_fields ~w(model reasoning_effort)
   @safe_reasoning_efforts ~w(minimal none low medium high xhigh max)
   @defaulted_runner_fields %{
     "codex_app_server" => MapSet.new(~w(command model approval_policy thread_sandbox turn_timeout_ms read_timeout_ms stall_timeout_ms execution_profiles)),
-    "opencode_server" => MapSet.new(~w(hostname port turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles permissions))
+    "opencode_server" => MapSet.new(~w(hostname port turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles permissions)),
+    "omp_acp" => MapSet.new(~w(command turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles))
   }
   @normalized_validation_command_fields ~w(command name)
   @mapped_runtime_sections ~w(tracker target hooks worker workspace polling quality_gate)

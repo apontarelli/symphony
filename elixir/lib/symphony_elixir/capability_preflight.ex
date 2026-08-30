@@ -126,6 +126,9 @@ defmodule SymphonyElixir.CapabilityPreflight do
       "opencode_server" ->
         {:ok, context_opts}
 
+      "omp_acp" ->
+        {:ok, context_opts}
+
       _unsupported ->
         {:error, :invalid_capability_preflight_context}
     end
