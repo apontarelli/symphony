@@ -46,11 +46,12 @@ defmodule SymphonyElixir.Config.Schema do
                              )
   @omp_runner_v1_fields MapSet.union(
                           @runner_common_v1_fields,
-                          MapSet.new(["profile", "thinking", "startup_timeout_ms"])
+                          MapSet.new(["permissions", "profile", "thinking", "startup_timeout_ms"])
                         )
   @default_runner_name "codex"
   @supported_runner_kinds MapSet.new(["codex_app_server", "omp_acp", "opencode_server"])
   @omp_thinking_values MapSet.new(~w(inherit off minimal low medium high xhigh max auto))
+  @omp_permission_decisions MapSet.new(~w(allow block deny))
   @opencode_loopback_hosts MapSet.new(["127.0.0.1", "localhost", "::1"])
   @default_runner_config %{
     "kind" => "codex_app_server",
@@ -76,12 +77,13 @@ defmodule SymphonyElixir.Config.Schema do
   }
   @omp_runner_defaults %{
     "kind" => "omp_acp",
-    "command" => ["omp", "acp"],
+    "command" => ["omp", "--no-extensions", "--no-skills", "acp"],
     "turn_timeout_ms" => 3_600_000,
     "read_timeout_ms" => 30_000,
     "stall_timeout_ms" => 300_000,
     "startup_timeout_ms" => 30_000,
-    "execution_profiles" => %{}
+    "execution_profiles" => %{},
+    "permissions" => %{}
   }
   @default_runners %{@default_runner_name => @default_runner_config}
 
@@ -1164,6 +1166,8 @@ defmodule SymphonyElixir.Config.Schema do
     [
       validate_runner_non_empty_string(name, "profile", Map.get(runner, "profile")),
       validate_omp_thinking(name, Map.get(runner, "thinking")),
+      validate_omp_isolation_flags(name, Map.get(runner, "command")),
+      validate_omp_permission_policy(name, Map.get(runner, "permissions")),
       validate_runner_positive_integer(name, "startup_timeout_ms", Map.get(runner, "startup_timeout_ms"))
     ]
   end
@@ -1241,6 +1245,34 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp validate_omp_thinking(name, _value),
     do: "runtime.runners.#{name}.thinking must be a string"
+
+  defp validate_omp_isolation_flags(name, command) when is_list(command) do
+    if "--no-extensions" in command and "--no-skills" in command do
+      nil
+    else
+      "runtime.runners.#{name}.command must include --no-extensions and --no-skills"
+    end
+  end
+
+  defp validate_omp_isolation_flags(_name, _command), do: nil
+
+  defp validate_omp_permission_policy(name, permissions) when is_map(permissions) do
+    Enum.find_value(permissions, fn {tool_kind, decision} ->
+      cond do
+        not is_binary(tool_kind) or String.trim(tool_kind) == "" ->
+          "runtime.runners.#{name}.permissions keys must be non-empty strings"
+
+        not MapSet.member?(@omp_permission_decisions, decision) ->
+          "runtime.runners.#{name}.permissions.#{tool_kind} must be one of: allow, block, deny"
+
+        true ->
+          nil
+      end
+    end)
+  end
+
+  defp validate_omp_permission_policy(name, _permissions),
+    do: "runtime.runners.#{name}.permissions must be a map"
 
   defp validate_opencode_hostname(name, value) do
     case validate_runner_non_empty_string(name, "hostname", value) do

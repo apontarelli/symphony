@@ -1,9 +1,9 @@
-.PHONY: help all setup deps audit build fmt fmt-check lint test coverage ci dialyzer e2e
+.PHONY: help all setup deps audit build fmt fmt-check lint test coverage ci dialyzer e2e omp-live
 
 MIX ?= mix
 
 help:
-	@echo "Targets: setup, deps, audit, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, audit, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, omp-live, ci"
 
 setup:
 	$(MIX) setup
@@ -47,6 +47,9 @@ dialyzer:
 
 e2e:
 	SYMPHONY_RUN_LIVE_E2E=1 $(MIX) test test/symphony_elixir/live_e2e_test.exs
+
+omp-live:
+	SYMPHONY_RUN_LIVE_OMP_ACP=1 $(MIX) test test/symphony_elixir/agent_runtime_omp_acp_test.exs
 
 ci:
 	$(MAKE) setup

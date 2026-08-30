@@ -10,6 +10,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
 
   alias SymphonyElixir.AgentRuntime.{Event, OmpMcpBridge}
   alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor}
+  alias SymphonyElixir.ReviewRecords.Redaction
 
   @runtime :omp_acp
   @protocol_version 1
@@ -109,8 +110,11 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     %{
       adapter: "omp_acp",
       client_tools: ["linear_graphql"],
+      global_extensions: false,
+      global_skills: false,
       local_only: true,
       model: config["model"],
+      permission_policy: true,
       pinned: true,
       protocol: "acp-v1",
       session_resume: false
@@ -186,7 +190,12 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   end
 
   defp validate_command(command) do
-    if valid_command?(command), do: :ok, else: {:error, {:invalid_omp_command, command}}
+    cond do
+      not valid_command?(command) -> {:error, {:invalid_omp_command, command}}
+      "--no-extensions" not in command -> {:error, :omp_global_extensions_not_disabled}
+      "--no-skills" not in command -> {:error, :omp_global_skills_not_disabled}
+      true -> :ok
+    end
   end
 
   defp validate_model(model) do
@@ -371,6 +380,8 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   end
 
   defp cleanup_failed_start(process, bridge, primary_reason) do
+    primary_reason = Redaction.redact_secrets(primary_reason, [bridge.token])
+
     cleanup_errors =
       [ProcessSupervisor.stop(process), OmpMcpBridge.stop(bridge)]
       |> Enum.reject(&(&1 == :ok))
@@ -509,18 +520,19 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
         await_turn(session, request_id, on_event, turn_deadline, next_stall, "")
 
       {:ok, %{"method" => "session/request_permission", "id" => id, "params" => params} = native} ->
-        reason = {:permission_required, params}
-        emit_event(on_event, :blocked, session, %{request: params}, native, nil, :permission_required)
-        respond_to_permission(session.process.port, id, params)
-        cancel_session(session)
-        fail_turn(session, on_event, reason, native)
+        handle_permission_request(
+          session,
+          request_id,
+          on_event,
+          turn_deadline,
+          stall_deadline,
+          id,
+          params,
+          native
+        )
 
       {:ok, %{"method" => method, "id" => id} = native} ->
-        reason = {:unsupported_acp_request, method}
-        emit_event(on_event, :blocked, session, %{method: method}, native, nil, :unsupported_acp_request)
-        send_rpc_error(session.process.port, id, -32_601, "Method not found")
-        cancel_session(session)
-        fail_turn(session, on_event, reason, native)
+        handle_required_request(session, on_event, id, method, native)
 
       {:ok, %{"method" => _notification}} ->
         await_turn(session, request_id, on_event, turn_deadline, stall_deadline, "")
@@ -537,8 +549,9 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   defp complete_turn(session, on_event, %{"stopReason" => stop_reason} = result, native)
        when stop_reason in ["end_turn", "max_tokens", "max_turn_requests"] do
     usage = current_usage(session)
+    safe_result = redact(session, result)
     emit_event(on_event, :turn_completed, session, %{stop_reason: stop_reason}, native, usage)
-    {:ok, %{session_id: session.session_id, stop_reason: stop_reason, usage: usage, native: result}}
+    {:ok, %{session_id: session.session_id, stop_reason: stop_reason, usage: usage, native: safe_result}}
   end
 
   defp complete_turn(session, on_event, %{"stopReason" => stop_reason}, native),
@@ -574,7 +587,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     do: emit_event(on_event, :turn_progress, session, %{kind: :plan, entries: update["entries"] || []}, native)
 
   defp emit_acp_update("usage_update", session, on_event, update, native) do
-    usage = Map.delete(update, "sessionUpdate")
+    usage = update |> Map.delete("sessionUpdate") |> then(&redact(session, &1))
     Agent.update(session.state, &Map.put(&1, :usage, usage))
     emit_event(on_event, :turn_progress, session, %{kind: :usage}, native, usage)
   end
@@ -613,16 +626,116 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     }
   end
 
-  defp respond_to_permission(port, id, params) do
-    rejection =
-      params
-      |> Map.get("options", [])
-      |> Enum.find(fn option -> option["kind"] in ["reject_once", "reject_always"] end)
+  defp handle_permission_request(
+         session,
+         request_id,
+         on_event,
+         turn_deadline,
+         _stall_deadline,
+         rpc_id,
+         params,
+         native
+       ) do
+    evidence = permission_evidence(session.runner_config["permissions"] || %{}, params)
 
+    case evidence do
+      %{decision: :allow, option_id: option_id} ->
+        case respond_to_permission(session.process.port, rpc_id, option_id) do
+          :ok ->
+            emit_event(on_event, :turn_progress, session, evidence, native)
+
+            await_turn(
+              session,
+              request_id,
+              on_event,
+              turn_deadline,
+              reset_stall_deadline(session, turn_deadline),
+              ""
+            )
+
+          {:error, reason} ->
+            fail_turn(session, on_event, reason, native)
+        end
+
+      %{decision: decision, option_id: option_id} ->
+        respond_to_permission(session.process.port, rpc_id, option_id)
+        reason = permission_failure(decision, evidence.tool_kind)
+
+        emit_event(
+          on_event,
+          :blocked,
+          session,
+          Map.put(evidence, :action, "Change the pinned OMP permission policy, then retry the run."),
+          native,
+          nil,
+          elem(reason, 0)
+        )
+
+        cancel_session(session)
+        fail_turn(session, on_event, reason, native)
+    end
+  end
+
+  defp permission_evidence(policy, params) do
+    tool_call = Map.get(params, "toolCall", %{})
+    tool_kind = Map.get(tool_call, "kind")
+    options = Map.get(params, "options", [])
+    {policy_decision, policy_key} = permission_policy_decision(policy, tool_kind)
+    option_id = permission_option_id(options, policy_decision)
+    decision = if policy_decision == :allow and is_nil(option_id), do: :unavailable, else: policy_decision
+
+    %{
+      call_id: Map.get(tool_call, "toolCallId"),
+      decision: decision,
+      option_id: option_id,
+      policy_key: policy_key,
+      title: Map.get(tool_call, "title"),
+      tool_kind: tool_kind
+    }
+  end
+
+  defp permission_policy_decision(policy, tool_kind) when is_binary(tool_kind) do
+    cond do
+      Map.has_key?(policy, tool_kind) -> {permission_decision(policy[tool_kind]), tool_kind}
+      Map.has_key?(policy, "*") -> {permission_decision(policy["*"]), "*"}
+      true -> {:missing, nil}
+    end
+  end
+
+  defp permission_policy_decision(_policy, _tool_kind), do: {:missing, nil}
+
+  defp permission_decision("allow"), do: :allow
+  defp permission_decision("deny"), do: :deny
+  defp permission_decision("block"), do: :block
+  defp permission_decision(_invalid), do: :missing
+
+  defp permission_option_id(options, :allow), do: option_id(options, "allow_once")
+  defp permission_option_id(options, :deny), do: option_id(options, "reject_once")
+  defp permission_option_id(_options, _decision), do: nil
+
+  defp option_id(options, kind) when is_list(options) do
+    Enum.find_value(options, fn
+      %{"kind" => ^kind, "optionId" => option_id} when is_binary(option_id) and option_id != "" ->
+        option_id
+
+      _other ->
+        nil
+    end)
+  end
+
+  defp option_id(_options, _kind), do: nil
+
+  defp permission_failure(:deny, tool_kind), do: {:permission_denied, tool_kind}
+  defp permission_failure(:block, tool_kind), do: {:permission_blocked, tool_kind}
+  defp permission_failure(:missing, tool_kind), do: {:permission_policy_missing, tool_kind}
+  defp permission_failure(:unavailable, tool_kind), do: {:permission_option_unavailable, tool_kind}
+
+  defp respond_to_permission(port, id, option_id) do
     outcome =
-      case rejection do
-        %{"optionId" => option_id} -> %{"outcome" => "selected", "optionId" => option_id}
-        _none -> %{"outcome" => "cancelled"}
+      if is_binary(option_id) and option_id != "" do
+        %{"outcome" => "selected", "optionId" => option_id}
+      else
+        %{"outcome" => "cancelled"}
       end
 
     send_message(port, rpc_result(id, %{"outcome" => outcome}))
@@ -713,8 +826,9 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   defp current_usage(session), do: Agent.get(session.state, & &1.usage)
 
   defp fail_turn(session, on_event, reason, native \\ nil) do
-    emit_event(on_event, :turn_failed, session, %{reason: reason}, native, current_usage(session))
-    {:error, reason}
+    safe_reason = redact(session, reason)
+    emit_event(on_event, :turn_failed, session, %{reason: safe_reason}, native, current_usage(session))
+    {:error, safe_reason}
   end
 
   defp emit_event(on_event, event_type, session, payload, native \\ nil, usage \\ nil, reason \\ nil) do
@@ -722,14 +836,54 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
       Event.new(event_type,
         runtime: @runtime,
         session_id: session.session_id,
-        native: native,
-        usage: usage,
-        payload: payload,
-        reason: reason
+        native: redact(session, native),
+        usage: redact(session, usage),
+        payload: redact(session, payload),
+        reason: redact(session, reason)
       )
 
     on_event.(event)
   end
+
+  defp handle_required_request(session, on_event, id, method, native) do
+    if elicitation_method?(method) do
+      reason = {:operator_input_required, method}
+
+      emit_event(
+        on_event,
+        :blocked,
+        session,
+        %{
+          action: "Resolve the requested input outside the unattended run, then retry.",
+          method: method
+        },
+        native,
+        nil,
+        :operator_input_required
+      )
+
+      send_rpc_error(session.process.port, id, -32_603, "Interactive input is unavailable")
+      cancel_session(session)
+      fail_turn(session, on_event, reason, native)
+    else
+      reason = {:unsupported_acp_request, method}
+      emit_event(on_event, :blocked, session, %{method: method}, native, nil, :unsupported_acp_request)
+      send_rpc_error(session.process.port, id, -32_601, "Method not found")
+      cancel_session(session)
+      fail_turn(session, on_event, reason, native)
+    end
+  end
+
+  defp elicitation_method?(method) when is_binary(method) do
+    method == "session/request_input" or
+      String.contains?(method, "question") or
+      String.contains?(method, "elicitation")
+  end
+
+  defp elicitation_method?(_method), do: false
+
+  defp redact(session, value),
+    do: Redaction.redact_secrets(value, [session.bridge.token])
 
   defp request_deadline(overall_deadline, timeout_ms),
     do: min(overall_deadline, monotonic_deadline(timeout_ms))
