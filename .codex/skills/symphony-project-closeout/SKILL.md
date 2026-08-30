@@ -42,6 +42,7 @@ in the workpad before stopping.
    - README/setup docs when user-facing workflow changed.
 4. Make the smallest repo-doc changes needed for durable accuracy.
 5. Create follow-up Linear issues for deferred work, known risks, or gaps.
+   Apply an execution label only when the current pinned target policy requires it.
 6. Update the closeout issue summary:
    - Shipped
    - Changed

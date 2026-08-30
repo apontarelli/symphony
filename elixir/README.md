@@ -233,6 +233,17 @@ targets per repository or explicit marker policy; do not activate one unmarked t
 mixed project. Planning, implementation, and closeout workflows add execution labels only when the
 selected target policy requires them.
 
+After this change is merged, save and start the unlabeled Symphony project target:
+
+1. From the Symphony repository root, run `symphony`.
+2. Select `Create new workflow`, `Linear project`, the `Symphony` project with slug `symphony`,
+   `watch` mode, and the required capacity. Save the workflow as `main`. Do not add a required
+   label.
+3. Run `symphony run main --preview --no-env-file`. Confirm the target is project `symphony` and
+   required labels are `none`.
+4. Run `symphony run main --no-env-file` to confirm and start it, or add `--yes` for unattended
+   activation. Do not change an issue state or merge a pull request as part of this activation.
+
 Confirmation requires the exact generated plan ID. It rebinds the action, target, and registry and
 validates bound sources and the registry generation before replacement. Stale, corrupt, or
 mismatched plans, and a locked registry, do not write. Registry replacement is atomic and writes

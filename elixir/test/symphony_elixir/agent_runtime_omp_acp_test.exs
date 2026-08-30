@@ -180,6 +180,38 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
            end)
   end
 
+  test "default Linear executor resolves only the session target credential", context do
+    variable = "SYMPHONY_OMP_MISSING_TARGET_TOKEN"
+    System.delete_env(variable)
+
+    execution_context =
+      context
+      |> execution_context("success")
+      |> put_in(
+        [Access.key!(:target), Access.key!(:tracker_connection)],
+        %{
+          "id" => "linear",
+          "policy" => %{
+            "kind" => "linear",
+            "endpoint" => "https://linear.example/graphql",
+            "api_key" => "$#{variable}"
+          }
+        }
+      )
+
+    assert {:ok, session} = OmpAcp.start(execution_context, issue(), [])
+
+    try do
+      assert {:error, :missing_secret} =
+               OmpAcp.send_turn(session, "Use Linear", issue(), [])
+
+      assert get_in(session, [:execution_context, Access.key!(:target), Access.key!(:tracker_connection), "policy", "api_key"]) ==
+               "$#{variable}"
+    after
+      assert :ok = OmpAcp.stop(session)
+    end
+  end
+
   test "pinned permission policy denies an ACP request with stable evidence", context do
     execution_context = execution_context(context, "permission", %{"edit" => "deny"})
     issue = issue()
@@ -624,7 +656,14 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
         "manifest_source_dir" => context.root,
         "workflow_module_resolution" => %{}
       },
-      tracker_connection: %{},
+      tracker_connection: %{
+        "id" => "linear",
+        "policy" => %{
+          "kind" => "linear",
+          "endpoint" => "https://linear.example/graphql",
+          "api_key" => "target-linear-token"
+        }
+      },
       run_target: %{},
       worktree_policy: %{
         "root" => context.workspace_root,
