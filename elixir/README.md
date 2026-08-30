@@ -108,9 +108,10 @@ moving the issue as ready for merge.
 7. Follow the instructions below to install the required runtime dependencies and start the service.
 
 The root [`../symphony.yml`](../symphony.yml) is this repository's dogfood repo setup manifest. It
-contains this fork's public repository URL, docs, validation, delivery policy, required
-capabilities, issue markers, and selected workflow module configuration. Local run targets,
-workspace, polling, runner, and host settings are intentionally not committed there.
+contains this fork's public repository URL, docs, validation, delivery policy, required capabilities,
+and selected workflow module configuration. Optional issue markers belong there only when target
+scope alone cannot identify the repository. Local run targets, workspace, polling, runner, and host
+settings are intentionally not committed there.
 
 ## Prerequisites
 
@@ -547,6 +548,22 @@ mode: issue-batch
 capacity: normal
 ```
 
+A dedicated project target relies on the Linear Project identity and can keep both repository issue
+markers and runtime required labels empty. Team and query targets must configure at least one
+nonempty repository marker in `symphony.yml` or one target-required label. Do not use one unlabeled
+project target for a Linear Project that contains work for multiple repositories; create
+repository-specific targets or configure explicit markers.
+
+After this change is merged, save and start the Symphony dogfood target as follows:
+
+1. From the Symphony repository root, run `symphony`.
+2. Select `Create new workflow`, `Linear project`, the `Symphony` project with slug `symphony`,
+   `watch` mode, the required capacity, and save the workflow as `main`. Do not add a required label.
+3. Run `symphony run main --preview --no-env-file` and confirm the target is project `symphony` and
+   required labels are `none`.
+4. Run `symphony run main --no-env-file` to confirm and start it, or add `--yes` for unattended
+   activation. Do not change an issue state or merge a pull request as part of this activation.
+
 Run setup may make a launch stricter with lower capacity, marker intersections, required labels, or
 human-review-only flags. It cannot weaken repo-owned safety: validation commands, delivery target,
 required capabilities, workflow modules, and checked-in policy come from repo setup.
@@ -692,11 +709,11 @@ Notes:
   validation requirement, such as the default GitHub PR publish target checks.
 - `capabilities.required` declares runner capability names the repo needs without selecting a
   concrete runner, model, sandbox, or command.
-- `issue_markers.labels` and `issue_markers.allowed_projects` declare durable issue markers for
-  preview and policy checks. They do not select the active Linear polling target.
+- `issue_markers.labels` and `issue_markers.allowed_projects` are optional repository markers for
+  broad targets and mixed-repository Projects. They do not select the active Linear polling target.
 - Runtime `tracker.required_labels` remains available in local config or run setup. When set, an
   issue must have every configured label to dispatch or continue running. Label matching ignores
-  case and surrounding whitespace.
+  case and surrounding whitespace. Dedicated project targets can leave required labels empty.
 - Runtime `target.issue_ids` limits dispatch to explicit Linear issue identifiers or internal IDs.
   Runtime `target.filter` supplies a Linear-native issue filter object for query targets.
 - `delivery.pr_target` names the Git PR target/base branch. Additional profiles may override the
@@ -719,9 +736,10 @@ runtime:
 
 - Supported Linear target types are `project`, `team`, `query`, and `issues`. Query targets use a
   Linear-native issue filter object under `runtime.target.filter`; explicit issue targets use
-  `runtime.target.issue_ids`. Team and query targets require repo `issue_markers.labels` or
-  `issue_markers.allowed_projects`, and marker filters are intersected with project, team, and query
-  targets. Explicit issue targets keep mismatched issues but return preview warnings.
+  `runtime.target.issue_ids`. Team and query targets require nonempty repo issue markers or target
+  required labels. A dedicated project target may omit both. A mixed-repository Project must use
+  repository-specific targets or explicit markers. Marker filters are intersected with project,
+  team, and query targets. Explicit issue targets keep mismatched issues but return preview warnings.
 - Workflow profiles do not choose which Linear issues are polled. `--profile` is a process-wide
   override for policy selection; otherwise the `default` profile is used.
 - Ticket class labels have generic Symphony behavior independent of tracker project scope:

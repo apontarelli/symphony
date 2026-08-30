@@ -138,8 +138,7 @@ defmodule SymphonyElixir.Workflow.Manifest do
       "delivery" => %{"pr_target" => "main"},
       "automation" => %{"posture" => "unattended", "profile" => "default", "completion_requirements" => []},
       "harness" => %{"codex_home" => nil},
-      "capabilities" => %{"required" => []},
-      "issue_markers" => %{"labels" => [], "allowed_projects" => []}
+      "capabilities" => %{"required" => []}
     }
   end
 

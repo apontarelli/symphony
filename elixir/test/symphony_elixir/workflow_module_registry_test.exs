@@ -266,6 +266,13 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "### Linear Operation"
     assert prompt =~ "### Quality Gates"
+
+    assert prompt =~
+             "add execution labels only when the pinned required-label or repo-marker policy requires them"
+
+    assert prompt =~
+             "Apply repository or execution labels only when the pinned target policy requires them."
+
     refute prompt =~ "## Related skills"
     refute Regex.match?(~r/`symphony-[a-z-]+`/, prompt)
   end

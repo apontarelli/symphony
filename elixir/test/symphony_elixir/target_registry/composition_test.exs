@@ -435,6 +435,47 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
   end
 
   @tag :tmp_dir
+  test "composes a dedicated project target without repository or target labels", %{paths: paths} do
+    manifest_path = Path.join(paths.symphony, "symphony.yml")
+
+    manifest =
+      manifest_path
+      |> File.read!()
+      |> String.replace(
+        """
+        issue_markers:
+          labels:
+            - repo:symphony-fixture
+            - needs-review
+          allowed_projects:
+            - fixture-project
+        """,
+        ""
+      )
+
+    File.write!(manifest_path, manifest)
+
+    target =
+      target("alpha", paths.symphony, paths.worktree, %{
+        configured: %{
+          "linear" => %{"required_labels" => []}
+        }
+      })
+
+    composed = Composition.compose(snapshot(%{"alpha" => target})).targets["alpha"]
+
+    assert %Target{valid?: true, effective_state: :active, diagnostics: []} = composed
+
+    assert get_in(composed.effective_policy, ["run_target", "scope"]) == %{
+             "type" => "project",
+             "project_slug" => "alpha"
+           }
+
+    assert get_in(composed.effective_policy, ["run_target", "required_labels"]) == []
+    assert get_in(composed.repo_manifest, ["issue_markers", "labels"]) == []
+  end
+
+  @tag :tmp_dir
   test "unions target labels with current repository issue markers", %{paths: paths} do
     target =
       target("alpha", paths.symphony, paths.worktree, %{

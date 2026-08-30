@@ -414,10 +414,10 @@ Loader behavior:
 - The default `symphony.yml` file is parsed with the repo setup schema. Explicit local runtime setup
   sources MAY add daemon/runtime fields outside the checked-in repo setup file.
 
-`symphony.yml` is a YAML repo setup manifest. It declares durable repository facts, required
-capability names, issue markers, and selected Symphony-owned workflow modules, then compiles to the
-runtime workflow object used by the daemon. It MUST NOT contain active run targets, workspace or log
-roots, polling settings, agent capacity, concrete runners, saved run setups, or host/deployment
+`symphony.yml` is a YAML repo setup manifest. It declares durable repository facts, optional issue
+markers, required capability names, and selected Symphony-owned workflow modules, then compiles to
+the runtime workflow object used by the daemon. It MUST NOT contain active run targets, workspace or
+log roots, polling settings, agent capacity, concrete runners, saved run setups, or host/deployment
 runtime settings. Those fields belong to local config or run setup sources. Local runtime tracker
 scope MAY select a Linear project, team, explicit issue ID batch, or implementation-defined Linear
 query source.
@@ -460,8 +460,11 @@ Manifest fields for the default preset:
     select a concrete runner, model, sandbox, or command.
 - `issue_markers.labels` (list of strings, default `[]`)
 - `issue_markers.allowed_projects` (list of strings, default `[]`)
-  - Durable issue marker declarations for policy and preview validation. They do not select the
-    active Linear polling target.
+  - Optional repository markers for broad targets or Linear Projects that contain work for multiple
+    repositories. They do not select the active Linear polling target.
+  - A target bound to one dedicated Linear Project MAY leave both lists empty.
+  - Team and query targets MUST have a nonempty marker through these fields or target-required labels.
+  - A mixed-repository Linear Project MUST use repository-specific targets or explicit markers.
 - `harness.codex_home` (string or null, default `null`)
   - Durable harness isolation override for repositories that commit a Symphony-owned harness
     directory. `null` means the managed harness default is used.
@@ -2293,9 +2296,12 @@ Linear-specific requirements for `runtime.tracker.kind == "linear"`:
   by `project: { slugId: { eq: $projectSlug } }` when only `project_slug` is set, or by
   `team: { key: { eq: $teamKey } }` for project/team targets; query targets use the supplied native
   filter object.
-- Team and query targets require repo `issue_markers.labels` or `issue_markers.allowed_projects`.
-  When markers exist, project, team, and query targets are intersected with those labels/projects.
-  Explicit issue targets return marker mismatch warnings instead of silently dropping mismatched
+- Team and query targets require nonempty repo `issue_markers.labels`,
+  `issue_markers.allowed_projects`, or target-required labels. When markers exist, project, team,
+  and query targets are intersected with those labels/projects.
+- A target bound to one dedicated Linear Project MAY omit markers. A mixed-repository Linear Project
+  MUST use repository-specific targets or explicit markers.
+- Explicit issue targets return marker mismatch warnings instead of silently dropping mismatched
   requested issues.
 - Issue-state refresh query uses GraphQL issue IDs with variable type `[ID!]`
 - Pagination REQUIRED for candidate issues

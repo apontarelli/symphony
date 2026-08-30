@@ -288,6 +288,56 @@ defmodule SymphonyElixir.TrackerContextTest do
              Tracker.resolve_candidate_issues_uncached(context)
   end
 
+  test "broad context targets accept repo markers or target-required labels" do
+    target = %RunTarget{type: :team, team_key: "SID"}
+
+    request_fun = fn _endpoint, _payload, _headers ->
+      {:ok,
+       %{
+         status: 200,
+         body:
+           linear_issue_page([
+             linear_issue("issue-routable", nil, ["repo:required"]),
+             linear_issue("issue-unmarked", nil, [])
+           ])
+       }}
+    end
+
+    for {repo_labels, target_labels} <- [
+          {["repo:required"], []},
+          {[], ["repo:required"]}
+        ] do
+      context =
+        target_context(
+          "marker-source",
+          "connection-marker-source",
+          "https://marker-source.example/graphql",
+          "marker-source-token",
+          %{
+            "active_states" => ["Todo"],
+            "required_labels" => target_labels,
+            "assignee" => nil
+          }
+        )
+
+      context =
+        %{
+          context
+          | repo_policy: %{
+              "manifest" => %{
+                "issue_markers" => %{
+                  "labels" => repo_labels,
+                  "allowed_projects" => []
+                }
+              }
+            }
+        }
+
+      assert {:ok, %RunTarget.Resolution{issues: [%Issue{id: "issue-routable"}]}} =
+               Client.resolve_run_target(context, target, request_fun: request_fun)
+    end
+  end
+
   test "Linear context resolution uses pinned states labels and assignee routing" do
     context =
       target_context(

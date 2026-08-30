@@ -126,6 +126,11 @@ overrides can only lower the selected capacity and cannot exceed local deploymen
 Capacity belongs to the run setup or CLI launch override, never to the checked-in repo setup
 manifest.
 
+A dedicated Linear Project can bind one repository without a required issue label. Team and query
+targets must have a nonempty repository marker, supplied by committed `issue_markers` policy or
+target `required_labels`. Do not use an unlabeled project target for a Linear Project that contains
+work for multiple repositories; use repository-specific targets or explicit markers.
+
 `setup migrate` can convert an existing checked-in runtime setup into local config plus a saved
 workflow. It intentionally requires an explicit `--repo`. The command previews by default and
 writes only when `--apply` is passed.

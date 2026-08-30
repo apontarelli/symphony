@@ -512,8 +512,10 @@ defmodule SymphonyElixir.RunSetupTest do
       repo
       |> Manifest.default([])
       |> put_in(["project", "repository"], "https://github.com/example/#{prefix}.git")
-      |> put_in(["issue_markers", "labels"], Keyword.get(opts, :labels, []))
-      |> put_in(["issue_markers", "allowed_projects"], Keyword.get(opts, :allowed_projects, []))
+      |> Map.put("issue_markers", %{
+        "labels" => Keyword.get(opts, :labels, []),
+        "allowed_projects" => Keyword.get(opts, :allowed_projects, [])
+      })
 
     File.write!(Path.join(repo, "symphony.yml"), Renderer.to_yaml(manifest))
     repo

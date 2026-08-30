@@ -55,6 +55,8 @@ links alone.
 - Evidence missing: keep or move to `Todo`, record exact missing evidence.
 - Acceptance not met: move to `Rework` or leave in `Todo` with a concise
   workpad note, then create/identify follow-up implementation work.
+  Create implementation issues without execution labels unless the current pinned
+  target policy explicitly requires one.
 - Scope changed: update the Requirement or Project PDR before validating a new
   interpretation.
 - Deferred or dropped: require explicit reason before moving to `Canceled` or a

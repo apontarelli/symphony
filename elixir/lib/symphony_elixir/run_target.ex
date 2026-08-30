@@ -183,8 +183,20 @@ defmodule SymphonyElixir.RunTarget do
   end
 
   @spec repo_markers(term()) :: RepoMarkers.t()
-  def repo_markers(%{issue_markers: markers}), do: RepoMarkers.normalize(markers)
+  def repo_markers(%{issue_markers: markers} = source),
+    do: repo_markers(markers, source |> map_field(:tracker) |> map_field(:required_labels))
+
+  def repo_markers(%{"issue_markers" => markers} = source),
+    do: repo_markers(markers, source |> map_field(:tracker) |> map_field(:required_labels))
+
   def repo_markers(markers), do: RepoMarkers.normalize(markers)
+
+  @spec repo_markers(term(), term()) :: RepoMarkers.t()
+  def repo_markers(markers, required_labels) do
+    markers = RepoMarkers.normalize(markers)
+    labels = RepoMarkers.normalize_labels(markers.labels ++ RepoMarkers.normalize_labels(required_labels))
+    %{markers | labels: labels}
+  end
 
   @spec validate_marker_safety(t(), RepoMarkers.t()) :: :ok | {:error, term()}
   def validate_marker_safety(%__MODULE__{} = target, %RepoMarkers{} = markers) do

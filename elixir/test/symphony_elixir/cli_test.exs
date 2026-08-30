@@ -776,6 +776,7 @@ defmodule SymphonyElixir.CLITest do
 
     assert {:ok, init_output} = CLI.evaluate(["setup", "init", "--repo", repo])
     assert init_output =~ "Created symphony.yml"
+    refute File.read!(Path.join(repo, "symphony.yml")) =~ "issue_markers"
 
     set_publish_repository!(repo, "https://github.com/example/setup-repo")
 

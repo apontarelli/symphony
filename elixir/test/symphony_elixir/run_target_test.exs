@@ -29,6 +29,19 @@ defmodule SymphonyElixir.RunTargetTest do
     assert :ok = Config.validate!()
   end
 
+  test "broad runtime target accepts target-required labels without repo markers" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_project_id: nil,
+      tracker_project_slug: nil,
+      tracker_team_key: nil,
+      tracker_required_labels: ["repo:required"],
+      issue_markers: %{"labels" => [], "allowed_projects" => []},
+      target: %{"tracker" => "linear", "type" => "team", "team_key" => "SID"}
+    )
+
+    assert :ok = Config.validate!()
+  end
+
   test "legacy tracker selectors still parse as project or team targets" do
     assert {:ok, %RunTarget{tracker: "linear", type: :project, project_id: "project-id"}} =
              RunTarget.from_settings(%{
@@ -111,6 +124,22 @@ defmodule SymphonyElixir.RunTargetTest do
     assert RunTarget.repo_markers(%{labels: nil, allowed_projects: nil}) == RunTarget.RepoMarkers.empty()
     assert RunTarget.repo_markers(nil) == RunTarget.RepoMarkers.empty()
 
+    assert RunTarget.repo_markers(%{
+             issue_markers: %{labels: [], allowed_projects: ["repo-project"]},
+             tracker: %{required_labels: [" Repo:Required ", "repo:required"]}
+           }) == %RunTarget.RepoMarkers{
+             labels: ["repo:required"],
+             allowed_projects: ["repo-project"]
+           }
+
+    assert RunTarget.repo_markers(%{
+             "issue_markers" => %{"labels" => ["manifest:required"], "allowed_projects" => []},
+             "tracker" => %{"required_labels" => ["target:required"]}
+           }) == %RunTarget.RepoMarkers{
+             labels: ["manifest:required", "target:required"],
+             allowed_projects: []
+           }
+
     assert {:ok, %IssueMarkers{labels: [], allowed_projects: []}} =
              IssueMarkers.changeset(%IssueMarkers{}, %{labels: nil, allowed_projects: nil})
              |> Changeset.apply_action(:validate)
@@ -136,6 +165,18 @@ defmodule SymphonyElixir.RunTargetTest do
              RunTarget.validate_marker_safety(
                %RunTarget{tracker: "linear", type: :project, project_slug: "repo-project"},
                markers
+             )
+
+    target_labels =
+      RunTarget.repo_markers(%{
+        issue_markers: %{labels: [], allowed_projects: []},
+        tracker: %{required_labels: ["repo:required"]}
+      })
+
+    assert :ok =
+             RunTarget.validate_marker_safety(
+               %RunTarget{tracker: "linear", type: :team, team_key: "SID"},
+               target_labels
              )
   end
 
