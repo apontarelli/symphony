@@ -771,6 +771,17 @@ runtime:
   subscribes to `GET /global/event` before prompt submission. Only owned assistant/message/tool
   activity refreshes the generic stall watchdog; health checks, blocker polls, heartbeats, unrelated
   events, and raw process output do not. `turn_timeout_ms` remains the hard turn deadline.
+- `omp_acp` launches `omp acp` through the same owned process-group lifecycle and speaks stable ACP
+  protocol version `1` over stdio. It requires an operator-owned `profile`, an explicit
+  `provider/model`, and a thinking selector such as `high`. The adapter creates one ACP session,
+  reuses it for continuation turns, and stores OMP session data outside the checkout under
+  `<workspace.root>/.symphony/omp_sessions/<issue>-<session>`. It removes `LINEAR_API_KEY` from the
+  OMP child environment. A per-session loopback HTTP MCP bridge uses a random bearer token and
+  `linear_graphql`; Symphony retains and uses the Linear credential. Permission requests are
+  rejected and reported as blocked. Unsupported ACP versions or requests, malformed messages,
+  timeouts, stalls, and process exits fail closed. See
+  [`docs/agent_runtime_adapters.md`](docs/agent_runtime_adapters.md) for configuration and event
+  mapping.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

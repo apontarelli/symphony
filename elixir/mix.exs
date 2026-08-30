@@ -18,6 +18,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.AgentRuntime,
           SymphonyElixir.AgentRuntime.CodexAppServer,
           SymphonyElixir.AgentRuntime.OpenCodeServer,
+          SymphonyElixir.AgentRuntime.OmpAcp,
+          SymphonyElixir.AgentRuntime.OmpMcpBridge,
           SymphonyElixir.Config,
           SymphonyElixir.ControlPlane,
           SymphonyElixir.ControlPlaneCLI,

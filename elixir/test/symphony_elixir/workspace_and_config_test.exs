@@ -1476,7 +1476,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     invalid_catalogs = [
       {%{codex: %{kind: "other", command: ["runner"]}},
        [
-         "runtime.runners.codex.kind \"other\" is not supported; supported kinds: codex_app_server, opencode_server",
+         "runtime.runners.codex.kind \"other\" is not supported; supported kinds: codex_app_server, omp_acp, opencode_server",
          "runtime.runners.codex.stall_timeout_ms must be a non-negative integer"
        ]},
       {%{codex: %{command: ["codex", " "]}}, ["runtime.runners.codex.command[1] must be a non-empty string"]},
