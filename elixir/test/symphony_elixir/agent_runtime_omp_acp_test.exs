@@ -108,12 +108,53 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       assert %Event{payload: %{kind: :plan}} = Enum.at(events, 6)
       assert %Event{usage: %{"used" => 10}} = Enum.at(events, 7)
 
+      headers = [{"authorization", "Bearer " <> adapter_session.bridge.token}]
+
+      call =
+        rpc_request(99, "tools/call", %{
+          "name" => "linear_graphql",
+          "arguments" => %{"query" => "query BetweenTurns { viewer { id } }"}
+        })
+
+      assert {:ok,
+              %{
+                status: 200,
+                body: %{
+                  "result" => %{
+                    "content" => [%{"type" => "text", "text" => "ok"}],
+                    "isError" => false
+                  }
+                }
+              }} = Req.post(adapter_session.bridge.url, headers: headers, json: call)
+
       assert {:ok, %{stop_reason: "end_turn"}} =
                AgentRuntime.send_turn(session, "Continue", issue, on_event: on_event)
 
       continuation_events = receive_events()
       refute Enum.any?(continuation_events, &(&1.event == :session_started))
       assert hd(continuation_events).event == :turn_started
+
+      default_call =
+        rpc_request(100, "tools/call", %{
+          "name" => "linear_graphql",
+          "arguments" => %{}
+        })
+
+      assert {:ok,
+              %{
+                status: 200,
+                body: %{
+                  "result" => %{
+                    "content" => [
+                      %{"type" => "text", "text" => default_error}
+                    ],
+                    "isError" => true
+                  }
+                }
+              }} = Req.post(adapter_session.bridge.url, headers: headers, json: default_call)
+
+      assert default_error =~ "`linear_graphql` requires a non-empty `query` string."
+      refute default_error =~ "unavailable outside an active turn"
     after
       assert :ok = AgentRuntime.stop_session(session)
     end

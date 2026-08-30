@@ -950,7 +950,8 @@ defmodule SymphonyElixir.CoreTest do
     assert Map.get(hooks, "before_remove") == nil
 
     assert get_in(config, ["capabilities", "required"]) == ["linear", "github_pr", "browser"]
-    assert get_in(config, ["issue_markers", "labels"]) == ["repo:symphony"]
+    assert get_in(config, ["issue_markers", "labels"]) == []
+    assert get_in(config, ["issue_markers", "allowed_projects"]) == []
     assert get_in(config, ["workflow_modules", "product_visual_review", "route_policy"]) == "auto"
 
     profiles = Map.get(config, "profiles", %{})
@@ -961,6 +962,7 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Project context:"
     assert prompt =~ "## Core Workflow Modules"
     assert prompt =~ "Validation commands:\n- all: cd elixir && mise exec -- make all"
+    assert prompt =~ "unmarked dedicated project targets need no execution label"
     assert is_binary(Config.workflow_prompt())
     assert Config.workflow_prompt() =~ "## Core Workflow Modules"
     refute Config.workflow_prompt() =~ "## Related skills"

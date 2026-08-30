@@ -25,14 +25,22 @@ defmodule SymphonyElixir.Tracker do
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_candidate_issues(%TargetContext{} = context, target)
       when is_struct(target, RunTarget) or is_nil(target) do
-    with {:ok, routing} <- context_routing(context),
-         {:ok, state_path} <- context_coordinator_state_path(context),
-         {:ok, adapter, tracker} <- context_adapter(context),
-         {:ok, normalized_target} <- context_run_target(context, target, tracker.kind) do
+    with {:ok, io_context} <- tracker_io_context(context),
+         {:ok, routing} <- context_routing(io_context),
+         {:ok, state_path} <- context_coordinator_state_path(io_context),
+         {:ok, adapter, tracker} <- context_adapter(io_context),
+         {:ok, normalized_target} <- context_run_target(io_context, target, tracker.kind) do
       TrackerCoordinator.resolve_candidate_issues(
         normalized_target,
-        fn -> adapter.resolve_candidate_issues(context, normalized_target) end,
-        cache_key: context_candidate_cache_key(context, adapter, tracker, normalized_target, routing),
+        fn -> adapter.resolve_candidate_issues(io_context, normalized_target) end,
+        cache_key:
+          context_candidate_cache_key(
+            io_context,
+            adapter,
+            tracker,
+            normalized_target,
+            routing
+          ),
         state_path: state_path
       )
     end
@@ -50,10 +58,11 @@ defmodule SymphonyElixir.Tracker do
           {:ok, RunTarget.Resolution.t()} | {:error, term()}
   def resolve_candidate_issues_uncached(%TargetContext{} = context, target)
       when is_struct(target, RunTarget) or is_nil(target) do
-    with {:ok, _routing} <- context_routing(context),
-         {:ok, adapter, tracker} <- context_adapter(context),
-         {:ok, normalized_target} <- context_run_target(context, target, tracker.kind) do
-      adapter.resolve_candidate_issues(context, normalized_target)
+    with {:ok, io_context} <- tracker_io_context(context),
+         {:ok, _routing} <- context_routing(io_context),
+         {:ok, adapter, tracker} <- context_adapter(io_context),
+         {:ok, normalized_target} <- context_run_target(io_context, target, tracker.kind) do
+      adapter.resolve_candidate_issues(io_context, normalized_target)
     end
   end
 
@@ -65,8 +74,9 @@ defmodule SymphonyElixir.Tracker do
   def fetch_issues_by_states(%TargetContext{}, []), do: {:ok, []}
 
   def fetch_issues_by_states(%TargetContext{} = context, states) when is_list(states) do
-    with {:ok, adapter, _tracker} <- context_adapter(context) do
-      adapter.fetch_issues_by_states(context, states)
+    with {:ok, io_context} <- tracker_io_context(context),
+         {:ok, adapter, _tracker} <- context_adapter(io_context) do
+      adapter.fetch_issues_by_states(io_context, states)
     end
   end
 
@@ -79,8 +89,9 @@ defmodule SymphonyElixir.Tracker do
 
   def fetch_issue_states_by_ids(%TargetContext{} = context, issue_ids)
       when is_list(issue_ids) do
-    with {:ok, adapter, _tracker} <- context_adapter(context) do
-      adapter.fetch_issue_states_by_ids(context, issue_ids)
+    with {:ok, io_context} <- tracker_io_context(context),
+         {:ok, adapter, _tracker} <- context_adapter(io_context) do
+      adapter.fetch_issue_states_by_ids(io_context, issue_ids)
     end
   end
 
@@ -118,6 +129,13 @@ defmodule SymphonyElixir.Tracker do
 
   def update_issue_state(%ExecutionContext{}, _issue_id, _state_name),
     do: {:error, :invalid_tracker_context}
+
+  defp tracker_io_context(%TargetContext{} = context) do
+    case TargetContext.resolve_tracker_credentials(context) do
+      {:error, :invalid_tracker_connection} -> {:error, :invalid_tracker_context}
+      result -> result
+    end
+  end
 
   defp context_adapter(%TargetContext{
          target_id: target_id,
@@ -222,6 +240,7 @@ defmodule SymphonyElixir.Tracker do
   defp scope_value(scope, string_key, atom_key),
     do: Map.get(scope, string_key) || Map.get(scope, atom_key)
 
+  @dialyzer {:no_match, context_routing: 1}
   defp context_routing(%TargetContext{run_target: run_target}) when is_map(run_target) do
     with {:ok, active_states} <-
            context_string_list(Map.get(run_target, "active_states", [])),

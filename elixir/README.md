@@ -226,6 +226,13 @@ sibling `target-plans/` directory. `--registry` selects another local registry a
 directory. Preview commands do not mutate the registry and emit deterministic, redacted text;
 `--json` emits machine-readable output and errors.
 
+For a dedicated single-repository Linear Project target, repository identity comes from the project
+binding and the target may omit required labels and repository issue markers. Team and query/file
+targets require nonempty issue markers. A project shared by multiple repositories must use separate
+targets per repository or explicit marker policy; do not activate one unmarked target across the
+mixed project. Planning, implementation, and closeout workflows add execution labels only when the
+selected target policy requires them.
+
 Confirmation requires the exact generated plan ID. It rebinds the action, target, and registry and
 validates bound sources and the registry generation before replacement. Stale, corrupt, or
 mismatched plans, and a locked registry, do not write. Registry replacement is atomic and writes
@@ -717,11 +724,11 @@ runtime:
     project_slug: my-linear-project-slug
 ```
 
-- Supported Linear target types are `project`, `team`, `query`, and `issues`. Query targets use a
-  Linear-native issue filter object under `runtime.target.filter`; explicit issue targets use
-  `runtime.target.issue_ids`. Team and query targets require repo `issue_markers.labels` or
-  `issue_markers.allowed_projects`, and marker filters are intersected with project, team, and query
-  targets. Explicit issue targets keep mismatched issues but return preview warnings.
+- Manifest issue markers narrow an already selected target; they are not a substitute for target
+  scope. A dedicated single-repository project target can leave both `issue_markers.labels` and
+  `issue_markers.allowed_projects` empty. Team and query/file targets require at least one marker.
+  A project shared by multiple repositories must use separate targets or explicit repository
+  markers. Dispatch fails closed when a broad target has no markers.
 - Workflow profiles do not choose which Linear issues are polled. `--profile` is a process-wide
   override for policy selection; otherwise the `default` profile is used.
 - Ticket class labels have generic Symphony behavior independent of tracker project scope:

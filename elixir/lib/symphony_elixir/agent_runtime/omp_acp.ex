@@ -9,6 +9,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   @behaviour SymphonyElixir.AgentRuntime
 
   alias SymphonyElixir.AgentRuntime.{Event, OmpMcpBridge}
+  alias SymphonyElixir.Codex.DynamicTool
   alias SymphonyElixir.{ExecutionContext, PathSafety, ProcessSupervisor}
   alias SymphonyElixir.ReviewRecords.Redaction
 
@@ -72,13 +73,9 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
       timeout_ms = turn_timeout(session, opts)
       OmpMcpBridge.set_tool_executor(session.bridge, tool_executor)
 
-      try do
-        emit_session_started_once(session, on_event)
-        emit_event(on_event, :turn_started, session, %{prompt_bytes: byte_size(prompt)})
-        prompt_turn(session, prompt, on_event, timeout_ms)
-      after
-        OmpMcpBridge.set_tool_executor(session.bridge, nil)
-      end
+      emit_session_started_once(session, on_event)
+      emit_event(on_event, :turn_started, session, %{prompt_bytes: byte_size(prompt)})
+      prompt_turn(session, prompt, on_event, timeout_ms)
     end
   end
 
@@ -798,7 +795,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
 
   defp tool_executor(opts) do
     case Keyword.get(opts, :tool_executor) do
-      nil -> {:ok, nil}
+      nil -> {:ok, &DynamicTool.execute/2}
       executor when is_function(executor, 2) -> {:ok, executor}
       _invalid -> {:error, :invalid_agent_runtime_options}
     end

@@ -267,6 +267,58 @@ defmodule SymphonyElixir.TrackerContextTest do
              Tracker.resolve_candidate_issues_uncached(query_file_context)
   end
 
+  test "tracker reads resolve pinned credentials without mutating admission authority" do
+    Application.put_env(
+      :symphony_elixir,
+      :linear_client_module,
+      RecordingContextLinearClient
+    )
+
+    variable = "SYMPHONY_TRACKER_CONTEXT_TEST_TOKEN"
+    resolved_token = "resolved-tracker-context-token"
+    System.put_env(variable, resolved_token)
+    on_exit(fn -> System.delete_env(variable) end)
+
+    context =
+      target_context(
+        "pinned-credential",
+        "connection-pinned-credential",
+        "https://pinned.example/graphql",
+        "$#{variable}",
+        %{"scope" => %{"type" => "project", "project" => %{"id" => "project-1"}}}
+      )
+
+    assert {:ok, %RunTarget.Resolution{}} =
+             Tracker.resolve_candidate_issues_uncached(context)
+
+    assert_receive {:context_resolve_run_target, resolved_context, %RunTarget{}}
+    assert get_in(resolved_context.tracker_connection, ["policy", "api_key"]) == resolved_token
+    assert get_in(context.tracker_connection, ["policy", "api_key"]) == "$#{variable}"
+
+    assert {:ok, []} = Tracker.fetch_issues_by_states(context, ["Todo"])
+    assert_receive {:context_fetch_issues_by_states, state_context, ["Todo"]}
+    assert get_in(state_context.tracker_connection, ["policy", "api_key"]) == resolved_token
+
+    assert {:ok, []} = Tracker.fetch_issue_states_by_ids(context, ["SID-454"])
+    assert_receive {:context_fetch_issue_states_by_ids, id_context, ["SID-454"]}
+    assert get_in(id_context.tracker_connection, ["policy", "api_key"]) == resolved_token
+
+    System.delete_env(variable)
+    assert {:error, :missing_secret} = Tracker.resolve_candidate_issues_uncached(context)
+
+    unsupported_reference =
+      put_in(context, [Access.key!(:tracker_connection), "policy", "api_key"], "secret://linear/api-key")
+
+    assert {:error, :unsupported_secret_provider} =
+             TargetContext.resolve_tracker_credentials(unsupported_reference)
+
+    assert {:error, :invalid_tracker_connection} =
+             TargetContext.resolve_tracker_credentials(%{context | tracker_connection: nil})
+
+    assert {:error, :invalid_tracker_connection} =
+             TargetContext.resolve_tracker_credentials(context, :invalid_options)
+  end
+
   test "context candidate reads preserve marker safety errors" do
     Application.put_env(:symphony_elixir, :linear_client_module, Client)
 
@@ -1424,6 +1476,14 @@ defmodule SymphonyElixir.TrackerContextTest do
 
     assert {:error, :invalid_tracker_context} =
              Tracker.resolve_candidate_issues_uncached(malformed_connection)
+
+    malformed_memory_connection =
+      context
+      |> put_in([Access.key!(:tracker_connection), "policy", "kind"], "memory")
+      |> update_in([Access.key!(:tracker_connection), "policy"], &Map.delete(&1, "endpoint"))
+
+    assert {:error, :invalid_tracker_context} =
+             Tracker.resolve_candidate_issues_uncached(malformed_memory_connection)
 
     unsupported =
       put_in(context, [Access.key!(:tracker_connection), "policy", "kind"], "unsupported")

@@ -81,6 +81,32 @@ defmodule SymphonyElixir.TargetContext do
   def pin_from_registry(snapshot, target_id),
     do: build_context(snapshot, target_id, [], :pinned)
 
+  @spec resolve_tracker_credentials(t()) :: {:ok, t()} | {:error, atom()}
+  def resolve_tracker_credentials(context), do: resolve_tracker_credentials(context, [])
+
+  @spec resolve_tracker_credentials(t(), keyword()) :: {:ok, t()} | {:error, atom()}
+
+  def resolve_tracker_credentials(
+        %__MODULE__{tracker_connection: %{"policy" => %{"kind" => "memory"}}} = context,
+        opts
+      )
+      when is_list(opts),
+      do: {:ok, context}
+
+  def resolve_tracker_credentials(%__MODULE__{tracker_connection: connection} = context, opts)
+      when is_map(connection) and is_list(opts) do
+    case get_in(connection, ["policy", "api_key"]) do
+      reference when is_binary(reference) ->
+        resolve_tracker_credentials(context, connection, reference, opts)
+
+      _missing ->
+        {:error, :invalid_tracker_connection}
+    end
+  end
+
+  def resolve_tracker_credentials(%__MODULE__{}, _opts),
+    do: {:error, :invalid_tracker_connection}
+
   @type issue_policy_error ::
           :forbidden_policy_broadening
           | :invalid_issue_policy_options
@@ -1006,6 +1032,23 @@ defmodule SymphonyElixir.TargetContext do
     case secret_variable(reference) do
       {:ok, _variable} -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp resolve_tracker_credentials(context, connection, reference, opts) do
+    case secret_variable(reference) do
+      {:ok, _variable} ->
+        with {:ok, resolved} <- resolve_tracker_secret(connection, opts) do
+          {:ok, %{context | tracker_connection: resolved}}
+        end
+
+      {:error, :invalid_secret_reference} ->
+        if valid_nonblank_string?(reference),
+          do: {:ok, context},
+          else: {:error, :invalid_tracker_connection}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

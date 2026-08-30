@@ -144,6 +144,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                },
                prompt_sections: [
                  "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
+                 "Treat target scope as routing authority. When creating implementation or follow-up issues, add execution labels only when the pinned required-label or repo-marker policy requires them; unmarked dedicated project targets need no execution label.",
                  "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
                  "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command.",
                  "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
@@ -364,6 +365,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                exact blocked leg and human-verification need instead of calling the work complete.
 
                For meaningful out-of-scope work, create a separate Backlog issue instead of expanding scope.
+               Apply repository or execution labels only when the pinned target policy requires them.
                """,
                description: "Planning, reproduction, implementation, validation, and workpad execution loop"
              },
