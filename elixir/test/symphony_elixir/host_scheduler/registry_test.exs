@@ -3,6 +3,7 @@ defmodule SymphonyElixir.HostScheduler.RegistryTest do
 
   alias SymphonyElixir.HostScheduler.Registry
   alias SymphonyElixir.TargetRegistry.Yaml
+  @manifest_fixture_root Path.expand("../../fixtures/target_registry/repos/symphony", __DIR__)
 
   @tag :tmp_dir
   test "loads one verified file generation for host scheduling", %{tmp_dir: tmp_dir} do
@@ -40,18 +41,73 @@ defmodule SymphonyElixir.HostScheduler.RegistryTest do
           }
         }
       },
-      "targets" => %{}
+      "targets" => %{"alpha" => target(tmp_dir)}
     }
 
     bytes = Yaml.encode(document)
     File.write!(registry_path, bytes)
 
-    assert {:ok, %{snapshot: snapshot, contexts: %{}}} = Registry.load(registry_path)
+    assert {:ok, %{snapshot: snapshot, contexts: %{"alpha" => context}}} =
+             Registry.load(registry_path)
+
     assert snapshot.globally_valid?
     assert snapshot.path == registry_path
     assert snapshot.generation == hash(bytes)
     assert snapshot.source_hash == snapshot.generation
     assert snapshot.host["state_root"] == state_root
+    assert get_in(context.tracker_connection, ["policy", "api_key"]) == "$LINEAR_API_KEY"
+  end
+
+  defp target(tmp_dir) do
+    %{
+      "display_name" => "Alpha",
+      "state" => "active",
+      "dispatch_mode" => "watch",
+      "repo" => %{"path" => @manifest_fixture_root, "manifest" => "symphony.yml"},
+      "worktree" => %{
+        "root" => Path.join(Path.dirname(tmp_dir), "worktrees-" <> Path.basename(tmp_dir)),
+        "strategy" => "per_issue",
+        "hooks" => %{}
+      },
+      "linear" => %{
+        "connection" => "linear",
+        "scope" => %{"type" => "project", "project_id" => "project-1"},
+        "active_states" => ["Todo"],
+        "terminal_states" => ["Done"],
+        "required_labels" => []
+      },
+      "runners" => %{
+        "allowed" => ["codex"],
+        "default" => "codex",
+        "settings" => %{"codex" => %{"model" => "gpt-5.6-sol"}}
+      },
+      "concurrency" => %{
+        "max_concurrent_agents" => 1,
+        "max_concurrent_startups" => 1,
+        "max_concurrent_reviewers" => 1,
+        "by_linear_state" => %{}
+      },
+      "budgets" => %{
+        "per_run" => %{"max_total_tokens" => 1_000},
+        "daily" => %{"max_total_tokens" => 10_000},
+        "weekly" => %{"max_total_tokens" => 50_000}
+      },
+      "checks" => %{
+        "pre_dispatch" => [],
+        "pre_handoff" => [],
+        "pre_publish" => [],
+        "pre_merge" => []
+      },
+      "external_side_effects" => %{
+        "tracker_write" => "deny",
+        "vcs_publish" => "deny",
+        "pull_request_write" => "deny",
+        "merge" => "deny",
+        "deployment" => "deny",
+        "production_data" => "deny"
+      },
+      "scheduling" => %{"weight" => 1}
+    }
   end
 
   defp hash(bytes),
