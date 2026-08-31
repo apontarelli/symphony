@@ -47,18 +47,12 @@ defmodule SymphonyElixir.HostScheduler.Registry do
 
   def load(_path, _opts), do: {:error, :invalid_registry_path}
 
-  defp build_contexts(snapshot, opts) do
-    context_opts =
-      case Keyword.fetch(opts, :env_fetcher) do
-        {:ok, env_fetcher} -> [env_fetcher: env_fetcher]
-        :error -> []
-      end
-
+  defp build_contexts(snapshot, _opts) do
     snapshot.targets
     |> Map.keys()
     |> Enum.sort()
     |> Enum.reduce(%{}, fn target_id, contexts ->
-      case TargetContext.from_registry(snapshot, target_id, context_opts) do
+      case TargetContext.pin_from_registry(snapshot, target_id) do
         {:ok, %TargetContext{} = context} -> Map.put(contexts, target_id, context)
         {:error, _reason} -> contexts
       end
