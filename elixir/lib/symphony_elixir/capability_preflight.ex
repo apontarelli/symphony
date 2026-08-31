@@ -16,7 +16,11 @@ defmodule SymphonyElixir.CapabilityPreflight do
   @git_probe_file "symphony-capability-preflight"
   @github_publish_permission_jq ".permissions.push == true or .permissions.admin == true or .permissions.maintain == true"
 
-  @type reason :: :sandbox_tcp_denied | :git_metadata_denied | :github_publish_unavailable
+  @type reason ::
+          :sandbox_tcp_denied
+          | :git_metadata_denied
+          | :github_publish_unavailable
+          | :token_usage_unavailable
   @type failure :: %{
           reason: reason(),
           summary: String.t(),
@@ -47,7 +51,9 @@ defmodule SymphonyElixir.CapabilityPreflight do
              capabilities,
              Keyword.drop(opts, [:adapter_registry])
            ) do
-      run(context.workspace_path, context.policy, context_opts)
+      context.workspace_path
+      |> run(context.policy, context_opts)
+      |> require_enforceable_token_usage(context, capabilities)
     else
       {:error, _reason} = error -> error
     end
@@ -131,6 +137,26 @@ defmodule SymphonyElixir.CapabilityPreflight do
 
       _unsupported ->
         {:error, :invalid_capability_preflight_context}
+    end
+  end
+
+  defp require_enforceable_token_usage(result, context, capabilities) do
+    token_usage = Map.get(capabilities, :token_usage, %{})
+
+    if context.target.budget_limits != %{} and Map.get(token_usage, :status) != :supported do
+      version = Map.get(token_usage, :version)
+
+      token_failure =
+        failure(
+          :token_usage_unavailable,
+          "The selected runner cannot report enforceable token usage.",
+          "Use a runner version with a supported token-usage boundary or remove the token budget.",
+          "runner=#{context.runner_name} kind=#{context.runner_config["kind"]} version=#{inspect(version)}"
+        )
+
+      %{result | status: :blocked, failures: result.failures ++ [token_failure]}
+    else
+      result
     end
   end
 

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{
     AgentRunner,
+    AgentRuntime,
     ControlPlane,
     ExecutionContext,
     HandoffRoute,
@@ -3438,6 +3439,7 @@ defmodule SymphonyElixir.Orchestrator do
             runtime_last_reported_input_tokens: 0,
             runtime_last_reported_output_tokens: 0,
             runtime_last_reported_total_tokens: 0,
+            runtime_token_usage: runtime_token_usage_capability(context),
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             workflow_module_resolution: nil,
@@ -3473,6 +3475,16 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: context.worker_host
           }
         )
+    end
+  end
+
+  defp runtime_token_usage_capability(context) do
+    case AgentRuntime.capabilities(context) do
+      %{token_usage: %{status: status} = token_usage} when status in [:supported, :unavailable] ->
+        token_usage
+
+      _missing_or_invalid ->
+        %{status: :unavailable}
     end
   end
 
@@ -4563,6 +4575,7 @@ defmodule SymphonyElixir.Orchestrator do
           runtime_input_tokens: metadata.runtime_input_tokens,
           runtime_output_tokens: metadata.runtime_output_tokens,
           runtime_total_tokens: metadata.runtime_total_tokens,
+          runtime_token_usage: Map.get(metadata, :runtime_token_usage),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_runtime_timestamp: metadata.last_runtime_timestamp,
@@ -4933,6 +4946,7 @@ defmodule SymphonyElixir.Orchestrator do
         runtime_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         runtime_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         runtime_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
+        runtime_token_usage: runtime_token_usage_for_update(running_entry, update),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
       })
       |> maybe_release_startup_slot(event)
@@ -4941,27 +4955,71 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp runtime_token_usage_for_update(running_entry, update) do
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || %{}
+
+    payload
+    |> runtime_token_usage_from_payload()
+    |> normalize_runtime_token_usage(Map.get(running_entry, :runtime_token_usage, %{status: :unavailable}))
+  end
+
+  defp runtime_token_usage_from_payload(payload) do
+    Map.get(payload, :usage_capability) ||
+      Map.get(payload, "usage_capability") ||
+      Map.get(payload, :token_usage) ||
+      Map.get(payload, "token_usage")
+  end
+
+  defp normalize_runtime_token_usage(%{status: status} = token_usage, _fallback)
+       when status in [:supported, :unavailable],
+       do: token_usage
+
+  defp normalize_runtime_token_usage(%{"status" => "supported"} = token_usage, _fallback),
+    do: Map.put(token_usage, :status, :supported)
+
+  defp normalize_runtime_token_usage(%{"status" => "unavailable"} = token_usage, _fallback),
+    do: Map.put(token_usage, :status, :unavailable)
+
+  defp normalize_runtime_token_usage(_missing_or_invalid, fallback), do: fallback
+
   defp persist_or_stop_token_usage(
          %State{} = state,
          run_id,
          %{durable_authority: %RunAuthority{} = authority} = running_entry
        ) do
-    cumulative_total_tokens =
-      Map.get(running_entry, :durable_token_usage_baseline, 0) +
-        Map.get(running_entry, :runtime_total_tokens, 0)
+    budget_limits =
+      case running_entry do
+        %{execution_context: %ExecutionContext{target: %TargetContext{budget_limits: limits}}}
+        when is_map(limits) ->
+          limits
 
-    case RunAuthority.record_token_usage(authority, cumulative_total_tokens) do
-      {:ok, _authority, %ControlPlane.TokenBudget{reserved_tokens: 0}} ->
-        Logger.info("Stopping run at durable token ceiling run_id=#{inspect(run_id)}")
-        terminate_running_issue(state, run_id, false)
+        _missing_context ->
+          %{}
+      end
 
-      {:ok, _authority, _budget} ->
-        state
+    token_usage_status = get_in(running_entry, [:runtime_token_usage, :status])
 
-      {:error, reason} ->
-        Logger.error("Stopping run after durable token usage failed run_id=#{inspect(run_id)}: #{inspect(reason)}")
+    if budget_limits != %{} and token_usage_status != :supported do
+      Logger.error("Stopping run because token usage is unavailable for a configured budget run_id=#{inspect(run_id)}")
+      terminate_running_issue(state, run_id, false)
+    else
+      cumulative_total_tokens =
+        Map.get(running_entry, :durable_token_usage_baseline, 0) +
+          Map.get(running_entry, :runtime_total_tokens, 0)
 
-        terminate_running_issue(state, run_id, false)
+      case RunAuthority.record_token_usage(authority, cumulative_total_tokens) do
+        {:ok, _authority, %ControlPlane.TokenBudget{reserved_tokens: 0}} ->
+          Logger.info("Stopping run at durable token ceiling run_id=#{inspect(run_id)}")
+          terminate_running_issue(state, run_id, false)
+
+        {:ok, _authority, _budget} ->
+          state
+
+        {:error, reason} ->
+          Logger.error("Stopping run after durable token usage failed run_id=#{inspect(run_id)}: #{inspect(reason)}")
+
+          terminate_running_issue(state, run_id, false)
+      end
     end
   end
 
@@ -5040,15 +5098,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp summarize_runtime_event(update) do
     %{
-      event: update[:event],
-      message: update[:payload] || update[:native] || update[:raw] || error_message_from_update(update),
-      timestamp: update[:timestamp]
+      event: Map.get(update, :event),
+      message:
+        Map.get(update, :payload) || Map.get(update, :native) || Map.get(update, :raw) ||
+          error_message_from_update(update),
+      timestamp: Map.get(update, :timestamp)
     }
   end
 
   defp progress_timestamp_for_update(running_entry, update, token_delta) do
     if runtime_progress_event?(update, token_delta) do
-      update[:timestamp]
+      Map.get(update, :timestamp)
     else
       Map.get(running_entry, :last_runtime_progress_timestamp)
     end
@@ -5110,7 +5170,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp runtime_progress_method?(_method), do: false
 
   defp update_payload_method(update) when is_map(update) do
-    payload = update[:payload] || Map.get(update, "payload") || update
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || update
 
     if is_map(payload) do
       Map.get(payload, "method") || Map.get(payload, :method)
@@ -5129,7 +5189,7 @@ defmodule SymphonyElixir.Orchestrator do
         signature
 
       _ ->
-        update[:signature] || Map.get(update, :signature) ||
+        Map.get(update, :signature) ||
           Map.get(running_entry, :last_runtime_error_signature)
     end
   end
@@ -5144,12 +5204,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp runtime_error_context_from_event(_update), do: nil
 
   defp error_message_from_update(update) do
+    reason = Map.get(update, :reason)
+
     case runtime_error_context_from_event(update) do
       nil ->
-        update[:reason]
+        reason
 
       context ->
-        %{reason: update[:reason], signature: context[:signature] || context["signature"]}
+        %{reason: reason, signature: Map.get(context, :signature) || Map.get(context, "signature")}
     end
   end
 
@@ -5356,10 +5418,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_token_usage(update) do
     payloads = [
-      update[:usage],
-      Map.get(update, "usage"),
       Map.get(update, :usage),
-      update[:payload],
+      Map.get(update, "usage"),
+      Map.get(update, :payload),
       Map.get(update, "payload"),
       update
     ]
@@ -5370,10 +5431,9 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp extract_rate_limits(update) do
-    rate_limits_from_payload(update[:rate_limits]) ||
+    rate_limits_from_payload(Map.get(update, :rate_limits)) ||
       rate_limits_from_payload(Map.get(update, "rate_limits")) ||
-      rate_limits_from_payload(Map.get(update, :rate_limits)) ||
-      rate_limits_from_payload(update[:payload]) ||
+      rate_limits_from_payload(Map.get(update, :payload)) ||
       rate_limits_from_payload(Map.get(update, "payload")) ||
       rate_limits_from_payload(update)
   end

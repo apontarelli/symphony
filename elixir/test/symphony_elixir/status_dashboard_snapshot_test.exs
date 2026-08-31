@@ -214,6 +214,38 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("super_busy", render_snapshot(snapshot_data, 1_842.7))
   end
 
+  test "OMP token counters distinguish supported usage from unavailable telemetry" do
+    supported =
+      {:ok,
+       %{
+         running: [
+           running_entry(%{
+             identifier: "SID-466",
+             runtime_token_usage: %{status: :supported},
+             runtime_total_tokens: 864
+           })
+         ],
+         retrying: [],
+         runtime_totals: %{input_tokens: 6, output_tokens: 7, total_tokens: 864, seconds_running: 1},
+         rate_limits: nil
+       }}
+
+    supported_content = render_snapshot(supported, 0.0)
+    assert supported_content =~ "in 6"
+    assert supported_content =~ "out 7"
+    assert supported_content =~ "total 864"
+
+    unavailable =
+      put_in(supported, [Access.elem(1), :running, Access.at(0), :runtime_token_usage], %{
+        status: :unavailable
+      })
+
+    unavailable_content = render_snapshot(unavailable, 0.0)
+    assert unavailable_content =~ "in unavailable"
+    assert unavailable_content =~ "out unavailable"
+    assert unavailable_content =~ "total unavailable"
+  end
+
   test "snapshot fixture: backoff queue pressure" do
     snapshot_data =
       {:ok,

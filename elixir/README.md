@@ -811,8 +811,15 @@ runtime:
 - `omp_acp` launches `omp --no-extensions --no-skills acp` through the same owned process-group
   lifecycle and speaks stable ACP protocol version `1` over stdio. It requires an operator-owned
   named `profile`, an explicit `provider/model`, a thinking selector such as `high`, and a pinned
-  `permissions` map. Global extensions and skills are disabled while repository `AGENTS.md` rules
-  remain active. Each run gets a mode-`0700` OMP session directory outside the checkout at
+  `permissions` map. An optional exact `version` selects a validated runtime compatibility contract.
+  OMP versions `18.0.11` and `18.1.5` support token telemetry through a Symphony-owned explicit
+  extension using OMP's typed `message_end` and assistant `Usage` contracts. The extension writes
+  atomic Symphony schema `1` cumulative usage beside the private OMP session, not in the checkout;
+  Symphony does not parse OMP transcripts. Missing and other OMP versions expose token usage as
+  `unavailable`, and
+  capability preflight blocks them when a token budget is configured. Global extension and skill
+  discovery remains disabled while repository `AGENTS.md` rules remain active. Each run gets a
+  mode-`0700` OMP session directory outside the checkout at
   `<workspace.root>/.symphony/omp_sessions/<issue>-<session>`, a new process, and a new ACP identity.
   It removes `LINEAR_API_KEY` from the OMP child environment. A per-session loopback HTTP MCP bridge
   uses a random bearer token and exposes only `linear_graphql`; Symphony retains and uses the Linear
@@ -823,7 +830,7 @@ runtime:
   recorded process group and always creates a fresh ACP session; it never reattaches. Unsupported ACP
   versions or required requests, malformed messages, timeouts, stalls, and process exits fail closed.
   See [`docs/agent_runtime_adapters.md`](docs/agent_runtime_adapters.md) for configuration, live-smoke
-  commands, recovery, and event mapping.
+  commands, recovery, event mapping, and token accounting.
 - Codex app-server sessions run with a Symphony-owned `CODEX_HOME`. By default, Symphony generates
   it as a sibling to issue workspaces at `<workspace.root>/.symphony/codex_home`.
   - Symphony owns the generated harness `AGENTS.md` in that home.

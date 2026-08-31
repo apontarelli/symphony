@@ -585,6 +585,11 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
       adapter: @runtime,
       client_side_tools: ["linear_graphql"],
       continuation_turns: true,
+      token_usage: %{
+        boundary: "opencode-session-status-v1",
+        reason: "authoritative_cached_total_unavailable",
+        status: :unavailable
+      },
       unattended_permissions: true
     }
   end

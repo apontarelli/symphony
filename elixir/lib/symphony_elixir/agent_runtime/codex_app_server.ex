@@ -259,7 +259,8 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
     %{
       adapter: :codex_app_server,
       client_side_tools: Enum.map(DynamicTool.tool_specs(), &Map.get(&1, "name")),
-      continuation_turns: true
+      continuation_turns: true,
+      token_usage: %{status: :supported, boundary: "codex-app-server-v2"}
     }
   end
 

@@ -33,6 +33,7 @@ end
 defmodule SymphonyElixir.RunAuthorityTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.AgentRuntime.Event
   alias SymphonyElixir.ControlPlane
   alias SymphonyElixir.ControlPlane.{SideEffect, TokenBudget}
   alias SymphonyElixir.{ExecutionContext, Orchestrator, RunAuthority, TargetContext}
@@ -519,6 +520,84 @@ defmodule SymphonyElixir.RunAuthorityTest do
     assert resumed.lifecycle.blocked_reason == nil
     assert {:error, :stale_lease} = RunAuthority.record_token_usage(paused, 30)
     assert {:error, :stale_lease} = RunAuthority.acquire_token_reservation(paused)
+  end
+
+  test "OMP cumulative events advance the durable budget once" do
+    config_root = tmp_root!("run-authority-omp-token-usage")
+    server = start_control_plane!(config_root)
+
+    context =
+      execution_context!(config_root, "alpha", "issue-omp-budget", "SID-466",
+        budget_limits: %{
+          "per_run" => %{"max_total_tokens" => 1_000},
+          "daily" => %{"max_total_tokens" => 5_000},
+          "weekly" => %{"max_total_tokens" => 10_000}
+        }
+      )
+
+    assert {:ok, admitted} = RunAuthority.admit(server, "owner-omp-budget", context)
+    assert {:ok, authority} = RunAuthority.transition(admitted, :running, %{})
+
+    issue = %Issue{
+      id: context.issue_id,
+      identifier: context.issue_identifier,
+      state: "In Progress"
+    }
+
+    run_id = ExecutionContext.run_id(context)
+
+    running_entry = %{
+      codex_app_server_pid: nil,
+      durable_authority: authority,
+      durable_token_usage_baseline: 0,
+      execution_context: context,
+      host_grant: nil,
+      identifier: issue.identifier,
+      issue: issue,
+      last_runtime_error_signature: nil,
+      last_runtime_progress_timestamp: nil,
+      runtime_input_tokens: 0,
+      runtime_last_reported_input_tokens: 0,
+      runtime_last_reported_output_tokens: 0,
+      runtime_last_reported_total_tokens: 0,
+      runtime_output_tokens: 0,
+      runtime_token_usage: %{status: :supported},
+      runtime_total_tokens: 0,
+      session_id: "omp-session",
+      startup_slot?: false,
+      turn_count: 0
+    }
+
+    state = %State{
+      running: %{run_id => running_entry},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_rate_limits: nil
+    }
+
+    event = %Event{
+      event: :turn_progress,
+      payload: %{kind: :usage},
+      runtime: :omp_acp,
+      session_id: "omp-session",
+      timestamp: DateTime.utc_now(),
+      usage: %{"input_tokens" => 6, "output_tokens" => 7, "total_tokens" => 864}
+    }
+
+    assert {:noreply, first} = Orchestrator.handle_info({:runtime_event, run_id, event}, state)
+    assert first.runtime_totals == %{input_tokens: 6, output_tokens: 7, total_tokens: 864, seconds_running: 0}
+    assert first.running[run_id].runtime_total_tokens == 864
+
+    assert {:ok, %TokenBudget{cumulative_tokens: 864, charged_tokens: 864}} =
+             RunAuthority.fetch_token_budget(authority)
+
+    assert {:noreply, repeated} =
+             Orchestrator.handle_info({:runtime_event, run_id, event}, first)
+
+    assert repeated.runtime_totals == first.runtime_totals
+    assert repeated.running[run_id].runtime_total_tokens == 864
+
+    assert {:ok, %TokenBudget{cumulative_tokens: 864, charged_tokens: 864}} =
+             RunAuthority.fetch_token_budget(authority)
   end
 
   test "failed paused resume releases its newly acquired lease" do

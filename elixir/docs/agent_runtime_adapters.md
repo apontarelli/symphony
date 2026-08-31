@@ -47,6 +47,7 @@ runtime:
   runners:
     omp:
       kind: omp_acp
+      version: "18.1.5"
       profile: symphony
       model: openai/gpt-5.6-sol
       thinking: high
@@ -61,6 +62,16 @@ The command defaults to `["omp", "--no-extensions", "--no-skills", "acp"]`. Cust
 contain both isolation flags. OMP therefore does not discover global extensions or skills.
 Symphony does not pass `--no-rules`; OMP still loads repository `AGENTS.md` rules from the canonical
 workspace.
+
+`version` pins the OMP runtime contract. Symphony supports billable token telemetry only for
+explicitly validated versions; the current supported versions are `18.0.11` and `18.1.5`. For
+those versions, Symphony adds its own `--extension` path while `--no-extensions` continues to
+disable ambient discovery. The extension consumes OMP's typed `message_end` and assistant `Usage`
+contracts and
+atomically publishes Symphony schema `1` cumulative input, output, and total counts in the
+session directory. Symphony never parses OMP's native transcript. Other or missing versions report
+token usage as `unavailable`; a configured token budget blocks in capability preflight because it
+cannot be enforced.
 
 Before activation, create and authenticate the named OMP profile outside the repository. Symphony
 sets `OMP_PROFILE` to the configured reference. It stores each run in a mode-`0700` directory below
@@ -86,12 +97,15 @@ precedence over `"*"`. `allow` selects only an `allow_once` option. `deny` selec
 or an unavailable one-time option returns a cancelled permission response and the same fail-closed
 lifecycle. Symphony never selects `allow_always` or `reject_always`.
 
-ACP assistant chunks become `message_delta`; reasoning, plans, configuration, mode, session, and
-usage updates become `turn_progress`; tool calls and terminal tool updates become `tool_call` and
-`tool_result`; prompt stop reasons become `turn_completed` or `turn_failed`. Questions,
-`session/request_input`, and elicitation requests emit actionable `blocked` evidence and fail the
-turn. Other unknown required requests, malformed messages, unsupported protocol versions, stalls,
-timeouts, and process exits also fail closed.
+OMP ACP assistant chunks become `message_delta`; reasoning, plans, configuration, mode, session, and
+legacy ACP usage updates become `turn_progress`; tool calls and terminal tool updates become
+`tool_call` and `tool_result`; prompt stop reasons become `turn_completed` or `turn_failed`.
+Supported versioned telemetry is attached as cumulative usage to normalized events. Orchestration
+deduplicates repeated absolute totals and charges OMP's authoritative `totalTokens`, which already
+includes cache read/write and provider orchestration tokens. Questions, `session/request_input`, and
+elicitation requests emit actionable `blocked` evidence and fail the turn. Other unknown required
+requests, malformed messages, unsupported protocol versions, stalls, timeouts, and process exits
+also fail closed.
 
 Before an OMP event or turn result leaves the adapter, the shared redaction policy removes
 secret-bearing map values, labeled bearer or credential strings, and the exact per-session MCP
@@ -102,6 +116,7 @@ and loopback bridge.
 Run the installed-runtime smoke after the profile is authenticated:
 
 ```bash
+SYMPHONY_OMP_VERSION=18.1.5 \
 SYMPHONY_OMP_PROFILE=symphony \
 SYMPHONY_OMP_MODEL=openai/gpt-5.6-sol \
 SYMPHONY_OMP_THINKING=high \

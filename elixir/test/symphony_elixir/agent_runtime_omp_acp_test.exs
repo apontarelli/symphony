@@ -7,8 +7,14 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
   alias SymphonyElixir.AgentRuntime.OmpMcpBridge
   alias SymphonyElixir.CapabilityPreflight
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.ControlPlane
+  alias SymphonyElixir.ControlPlane.TokenBudget
   alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.Orchestrator.State
+  alias SymphonyElixir.RunAuthority
+  alias SymphonyElixir.StatusDashboard
   alias SymphonyElixir.TargetContext
 
   @live_omp_skip_reason if(System.get_env("SYMPHONY_RUN_LIVE_OMP_ACP") != "1",
@@ -59,7 +65,12 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
              permission_policy: true,
              pinned: true,
              protocol: "acp-v1",
-             session_resume: false
+             session_resume: false,
+             token_usage: %{
+               boundary: "symphony-omp-extension-v1",
+               status: :unavailable,
+               version: nil
+             }
            }
 
     assert %{status: :passed, failures: []} = CapabilityPreflight.run(execution_context)
@@ -198,7 +209,9 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     System.put_env("SSH_AUTH_SOCK", "/tmp/landing-agent.sock")
 
     landing_issue = %{issue() | state: "Merging"}
-    execution_context = execution_context(context, "success", %{"*" => "deny"}, landing_issue)
+
+    execution_context =
+      execution_context(context, "success", %{"*" => "deny"}, nil, %{}, landing_issue)
 
     assert {:ok, session} = OmpAcp.start(execution_context, landing_issue, [])
     assert :ok = OmpAcp.stop(session)
@@ -209,6 +222,97 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert trace =~ "ENV_GIT_TERMINAL_PROMPT:"
     assert trace =~ "ENV_GIT_CONFIG_KEY_0:"
     assert trace =~ "ENV_GIT_SSH_COMMAND:"
+  end
+
+  test "recovers versioned OMP usage when ACP omits usage updates", context do
+    execution_context = execution_context(context, "usage_without_acp", %{"*" => "deny"}, "18.0.11")
+    test_pid = self()
+
+    assert {:ok, session} = AgentRuntime.start_session(execution_context, issue())
+
+    try do
+      assert {:ok, %{usage: usage}} =
+               AgentRuntime.send_turn(session, "Return usage.", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      transcript =
+        session.adapter_session.session_dir
+        |> Path.join("omp-native.jsonl")
+        |> File.read!()
+        |> Jason.decode!()
+
+      assert get_in(transcript, ["message", "usage", "totalTokens"]) == 864
+
+      assert usage == %{
+               "input_tokens" => 6,
+               "output_tokens" => 7,
+               "total_tokens" => 864
+             }
+
+      events = receive_events()
+      assert %Event{usage: ^usage} = List.last(events)
+      refute Enum.any?(events, &match?(%Event{payload: %{kind: :usage}}, &1))
+    after
+      assert :ok = AgentRuntime.stop_session(session)
+    end
+  end
+
+  test "fails a supported turn when telemetry does not advance", context do
+    execution_context = execution_context(context, "telemetry_stale", %{"*" => "deny"}, "18.0.11")
+    test_pid = self()
+
+    assert {:ok, session} = AgentRuntime.start_session(execution_context, issue())
+
+    try do
+      assert {:error, {:omp_token_telemetry_unavailable, :sequence_not_advanced}} =
+               AgentRuntime.send_turn(session, "Return usage.", issue(), on_event: fn event -> send(test_pid, {:event, event}) end)
+
+      assert Enum.any?(receive_events(), &match?(%Event{event: :turn_failed}, &1))
+    after
+      assert :ok = AgentRuntime.stop_session(session)
+    end
+  end
+
+  test "stops the MCP bridge when supported telemetry setup fails", context do
+    before_links = self() |> Process.info(:links) |> elem(1) |> MapSet.new()
+
+    runner =
+      context
+      |> execution_context("success", %{"*" => "deny"}, "18.0.11")
+      |> Map.fetch!(:runner_config)
+      |> Map.put("command", [context.binary, "--no-extensions", "--no-skills"])
+
+    execution_context = execution_context_with_runner(context, runner, %{})
+
+    assert {:error, :invalid_omp_acp_command} =
+             AgentRuntime.start_session(execution_context, issue())
+
+    assert eventually(fn ->
+             current_links = self() |> Process.info(:links) |> elem(1) |> MapSet.new()
+             if current_links == before_links, do: :stopped
+           end) == :stopped
+  end
+
+  test "budget preflight blocks an unsupported OMP version", context do
+    execution_context =
+      execution_context(
+        context,
+        "success",
+        %{"*" => "deny"},
+        "18.0.12",
+        %{"per_run" => %{"max_total_tokens" => 1_000}}
+      )
+
+    assert %{
+             status: :blocked,
+             failures: [
+               %{
+                 reason: :token_usage_unavailable,
+                 details: details
+               }
+             ]
+           } = CapabilityPreflight.run(execution_context)
+
+    assert details =~ "version=\"18.0.12\""
   end
 
   test "default Linear executor resolves only the session target credential", context do
@@ -519,6 +623,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     profile = System.fetch_env!("SYMPHONY_OMP_PROFILE")
     model = System.fetch_env!("SYMPHONY_OMP_MODEL")
     thinking = System.get_env("SYMPHONY_OMP_THINKING", "high")
+    version = System.fetch_env!("SYMPHONY_OMP_VERSION")
 
     File.write!(
       Path.join(context.workspace, "AGENTS.md"),
@@ -528,6 +633,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     runner = %{
       "kind" => "omp_acp",
       "command" => ["omp", "--no-extensions", "--no-skills", "acp"],
+      "version" => version,
       "model" => model,
       "permissions" => %{"*" => "deny"},
       "profile" => profile,
@@ -539,7 +645,30 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       "execution_profiles" => %{}
     }
 
-    execution_context = execution_context_with_runner(context, runner)
+    budget_limits = %{
+      "per_run" => %{"max_total_tokens" => 1_000_000},
+      "daily" => %{"max_total_tokens" => 2_000_000},
+      "weekly" => %{"max_total_tokens" => 5_000_000}
+    }
+
+    execution_context = execution_context_with_runner(context, runner, budget_limits)
+    control_plane_name = {:global, {__MODULE__, make_ref()}}
+
+    control_plane =
+      start_supervised!(
+        {ControlPlane, config_root: context.root, name: control_plane_name},
+        restart: :temporary
+      )
+
+    durable_context =
+      put_in(
+        execution_context,
+        [Access.key!(:target), Access.key!(:tracker_connection), "policy", "api_key"],
+        "$SYMPHONY_OMP_TEST_TRACKER_KEY"
+      )
+
+    assert {:ok, admitted} = RunAuthority.admit(control_plane, "omp-live-smoke", durable_context)
+    assert {:ok, authority} = RunAuthority.transition(admitted, :running, %{})
     test_pid = self()
 
     assert {:ok, session} = AgentRuntime.start_session(execution_context, issue())
@@ -553,8 +682,66 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       text = events |> Enum.map(& &1.payload[:text]) |> Enum.reject(&is_nil/1) |> Enum.join()
 
       assert text =~ "SYMPHONY_OMP_LIVE_OK"
-      assert is_map(usage) and map_size(usage) > 0
-      assert Enum.any?(events, &(&1.event == :turn_completed))
+
+      assert %{
+               "input_tokens" => input_tokens,
+               "output_tokens" => output_tokens,
+               "total_tokens" => total_tokens
+             } = usage
+
+      assert input_tokens > 0
+      assert output_tokens > 0
+      assert total_tokens >= input_tokens + output_tokens
+      assert %Event{usage: ^usage} = List.last(events)
+
+      runtime_event = List.last(events)
+      state = live_orchestrator_state(durable_context, authority)
+      run_id = ExecutionContext.run_id(durable_context)
+
+      assert {:noreply, integrated} =
+               Orchestrator.handle_info({:runtime_event, run_id, runtime_event}, state)
+
+      assert integrated.runtime_totals == %{
+               input_tokens: input_tokens,
+               output_tokens: output_tokens,
+               total_tokens: total_tokens,
+               seconds_running: 0
+             }
+
+      assert {:ok,
+              %TokenBudget{
+                charged_tokens: ^total_tokens,
+                cumulative_tokens: ^total_tokens
+              }} = RunAuthority.fetch_token_budget(authority)
+
+      dashboard =
+        StatusDashboard.format_snapshot_content_for_test(
+          {:ok,
+           %{
+             running: [
+               %{
+                 identifier: issue().identifier,
+                 last_runtime_event: runtime_event.event,
+                 last_runtime_message: %{event: runtime_event.event},
+                 runtime_seconds: 1,
+                 runtime_token_usage: %{status: :supported},
+                 runtime_total_tokens: total_tokens,
+                 session_id: runtime_event.session_id,
+                 state: issue().state,
+                 turn_count: 1
+               }
+             ],
+             retrying: [],
+             runtime_totals: integrated.runtime_totals,
+             rate_limits: nil
+           }},
+          0.0,
+          115
+        )
+
+      refute dashboard =~ "in unavailable"
+
+      IO.puts("OMP live token telemetry input=#{input_tokens} output=#{output_tokens} total=#{total_tokens} charged=#{total_tokens}")
     after
       assert :ok = AgentRuntime.stop_session(session)
     end
@@ -570,6 +757,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
                  "model" => "openai/gpt-5.6-sol",
                  "permissions" => %{"read" => "allow"},
                  "profile" => "symphony",
+                 "version" => "18.0.11",
                  "thinking" => "high"
                }
              })
@@ -577,6 +765,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert runner["command"] == ["omp", "--no-extensions", "--no-skills", "acp"]
     assert runner["permissions"] == %{"read" => "allow"}
     assert runner["startup_timeout_ms"] == 30_000
+    assert runner["version"] == "18.0.11"
 
     assert {:error, errors} =
              Schema.validate_runner_catalog(%{
@@ -584,6 +773,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
                  "kind" => "omp_acp",
                  "model" => "missing-provider",
                  "profile" => "",
+                 "version" => "",
                  "thinking" => "extreme"
                }
              })
@@ -591,6 +781,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert Enum.any?(errors, &String.contains?(&1, ".model must use provider/model"))
     assert Enum.any?(errors, &String.contains?(&1, ".profile must be a non-empty string"))
     assert Enum.any?(errors, &String.contains?(&1, ".thinking must be one of:"))
+    assert Enum.any?(errors, &String.contains?(&1, ".version must be a non-empty string"))
 
     assert {:error, thinking_errors} =
              Schema.validate_runner_catalog(%{
@@ -652,6 +843,8 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
          context,
          scenario,
          permissions \\ %{"*" => "deny"},
+         version \\ nil,
+         budget_limits \\ %{},
          context_issue \\ issue()
        ) do
     runner = %{
@@ -660,6 +853,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
         context.binary,
         "--no-extensions",
         "--no-skills",
+        "acp",
         scenario,
         context.trace,
         context.child_pid_file
@@ -675,10 +869,14 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       "execution_profiles" => %{}
     }
 
-    execution_context_with_runner(context, runner, context_issue)
+    runner = if version, do: Map.put(runner, "version", version), else: runner
+    execution_context_with_runner(context, runner, budget_limits, context_issue)
   end
 
-  defp execution_context_with_runner(context, runner, context_issue \\ issue()) do
+  defp execution_context_with_runner(context, runner, budget_limits),
+    do: execution_context_with_runner(context, runner, budget_limits, issue())
+
+  defp execution_context_with_runner(context, runner, budget_limits, context_issue) do
     target = %TargetContext{
       target_id: "omp-test",
       workspace_layout: :flat,
@@ -688,7 +886,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       policy_hash: hash(),
       repo_manifest_hash: hash(),
       repo_policy: %{
-        "manifest" => %{"harness" => %{"codex_home" => nil}},
+        "manifest" => %{"harness" => %{"codex_home" => nil}, "version" => 1},
         "manifest_source_dir" => context.root,
         "workflow_module_resolution" => %{}
       },
@@ -717,21 +915,59 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
         "allowed" => ["omp"],
         "runners" => %{"omp" => runner}
       },
-      effective_checks: %{},
-      external_side_effect_gates: %{},
-      capacity_limits: %{},
-      budget_limits: %{}
+      effective_checks: %{"pre_handoff" => ["mix test"]},
+      external_side_effect_gates: %{
+        "pull_request_write" => "allow",
+        "tracker_write" => "allow",
+        "vcs_publish" => "allow"
+      },
+      capacity_limits: %{"max_concurrent_agents" => 1},
+      budget_limits: budget_limits
     }
 
     assert {:ok, execution_context} =
              ExecutionContext.new(target, context_issue,
                policy: %{
+                 "delivery" => %{"pr_target" => "main"},
                  "policy_ref" => "omp-test",
-                 "policy_metadata" => %{"profile" => "implementation"}
+                 "policy_metadata" => %{"profile" => "implementation"},
+                 "target" => "main"
                }
              )
 
     execution_context
+  end
+
+  defp live_orchestrator_state(execution_context, authority) do
+    run_id = ExecutionContext.run_id(execution_context)
+
+    running_entry = %{
+      codex_app_server_pid: nil,
+      durable_authority: authority,
+      durable_token_usage_baseline: 0,
+      execution_context: execution_context,
+      host_grant: nil,
+      identifier: issue().identifier,
+      issue: issue(),
+      last_runtime_error_signature: nil,
+      last_runtime_progress_timestamp: nil,
+      runtime_input_tokens: 0,
+      runtime_last_reported_input_tokens: 0,
+      runtime_last_reported_output_tokens: 0,
+      runtime_last_reported_total_tokens: 0,
+      runtime_output_tokens: 0,
+      runtime_token_usage: %{status: :supported},
+      runtime_total_tokens: 0,
+      session_id: "omp-session",
+      startup_slot?: false,
+      turn_count: 0
+    }
+
+    %State{
+      running: %{run_id => running_entry},
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      runtime_rate_limits: nil
+    }
   end
 
   defp issue do
@@ -754,12 +990,23 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
   defp fake_omp_script do
     ~S"""
     #!/bin/sh
-    printf 'ARG:%s\n' "$1" >> "$4"
-    printf 'ARG:%s\n' "$2" >> "$4"
-    shift 2
+    if [ "${1:-}" = "--version" ]; then
+      printf '%s\n' 'omp/18.0.11'
+      exit 0
+    fi
+
+    all_args="$*"
+    while [ "$#" -gt 0 ] && [ "$1" != "acp" ]; do
+      shift
+    done
+    shift
     scenario="$1"
     trace="$2"
     child_pid_file="$3"
+
+    for arg in $all_args; do
+      printf 'ARG:%s\n' "$arg" >> "$trace"
+    done
     prompt_id=""
     permission_pending=0
     session_id="omp-session"
@@ -807,6 +1054,9 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
         *'"method":"session/new"'*)
           bridge_token=$(printf '%s' "$line" | sed -n 's/.*Bearer \([^"]*\).*/\1/p')
           printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"sessionId\":\"$session_id\",\"configOptions\":[]}}"
+          if [ -n "${SYMPHONY_OMP_TOKEN_TELEMETRY_PATH:-}" ]; then
+            printf '%s\n' '{"schema_version":1,"omp_version":"18.0.11","sequence":0,"input_tokens":0,"output_tokens":0,"total_tokens":0}' > "$SYMPHONY_OMP_TOKEN_TELEMETRY_PATH"
+          fi
           ;;
         *'"method":"session/set_config_option"'*)
           printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"configOptions\":[]}}"
@@ -827,6 +1077,17 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
             secret)
               printf '%s\n' "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"$session_id\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"Authorization: Bearer $bridge_token\"},\"messageId\":\"message-secret\"}}}"
               printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\",\"credential\":\"$bridge_token\"}}"
+              ;;
+            usage_without_acp)
+              printf '%s\n' '{"message":{"role":"assistant","usage":{"input":6,"output":7,"cacheRead":850,"cacheWrite":1,"totalTokens":864}}}' > "$PI_CODING_AGENT_SESSION_DIR/omp-native.jsonl"
+              if [ -n "${SYMPHONY_OMP_TOKEN_TELEMETRY_PATH:-}" ]; then
+                printf '%s\n' '{"schema_version":1,"omp_version":"18.0.11","sequence":1,"input_tokens":6,"output_tokens":7,"total_tokens":864}' > "$SYMPHONY_OMP_TOKEN_TELEMETRY_PATH"
+              fi
+              printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"omp-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"},"messageId":"message-usage"}}}'
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
+              ;;
+            telemetry_stale)
+              printf '%s\n' "{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{\"stopReason\":\"end_turn\"}}"
               ;;
             *)
               printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"omp-session","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done"},"messageId":"message-1"}}}'
