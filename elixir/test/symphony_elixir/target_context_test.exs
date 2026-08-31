@@ -834,7 +834,7 @@ defmodule SymphonyElixir.TargetContextTest do
         "criticality" => "production",
         "deployment_coupling" => "production"
       },
-      "workflow" => %{"modules" => []},
+      "workflow" => %{"modules" => ["delivery.github_pr"]},
       "docs" => %{},
       "validation" => %{"commands" => [%{"name" => "test", "command" => "mix test"}]},
       "vcs" => %{},
@@ -878,6 +878,14 @@ defmodule SymphonyElixir.TargetContextTest do
              )
 
     assert policy["delivery"] == %{"pr_target" => "main"}
+
+    assert policy["publish_target"] == %{
+             "repository" => "https://github.com/example/repo",
+             "pr_target" => "main",
+             "github_repository" => "example/repo",
+             "display" => "example/repo:main"
+           }
+
     assert policy["checks"] == [%{"name" => "test", "command" => "mix test"}]
     assert policy["completion_requirements"] == ["tests-green"]
     assert policy["auto_land"]["posture"] == "off"

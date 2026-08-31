@@ -6,6 +6,7 @@ defmodule SymphonyElixir.TargetContext do
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
+  alias SymphonyElixir.Workflow.PublishTarget
 
   @target_id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
   @secret_provider_regex ~r|^secret://[A-Za-z0-9._-]+/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$|
@@ -567,12 +568,19 @@ defmodule SymphonyElixir.TargetContext do
 
       {:ok,
        policy
+       |> maybe_put_publish_target(manifest)
        |> maybe_put_policy("auto_land", Map.get(manifest, "auto_land"))
        |> maybe_put_policy("review", Map.get(automation, "review"))
        |> maybe_put_policy("review_routing", Map.get(manifest, "review_routing"))}
     else
       _invalid -> {:error, :malformed_composed_policy}
     end
+  end
+
+  defp maybe_put_publish_target(policy, manifest) do
+    if "delivery.github_pr" in List.wrap(get_in(manifest, ["workflow", "modules"])),
+      do: Map.merge(policy, PublishTarget.config(manifest)),
+      else: policy
   end
 
   defp validate_optional_auto_land(manifest) do
