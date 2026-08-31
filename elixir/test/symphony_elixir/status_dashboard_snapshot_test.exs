@@ -1,7 +1,136 @@
 defmodule SymphonyElixir.StatusDashboardSnapshotTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.HostScheduler
   alias SymphonyElixir.TestSupport.Snapshot
+
+  defmodule SnapshotServer do
+    use GenServer
+
+    def init(snapshot), do: {:ok, snapshot}
+
+    def handle_call(:snapshot, from, {:deferred, recipient, _snapshot} = state) do
+      send(recipient, {:snapshot_requested, self(), from})
+      {:noreply, state}
+    end
+
+    def handle_call(:snapshot, _from, snapshot), do: {:reply, snapshot, snapshot}
+  end
+
+  test "registry host aggregates target snapshots and ignores unavailable targets" do
+    alpha =
+      start_snapshot_server(%{
+        running: [running_entry(%{identifier: "SID-A", runtime_total_tokens: 12})],
+        retrying: [retry_entry(%{identifier: "SID-RETRY-A", due_in_ms: 8_000})],
+        runtime_totals: %{input_tokens: 10, output_tokens: 2, total_tokens: 12, seconds_running: 3},
+        rate_limits: %{limit_id: "alpha-tier"},
+        tracker: %{limited?: false, rate_limit: nil},
+        polling: %{checking?: true, next_poll_in_ms: 8_000}
+      })
+
+    zeta =
+      start_snapshot_server(%{
+        running: [running_entry(%{identifier: "SID-Z", runtime_total_tokens: 25})],
+        retrying: [retry_entry(%{identifier: "SID-RETRY-Z", due_in_ms: 2_000})],
+        runtime_totals: %{input_tokens: 20, output_tokens: 5, total_tokens: 25, seconds_running: 7},
+        rate_limits: %{limit_id: "zeta-tier"},
+        tracker: %{limited?: true, rate_limit: %{source: "linear", remaining_ms: 4_000}},
+        polling: %{checking?: false, next_poll_in_ms: 2_000}
+      })
+
+    unavailable =
+      start_snapshot_server(%{
+        running: [running_entry(%{identifier: "SKIP-ME", runtime_total_tokens: 999})],
+        retrying: [],
+        runtime_totals: %{input_tokens: 999, output_tokens: 999, total_tokens: 999, seconds_running: 999},
+        rate_limits: %{limit_id: "unavailable-tier"},
+        tracker: %{limited?: false, rate_limit: nil},
+        polling: %{checking?: false, next_poll_in_ms: 1_000}
+      })
+
+    _scheduler =
+      start_snapshot_server(
+        %{
+          targets: %{
+            "zeta" => %{pid: zeta, effective_state: :active},
+            "paused" => %{pid: nil, effective_state: :paused},
+            "unavailable" => %{pid: unavailable, effective_state: :unavailable},
+            "alpha" => %{pid: alpha, effective_state: :active}
+          }
+        },
+        name: HostScheduler
+      )
+
+    dashboard = start_dashboard()
+    send(dashboard, :refresh)
+
+    assert_receive {:dashboard_frame, content}
+    refute content =~ "Orchestrator snapshot unavailable"
+    assert content =~ "SID-A"
+    assert content =~ "SID-Z"
+    assert content =~ "SID-RETRY-A"
+    assert content =~ "SID-RETRY-Z"
+    assert content =~ "in 30"
+    assert content =~ "out 7"
+    assert content =~ "total 37"
+    assert content =~ "alpha-tier"
+    refute content =~ "zeta-tier"
+    assert content =~ "tracker_rate_limited"
+    assert content =~ "Next refresh:"
+    assert content =~ "checking now"
+    refute content =~ "SKIP-ME"
+    refute content =~ "unavailable-tier"
+  end
+
+  test "target snapshots are requested concurrently" do
+    snapshot = %{
+      running: [],
+      retrying: [],
+      runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      rate_limits: nil,
+      tracker: %{limited?: false, rate_limit: nil},
+      polling: %{checking?: false, next_poll_in_ms: 1_000}
+    }
+
+    alpha = start_snapshot_server({:deferred, self(), snapshot})
+    zeta = start_snapshot_server({:deferred, self(), snapshot})
+
+    _scheduler =
+      start_snapshot_server(
+        %{
+          targets: %{
+            "zeta" => %{pid: zeta, effective_state: :active},
+            "alpha" => %{pid: alpha, effective_state: :active}
+          }
+        },
+        name: HostScheduler
+      )
+
+    dashboard = start_dashboard()
+    send(dashboard, :refresh)
+
+    requests =
+      for _index <- 1..2 do
+        assert_receive {:snapshot_requested, pid, from}, 500
+        {pid, from}
+      end
+
+    assert requests |> Enum.map(&elem(&1, 0)) |> MapSet.new() == MapSet.new([alpha, zeta])
+    Enum.each(requests, fn {_pid, from} -> GenServer.reply(from, snapshot) end)
+
+    assert_receive {:dashboard_frame, content}
+    refute content =~ "Orchestrator snapshot unavailable"
+  end
+
+  test "scheduler unavailability renders the unavailable frame" do
+    assert Process.whereis(HostScheduler) == nil
+
+    dashboard = start_dashboard()
+    send(dashboard, :refresh)
+
+    assert_receive {:dashboard_frame, content}
+    assert content =~ "Orchestrator snapshot unavailable"
+  end
 
   @terminal_columns 115
 
@@ -239,6 +368,30 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
       },
       overrides
     )
+  end
+
+  defp start_snapshot_server(snapshot, opts \\ []) do
+    {:ok, pid} = GenServer.start(SnapshotServer, snapshot, opts)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: GenServer.stop(pid)
+    end)
+
+    pid
+  end
+
+  defp start_dashboard do
+    test_pid = self()
+
+    opts = [
+      name: {:global, {__MODULE__, make_ref()}},
+      enabled: true,
+      refresh_ms: 60_000,
+      render_interval_ms: 1,
+      render_fun: &send(test_pid, {:dashboard_frame, &1})
+    ]
+
+    start_supervised!({StatusDashboard, opts})
   end
 
   defp turn_started_message do

@@ -6,8 +6,7 @@ defmodule SymphonyElixir.StatusDashboard do
   use GenServer
   require Logger
 
-  alias SymphonyElixir.{Config, HttpServer}
-  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.{Config, HostScheduler, HttpServer, Orchestrator}
   alias SymphonyElixirWeb.ObservabilityPubSub
 
   @minimum_idle_rerender_ms 1_000
@@ -26,6 +25,9 @@ defmodule SymphonyElixir.StatusDashboard do
   @running_event_min_width 12
   @running_row_chrome_width 11
   @default_terminal_columns 115
+  @target_snapshot_timeout_ms 1_000
+  @runtime_total_keys [:input_tokens, :output_tokens, :total_tokens, :seconds_running]
+  @empty_runtime_totals Map.new(@runtime_total_keys, &{&1, 0})
 
   @ansi_reset IO.ANSI.reset()
   @ansi_bold IO.ANSI.bright()
@@ -565,30 +567,151 @@ defmodule SymphonyElixir.StatusDashboard do
     do: dashboard_url(host, configured_port, bound_port)
 
   defp snapshot_payload do
-    if Process.whereis(Orchestrator) do
-      case Orchestrator.snapshot() do
-        %{
-          running: running,
-          retrying: retrying,
-          runtime_totals: runtime_totals
-        } = snapshot
-        when is_list(running) and is_list(retrying) ->
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             runtime_totals: runtime_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             tracker: Map.get(snapshot, :tracker),
-             polling: Map.get(snapshot, :polling)
-           }}
-
-        _ ->
-          :error
-      end
+    if Process.whereis(HostScheduler) do
+      host_snapshot_payload()
     else
-      :error
+      Orchestrator.snapshot()
+      |> orchestrator_snapshot_payload()
     end
+  end
+
+  defp host_snapshot_payload do
+    case host_scheduler_snapshot() do
+      %{targets: targets} when is_map(targets) ->
+        targets
+        |> target_snapshots()
+        |> aggregate_target_snapshots()
+        |> then(&{:ok, &1})
+
+      _unavailable ->
+        :error
+    end
+  end
+
+  defp host_scheduler_snapshot do
+    HostScheduler.snapshot()
+  catch
+    :exit, _reason -> :unavailable
+  end
+
+  defp target_snapshots(targets) do
+    eligible_targets =
+      targets
+      |> Enum.sort_by(fn {target_id, _target} -> to_string(target_id) end)
+      |> Enum.filter(&snapshot_target?/1)
+
+    eligible_targets
+    |> Task.async_stream(
+      fn {_target_id, %{pid: pid}} ->
+        Orchestrator.snapshot(pid, @target_snapshot_timeout_ms)
+        |> orchestrator_snapshot_payload()
+      end,
+      max_concurrency: max(length(eligible_targets), 1),
+      ordered: true,
+      timeout: @target_snapshot_timeout_ms + 100,
+      on_timeout: :kill_task
+    )
+    |> Enum.flat_map(fn
+      {:ok, {:ok, snapshot}} -> [snapshot]
+      _unavailable -> []
+    end)
+  end
+
+  defp snapshot_target?({_target_id, %{pid: pid, effective_state: effective_state}})
+       when is_pid(pid) and effective_state not in [:paused, :retired, :unavailable],
+       do: true
+
+  defp snapshot_target?(_paused_or_unavailable), do: false
+
+  defp orchestrator_snapshot_payload(
+         %{
+           running: running,
+           retrying: retrying,
+           runtime_totals: runtime_totals
+         } = snapshot
+       )
+       when is_list(running) and is_list(retrying) and is_map(runtime_totals) do
+    {:ok,
+     %{
+       running: running,
+       retrying: retrying,
+       runtime_totals: runtime_totals,
+       rate_limits: Map.get(snapshot, :rate_limits),
+       tracker: Map.get(snapshot, :tracker),
+       polling: Map.get(snapshot, :polling)
+     }}
+  end
+
+  defp orchestrator_snapshot_payload(_unavailable), do: :error
+
+  defp aggregate_target_snapshots(snapshots) do
+    snapshots
+    |> Enum.reduce(
+      %{
+        running: [],
+        retrying: [],
+        runtime_totals: @empty_runtime_totals,
+        rate_limits: nil,
+        tracker: nil,
+        polling: nil
+      },
+      fn snapshot, aggregate ->
+        %{
+          running: [snapshot.running | aggregate.running],
+          retrying: [snapshot.retrying | aggregate.retrying],
+          runtime_totals: sum_runtime_totals(aggregate.runtime_totals, snapshot.runtime_totals),
+          rate_limits: aggregate.rate_limits || snapshot.rate_limits,
+          tracker: aggregate_tracker(aggregate.tracker, snapshot.tracker),
+          polling: aggregate_polling(aggregate.polling, snapshot.polling)
+        }
+      end
+    )
+    |> then(fn aggregate ->
+      %{
+        aggregate
+        | running: aggregate.running |> Enum.reverse() |> List.flatten(),
+          retrying: aggregate.retrying |> Enum.reverse() |> List.flatten()
+      }
+    end)
+  end
+
+  defp sum_runtime_totals(left, right) do
+    Map.new(@runtime_total_keys, fn key ->
+      {key, Map.get(left, key, 0) + Map.get(right, key, 0)}
+    end)
+  end
+
+  defp aggregate_tracker(nil, tracker), do: tracker
+  defp aggregate_tracker(tracker, nil), do: tracker
+
+  defp aggregate_tracker(tracker, candidate) do
+    if Map.get(candidate, :limited?, false) and not Map.get(tracker, :limited?, false),
+      do: candidate,
+      else: tracker
+  end
+
+  defp aggregate_polling(nil, polling), do: polling
+  defp aggregate_polling(polling, nil), do: polling
+
+  defp aggregate_polling(polling, candidate) do
+    selected =
+      case {Map.get(polling, :next_poll_in_ms), Map.get(candidate, :next_poll_in_ms)} do
+        {current_ms, candidate_ms}
+        when is_integer(current_ms) and is_integer(candidate_ms) and candidate_ms < current_ms ->
+          candidate
+
+        {nil, candidate_ms} when is_integer(candidate_ms) ->
+          candidate
+
+        _other ->
+          polling
+      end
+
+    Map.put(
+      selected,
+      :checking?,
+      Map.get(polling, :checking?, false) or Map.get(candidate, :checking?, false)
+    )
   end
 
   defp format_running_rows(running, running_event_width) do
