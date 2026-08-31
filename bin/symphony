@@ -228,10 +228,30 @@ run_workflow_cli() {
   shift
 
   local symphony_home="${SYMPHONY_HOME:-"$repo_root/elixir"}"
+  local args=()
+  local arg value
 
+  while [[ $# -gt 0 ]]; do
+    arg="$1"
+
+    case "$arg" in
+      --repo)
+        require_value "$arg" "${2:-}"
+        value="$(expand_path "$2")"
+        args+=("$arg" "$(absolute_path "$value")")
+        shift 2
+        ;;
+      *)
+        args+=("$arg")
+        shift
+        ;;
+    esac
+  done
+
+  symphony_home="$(absolute_path "$(expand_path "$symphony_home")")"
   prepare_elixir_cli "$symphony_home"
 
-  exec mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "$@"
+  exec mise exec -- mix run --no-start --no-compile -e 'SymphonyElixir.CLI.main(System.argv())' -- "${args[@]}"
 }
 
 run_host_cli() {
@@ -350,12 +370,18 @@ run_saved_setup_cli() {
   local cli_args=(run --i-understand-that-this-will-be-running-without-the-usual-guardrails)
   local env_optional=0
   local interactive_tty=0
-  local arg
+  local arg value
 
   while [[ $# -gt 0 ]]; do
     arg="$1"
 
     case "$arg" in
+      --repo)
+        require_value "$arg" "${2:-}"
+        value="$(expand_path "$2")"
+        cli_args+=("$arg" "$(absolute_path "$value")")
+        shift 2
+        ;;
       --env-file)
         require_value "$arg" "${2:-}"
         env_file="$2"
