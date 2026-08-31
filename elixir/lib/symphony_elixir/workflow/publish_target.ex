@@ -36,23 +36,49 @@ defmodule SymphonyElixir.Workflow.PublishTarget do
 
   @spec resolve_policy(map()) :: resolved() | nil
   def resolve_policy(policy) when is_map(policy) do
-    case Map.get(policy, "publish_target", Map.get(policy, :publish_target)) do
-      target when is_map(target) ->
-        repository = target_field(target, "repository")
-        base_branch = target_field(target, "pr_target")
-
-        %{
-          repository: repository,
-          base_branch: base_branch,
-          github_repository: github_repository_slug(repository)
-        }
-
-      _target ->
-        nil
+    case fetch_publish_target(policy) do
+      {:ok, target} when is_map(target) -> resolve_target(target)
+      {:ok, _invalid} -> nil
+      :error -> resolve_manifest_policy(policy)
     end
   end
 
   def resolve_policy(_policy), do: nil
+
+  defp fetch_publish_target(policy) do
+    case Map.fetch(policy, "publish_target") do
+      {:ok, target} -> {:ok, target}
+      :error -> Map.fetch(policy, :publish_target)
+    end
+  end
+
+  defp resolve_manifest_policy(policy) do
+    modules = get_in(policy, ["manifest", "workflow", "modules"])
+    repository = get_in(policy, ["manifest", "project", "repository"])
+    pr_target = get_in(policy, ["delivery", "pr_target"])
+
+    if is_list(modules) and "delivery.github_pr" in modules,
+      do: policy_target(repository, pr_target),
+      else: nil
+  end
+
+  defp policy_target(repository, pr_target) do
+    case build(repository, pr_target) do
+      target when is_map(target) -> resolve_target(target)
+      nil -> nil
+    end
+  end
+
+  defp resolve_target(target) do
+    repository = target_field(target, "repository")
+    base_branch = target_field(target, "pr_target")
+
+    %{
+      repository: repository,
+      base_branch: base_branch,
+      github_repository: github_repository_slug(repository)
+    }
+  end
 
   @spec github_repository_slug(String.t() | nil) :: String.t() | nil
   def github_repository_slug(repository) when is_binary(repository) do
