@@ -196,27 +196,31 @@ defmodule SymphonyElixir.PromptBuilder do
   end
 
   defp compile_context_prompt(manifest, pinned_resolution) do
-    case Manifest.compile(manifest) do
-      %{
-        prompt_template: prompt_template,
-        workflow_module_resolution: compiled_resolution
-      }
-      when is_binary(prompt_template) ->
-        with true <- String.valid?(prompt_template),
-             modules when is_list(modules) <- Map.get(compiled_resolution, :modules),
-             {:ok, compiled_projection} <-
-               normalize_compiled_prompt_resolution(compiled_resolution),
-             true <- compiled_projection == pinned_resolution do
-          {:ok, prompt_template, bundle_prompt_resolution(compiled_projection, modules)}
-        else
-          _invalid -> {:error, :invalid_prompt_context}
-        end
+    with {:ok,
+          %{
+            prompt_template: prompt_template,
+            workflow_module_resolution: compiled_resolution
+          }}
+         when is_binary(prompt_template) <- compile_pinned_manifest(manifest),
+         true <- String.valid?(prompt_template),
+         modules when is_list(modules) <- Map.get(compiled_resolution, :modules),
+         {:ok, compiled_projection} <-
+           normalize_compiled_prompt_resolution(compiled_resolution),
+         true <- compiled_projection == pinned_resolution do
+      {:ok, prompt_template, bundle_prompt_resolution(compiled_projection, modules)}
+    else
+      _invalid -> {:error, :invalid_prompt_context}
     end
   rescue
     _exception -> {:error, :invalid_prompt_context}
   catch
     _kind, _reason -> {:error, :invalid_prompt_context}
   end
+
+  defp compile_pinned_manifest(%{"_field_sources" => _sources} = manifest),
+    do: {:ok, Manifest.compile(manifest)}
+
+  defp compile_pinned_manifest(manifest), do: Manifest.load_map(manifest)
 
   defp normalize_pinned_prompt_resolution(
          %{
