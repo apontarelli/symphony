@@ -78,6 +78,9 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert resolution.rendered =~ "Policy hash: #{resolution.policy_hash}"
     assert resolution.rendered =~ "### Linear Operation"
     refute Regex.match?(~r/`symphony-[a-z-]+`/, resolution.rendered)
+
+    assert resolution.rendered =~
+             "If Human Review has no branch, PR, or implementation diff"
   end
 
   test "manifest prompt metadata does not require optional workflow modules" do

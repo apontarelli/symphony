@@ -283,8 +283,12 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
                Start by fetching the explicit issue identifier. Route by the current state: Backlog is
                ineligible, Todo moves to In Progress before implementation, In Progress continues execution,
-               Human Review waits for review, Rework restarts the implementation loop, Merging runs the
-               land loop, and terminal states stop.
+               Rework restarts the implementation loop, Merging runs the land loop, and terminal states stop.
+               Human Review waits when a reviewable delivery artifact exists or a review decision is pending.
+               If Human Review has no branch, PR, or implementation diff because a prior host capability or
+               runtime blocker stopped before implementation, verify that blocker again. When it is resolved,
+               move the issue to Rework and immediately start a fresh implementation loop. Otherwise update
+               the workpad blocker and stop. Never use this recovery route to bypass review of existing code.
 
                Maintain exactly one active issue comment headed `## Codex Workpad`. Reuse that comment for
                plan, acceptance criteria, validation, blocker notes, and handoff evidence. Keep issue
