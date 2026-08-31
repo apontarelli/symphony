@@ -1161,6 +1161,26 @@ defmodule SymphonyElixir.WorkflowManifestTest do
              github_repository: "example/target-repo"
            }
 
+    pinned_policy = %{
+      "manifest" => %{
+        "workflow" => %{"modules" => ["delivery.github_pr"]},
+        "project" => %{"repository" => "https://github.com/example/pinned.git"}
+      },
+      "delivery" => %{"pr_target" => "release/next"}
+    }
+
+    assert PublishTarget.resolve_policy(pinned_policy) == %{
+             repository: "https://github.com/example/pinned.git",
+             base_branch: "release/next",
+             github_repository: "example/pinned"
+           }
+
+    assert PublishTarget.resolve_policy(put_in(pinned_policy, ["manifest", "workflow", "modules"], [])) == nil
+
+    assert PublishTarget.resolve_policy(put_in(pinned_policy, ["manifest", "project", "repository"], "https://gitlab.com/example/pinned")) == nil
+
+    assert PublishTarget.resolve_policy(%{"publish_target" => "invalid"}) == nil
+
     assert PublishTarget.resolve_policy(nil) == nil
 
     assert PublishTarget.resolve_policy(%{"publish_target" => %{"repository" => " ", "pr_target" => " "}}) == %{
