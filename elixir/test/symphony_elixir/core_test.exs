@@ -1550,6 +1550,23 @@ defmodule SymphonyElixir.CoreTest do
     assert bundle.prompt =~ "SID-410"
     assert bundle.workflow_module_resolution.policy_hash == resolution["policy_hash"]
 
+    persisted_manifest =
+      manifest
+      |> Jason.encode!()
+      |> Jason.decode!()
+      |> Map.drop(["_field_sources", "_runtime_allowed?", "runtime"])
+
+    persisted_context =
+      prompt_execution_context(issue, nil, %{"profile" => "strict"},
+        manifest: persisted_manifest,
+        resolution: resolution
+      )
+
+    assert {:ok, persisted_bundle} =
+             PromptBuilder.build_prompt_bundle(persisted_context, issue, [])
+
+    assert persisted_bundle.workflow_module_resolution.policy_hash == resolution["policy_hash"]
+
     mismatched_resolution =
       Map.put(resolution, "policy_hash", "sha256:" <> String.duplicate("f", 64))
 
