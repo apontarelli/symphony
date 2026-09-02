@@ -194,6 +194,15 @@ defmodule SymphonyElixir.Codex.LaunchTest do
 
     assert opts[:cd] == context.workspace_path
     assert opts[:line] == 8_192
+    assert opts[:env]["GH_TOKEN"] == false
+    assert opts[:env]["GH_ENTERPRISE_TOKEN"] == false
+    assert opts[:env]["GITHUB_TOKEN"] == false
+    assert opts[:env]["GITHUB_ENTERPRISE_TOKEN"] == false
+    assert opts[:env]["SSH_AUTH_SOCK"] == false
+    assert opts[:env]["GIT_TERMINAL_PROMPT"] == "0"
+    assert opts[:env]["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert opts[:env]["GIT_SSH_COMMAND"] == "false"
+    assert opts[:env]["CODEX_HOME"] == result.codex_home
     assert result.port == :fake_port
     assert result.process == :fake_process
 
@@ -206,6 +215,45 @@ defmodule SymphonyElixir.Codex.LaunchTest do
              profile: "implementation",
              model: "pinned-model"
            }
+  end
+
+  @tag :tmp_dir
+  test "context Launch rejects a landing role with an implementation profile", %{
+    tmp_dir: tmp_dir
+  } do
+    context = execution_context(tmp_dir, codex_home: nil)
+    File.mkdir_p!(context.workspace_path)
+
+    assert {:error, :invalid_launch_context} =
+             Launch.start(%{context | role: :landing},
+               process_starter: fn _argv, _opts ->
+                 flunk("role and profile mismatch must fail before process launch")
+               end
+             )
+  end
+
+  @tag :tmp_dir
+  test "context Launch exposes delivery authentication only to landing workers", %{
+    tmp_dir: tmp_dir
+  } do
+    previous_token = System.get_env("GH_TOKEN")
+    on_exit(fn -> restore_env("GH_TOKEN", previous_token) end)
+    System.put_env("GH_TOKEN", "landing-token")
+
+    context = execution_context(tmp_dir, codex_home: nil, role: :landing)
+    File.mkdir_p!(context.workspace_path)
+    parent = self()
+
+    process_starter = fn _argv, opts ->
+      send(parent, {:landing_start, opts})
+      {:ok, %{port: :fake_port, process: :fake_process}}
+    end
+
+    assert {:ok, _result} = Launch.start(context, process_starter: process_starter)
+    assert_receive {:landing_start, opts}
+    assert opts[:env]["GH_TOKEN"] == "landing-token"
+    refute Map.has_key?(opts[:env], "GIT_TERMINAL_PROMPT")
+    refute Map.has_key?(opts[:env], "GIT_CONFIG_KEY_0")
   end
 
   @tag :tmp_dir
@@ -247,11 +295,44 @@ defmodule SymphonyElixir.Codex.LaunchTest do
     assert command =~ "home='/remote/codex/alpha'"
     assert command =~ "cd -- \"$canonical_workspace\""
     assert command =~ "CODEX_HOME='/remote/codex/alpha' exec codex app-server --pinned"
+
+    assert command =~
+             "unset GH_ENTERPRISE_TOKEN GH_TOKEN GITHUB_ENTERPRISE_TOKEN GITHUB_TOKEN"
+
+    assert command =~ "GIT_CONFIG_KEY_0='credential.helper'"
+    assert command =~ "GIT_SSH_COMMAND='false'"
+    assert command =~ "GIT_TERMINAL_PROMPT='0'"
     refute command =~ "$HOME"
     refute_receive {:remote_start, _host, _command, _opts}
     assert result.port == :remote_port
     assert result.process == :remote_process
     assert result.argv == nil
+  end
+
+  test "remote landing launch uses remote authentication without forwarding local secrets" do
+    previous_token = System.get_env("GH_TOKEN")
+    on_exit(fn -> restore_env("GH_TOKEN", previous_token) end)
+    System.put_env("GH_TOKEN", "local-secret-must-not-cross-ssh")
+
+    context =
+      execution_context("/tmp",
+        codex_home: "/remote/codex/alpha",
+        command: ["codex", "app-server", "--pinned"],
+        worker_host: "worker.example",
+        role: :landing
+      )
+
+    parent = self()
+
+    ssh_starter = fn _host, command, _opts ->
+      send(parent, {:remote_landing_start, command})
+      {:ok, %{port: :remote_port, process: :remote_process}}
+    end
+
+    assert {:ok, _result} = Launch.start(context, ssh_starter: ssh_starter)
+    assert_receive {:remote_landing_start, command}
+    refute command =~ "local-secret-must-not-cross-ssh"
+    refute command =~ "unset GH_TOKEN"
   end
 
   test "context Launch prepends quoted remote workspace validation to the one start command" do
@@ -857,6 +938,8 @@ defmodule SymphonyElixir.Codex.LaunchTest do
     command = Keyword.get(opts, :command, ["codex", "app-server"])
     model = Keyword.get(opts, :model, "pinned-model")
     profile_command = Keyword.get(opts, :profile_command)
+    role = Keyword.get(opts, :role, :implementation)
+    profile_name = Atom.to_string(role)
 
     profile_config = %{
       "model" => model,
@@ -870,7 +953,7 @@ defmodule SymphonyElixir.Codex.LaunchTest do
     runner_config = %{
       "kind" => Keyword.get(opts, :runner_kind, "codex_app_server"),
       "command" => command,
-      "execution_profiles" => %{"implementation" => profile_config}
+      "execution_profiles" => %{profile_name => profile_config}
     }
 
     target = %TargetContext{
@@ -917,9 +1000,9 @@ defmodule SymphonyElixir.Codex.LaunchTest do
       runner_name: "codex",
       runner_config: runner_config,
       policy: %{"sandbox" => "restricted"},
-      role: :implementation,
+      role: role,
       execution_profile: %{
-        name: "implementation",
+        name: profile_name,
         model: model,
         reasoning_effort: "medium",
         budget: "standard",

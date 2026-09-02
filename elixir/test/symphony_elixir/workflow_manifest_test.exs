@@ -203,7 +203,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert prompt =~ "Use the dashboard and status APIs as operator-visible evidence"
 
     assert prompt =~
-             "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command."
+             "`Merging` means the host dispatched a dedicated landing worker after approval"
 
     refute prompt =~ "skill/flow"
   end

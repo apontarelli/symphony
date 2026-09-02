@@ -797,6 +797,30 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     assert :ok = OpenCodeServer.stop(session)
   end
 
+  test "separates implementation and landing delivery authentication", %{context: context} do
+    previous_token = System.get_env("GH_TOKEN")
+    previous_socket = System.get_env("SSH_AUTH_SOCK")
+
+    on_exit(fn ->
+      restore_env("GH_TOKEN", previous_token)
+      restore_env("SSH_AUTH_SOCK", previous_socket)
+    end)
+
+    System.put_env("GH_TOKEN", "landing-token")
+    System.put_env("SSH_AUTH_SOCK", "/tmp/landing-agent.sock")
+
+    assert {:ok, implementation} = start_adapter(context, :delivery_auth_denied)
+    assert :ok = OpenCodeServer.stop(implementation)
+
+    landing_issue = Map.put(issue(), :state, "Merging")
+    landing_runner = runner_config(context, :delivery_auth_allowed)
+
+    assert {:ok, landing} =
+             start_opencode_context(context.workspace, landing_issue, runner_config: landing_runner)
+
+    assert :ok = OpenCodeServer.stop(landing)
+  end
+
   test "fails closed when config overlay parents are symlinks", %{context: context} do
     workspace_root = Path.dirname(context.workspace)
 
@@ -951,7 +975,8 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
     context_issue = %Issue{
       id: Map.get(issue, :id, "issue-opencode-contract"),
       identifier: Path.basename(workspace),
-      title: Map.get(issue, :title, "OpenCode contract")
+      title: Map.get(issue, :title, "OpenCode contract"),
+      state: Map.get(issue, :state)
     }
 
     with {:ok, execution_context} <-
@@ -1072,6 +1097,22 @@ defmodule SymphonyElixir.AgentRuntimeOpenCodeServerTest do
         raise SystemExit(13)
     if scenario == "environment_allowlist" and os.environ.get(provider_key) != "provider-key":
         raise SystemExit(14)
+    if scenario == "delivery_auth_denied" and (
+        os.environ.get("GH_TOKEN") or
+        os.environ.get("SSH_AUTH_SOCK") or
+        os.environ.get("GIT_TERMINAL_PROMPT") != "0" or
+        os.environ.get("GIT_CONFIG_KEY_0") != "credential.helper" or
+        os.environ.get("GIT_SSH_COMMAND") != "false"
+    ):
+        raise SystemExit(15)
+    if scenario == "delivery_auth_allowed" and (
+        os.environ.get("GH_TOKEN") != "landing-token" or
+        os.environ.get("SSH_AUTH_SOCK") != "/tmp/landing-agent.sock" or
+        os.environ.get("GIT_TERMINAL_PROMPT") or
+        os.environ.get("GIT_CONFIG_KEY_0") or
+        os.environ.get("GIT_SSH_COMMAND")
+    ):
+        raise SystemExit(16)
 
 
     if scenario in ("startup_timeout", "descendant"):

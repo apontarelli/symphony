@@ -108,6 +108,7 @@ defmodule SymphonyElixir.Codex.Launch do
          runner_name: runner_name,
          runner_config: runner_config,
          execution_profile: execution_profile,
+         role: execution_role,
          timeout_ms: timeout_ms,
          max_retries: max_retries,
          worker_host: worker_host
@@ -147,12 +148,15 @@ defmodule SymphonyElixir.Codex.Launch do
            ),
          {:ok, argv} <- validate_context_argv(argv),
          {:ok, profile, model} <- pinned_context_profile(execution_profile),
+         true <- valid_execution_role?(execution_role),
+         true <- profile == Atom.to_string(execution_role),
          true <- valid_worker_host?(worker_host) do
       {:ok,
        %{
          argv: argv,
          workspace: workspace_path,
          worker_host: worker_host,
+         execution_role: execution_role,
          root: workspace_authority.root,
          target_root: workspace_authority.target_root,
          issue_identifier: issue_identifier,
@@ -297,6 +301,19 @@ defmodule SymphonyElixir.Codex.Launch do
       not Regex.match?(~r/\p{Cc}/u, value)
   end
 
+  defp valid_execution_role?(role),
+    do:
+      role in [
+        :implementation,
+        :landing,
+        :source_reviewer,
+        :test_reviewer,
+        :runtime_qa,
+        :product_visual_review,
+        :docs_reviewer,
+        :security_reviewer
+      ]
+
   defp valid_worker_host?(nil), do: true
   defp valid_worker_host?(worker_host), do: match?({:ok, _target}, SSH.parse_target(worker_host))
 
@@ -316,7 +333,7 @@ defmodule SymphonyElixir.Codex.Launch do
   defp start_context_transport(%{worker_host: nil} = authority, harness, transport) do
     opts = [
       cd: authority.workspace,
-      env: HarnessHome.local_port_env(harness.path),
+      env: local_worker_environment(harness.path, authority.execution_role),
       line: transport.line
     ]
 
@@ -470,6 +487,7 @@ defmodule SymphonyElixir.Codex.Launch do
       "validate_canonical \"$canonical_workspace\"",
       "[ \"$canonical_workspace\" = \"$workspace_candidate\" ] || exit 70",
       "case \"$canonical_workspace\" in \"$canonical_target\"/*) ;; *) exit 70 ;; esac",
+      remote_worker_environment(authority.execution_role),
       harness.command,
       "cd -- \"$canonical_workspace\"",
       "CODEX_HOME=#{Shell.escape(harness.path)} exec #{Shell.argv_to_command(authority.argv)}"
@@ -478,6 +496,39 @@ defmodule SymphonyElixir.Codex.Launch do
   end
 
   defp remote_launch_assign(name, value), do: "#{name}=#{Shell.escape(value)}"
+
+  defp local_worker_environment(codex_home, execution_role) do
+    harness_environment =
+      codex_home
+      |> HarnessHome.local_port_env()
+      |> Map.new(fn {name, value} -> {List.to_string(name), List.to_string(value)} end)
+
+    Map.merge(harness_environment, ExecutionContext.worker_environment(execution_role))
+  end
+
+  defp remote_worker_environment(:landing), do: ":"
+
+  defp remote_worker_environment(execution_role) do
+    environment = ExecutionContext.worker_environment(execution_role)
+
+    unset =
+      environment
+      |> Enum.flat_map(fn
+        {name, false} -> [name]
+        {_name, _value} -> []
+      end)
+      |> Enum.sort()
+
+    exports =
+      environment
+      |> Enum.flat_map(fn
+        {_name, false} -> []
+        {name, value} -> ["#{name}=#{Shell.escape(value)}"]
+      end)
+      |> Enum.sort()
+
+    "unset #{Enum.join(unset, " ")}\nexport #{Enum.join(exports, " ")}"
+  end
 
   defp remote_launch_canonical_validator do
     """

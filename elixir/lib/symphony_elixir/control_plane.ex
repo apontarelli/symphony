@@ -8252,6 +8252,7 @@ defmodule SymphonyElixir.ControlPlane do
   defp workspace_layout(_layout), do: {:error, :invalid_workspace_layout}
 
   defp execution_role("implementation"), do: {:ok, :implementation}
+  defp execution_role("landing"), do: {:ok, :landing}
   defp execution_role("source_reviewer"), do: {:ok, :source_reviewer}
   defp execution_role("test_reviewer"), do: {:ok, :test_reviewer}
   defp execution_role("runtime_qa"), do: {:ok, :runtime_qa}

@@ -50,6 +50,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
              bridge,
              workspace,
              session_dir,
+             context.role,
              runner,
              settings,
              context.timeout_ms
@@ -253,21 +254,33 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
       else: {:error, :unsafe_path}
   end
 
-  defp launch(command, workspace, session_dir, profile) do
-    ProcessSupervisor.start(command,
-      cd: workspace,
-      env: %{
+  defp launch(command, workspace, session_dir, profile, execution_role) do
+    environment =
+      %{
         "LINEAR_API_KEY" => false,
         "OMP_PROFILE" => profile,
         "PI_CODING_AGENT_SESSION_DIR" => session_dir
-      },
+      }
+      |> Map.merge(ExecutionContext.worker_environment(execution_role))
+
+    ProcessSupervisor.start(command,
+      cd: workspace,
+      env: environment,
       line: @line_bytes,
       stderr_to_stdout: false
     )
   end
 
-  defp launch_session(bridge, workspace, session_dir, runner, settings, turn_timeout_ms) do
-    case launch(settings.command, workspace, session_dir, settings.profile) do
+  defp launch_session(
+         bridge,
+         workspace,
+         session_dir,
+         execution_role,
+         runner,
+         settings,
+         turn_timeout_ms
+       ) do
+    case launch(settings.command, workspace, session_dir, settings.profile, execution_role) do
       {:ok, process} ->
         initialize_session(
           process,

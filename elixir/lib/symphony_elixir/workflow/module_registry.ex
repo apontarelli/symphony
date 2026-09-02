@@ -68,6 +68,9 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
     "debug-run-recovery"
   ]
 
+  @shared_core_module_ids ["linear-operation", "debug-run-recovery"]
+  @landing_core_module_ids @shared_core_module_ids ++ ["land-merge"]
+
   @presets %{
     "default" => %{
       id: "default",
@@ -82,11 +85,11 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       },
       prompt_sections: [
         "This is an unattended orchestration session; never ask a human to perform follow-up actions.",
-        "Route ticket states before acting: `Todo` starts work, `In Progress` continues work, `Rework` resets from review feedback, `Merging` runs the land flow, and terminal states stop.",
+        "Route ticket states before acting: `Todo` starts work, `In Progress` continues work, `Rework` resets from review feedback, `Human Review` waits, and `Merging` runs the dedicated land flow.",
         "Maintain exactly one active `## Codex Workpad` comment as the source of truth for plan, acceptance criteria, validation, review evidence, and blockers.",
-        "Before implementation, reproduce the current behavior, refine the plan, and sync the delivery target.",
-        "Execute ticket-provided validation and the strongest feasible quality gate before handoff.",
-        "Before Human Review or guarded auto-land routing, publish the PR, link it to the issue, ensure required PR metadata, sweep top-level and inline PR feedback, and confirm checks are green.",
+        "Implementation workers reproduce current behavior, refine the plan, and sync the delivery target before editing.",
+        "Implementation workers execute ticket validation and the strongest feasible quality gate before handoff.",
+        "Implementation workers submit structured validation, review, sync, and changed-file evidence; the host publishes and links the PR before routing. Landing workers operate only on the existing published PR and branch.",
         "Stop early only for missing required auth, permissions, or secrets; document the blocker and unblock action in the workpad.",
         "Final responses report completed actions and blockers only."
       ]
@@ -146,7 +149,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                  "Use Linear as the tracker and keep issue state, links, and the single workpad aligned with Symphony policy.",
                  "Treat target scope as routing authority. When creating implementation or follow-up issues, add execution labels only when the pinned required-label or repo-marker policy requires them; unmarked dedicated project targets need no execution label.",
                  "`Human Review` means validated work is waiting for human approval; do not code while the issue is in that state.",
-                 "`Merging` means human approval or guarded auto-land approval was granted; run the configured land flow and never bypass it with a direct merge command.",
+                 "`Merging` means the host dispatched a dedicated landing worker after approval; run the configured land flow only when the prompt's `Current status` is `Merging`.",
                  "`Rework` means reviewer feedback requires a fresh planning pass, explicit feedback triage, implementation, validation, and republish."
                ],
                content: nil,
@@ -376,7 +379,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
              %{
                id: "vcs-commit-push",
                version: "v1",
-               summary: "Version-control inspection, commit description, branch publication, and PR creation.",
+               summary: "Version-control inspection and host publication handoff.",
                default?: true,
                compatibility: @compatibility,
                pins: %{registry: @registry_pin, module: "vcs-commit-push@v1"},
@@ -385,25 +388,24 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                content: """
                Prefer Jujutsu when the workspace is a jj repository. Use git only when the repository is not
                jj-backed or a tool explicitly requires git compatibility. Inspect status and diff before
-               committing or publishing.
+               handoff.
 
-               Commit and publish only after implementation validation, required quality gates, and automated review
-               have no unresolved fix-required findings. Keep PR link evidence in Linear or the workpad before
-               final handoff routing.
+               For `Todo`, `In Progress`, or `Rework`, finalize the intended working-copy change only after
+               implementation validation, required quality gates, and automated review have no unresolved
+               fix-required findings. Describe the change with a Conventional Commit subject that includes
+               the ticket ID, for example `feat(SID-292): create core workflow modules`.
 
-               Describe the current change with a Conventional Commit subject that includes the ticket ID,
-               for example `feat(SID-292): create core workflow modules`. Commit only intended files and
-               leave unrelated workspace changes untouched.
+               Leave validated implementation changes for the host to publish.
+               Do not create, move, push, or delete a branch or bookmark.
+               Do not create, update, merge, or close a pull request.
+               Report the intended PR title, changed files, validation evidence, and one to three
+               `Reviewer Testing` checks in completion metadata so the host can create and link the delivery artifact.
 
-               Publish one bookmark or branch per ticket. Create or update the PR against the workflow policy
-               delivery target. If the target is not main, set the PR base to that target and do not merge or
-               promote work to main in v1. Ensure the PR title, body, labels, and Linear attachment reflect
-               the current scope. Include a `Reviewer Testing` section with one to three PM/designer/operator
-               checks that point a human reviewer to the changed path, screen, command, or expected state. Do
-               not expand this into full UAT or edge-case acceptance criteria; keep exhaustive proof in the
-               validation and quality-gate evidence.
+               When and only when the prompt's `Current status` is `Merging`, skip implementation handoff and
+               follow the `land-merge` module. Limit delivery writes to the existing attached pull request and
+               its published branch; do not create a new branch, bookmark, or pull request.
                """,
-               description: "Version-control inspection, commit description, branch publication, and PR creation"
+               description: "Version-control inspection, implementation handoff, and dedicated landing scope"
              },
              %{
                id: "pull-sync",
@@ -421,7 +423,7 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
                Record sync evidence in the workpad: merge or fetch source, clean versus conflicts-resolved
                result, and resulting short change or commit ID. After conflict resolution, rerun affected
-               validation before publishing.
+               validation before host handoff.
                """,
                description: "Mainline sync, merge conflict handling, and workpad sync evidence"
              },
@@ -481,14 +483,14 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                touched scope until no fix-required findings remain. Record review mode, reviewers, findings,
                fixes, rejected false positives, follow-ups, and final decision in the workpad.
 
-               Before moving to Human Review, run a PR feedback sweep when a PR is attached or exists for the
-               current branch. Identify the PR number, read top-level PR comments with `gh pr view --comments`,
-               read inline review comments with `gh api repos/<owner>/<repo>/pulls/<pr>/comments`, and read
-               review summaries/states with `gh pr view --json reviews`. Treat every actionable human or bot
-               comment as blocking until code, tests, or docs are updated to address it, or an explicit
-               justified pushback reply is posted on the thread. Update the workpad with each feedback item
-               and resolution, rerun validation after feedback-driven changes, and repeat until no
-               outstanding actionable feedback remains.
+               For implementation states, read an attached PR's top-level comments, inline review comments,
+               and review summaries before handoff. Treat every actionable human or bot comment as blocking
+               until code, tests, or docs are updated, or the workpad records a justified rejection for host
+               publication. Do not post replies or modify the PR from an implementation worker. Update the
+               workpad with each feedback item and resolution, then rerun validation.
+
+               When the prompt's `Current status` is `Merging`, follow the `land-merge` feedback and delivery
+               rules instead. Do not apply implementation-state publication restrictions to that landing loop.
                """,
                description: "Pre-handoff automated review and finding triage"
              }
@@ -508,10 +510,10 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
                  Treat Rework as a full approach reset. Re-read the issue, workpad, PR feedback, inline review
                  comments, and human comments. Identify what will change in this attempt before editing code.
 
-                 Close or supersede the prior PR when workflow policy requires a fresh attempt. Create a fresh
-                 branch or bookmark from the delivery target, create a new workpad if the prior one is removed,
-                 rebuild the plan, reproduce the issue again when needed, and run the complete
-                 implement-validate-review-publish loop.
+                 Keep the host-owned deterministic branch and pull request for routine rework. Do not close,
+                 replace, or publish either artifact from the implementation worker. Rebuild the plan, reproduce
+                 the issue again when needed, and run the complete implement-validate-review-handoff loop. The
+                 host may replace an unusable closed or merged artifact only after recording that reason.
                  """,
                  description: "Reviewer-requested rework reset flow"
                },
@@ -777,7 +779,8 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp policy_hash(modules) do
     material =
       Enum.map_join(modules, "\n", fn module ->
-        "#{module.id}@#{module.version}:#{hash(module.content)}"
+        roles = module_roles(module.id) |> Enum.map_join(",", &Atom.to_string/1)
+        "#{module.id}@#{module.version}[#{roles}]:#{hash(module.content)}"
       end)
 
     "sha256:" <> hash(material)
@@ -789,18 +792,18 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   end
 
   defp render_core_prompt(preset, modules, manifest \\ nil) do
-    module_index =
-      modules
-      |> Enum.map_join("\n", fn module ->
-        "- #{module.id}@#{module.version}: #{module.summary}"
-      end)
-
-    rendered_modules = Enum.map_join(modules, "\n\n", &render_core_module/1)
+    implementation_modules = Enum.reject(modules, &(&1.id == "land-merge"))
+    landing_modules = Enum.filter(modules, &(&1.id in @landing_core_module_ids))
 
     [
       "Role: You are an autonomous software-engineering agent resolving Linear ticket `{{ issue.identifier }}`.",
+      "Execution role: `{{ execution.role }}`.",
       "",
-      "Goal: Complete the ticket end to end in the assigned workspace and route it to the correct workflow state.",
+      "{% if execution.role == \"landing\" %}",
+      "Goal: Land the existing approved pull request and preserve the correct terminal or blocked state.",
+      "{% else %}",
+      "Goal: Complete the ticket in the assigned workspace and submit evidence for host-owned publication and routing.",
+      "{% endif %}",
       "",
       "Success criteria:",
       "- The issue's acceptance criteria are satisfied by the smallest in-scope change.",
@@ -810,7 +813,11 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       "",
       "Autonomy and boundaries:",
       "- Read, inspect, edit in-scope files, and run non-destructive validation without asking.",
-      "- Perform ticket-authorized Linear and delivery writes required by this workflow without asking.",
+      "{% if execution.role == \"landing\" %}",
+      "- You may perform only the remote delivery writes required to land that pull request; limit them to the existing published pull request and branch.",
+      "{% else %}",
+      "- Perform ticket-authorized Linear writes required for implementation tracking without asking. Remote delivery writes are host-owned: do not push, create or mutate pull requests, merge, deploy, or clean remote branches.",
+      "{% endif %}",
       "- Do not perform destructive actions, expand scope materially, or modify paths outside the assigned workspace.",
       "- End the turn after reaching the workflow-defined handoff or terminal state.",
       "- Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition.",
@@ -844,16 +851,35 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
       "Module registry: #{@registry_pin}",
       "Preset: #{preset.id}@#{preset.version}",
       "",
-      "Default module set:",
-      module_index,
+      "{% if execution.role == \"landing\" %}",
+      "Active landing module set:",
+      module_index(landing_modules),
       "",
-      rendered_modules
+      render_modules(landing_modules),
+      "{% else %}",
+      "Active implementation module set:",
+      module_index(implementation_modules),
+      "",
+      render_modules(implementation_modules),
+      "{% endif %}"
     ]
     |> List.flatten()
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
     |> String.trim()
   end
+
+  defp module_index(modules) do
+    Enum.map_join(modules, "\n", fn module ->
+      "- #{module.id}@#{module.version}: #{module.summary}"
+    end)
+  end
+
+  defp render_modules(modules), do: Enum.map_join(modules, "\n\n", &render_core_module/1)
+
+  defp module_roles("land-merge"), do: [:landing]
+  defp module_roles(id) when id in @shared_core_module_ids, do: [:implementation, :landing]
+  defp module_roles(_id), do: [:implementation]
 
   defp manifest_context(nil), do: []
 
