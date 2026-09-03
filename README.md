@@ -118,6 +118,9 @@ generation. It enforces weighted fairness, host/target/runner/poll/reviewer ceil
 budgets, and tracker-connection backoff. The dashboard and `GET /api/v1/state` expose those decisions
 without raw policy, credentials, secret references, prompts, or transition evidence. The registry
 defaults to `~/.config/symphony/targets.yml`.
+The [multi-repository system contract](elixir/README.md#execution-context-isolation-phase-2)
+exercises two committed repository manifests, overlapping host activity, target-local recovery, and
+retained cleanup evidence.
 
 Project, team, and query/file targets are selected by the interactive builder or stored in saved run
 setup YAML under `target.tracker.project_slug`, `target.tracker.team_key`,

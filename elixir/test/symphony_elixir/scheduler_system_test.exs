@@ -184,6 +184,7 @@ defmodule SymphonyElixir.SchedulerSystemTest do
            end)
 
     assert {:error, :stale_grant} = HostScheduler.reserve_dispatch(draining_grant)
+    assert :ok = HostScheduler.finish_poll(draining_grant, false)
 
     {:ok, restarted_beta_pid} = TargetDouble.start_link(recipient: self(), snapshot: beta_snapshot)
     HostScheduler.register_target(scheduler, restarted_beta, restarted_beta_pid)

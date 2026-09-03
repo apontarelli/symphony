@@ -340,6 +340,18 @@ The test proves deterministic retry and blocked recovery, stale-owner rejection,
 interrupted delivery intent, idempotent recovered delivery, target-scoped artifacts, and fenced
 cleanup.
 
+The multi-repository system contract is
+`test/symphony_elixir/multi_repository_system_test.exs`. It creates and commits two independent
+repository manifests, clones both repositories into separate project-bound workspace roots, and
+runs their distinct validation commands through different runners and landing routes. Both runs
+overlap under one host ceiling. One target is blocked and resumed while the other stays active.
+The test then restarts the control plane and verifies target-scoped admission, policy, budget,
+handoff, terminal completion, and workspace-cleanup evidence:
+
+```bash
+mix test test/symphony_elixir/multi_repository_system_test.exs
+```
+
 ## Configuration
 
 Target repos can use a committed `symphony.yml` manifest for setup and audit:
