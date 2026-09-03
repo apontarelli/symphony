@@ -167,7 +167,7 @@ defmodule SymphonyElixir.ExecutionContextTest do
       )
 
     assert MapSet.member?(state.completed, ExecutionContext.run_id(landing))
-    assert state.handoff_routes == %{}
+    assert state.delivery.handoff_routes == %{}
   end
 
   @tag :tmp_dir

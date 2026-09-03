@@ -901,6 +901,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+
+    merging_issue = %{refreshed_issue | state: "Merging"}
+    refute Orchestrator.should_dispatch_issue_for_test(merging_issue, %Orchestrator.State{max_concurrent_agents: 3})
+    assert Orchestrator.dispatch_block_reason_for_test(merging_issue) == :blocked_by_non_terminal
+
+    in_progress_issue = %{refreshed_issue | state: "In Progress"}
+    assert Orchestrator.dispatch_block_reason_for_test(in_progress_issue) == nil
+
+    rework_issue = %{refreshed_issue | state: "Rework"}
+    assert Orchestrator.dispatch_block_reason_for_test(rework_issue) == nil
   end
 
   test "dispatch revalidation skips an issue after a required label is removed" do

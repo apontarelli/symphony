@@ -28,6 +28,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.WorkflowCLI,
           SymphonyElixir.Workflow.Renderer,
           SymphonyElixir.Linear.Client,
+          SymphonyElixir.LandingRevalidation,
           SymphonyElixir.HostScheduler,
           SymphonyElixir.HostScheduler.Registry,
           SymphonyElixir.HostCLI,

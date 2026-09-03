@@ -15,6 +15,8 @@ defmodule SymphonyElixir.Orchestrator do
     HandoffRoute,
     HandoffRouteRecorder,
     HostScheduler,
+    LandingQueue,
+    LandingRevalidation,
     ProcessSupervisor,
     PublishHandoff,
     PublishPreflight,
@@ -48,6 +50,15 @@ defmodule SymphonyElixir.Orchestrator do
     seconds_running: 0
   }
 
+  defmodule DeliveryState do
+    @moduledoc false
+
+    defstruct handoff_routes: %{},
+              landing_queue: [],
+              landing_decisions: %{},
+              landing_revalidator: nil
+  end
+
   defmodule State do
     @moduledoc """
     Runtime state for the orchestrator polling loop.
@@ -78,7 +89,7 @@ defmodule SymphonyElixir.Orchestrator do
       dispatched_issue_count: 0,
       running: %{},
       completed: MapSet.new(),
-      handoff_routes: %{},
+      delivery: %DeliveryState{},
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
@@ -156,6 +167,9 @@ defmodule SymphonyElixir.Orchestrator do
           target_context: target_context,
           quality_gate_runner: Keyword.get(opts, :quality_gate_runner),
           agent_runner_options: Keyword.get(opts, :agent_runner_options, []),
+          delivery: %DeliveryState{
+            landing_revalidator: Keyword.get(opts, :landing_revalidator, &LandingRevalidation.check/1)
+          },
           next_poll_due_at_ms: now_ms,
           poll_check_in_progress: false,
           tick_timer_ref: nil,
@@ -501,6 +515,7 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Agent task completed #{run_log_context(run_id, running_entry)} session_id=#{session_id}; scheduling active-state continuation check")
 
       state = complete_issue(state, run_id, running_entry)
+      landing_candidate = landing_handoff_route?(Map.get(state.delivery.handoff_routes, run_id))
 
       running_entry =
         transition_durable_entry(
@@ -520,6 +535,8 @@ defmodule SymphonyElixir.Orchestrator do
         retry_metadata_from_running(running_entry, %{
           identifier: running_entry.identifier,
           issue_url: issue_url_from_running(running_entry),
+          issue: Map.get(running_entry, :issue),
+          landing_candidate: landing_candidate,
           delay_type: :continuation,
           worker_host: Map.get(running_entry, :worker_host),
           workspace_path: Map.get(running_entry, :workspace_path)
@@ -1098,6 +1115,19 @@ defmodule SymphonyElixir.Orchestrator do
   @spec order_candidate_issues_for_test(RunTarget.Resolution.t()) :: [Issue.t()]
   def order_candidate_issues_for_test(%RunTarget.Resolution{} = resolution) do
     order_candidate_issues(resolution)
+  end
+
+  @doc false
+  @spec prepare_candidate_issues_for_test(RunTarget.Resolution.t(), State.t()) ::
+          {[Issue.t()], State.t()}
+  def prepare_candidate_issues_for_test(%RunTarget.Resolution{} = resolution, %State{} = state) do
+    prepare_candidate_issues(resolution, state)
+  end
+
+  @doc false
+  @spec durable_start_evidence_for_test(State.t(), ExecutionContext.t()) :: map()
+  def durable_start_evidence_for_test(%State{} = state, %ExecutionContext{} = context) do
+    durable_start_evidence(state, context)
   end
 
   @doc false
@@ -1818,18 +1848,23 @@ defmodule SymphonyElixir.Orchestrator do
         last_runtime_timestamp: Map.get(running_entry, :last_runtime_timestamp)
       })
 
+    delivery = %{
+      state.delivery
+      | handoff_routes:
+          Map.put(
+            state.delivery.handoff_routes,
+            run_id,
+            HandoffRoute.to_map(handoff_route)
+          )
+    }
+
     %{
       state
       | running: Map.delete(state.running, run_id),
         retry_attempts: Map.delete(state.retry_attempts, run_id),
         claimed: MapSet.put(state.claimed, run_id),
         blocked: Map.put(state.blocked, run_id, blocked_entry),
-        handoff_routes:
-          Map.put(
-            state.handoff_routes,
-            run_id,
-            HandoffRoute.to_map(handoff_route)
-          )
+        delivery: delivery
     }
   end
 
@@ -1842,10 +1877,9 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     active_states = active_state_set(target)
     terminal_states = terminal_state_set(target)
+    {issues, state} = prepare_candidate_issues(resolution, state)
 
-    resolution
-    |> order_candidate_issues()
-    |> Enum.reduce_while(state, fn issue, state_acc ->
+    Enum.reduce_while(issues, state, fn issue, state_acc ->
       maybe_choose_granted_issue(issue, state_acc, active_states, terminal_states)
     end)
   end
@@ -1853,10 +1887,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp choose_issues(%RunTarget.Resolution{} = resolution, %State{target_context: target} = state) do
     active_states = active_state_set(target)
     terminal_states = terminal_state_set(target)
+    {issues, state} = prepare_candidate_issues(resolution, state)
 
-    resolution
-    |> order_candidate_issues()
-    |> Enum.reduce_while(state, fn issue, state_acc ->
+    Enum.reduce_while(issues, state, fn issue, state_acc ->
       maybe_choose_issue(issue, state_acc, active_states, terminal_states)
     end)
   end
@@ -1913,6 +1946,211 @@ defmodule SymphonyElixir.Orchestrator do
   defp order_candidate_issues(%RunTarget.Resolution{issues: issues}) when is_list(issues),
     do: sort_issues_for_dispatch(issues)
 
+  defp prepare_candidate_issues(%RunTarget.Resolution{} = resolution, %State{} = state) do
+    ordered_issues = order_candidate_issues(resolution)
+    {landing_issues, other_issues} = Enum.split_with(ordered_issues, &landing_issue?/1)
+
+    case build_landing_plan(landing_issues, state) do
+      {:ok, plan} ->
+        selected_issue = selected_landing_issue(plan, landing_issues)
+        selected_issues = if selected_issue, do: [selected_issue], else: []
+
+        delivery = %{
+          state.delivery
+          | landing_queue: landing_queue_snapshot(plan),
+            landing_decisions: selected_landing_decisions(plan, selected_issue, state)
+        }
+
+        {
+          selected_issues ++ other_issues,
+          %{state | delivery: delivery}
+        }
+
+      {:error, reason} ->
+        Logger.error("Landing queue planning failed: #{inspect(reason)}")
+
+        blocked =
+          Enum.map(landing_issues, fn issue ->
+            %{
+              issue_id: issue.id,
+              identifier: issue.identifier,
+              status: :blocked,
+              blocked_reasons: [:queue_planning_failed],
+              error: inspect(reason)
+            }
+          end)
+
+        delivery = %{state.delivery | landing_queue: blocked, landing_decisions: %{}}
+        {other_issues, %{state | delivery: delivery}}
+    end
+  end
+
+  defp build_landing_plan(issues, %State{} = state) do
+    entries = Enum.map(issues, &build_landing_entry(&1, state))
+    running_landings = Enum.filter(state.running, &running_landing?/1)
+
+    LandingQueue.plan(entries, running_landings, terminal_states: state.target_context |> terminal_state_set() |> Map.keys())
+  end
+
+  defp build_landing_entry(%Issue{} = issue, %State{} = state) do
+    case landing_publish_evidence(state, issue) do
+      {:ok, evidence} ->
+        entry = landing_entry(issue, evidence, %{status: :failed, reason: :not_revalidated})
+        %{entry | revalidation: run_landing_revalidation(state.delivery.landing_revalidator, entry)}
+
+      {:error, reason} ->
+        landing_entry(issue, %{}, %{status: :failed, reason: reason})
+    end
+  end
+
+  defp landing_entry(issue, evidence, revalidation) do
+    %LandingQueue.Entry{
+      issue_id: issue.id,
+      identifier: issue.identifier,
+      priority: issue.priority,
+      enqueued_at: landing_enqueued_at(evidence, issue),
+      admitted_run_id: field(evidence, :admitted_run_id),
+      pr_url: field(evidence, :pr_url),
+      repository: field(evidence, :github_repository),
+      base_branch: field(evidence, :base_branch),
+      branch: field(evidence, :branch),
+      dependencies: issue.blocked_by || [],
+      changed_files: normalized_changed_files(field(evidence, :changed_files)),
+      revalidation: revalidation
+    }
+  end
+
+  defp landing_publish_evidence(
+         %State{
+           control_plane: server,
+           target_context: %TargetContext{target_id: target_id}
+         },
+         %Issue{id: issue_id}
+       )
+       when not is_nil(server) and is_binary(issue_id) do
+    with {:ok, lifecycle} <- ControlPlane.fetch_target_lifecycle(server, target_id, issue_id),
+         {:ok, effects} <- ControlPlane.list_side_effects(server, lifecycle.admitted_run_id),
+         %ControlPlane.SideEffect{state: :succeeded, outcome: outcome} = effect <-
+           Enum.find(effects, &(&1.kind == :publish_handoff and &1.state == :succeeded)),
+         true <- is_map(outcome) do
+      {:ok,
+       outcome
+       |> Map.put(:admitted_run_id, lifecycle.admitted_run_id)
+       |> Map.put(:queue_entered_at, effect.completed_at)}
+    else
+      nil -> {:error, :publish_handoff_evidence_missing}
+      false -> {:error, :publish_handoff_evidence_invalid}
+      {:error, reason} -> {:error, {:publish_handoff_evidence_unavailable, reason}}
+    end
+  end
+
+  defp landing_publish_evidence(_state, _issue),
+    do: {:error, :durable_control_plane_required}
+
+  defp run_landing_revalidation(revalidator, entry) when is_function(revalidator, 1) do
+    case revalidator.(entry) do
+      result when is_map(result) -> result
+      invalid -> %{status: :failed, reason: {:invalid_revalidation_result, invalid}}
+    end
+  rescue
+    exception -> %{status: :failed, reason: {:revalidation_exception, Exception.message(exception)}}
+  catch
+    kind, reason -> %{status: :failed, reason: {:revalidation_failure, kind, reason}}
+  end
+
+  defp run_landing_revalidation(_revalidator, _entry),
+    do: %{status: :failed, reason: :landing_revalidator_unavailable}
+
+  defp selected_landing_issue(%LandingQueue.Plan{selected: nil}, _issues), do: nil
+
+  defp selected_landing_issue(%LandingQueue.Plan{selected: selected}, issues) do
+    Enum.find(issues, &(&1.id == selected.issue_id))
+  end
+
+  defp selected_landing_decisions(_plan, nil, _state), do: %{}
+
+  defp selected_landing_decisions(%LandingQueue.Plan{} = plan, issue, state) do
+    selected = plan.selected
+
+    evidence = %{
+      status: :selected,
+      queue_position: selected.position,
+      queue_entered_at: DateTime.to_iso8601(selected.entry.enqueued_at),
+      base_priority: selected.base_priority,
+      effective_priority: selected.effective_priority,
+      starvation_promotions: selected.starvation_promotions,
+      starvation_policy: plan.starvation,
+      freshness: selected.freshness,
+      conflicts: selected.conflicts,
+      revalidation: selected.entry.revalidation
+    }
+
+    Map.put(%{}, run_id_for_issue(state, issue), evidence)
+  end
+
+  defp landing_queue_snapshot(%LandingQueue.Plan{} = plan) do
+    Enum.map(plan.entries, fn entry ->
+      %{
+        issue_id: entry.issue_id,
+        identifier: entry.identifier,
+        status: entry.status,
+        position: entry.position,
+        blocked_reasons: entry.blocked_reasons,
+        dependency_blockers: entry.dependency_blockers,
+        conflicts: entry.conflicts,
+        wait_ms: entry.wait_ms,
+        starvation_promotions: entry.starvation_promotions,
+        base_priority: entry.base_priority,
+        effective_priority: entry.effective_priority,
+        freshness: entry.freshness,
+        revalidation: entry.entry.revalidation
+      }
+    end)
+  end
+
+  defp running_landing?({_run_id, %{execution_context: %ExecutionContext{role: :landing}}}),
+    do: true
+
+  defp running_landing?(_entry), do: false
+
+  defp landing_issue?(%Issue{state: state}) when is_binary(state),
+    do: normalize_issue_state(state) == "merging"
+
+  defp landing_issue?(_issue), do: false
+
+  defp landing_enqueued_at(evidence, issue) do
+    parse_datetime(field(evidence, :queue_entered_at)) || issue.updated_at || issue.created_at ||
+      DateTime.from_unix!(0)
+  end
+
+  defp parse_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _invalid -> nil
+    end
+  end
+
+  defp parse_datetime(_value), do: nil
+
+  defp normalized_changed_files(files) when is_list(files) do
+    files
+    |> Enum.filter(&(is_binary(&1) and String.trim(&1) != ""))
+    |> Enum.map(&String.trim/1)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp normalized_changed_files(_files), do: []
+
+  defp field(value, key) when is_map(value),
+    do: Map.get(value, key, Map.get(value, to_string(key)))
+
+  defp run_id_for_issue(
+         %State{target_context: %TargetContext{target_id: target_id}},
+         %Issue{id: issue_id}
+       ),
+       do: {target_id, issue_id}
+
   defp log_target_resolution_warnings(%RunTarget.Resolution{warnings: warnings} = resolution)
        when is_list(warnings) do
     Enum.each(warnings, fn warning ->
@@ -1962,6 +2200,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_capacity_available?(issue, state, running) do
     available_slots(state) > 0 and
       state_slots_available?(issue, state, running) and
+      landing_slot_available?(issue, state) and
       worker_slots_available?(state)
   end
 
@@ -2048,7 +2287,7 @@ defmodule SymphonyElixir.Orchestrator do
       Issue.requirement?(issue) ->
         :unsupported_requirement_issue
 
-      todo_issue_blocked_by_non_terminal?(issue, terminal_states) ->
+      issue_blocked_by_non_terminal?(issue, terminal_states) ->
         :blocked_by_non_terminal
 
       true ->
@@ -2056,12 +2295,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp todo_issue_blocked_by_non_terminal?(
+  defp issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
          terminal_states
        )
        when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
+    normalize_issue_state(issue_state) in ["todo", "merging"] and
       Enum.any?(blockers, fn
         %{state: blocker_state} when is_binary(blocker_state) ->
           !terminal_issue_state?(blocker_state, terminal_states)
@@ -2071,7 +2310,7 @@ defmodule SymphonyElixir.Orchestrator do
       end)
   end
 
-  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+  defp issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
   @spec terminal_issue_state?(term(), issue_state_set()) :: boolean()
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
@@ -2303,7 +2542,9 @@ defmodule SymphonyElixir.Orchestrator do
        ) do
     case ExecutionContext.refresh_dispatch_role(context, refreshed_issue) do
       {:ok, refreshed_context} ->
-        case start_durable_authority(authority) do
+        start_evidence = durable_start_evidence(state, refreshed_context)
+
+        case start_durable_authority(authority, start_evidence) do
           {:ok, running_authority} ->
             state
             |> spawn_issue_in_context(
@@ -2312,6 +2553,7 @@ defmodule SymphonyElixir.Orchestrator do
               refreshed_context,
               running_authority
             )
+            |> clear_landing_decision(refreshed_context)
             |> release_untracked_lease(refreshed_context, owner_id)
 
           {:error, reason} ->
@@ -2828,8 +3070,22 @@ defmodule SymphonyElixir.Orchestrator do
   defp resolve_dispatch_context(%RunAuthority{} = authority, _pinned_context),
     do: ControlPlane.resolve_admission_credentials(authority.admission)
 
-  defp start_durable_authority(%RunAuthority{} = authority),
-    do: RunAuthority.transition(authority, :running, %{})
+  defp start_durable_authority(%RunAuthority{} = authority, evidence) when is_map(evidence),
+    do: RunAuthority.transition(authority, :running, evidence)
+
+  defp durable_start_evidence(%State{} = state, %ExecutionContext{role: :landing} = context) do
+    case Map.get(state.delivery.landing_decisions, ExecutionContext.run_id(context)) do
+      decision when is_map(decision) -> %{landing_queue: decision}
+      _missing -> %{landing_queue: %{status: :unplanned}}
+    end
+  end
+
+  defp durable_start_evidence(%State{}, %ExecutionContext{}), do: %{}
+
+  defp clear_landing_decision(%State{} = state, %ExecutionContext{} = context) do
+    decisions = Map.delete(state.delivery.landing_decisions, ExecutionContext.run_id(context))
+    %{state | delivery: %{state.delivery | landing_decisions: decisions}}
+  end
 
   defp complete_skipped_authority(%RunAuthority{} = authority, _reason) do
     case RunAuthority.transition(authority, :completed, %{disposition: :skipped}) do
@@ -3449,12 +3705,14 @@ defmodule SymphonyElixir.Orchestrator do
 
         running = Map.put(state.running, run_id, running_entry)
 
+        delivery = %{state.delivery | handoff_routes: Map.delete(state.delivery.handoff_routes, run_id)}
+
         %{
           state
           | running: running,
             dispatched_issue_count: increment_dispatched_issue_count(state, attempt),
             claimed: MapSet.put(state.claimed, run_id),
-            handoff_routes: Map.delete(state.handoff_routes, run_id),
+            delivery: delivery,
             retry_attempts: Map.delete(state.retry_attempts, run_id)
         }
 
@@ -3565,15 +3823,20 @@ defmodule SymphonyElixir.Orchestrator do
       maybe_persist_handoff_route(running_entry, handoff_route)
     end
 
+    delivery = %{
+      state.delivery
+      | handoff_routes:
+          Map.put(
+            state.delivery.handoff_routes,
+            run_id,
+            HandoffRoute.to_map(handoff_route)
+          )
+    }
+
     %{
       state
       | completed: MapSet.put(state.completed, run_id),
-        handoff_routes:
-          Map.put(
-            state.handoff_routes,
-            run_id,
-            HandoffRoute.to_map(handoff_route)
-          ),
+        delivery: delivery,
         retry_attempts: Map.delete(state.retry_attempts, run_id)
     }
   end
@@ -3616,6 +3879,10 @@ defmodule SymphonyElixir.Orchestrator do
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
     context = metadata[:execution_context] || Map.get(previous_retry, :execution_context)
+    issue = metadata[:issue] || Map.get(previous_retry, :issue)
+
+    landing_candidate =
+      metadata[:landing_candidate] == true or Map.get(previous_retry, :landing_candidate) == true
 
     durable_authority =
       metadata[:durable_authority] || Map.get(previous_retry, :durable_authority)
@@ -3647,6 +3914,8 @@ defmodule SymphonyElixir.Orchestrator do
         last_error_signature: last_error_signature,
         worker_host: worker_host,
         workspace_path: workspace_path,
+        issue: issue,
+        landing_candidate: landing_candidate,
         execution_context: context,
         durable_authority: durable_authority,
         profile: profile,
@@ -3671,6 +3940,8 @@ defmodule SymphonyElixir.Orchestrator do
           workspace_path: Map.get(retry_entry, :workspace_path),
           execution_context: Map.get(retry_entry, :execution_context),
           durable_authority: Map.get(retry_entry, :durable_authority),
+          issue: Map.get(retry_entry, :issue),
+          landing_candidate: Map.get(retry_entry, :landing_candidate) == true,
           profile: Map.get(retry_entry, :profile),
           target: Map.get(retry_entry, :target),
           policy_ref: Map.get(retry_entry, :policy_ref)
@@ -3809,8 +4080,17 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_active_retry(state, run_id, issue, attempt, metadata) do
     context = metadata[:execution_context]
+    metadata = Map.put(metadata, :issue, issue)
 
-    if retry_candidate_issue?(issue, terminal_state_set(context), context) and
+    {state, landing_selected?} =
+      if landing_issue?(issue) do
+        plan_landing_retry(state, issue, context)
+      else
+        {state, true}
+      end
+
+    if landing_selected? and
+         retry_candidate_issue?(issue, terminal_state_set(context), context) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
       {:noreply,
@@ -3823,7 +4103,12 @@ defmodule SymphonyElixir.Orchestrator do
          metadata[:durable_authority]
        )}
     else
-      Logger.debug("No available slots for retrying #{retry_log_context(run_id, context, issue.identifier)}; retrying again")
+      reason =
+        if landing_issue?(issue) and not landing_selected?,
+          do: "waiting for deterministic landing order",
+          else: "no available orchestrator slots"
+
+      Logger.debug("#{reason} for retrying #{retry_log_context(run_id, context, issue.identifier)}; retrying again")
 
       {:noreply,
        schedule_issue_retry(
@@ -3833,11 +4118,103 @@ defmodule SymphonyElixir.Orchestrator do
          Map.merge(metadata, %{
            identifier: issue.identifier,
            issue_url: issue.url,
-           error: "no available orchestrator slots"
+           error: reason,
+           retry_delay_ms: landing_retry_delay(state, issue)
          })
        )}
     end
   end
+
+  defp plan_landing_retry(%State{} = state, %Issue{} = current_issue, %ExecutionContext{} = context) do
+    with {:ok, issues} <- landing_retry_issues(state, current_issue, context),
+         {:ok, plan} <- build_landing_plan(issues, state) do
+      selected_issue = selected_landing_issue(plan, issues)
+
+      delivery = %{
+        state.delivery
+        | landing_queue: landing_queue_snapshot(plan),
+          landing_decisions: selected_landing_decisions(plan, selected_issue, state)
+      }
+
+      planned_state = %{state | delivery: delivery}
+
+      selected? =
+        case selected_issue do
+          %Issue{id: selected_id} -> selected_id == current_issue.id
+          nil -> false
+        end
+
+      {planned_state, selected?}
+    else
+      {:error, reason} ->
+        Logger.warning("Landing retry planning failed for #{issue_context(current_issue)}: #{inspect(reason)}")
+
+        delivery = %{
+          state.delivery
+          | landing_queue: [
+              %{
+                issue_id: current_issue.id,
+                identifier: current_issue.identifier,
+                status: :blocked,
+                blocked_reasons: [:queue_planning_failed],
+                error: inspect(reason)
+              }
+            ],
+            landing_decisions: %{}
+        }
+
+        {%{state | delivery: delivery}, false}
+    end
+  end
+
+  defp landing_retry_issues(%State{} = state, current_issue, context) do
+    other_issue_ids =
+      state.retry_attempts
+      |> Enum.flat_map(fn {run_id, retry} ->
+        landing_retry_issue_id(run_id, retry, current_issue.id, context)
+      end)
+      |> Enum.uniq()
+
+    case other_issue_ids do
+      [] ->
+        {:ok, [current_issue]}
+
+      issue_ids ->
+        case Tracker.fetch_issue_states_by_ids(context.target, issue_ids) do
+          {:ok, issues} -> {:ok, [current_issue | Enum.filter(issues, &landing_issue?/1)]}
+          {:error, reason} -> {:error, {:landing_queue_tracker_fetch_failed, reason}}
+        end
+    end
+  end
+
+  defp landing_retry_issue_id(run_id, retry, current_issue_id, context) do
+    issue_id = issue_id_from_run_id(run_id)
+
+    if same_target_retry?(retry, context) and is_binary(issue_id) and issue_id != current_issue_id do
+      [issue_id]
+    else
+      []
+    end
+  end
+
+  defp same_target_retry?(
+         %{execution_context: %ExecutionContext{target: %TargetContext{target_id: target_id}}},
+         %ExecutionContext{target: %TargetContext{target_id: target_id}}
+       ),
+       do: true
+
+  defp same_target_retry?(_retry, _context), do: false
+
+  defp landing_retry_delay(%State{poll_interval_ms: delay_ms}, %Issue{} = issue) do
+    if is_integer(delay_ms) and delay_ms > 0 and landing_issue?(issue), do: delay_ms
+  end
+
+  defp landing_retry_delay(_state, _issue), do: nil
+
+  defp landing_handoff_route?(route) when is_map(route),
+    do: field(route, :route) in [:auto_land, "auto_land"] and field(route, :target_state) == "Merging"
+
+  defp landing_handoff_route?(_route), do: false
 
   defp release_issue_claim(%State{} = state, run_id, %ExecutionContext{} = context) do
     release_coordinator_lease(context, coordinator_owner_id(state))
@@ -4638,7 +5015,8 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
-       handoff_routes: handoff_route_entries(state.handoff_routes),
+       landing_queue: state.delivery.landing_queue,
+       handoff_routes: handoff_route_entries(state.delivery.handoff_routes),
        runtime_totals: state.runtime_totals,
        rate_limits: Map.get(state, :runtime_rate_limits),
        tracker: %{
@@ -5307,7 +5685,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
     available_slots(state) > 0 and startup_slots_available?(state) and
-      state_slots_available?(issue, state, state.running)
+      state_slots_available?(issue, state, state.running) and landing_slot_available?(issue, state)
+  end
+
+  defp landing_slot_available?(%Issue{} = issue, %State{} = state) do
+    not landing_issue?(issue) or not Enum.any?(state.running, &running_landing?/1)
   end
 
   defp dispatch_budget_available?(%State{

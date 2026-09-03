@@ -31,6 +31,8 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert land_merge.content =~ "Current status` is `Merging`"
     assert land_merge.content =~ "Do not create a new branch, bookmark, or pull request"
     assert land_merge.content =~ "Merge only when checks are green"
+    assert land_merge.content =~ "Immediately before merge, read the delivery-target revision"
+    assert land_merge.content =~ "If target changes after validation"
   end
 
   test "core module registry exposes v1 default modules with metadata" do
