@@ -271,6 +271,41 @@ defmodule SymphonyElixir.TargetRegistry.ImportTest do
                }
              }
     end
+
+    test "keeps the required OMP model in the host runner catalog" do
+      assert {:ok, result} =
+               preview(%{
+                 "tracker" => %{"project_slug" => "project-one"},
+                 "agent" => %{"default_runner" => "omp"},
+                 "runners" => %{
+                   "omp" => %{
+                     "kind" => "omp_acp",
+                     "model" => "openai-codex/gpt-5.6-sol",
+                     "profile" => "default",
+                     "thinking" => "high",
+                     "permissions" => %{
+                       "read" => "allow",
+                       "edit" => "allow",
+                       "execute" => "allow"
+                     }
+                   }
+                 }
+               })
+
+      assert result.applicable?
+
+      assert get_in(result.proposal, ["host", "runners", "omp", "model"]) ==
+               "openai-codex/gpt-5.6-sol"
+
+      assert get_in(result.proposal, [
+               "targets",
+               "imported",
+               "runners",
+               "settings",
+               "omp",
+               "model"
+             ]) == "openai-codex/gpt-5.6-sol"
+    end
   end
 
   describe "capacity and quality-gate mapping" do

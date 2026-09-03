@@ -252,7 +252,8 @@ defmodule SymphonyElixir.Codex.HarnessHome do
            :ok <- File.mkdir_p(result.path),
            :ok <- validate_context_home_components(result.path, :require_directories),
            :ok <- validate_context_agents_path(agents_path),
-           :ok <- write_context_agents_atomically(result.path, agents_path, result.provenance) do
+           :ok <- write_context_agents_atomically(result.path, agents_path, result.provenance),
+           :ok <- ensure_local_auth_link(result.path) do
         {:ok, result}
       else
         {:error, :invalid_harness_home_path} = error -> error

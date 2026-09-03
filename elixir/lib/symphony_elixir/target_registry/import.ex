@@ -1538,9 +1538,14 @@ defmodule SymphonyElixir.TargetRegistry.Import do
             id
           )
 
+        host_runner_fields =
+          if runner["kind"] == "omp_acp",
+            do: ["model" | @host_runner_fields],
+            else: @host_runner_fields
+
         host_runner =
           runner
-          |> Map.take(@host_runner_fields)
+          |> Map.take(host_runner_fields)
           |> maybe_put("command", command)
           |> maybe_put("execution_profiles", host_profiles)
           |> Map.put("max_concurrent_agents", max_agents)
@@ -1554,7 +1559,7 @@ defmodule SymphonyElixir.TargetRegistry.Import do
           |> maybe_put("execution_profiles", target_profiles)
 
         host_dispositions =
-          Enum.map(Map.keys(Map.take(raw_runner, @host_runner_fields)), fn field ->
+          Enum.map(Map.keys(Map.take(raw_runner, host_runner_fields)), fn field ->
             disposition("#{path}.#{field}", "$.host.runners.#{id}.#{field}", :mapped)
           end)
 

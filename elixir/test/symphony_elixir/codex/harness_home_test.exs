@@ -71,6 +71,20 @@ defmodule SymphonyElixir.Codex.HarnessHomeTest do
   end
 
   @tag :tmp_dir
+  test "context local preparation mirrors operator auth", %{tmp_dir: tmp_dir} do
+    assert {:ok, result} = tmp_dir |> context() |> HarnessHome.ensure_local()
+    source = Path.expand("~/.codex/auth.json")
+    destination = Path.join(result.path, "auth.json")
+
+    if File.exists?(source) do
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(destination)
+      assert File.read_link!(destination) == source
+    else
+      assert {:error, :enoent} = File.lstat(destination)
+    end
+  end
+
+  @tag :tmp_dir
   test "context local and remote entry points enforce worker locality", %{tmp_dir: tmp_dir} do
     local = context(tmp_dir)
     remote = %{local | worker_host: "worker.example"}
