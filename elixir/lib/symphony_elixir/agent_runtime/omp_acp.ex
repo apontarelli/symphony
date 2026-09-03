@@ -21,6 +21,10 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   @line_bytes 1_048_576
   @close_timeout_ms 250
   @thinking_values MapSet.new(~w(inherit off minimal low medium high xhigh max auto))
+  @token_telemetry_boundary "symphony-omp-extension-v1"
+  @token_telemetry_filename "symphony-token-telemetry-v1.json"
+  @token_telemetry_schema_version 1
+  @supported_token_telemetry_versions MapSet.new(["18.0.11", "18.1.5"])
 
   @type session :: %{
           optional(:execution_context) => ExecutionContext.t(),
@@ -30,6 +34,8 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
           session_dir: Path.t(),
           session_id: String.t(),
           state: pid(),
+          token_usage: map(),
+          token_telemetry_path: Path.t() | nil,
           turn_timeout_ms: pos_integer(),
           workspace: Path.t()
         }
@@ -73,7 +79,8 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     with :ok <- validate_turn_options(opts),
          :ok <- validate_session(session),
          {:ok, on_event} <- event_handler(opts),
-         {:ok, tool_executor} <- tool_executor(session, opts) do
+         {:ok, tool_executor} <- tool_executor(session, opts),
+         :ok <- begin_turn_telemetry(session) do
       timeout_ms = turn_timeout(session, opts)
       OmpMcpBridge.set_tool_executor(session.bridge, tool_executor)
 
@@ -118,11 +125,31 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
       permission_policy: true,
       pinned: true,
       protocol: "acp-v1",
-      session_resume: false
+      session_resume: false,
+      token_usage: token_usage_capability(config["version"])
     }
   end
 
-  def capabilities(_config), do: %{adapter: "omp_acp", local_only: true, pinned: true, protocol: "acp-v1"}
+  def capabilities(_config) do
+    %{
+      adapter: "omp_acp",
+      local_only: true,
+      pinned: true,
+      protocol: "acp-v1",
+      token_usage: token_usage_capability(nil)
+    }
+  end
+
+  defp token_usage_capability(version) when is_binary(version) do
+    if MapSet.member?(@supported_token_telemetry_versions, version) do
+      %{status: :supported, boundary: @token_telemetry_boundary, version: version}
+    else
+      %{status: :unavailable, boundary: @token_telemetry_boundary, version: version}
+    end
+  end
+
+  defp token_usage_capability(version),
+    do: %{status: :unavailable, boundary: @token_telemetry_boundary, version: version}
 
   defp validate_start_options([]), do: :ok
   defp validate_start_options(_opts), do: {:error, :invalid_agent_runtime_options}
@@ -254,7 +281,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
       else: {:error, :unsafe_path}
   end
 
-  defp launch(command, workspace, session_dir, profile, execution_role) do
+  defp launch(command, workspace, session_dir, profile, execution_role, telemetry_env) do
     environment =
       %{
         "LINEAR_API_KEY" => false,
@@ -262,6 +289,7 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
         "PI_CODING_AGENT_SESSION_DIR" => session_dir
       }
       |> Map.merge(ExecutionContext.worker_environment(execution_role))
+      |> Map.merge(telemetry_env)
 
     ProcessSupervisor.start(command,
       cd: workspace,
@@ -280,23 +308,96 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
          settings,
          turn_timeout_ms
        ) do
-    case launch(settings.command, workspace, session_dir, settings.profile, execution_role) do
-      {:ok, process} ->
-        initialize_session(
-          process,
+    case prepare_token_telemetry(runner, session_dir, settings.command) do
+      {:ok, telemetry} ->
+        launch_prepared_session(
           bridge,
           workspace,
           session_dir,
+          execution_role,
           runner,
           settings,
-          turn_timeout_ms
+          turn_timeout_ms,
+          telemetry
         )
 
       {:error, reason} ->
-        case OmpMcpBridge.stop(bridge) do
-          :ok -> {:error, {:startup_failed, reason}}
-          {:error, cleanup_reason} -> {:error, {:startup_failed, reason, {:cleanup_failed, cleanup_reason}}}
-        end
+        cleanup_startup_bridge(bridge, reason)
+    end
+  end
+
+  defp launch_prepared_session(
+         bridge,
+         workspace,
+         session_dir,
+         execution_role,
+         runner,
+         settings,
+         turn_timeout_ms,
+         telemetry
+       ) do
+    case launch(
+           telemetry.command,
+           workspace,
+           session_dir,
+           settings.profile,
+           execution_role,
+           telemetry.env
+         ) do
+      {:ok, process} ->
+        initialize_session(process, bridge, workspace, session_dir, runner, settings, telemetry, turn_timeout_ms)
+
+      {:error, reason} ->
+        cleanup_startup_bridge(bridge, {:startup_failed, reason})
+    end
+  end
+
+  defp cleanup_startup_bridge(bridge, reason) do
+    case OmpMcpBridge.stop(bridge) do
+      :ok -> {:error, reason}
+      {:error, cleanup_reason} -> {:error, {reason, {:cleanup_failed, cleanup_reason}}}
+    end
+  end
+
+  defp prepare_token_telemetry(runner, session_dir, command) do
+    capability = token_usage_capability(runner["version"])
+
+    if capability.status == :supported do
+      with {:ok, extension_path} <- token_telemetry_extension_path(),
+           {:ok, command} <- insert_extension(command, extension_path) do
+        telemetry_path = Path.join(session_dir, @token_telemetry_filename)
+
+        {:ok,
+         %{
+           capability: capability,
+           command: command,
+           env: %{"SYMPHONY_OMP_TOKEN_TELEMETRY_PATH" => telemetry_path},
+           path: telemetry_path
+         }}
+      end
+    else
+      {:ok, %{capability: capability, command: command, env: %{}, path: nil}}
+    end
+  end
+
+  defp token_telemetry_extension_path do
+    case :code.priv_dir(:symphony_elixir) do
+      priv_dir when is_list(priv_dir) ->
+        path = Path.join([List.to_string(priv_dir), "omp", "token_telemetry_v1.ts"])
+        if File.regular?(path), do: {:ok, path}, else: {:error, :omp_token_telemetry_extension_unavailable}
+
+      {:error, _reason} ->
+        {:error, :omp_token_telemetry_extension_unavailable}
+    end
+  end
+
+  defp insert_extension(command, extension_path) do
+    case Enum.split_while(command, &(&1 != "acp")) do
+      {prefix, ["acp" | suffix]} ->
+        {:ok, prefix ++ ["--extension", extension_path, "acp" | suffix]}
+
+      _missing_acp_command ->
+        {:error, :invalid_omp_acp_command}
     end
   end
 
@@ -308,7 +409,16 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     end
   end
 
-  defp initialize_session(process, bridge, workspace, session_dir, runner, settings, turn_timeout_ms) do
+  defp initialize_session(
+         process,
+         bridge,
+         workspace,
+         session_dir,
+         runner,
+         settings,
+         telemetry,
+         turn_timeout_ms
+       ) do
     deadline = monotonic_deadline(runner["startup_timeout_ms"])
 
     result =
@@ -340,18 +450,24 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
              ),
            {:ok, session_id} <- session_id(new_session),
            :ok <- configure_session(process, session_id, settings, deadline, runner["read_timeout_ms"]),
-           {:ok, state} <- Agent.start_link(fn -> %{session_started?: false, usage: nil} end) do
-        {:ok,
-         %{
-           bridge: bridge,
-           process: process,
-           runner_config: runner,
-           session_dir: session_dir,
-           session_id: session_id,
-           state: state,
-           turn_timeout_ms: turn_timeout_ms,
-           workspace: workspace
-         }}
+           {:ok, state} <-
+             Agent.start_link(fn ->
+               %{required_telemetry_sequence: nil, session_started?: false, telemetry_sequence: -1, usage: nil}
+             end),
+           session = %{
+             bridge: bridge,
+             process: process,
+             runner_config: runner,
+             session_dir: session_dir,
+             session_id: session_id,
+             state: state,
+             token_telemetry_path: telemetry.path,
+             token_usage: telemetry.capability,
+             turn_timeout_ms: turn_timeout_ms,
+             workspace: workspace
+           },
+           :ok <- refresh_token_telemetry(session) do
+        {:ok, session}
       end
 
     case result do
@@ -520,51 +636,144 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   end
 
   defp handle_turn_line(session, request_id, on_event, turn_deadline, stall_deadline, line) do
-    case decode_line(line) do
-      {:ok, %{"id" => ^request_id, "result" => result} = native} ->
-        complete_turn(session, on_event, result, native)
-
-      {:ok, %{"id" => ^request_id, "error" => error} = native} ->
-        fail_turn(session, on_event, {:response_error, error}, native)
-
-      {:ok, %{"method" => "session/update", "params" => params} = native} ->
-        map_session_update(session, on_event, params, native)
-        next_stall = reset_stall_deadline(session, turn_deadline)
-        await_turn(session, request_id, on_event, turn_deadline, next_stall, "")
-
-      {:ok, %{"method" => "session/request_permission", "id" => id, "params" => params} = native} ->
-        handle_permission_request(
+    case refresh_token_telemetry(session) do
+      :ok ->
+        handle_decoded_turn_line(
           session,
           request_id,
           on_event,
           turn_deadline,
           stall_deadline,
-          id,
-          params,
-          native
+          line,
+          decode_line(line)
         )
-
-      {:ok, %{"method" => method, "id" => id} = native} ->
-        handle_required_request(session, on_event, id, method, native)
-
-      {:ok, %{"method" => _notification}} ->
-        await_turn(session, request_id, on_event, turn_deadline, stall_deadline, "")
-
-      {:ok, %{"id" => _other_id}} ->
-        await_turn(session, request_id, on_event, turn_deadline, stall_deadline, "")
 
       {:error, reason} ->
         cancel_session(session)
-        fail_turn(session, on_event, reason, %{"line" => line})
+        fail_turn(session, on_event, reason)
     end
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         _turn_deadline,
+         _stall_deadline,
+         _line,
+         {:ok, %{"id" => request_id, "result" => result} = native}
+       ) do
+    complete_turn(session, on_event, result, native)
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         _turn_deadline,
+         _stall_deadline,
+         _line,
+         {:ok, %{"id" => request_id, "error" => error} = native}
+       ) do
+    fail_turn(session, on_event, {:response_error, error}, native)
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         turn_deadline,
+         _stall_deadline,
+         _line,
+         {:ok, %{"method" => "session/update", "params" => params} = native}
+       ) do
+    map_session_update(session, on_event, params, native)
+    next_stall = reset_stall_deadline(session, turn_deadline)
+    await_turn(session, request_id, on_event, turn_deadline, next_stall, "")
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         turn_deadline,
+         stall_deadline,
+         _line,
+         {:ok, %{"method" => "session/request_permission", "id" => id, "params" => params} = native}
+       ) do
+    handle_permission_request(
+      session,
+      request_id,
+      on_event,
+      turn_deadline,
+      stall_deadline,
+      id,
+      params,
+      native
+    )
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         _request_id,
+         on_event,
+         _turn_deadline,
+         _stall_deadline,
+         _line,
+         {:ok, %{"method" => method, "id" => id} = native}
+       ) do
+    handle_required_request(session, on_event, id, method, native)
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         turn_deadline,
+         stall_deadline,
+         _line,
+         {:ok, %{"method" => _notification}}
+       ) do
+    await_turn(session, request_id, on_event, turn_deadline, stall_deadline, "")
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         request_id,
+         on_event,
+         turn_deadline,
+         stall_deadline,
+         _line,
+         {:ok, %{"id" => _other_id}}
+       ) do
+    await_turn(session, request_id, on_event, turn_deadline, stall_deadline, "")
+  end
+
+  defp handle_decoded_turn_line(
+         session,
+         _request_id,
+         on_event,
+         _turn_deadline,
+         _stall_deadline,
+         line,
+         {:error, reason}
+       ) do
+    cancel_session(session)
+    fail_turn(session, on_event, reason, %{"line" => line})
   end
 
   defp complete_turn(session, on_event, %{"stopReason" => stop_reason} = result, native)
        when stop_reason in ["end_turn", "max_tokens", "max_turn_requests"] do
-    usage = current_usage(session)
-    safe_result = redact(session, result)
-    emit_event(on_event, :turn_completed, session, %{stop_reason: stop_reason}, native, usage)
-    {:ok, %{session_id: session.session_id, stop_reason: stop_reason, usage: usage, native: safe_result}}
+    case verify_turn_telemetry(session) do
+      :ok ->
+        usage = current_usage(session)
+        safe_result = redact(session, result)
+        emit_event(on_event, :turn_completed, session, %{stop_reason: stop_reason}, native, usage)
+        {:ok, %{session_id: session.session_id, stop_reason: stop_reason, usage: usage, native: safe_result}}
+
+      {:error, reason} ->
+        fail_turn(session, on_event, reason, native)
+    end
   end
 
   defp complete_turn(session, on_event, %{"stopReason" => stop_reason}, native),
@@ -600,9 +809,13 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
     do: emit_event(on_event, :turn_progress, session, %{kind: :plan, entries: update["entries"] || []}, native)
 
   defp emit_acp_update("usage_update", session, on_event, update, native) do
-    usage = update |> Map.delete("sessionUpdate") |> then(&redact(session, &1))
-    Agent.update(session.state, &Map.put(&1, :usage, usage))
-    emit_event(on_event, :turn_progress, session, %{kind: :usage}, native, usage)
+    if session.token_usage.status == :supported do
+      emit_event(on_event, :turn_progress, session, %{kind: :acp_usage, update: update}, native)
+    else
+      usage = update |> Map.delete("sessionUpdate") |> then(&redact(session, &1))
+      Agent.update(session.state, &Map.put(&1, :usage, usage))
+      emit_event(on_event, :turn_progress, session, %{kind: :usage}, native, usage)
+    end
   end
 
   defp emit_acp_update(update_type, session, on_event, update, native)
@@ -851,7 +1064,95 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
         {not state.session_started?, %{state | session_started?: true}}
       end)
 
-    if emit?, do: emit_event(on_event, :session_started, session, %{workspace: session.workspace})
+    if emit? do
+      emit_event(on_event, :session_started, session, %{
+        usage_capability: session.token_usage,
+        workspace: session.workspace
+      })
+    end
+  end
+
+  defp refresh_token_telemetry(%{token_usage: %{status: :unavailable}}), do: :ok
+
+  defp refresh_token_telemetry(%{
+         state: state,
+         token_telemetry_path: path,
+         token_usage: %{status: :supported, version: version}
+       })
+       when is_binary(path) do
+    with {:ok, encoded} <- File.read(path),
+         {:ok, snapshot} <- Jason.decode(encoded),
+         :ok <- store_token_telemetry(state, snapshot, version) do
+      :ok
+    else
+      {:error, reason} -> {:error, {:omp_token_telemetry_unavailable, reason}}
+      _invalid -> {:error, {:omp_token_telemetry_unavailable, :invalid_snapshot}}
+    end
+  end
+
+  defp begin_turn_telemetry(%{token_usage: %{status: :unavailable}}), do: :ok
+
+  defp begin_turn_telemetry(%{state: state, token_usage: %{status: :supported}}) do
+    Agent.update(state, fn current ->
+      %{current | required_telemetry_sequence: current.telemetry_sequence + 1}
+    end)
+  end
+
+  defp verify_turn_telemetry(%{token_usage: %{status: :unavailable}}), do: :ok
+
+  defp verify_turn_telemetry(%{state: state, token_usage: %{status: :supported}}) do
+    Agent.get(state, fn current ->
+      if current.telemetry_sequence >= current.required_telemetry_sequence do
+        :ok
+      else
+        {:error, {:omp_token_telemetry_unavailable, :sequence_not_advanced}}
+      end
+    end)
+  end
+
+  defp store_token_telemetry(state, snapshot, version) do
+    with {:ok, sequence, usage} <- token_telemetry_snapshot(snapshot, version) do
+      store_token_telemetry_sequence(state, sequence, usage)
+    end
+  end
+
+  defp token_telemetry_snapshot(
+         %{
+           "schema_version" => @token_telemetry_schema_version,
+           "omp_version" => version,
+           "sequence" => sequence,
+           "input_tokens" => input_tokens,
+           "output_tokens" => output_tokens,
+           "total_tokens" => total_tokens
+         },
+         version
+       )
+       when is_integer(sequence) and sequence >= 0 and is_integer(input_tokens) and
+              input_tokens >= 0 and is_integer(output_tokens) and output_tokens >= 0 and
+              is_integer(total_tokens) and total_tokens >= input_tokens + output_tokens do
+    {:ok, sequence,
+     %{
+       "input_tokens" => input_tokens,
+       "output_tokens" => output_tokens,
+       "total_tokens" => total_tokens
+     }}
+  end
+
+  defp token_telemetry_snapshot(_snapshot, _version), do: {:error, :invalid_snapshot}
+
+  defp store_token_telemetry_sequence(state, sequence, usage) do
+    Agent.get_and_update(state, fn current ->
+      cond do
+        sequence < current.telemetry_sequence ->
+          {{:error, :stale_sequence}, current}
+
+        sequence == current.telemetry_sequence ->
+          {:ok, current}
+
+        true ->
+          {:ok, %{current | telemetry_sequence: sequence, usage: usage}}
+      end
+    end)
   end
 
   defp current_usage(session), do: Agent.get(session.state, & &1.usage)
@@ -863,18 +1164,33 @@ defmodule SymphonyElixir.AgentRuntime.OmpAcp do
   end
 
   defp emit_event(on_event, event_type, session, payload, native \\ nil, usage \\ nil, reason \\ nil) do
+    usage = usage || current_usage(session)
+
     {:ok, event} =
       Event.new(event_type,
         runtime: @runtime,
         session_id: session.session_id,
         native: redact(session, native),
-        usage: redact(session, usage),
+        usage: safe_event_usage(session, usage),
         payload: redact(session, payload),
         reason: redact(session, reason)
       )
 
     on_event.(event)
   end
+
+  defp safe_event_usage(
+         _session,
+         %{
+           "input_tokens" => input_tokens,
+           "output_tokens" => output_tokens,
+           "total_tokens" => total_tokens
+         } = usage
+       )
+       when is_integer(input_tokens) and is_integer(output_tokens) and is_integer(total_tokens),
+       do: usage
+
+  defp safe_event_usage(session, usage), do: redact(session, usage)
 
   defp handle_required_request(session, on_event, id, method, native) do
     if elicitation_method?(method) do

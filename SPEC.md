@@ -1998,6 +1998,9 @@ SHOULD include:
 - OPTIONAL `native` metadata for adapter-owned diagnostics
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
+- A runtime with a configured token budget MUST report whether cumulative billable token telemetry
+  is supported through an explicit runtime capability. If it is unavailable, admission or
+  capability preflight MUST fail closed instead of treating absent usage as zero.
 
 Core normalized events:
 
@@ -2719,6 +2722,14 @@ Token accounting rules:
 - Do not treat generic `usage` maps as cumulative totals unless the event type defines them that
   way.
 - Accumulate aggregate totals in orchestrator state.
+- A versioned adapter-owned boundary MAY derive usage from a runtime extension or plugin API when
+  the native transport does not expose it. The adapter MUST document and validate the supported
+  runtime version and schema; it MUST NOT scrape an unspecified runtime transcript format.
+- Cached input MUST be charged exactly once. When a runtime provides an authoritative total that
+  already includes cache and provider-side orchestration tokens, use that total directly rather
+  than summing it with component counters.
+- A status surface MUST render `unavailable`, not zero, while any active run lacks cumulative token
+  telemetry.
 
 Runtime accounting:
 

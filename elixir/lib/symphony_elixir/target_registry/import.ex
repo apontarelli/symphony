@@ -24,7 +24,7 @@ defmodule SymphonyElixir.TargetRegistry.Import do
   @defaulted_runner_fields %{
     "codex_app_server" => MapSet.new(~w(command model approval_policy thread_sandbox turn_timeout_ms read_timeout_ms stall_timeout_ms execution_profiles)),
     "opencode_server" => MapSet.new(~w(hostname port turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles permissions)),
-    "omp_acp" => MapSet.new(~w(command turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles))
+    "omp_acp" => MapSet.new(~w(command version turn_timeout_ms read_timeout_ms stall_timeout_ms startup_timeout_ms execution_profiles))
   }
   @normalized_validation_command_fields ~w(command name)
   @mapped_runtime_sections ~w(tracker target hooks worker workspace polling quality_gate)

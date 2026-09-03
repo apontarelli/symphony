@@ -345,6 +345,7 @@ defmodule SymphonyElixir.StatusDashboard do
         runtime_output_tokens = Map.get(runtime_totals, :output_tokens, 0)
         runtime_total_tokens = Map.get(runtime_totals, :total_tokens, 0)
         runtime_seconds_running = Map.get(runtime_totals, :seconds_running, 0)
+        token_usage_available? = Enum.all?(running, &token_usage_available?/1)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -362,11 +363,11 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Runtime: ", @ansi_bold) <>
              colorize(format_runtime_seconds(runtime_seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
-             colorize("in #{format_count(runtime_input_tokens)}", @ansi_yellow) <>
+             colorize("in #{format_token_count(runtime_input_tokens, token_usage_available?)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("out #{format_count(runtime_output_tokens)}", @ansi_yellow) <>
+             colorize("out #{format_token_count(runtime_output_tokens, token_usage_available?)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(runtime_total_tokens)}", @ansi_yellow),
+             colorize("total #{format_token_count(runtime_total_tokens, token_usage_available?)}", @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            colorize("│ Tracker: ", @ansi_bold) <> format_tracker_status(tracker),
            project_link_lines,
@@ -906,6 +907,18 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp policy_part(nil), do: "n/a"
   defp policy_part(value), do: to_string(value)
+
+  defp token_usage_available?(running_entry) do
+    status =
+      running_entry
+      |> Map.get(:runtime_token_usage, %{})
+      |> then(&(Map.get(&1, :status) || Map.get(&1, "status")))
+
+    status not in [:unavailable, "unavailable"]
+  end
+
+  defp format_token_count(_value, false), do: "unavailable"
+  defp format_token_count(value, true), do: format_count(value)
 
   defp format_count(nil), do: "0"
 

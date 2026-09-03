@@ -46,7 +46,7 @@ defmodule SymphonyElixir.Config.Schema do
                              )
   @omp_runner_v1_fields MapSet.union(
                           @runner_common_v1_fields,
-                          MapSet.new(["permissions", "profile", "thinking", "startup_timeout_ms"])
+                          MapSet.new(["permissions", "profile", "thinking", "startup_timeout_ms", "version"])
                         )
   @default_runner_name "codex"
   @supported_runner_kinds MapSet.new(["codex_app_server", "omp_acp", "opencode_server"])
@@ -1168,7 +1168,8 @@ defmodule SymphonyElixir.Config.Schema do
       validate_omp_thinking(name, Map.get(runner, "thinking")),
       validate_omp_isolation_flags(name, Map.get(runner, "command")),
       validate_omp_permission_policy(name, Map.get(runner, "permissions")),
-      validate_runner_positive_integer(name, "startup_timeout_ms", Map.get(runner, "startup_timeout_ms"))
+      validate_runner_positive_integer(name, "startup_timeout_ms", Map.get(runner, "startup_timeout_ms")),
+      validate_runner_optional_non_empty_string(name, "version", Map.get(runner, "version"))
     ]
   end
 
