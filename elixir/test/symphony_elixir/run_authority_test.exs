@@ -36,7 +36,7 @@ defmodule SymphonyElixir.RunAuthorityTest do
   alias SymphonyElixir.AgentRuntime.Event
   alias SymphonyElixir.ControlPlane
   alias SymphonyElixir.ControlPlane.{SideEffect, TokenBudget}
-  alias SymphonyElixir.{ExecutionContext, Orchestrator, RunAuthority, TargetContext}
+  alias SymphonyElixir.{ExecutionContext, Orchestrator, RunAuthority, RunTarget, TargetContext}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.State
   alias SymphonyElixir.RunAuthorityTest.FailingLifecycleControlPlane
@@ -803,6 +803,92 @@ defmodule SymphonyElixir.RunAuthorityTest do
     assert recovered.lease.fencing_token > running.lease.fencing_token
     assert recovered_context.target.target_id == "alpha"
     refute inspect(recovered_context) =~ "rotated-secret"
+  end
+
+  test "landing selection uses retained publish evidence and persists its decision" do
+    config_root = tmp_root!("landing-queue-evidence")
+    server = start_control_plane!(config_root)
+    context = execution_context!(config_root, "alpha", "issue-landing", "SID-462-A")
+
+    assert {:ok, admitted} = RunAuthority.admit(server, "landing-owner", context)
+    assert {:ok, running} = RunAuthority.transition(admitted, :running, %{})
+
+    publish_outcome = %{
+      pr_url: "https://github.com/example/repo/pull/462",
+      github_repository: "example/repo",
+      base_branch: "main",
+      branch: "ticket/sid-462-a",
+      changed_files: ["lib/landing.ex"]
+    }
+
+    assert {:ok, ^publish_outcome, %SideEffect{state: :succeeded}} =
+             RunAuthority.run_side_effect(
+               running,
+               :publish_handoff,
+               "run-completion",
+               %{issue_identifier: "SID-462-A"},
+               fn -> {:ok, publish_outcome} end
+             )
+
+    assert {:ok, retrying} =
+             RunAuthority.transition(running, :retrying, %{
+               attempt: 1,
+               due_at_ms: System.system_time(:millisecond) + 1_000,
+               failure: %{code: "continuation", message: "checking landing queue"}
+             })
+
+    issue = %Issue{
+      id: "issue-landing",
+      identifier: "SID-462-A",
+      title: "Land retained change",
+      state: "Merging",
+      priority: 2,
+      assigned_to_worker: true,
+      created_at: ~U[2026-09-03 10:00:00Z],
+      updated_at: ~U[2026-09-03 11:00:00Z]
+    }
+
+    revalidator = fn entry ->
+      assert entry.pr_url == publish_outcome.pr_url
+      assert entry.changed_files == publish_outcome.changed_files
+
+      %{
+        status: :ready,
+        reason: :merge_gate_clear,
+        checked_at: "2026-09-03T12:00:00Z",
+        target_revision: "target-sha",
+        head_revision: "head-sha"
+      }
+    end
+
+    state = %State{
+      target_context: context.target,
+      control_plane: server,
+      delivery: %Orchestrator.DeliveryState{landing_revalidator: revalidator},
+      running: %{}
+    }
+
+    resolution = %RunTarget.Resolution{issues: [issue], ordering: :priority}
+
+    assert {[%Issue{id: "issue-landing"}], planned_state} =
+             Orchestrator.prepare_candidate_issues_for_test(resolution, state)
+
+    assert [%{identifier: "SID-462-A", status: :selected, freshness: :ready}] =
+             planned_state.delivery.landing_queue
+
+    landing_context = %{context | role: :landing}
+    start_evidence = Orchestrator.durable_start_evidence_for_test(planned_state, landing_context)
+
+    assert get_in(start_evidence, [:landing_queue, :revalidation, :target_revision]) ==
+             "target-sha"
+
+    assert {:ok, started_landing} = RunAuthority.transition(retrying, :running, start_evidence)
+    assert {:ok, history} = ControlPlane.lifecycle_history(server, started_landing.admission.admitted_run_id)
+
+    assert get_in(List.last(history).evidence, ["landing_queue", "revalidation", "target_revision"]) ==
+             "target-sha"
+
+    assert :ok = RunAuthority.release(started_landing)
   end
 
   defp execution_context!(config_root, target_id, issue_id, issue_identifier, opts \\ []) do

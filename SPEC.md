@@ -731,6 +731,21 @@ token and SSH authentication, disable interactive Git authentication and credent
 exclude landing workflow modules. The tracker transition authorizes the landing attempt; it does not
 bypass those checks.
 
+For each target, Symphony MUST serialize landing and construct the queue from retained publish
+handoff evidence. A queue entry records the pull request, deterministic branch, changed files,
+dependencies, priority, and publish-handoff completion time. Before selection, the host MUST read
+the current pull-request gate and delivery-target revision. It orders eligible entries by dependency
+readiness, effective priority, a clear gate before refresh-required work, publish-handoff completion
+time, issue identifier, and issue ID. For an eligible entry, every 15 minutes since publish-handoff
+completion promotes it by one priority rank, capped at four promotions (60 minutes); equal effective
+FIFO order. Non-terminal dependencies and failed or blocked revalidation keep an entry visible but
+do not block independent entries. Changed-file overlap is retained as conflict evidence, and the
+single target landing slot prevents overlapping or semantic conflicts from merging concurrently.
+The selected queue position, priority aging, conflicts, target and head revisions, and revalidation
+result MUST be stored in the durable transition to the landing run. Restart reconstructs the same
+authority from retained handoff completion time and revalidates current GitHub state; an already
+closed or merged pull request MUST NOT dispatch another landing worker.
+
 #### 5.3.9 `review_routing` (object, OPTIONAL extension)
 
 `review_routing` describes the policy used by the workflow prompt and agent tooling to choose a

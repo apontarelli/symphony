@@ -318,6 +318,7 @@ defmodule SymphonyElixir.StatusDashboard do
            %{
              running: running,
              retrying: retrying,
+             landing_queue: Map.get(snapshot, :landing_queue, []),
              runtime_totals: runtime_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              tracker: Map.get(snapshot, :tracker),
@@ -352,6 +353,10 @@ defmodule SymphonyElixir.StatusDashboard do
         running_rows = format_running_rows(running, running_event_width)
         running_to_backoff_spacer = if(running == [], do: [], else: ["│"])
         backoff_rows = format_retry_rows(retrying)
+        landing_rows = format_landing_rows(Map.get(snapshot, :landing_queue, []))
+
+        landing_section =
+          if landing_rows == [], do: [], else: [colorize("├─ Landing queue", @ansi_bold), "│"] ++ landing_rows
 
         ([
            colorize("╭─ SYMPHONY STATUS", @ansi_bold),
@@ -379,6 +384,7 @@ defmodule SymphonyElixir.StatusDashboard do
          ] ++
            running_rows ++
            running_to_backoff_spacer ++
+           landing_section ++
            [colorize("├─ Backoff queue", @ansi_bold), "│"] ++
            backoff_rows ++
            [closing_border()])
@@ -636,6 +642,7 @@ defmodule SymphonyElixir.StatusDashboard do
      %{
        running: running,
        retrying: retrying,
+       landing_queue: Map.get(snapshot, :landing_queue, []),
        runtime_totals: runtime_totals,
        rate_limits: Map.get(snapshot, :rate_limits),
        tracker: Map.get(snapshot, :tracker),
@@ -651,6 +658,7 @@ defmodule SymphonyElixir.StatusDashboard do
       %{
         running: [],
         retrying: [],
+        landing_queue: [],
         runtime_totals: @empty_runtime_totals,
         rate_limits: nil,
         tracker: nil,
@@ -660,6 +668,7 @@ defmodule SymphonyElixir.StatusDashboard do
         %{
           running: [snapshot.running | aggregate.running],
           retrying: [snapshot.retrying | aggregate.retrying],
+          landing_queue: [snapshot.landing_queue | aggregate.landing_queue],
           runtime_totals: sum_runtime_totals(aggregate.runtime_totals, snapshot.runtime_totals),
           rate_limits: aggregate.rate_limits || snapshot.rate_limits,
           tracker: aggregate_tracker(aggregate.tracker, snapshot.tracker),
@@ -671,7 +680,8 @@ defmodule SymphonyElixir.StatusDashboard do
       %{
         aggregate
         | running: aggregate.running |> Enum.reverse() |> List.flatten(),
-          retrying: aggregate.retrying |> Enum.reverse() |> List.flatten()
+          retrying: aggregate.retrying |> Enum.reverse() |> List.flatten(),
+          landing_queue: aggregate.landing_queue |> Enum.reverse() |> List.flatten()
       }
     end)
   end
@@ -789,6 +799,28 @@ defmodule SymphonyElixir.StatusDashboard do
   @doc false
   @spec tps_graph_for_test([{integer(), integer()}], integer(), integer()) :: String.t()
   def tps_graph_for_test(samples, now_ms, current_tokens), do: tps_graph(samples, now_ms, current_tokens)
+
+  defp format_landing_rows([]), do: []
+
+  defp format_landing_rows(entries) when is_list(entries) do
+    entries
+    |> Enum.sort_by(fn entry ->
+      {Map.get(entry, :position) || 9_223_372_036_854_775_807, Map.get(entry, :identifier) || Map.get(entry, :issue_id) || ""}
+    end)
+    |> Enum.map(fn entry ->
+      identifier = Map.get(entry, :identifier) || Map.get(entry, :issue_id) || "unknown"
+      status = Map.get(entry, :status, :blocked)
+      position = Map.get(entry, :position)
+      freshness = Map.get(entry, :freshness, :unknown)
+      reasons = Map.get(entry, :blocked_reasons, [])
+      conflicts = Map.get(entry, :conflicts, [])
+      position_text = if is_integer(position), do: " position=#{position}", else: ""
+      reason_text = if reasons == [], do: "", else: " reason=#{Enum.join(reasons, ",")}"
+      conflict_text = if conflicts == [], do: "", else: " conflicts=#{length(conflicts)}"
+
+      "│  #{identifier} status=#{status} freshness=#{freshness}#{position_text}#{reason_text}#{conflict_text}"
+    end)
+  end
 
   defp format_retry_rows(retrying) do
     if retrying == [] do

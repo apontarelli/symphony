@@ -44,13 +44,16 @@ defmodule SymphonyElixir.Workflow.LandingAuthority do
         landing worker only after it has published and linked the implementation pull request. Locate that
         existing pull request and branch. Do not create a new branch, bookmark, or pull request.
 
-        Confirm that the pinned merge gate permits landing. Inspect mergeability, required checks, and all
-        review feedback. If the pull request conflicts with the delivery target, sync the existing branch,
-        resolve conflicts, revalidate, and push that branch.
+        The host selected this change from its target-scoped landing queue after a current GitHub revalidation.
+        Re-read the pull request, delivery-target revision, mergeability, required checks, and all review feedback.
+        If the branch is behind or conflicts with the target, sync the existing branch, resolve conflicts,
+        revalidate the complete changed scope, and push that branch.
 
-        Poll checks and review feedback until all blocking signals are clear. Merge only when checks are green,
-        actionable feedback is resolved, and target policy still allows the merge. After merge, move the issue
-        to Done. If any gate cannot pass, record the blocker and leave the issue in Merging.
+        Immediately before merge, read the delivery-target revision and pull-request gate again. The target
+        revision must still match the revision used by the final validation. Merge only when checks are green,
+        actionable feedback is resolved, and target policy still allows the merge. If target changes after validation,
+        repeat sync and validation. After merge, move the issue to Done. If any gate cannot pass,
+        record the blocker and leave the issue in Merging.
         """,
         description: "Dedicated approved PR landing worker"
       }

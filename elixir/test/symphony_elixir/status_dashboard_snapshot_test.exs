@@ -355,6 +355,43 @@ defmodule SymphonyElixir.StatusDashboardSnapshotTest do
     Snapshot.assert_dashboard_snapshot!("credits_unlimited", render_snapshot(snapshot_data, 42.0))
   end
 
+  test "landing queue keeps blocked and independent entries visible" do
+    snapshot_data =
+      {:ok,
+       %{
+         running: [],
+         retrying: [],
+         landing_queue: [
+           %{
+             issue_id: "blocked",
+             identifier: "SID-201",
+             status: :blocked,
+             position: nil,
+             freshness: :failed,
+             blocked_reasons: [:revalidation_failed],
+             conflicts: []
+           },
+           %{
+             issue_id: "selected",
+             identifier: "SID-202",
+             status: :selected,
+             position: 1,
+             freshness: :ready,
+             blocked_reasons: [],
+             conflicts: [%{issue_id: "third"}]
+           }
+         ],
+         runtime_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+         rate_limits: nil
+       }}
+
+    rendered = render_snapshot(snapshot_data, 0.0)
+
+    assert rendered =~ "Landing queue"
+    assert rendered =~ "SID-201 status=blocked freshness=failed reason=revalidation_failed"
+    assert rendered =~ "SID-202 status=selected freshness=ready position=1 conflicts=1"
+  end
+
   defp render_snapshot(snapshot_data, tps) do
     StatusDashboard.format_snapshot_content_for_test(snapshot_data, tps, @terminal_columns)
   end

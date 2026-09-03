@@ -5202,7 +5202,24 @@ defmodule SymphonyElixir.ControlPlane do
        do: {:ok, :unchanged}
 
   defp normalize_transition_evidence(:running, evidence, _cleanup_authority) do
-    if map_size(evidence) == 0, do: {:ok, %{}}, else: {:error, :invalid_transition}
+    cond do
+      map_size(evidence) == 0 ->
+        {:ok, %{}}
+
+      evidence_keys?(evidence, [:landing_queue]) ->
+        with {:ok, landing_queue} <- fetch_evidence(evidence, :landing_queue),
+             true <- is_map(landing_queue) and map_size(landing_queue) > 0,
+             :ok <- validate_json_keys(landing_queue),
+             {:ok, json} <- encode_json(landing_queue),
+             {:ok, normalized} <- decode_json_map(json) do
+          {:ok, %{"landing_queue" => normalized}}
+        else
+          _invalid -> {:error, :invalid_transition}
+        end
+
+      true ->
+        {:error, :invalid_transition}
+    end
   end
 
   defp normalize_transition_evidence(:retrying, evidence, _cleanup_authority) do
