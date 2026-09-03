@@ -163,6 +163,11 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert trace =~ "ENV_OMP_PROFILE:symphony-test"
     assert trace =~ "ENV_LINEAR_API_KEY:"
     assert trace =~ "PI_CODING_AGENT_SESSION_DIR:#{session.adapter_session.session_dir}"
+    assert trace =~ "ENV_GH_TOKEN:"
+    assert trace =~ "ENV_SSH_AUTH_SOCK:"
+    assert trace =~ "ENV_GIT_TERMINAL_PROMPT:0"
+    assert trace =~ "ENV_GIT_CONFIG_KEY_0:credential.helper"
+    assert trace =~ "ENV_GIT_SSH_COMMAND:false"
     assert trace =~ "ARG:--no-extensions"
     assert trace =~ "ARG:--no-skills"
     assert trace =~ "PWD:#{session.adapter_session.workspace}"
@@ -178,6 +183,32 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert trace_request?(trace, "session/set_config_option", fn request ->
              request["params"]["configId"] == "thinking" and request["params"]["value"] == "high"
            end)
+  end
+
+  test "landing OMP receives delivery authentication", context do
+    previous_token = System.get_env("GH_TOKEN")
+    previous_socket = System.get_env("SSH_AUTH_SOCK")
+
+    on_exit(fn ->
+      restore_env("GH_TOKEN", previous_token)
+      restore_env("SSH_AUTH_SOCK", previous_socket)
+    end)
+
+    System.put_env("GH_TOKEN", "landing-token")
+    System.put_env("SSH_AUTH_SOCK", "/tmp/landing-agent.sock")
+
+    landing_issue = %{issue() | state: "Merging"}
+    execution_context = execution_context(context, "success", %{"*" => "deny"}, landing_issue)
+
+    assert {:ok, session} = OmpAcp.start(execution_context, landing_issue, [])
+    assert :ok = OmpAcp.stop(session)
+
+    trace = File.read!(context.trace)
+    assert trace =~ "ENV_GH_TOKEN:landing-token"
+    assert trace =~ "ENV_SSH_AUTH_SOCK:/tmp/landing-agent.sock"
+    assert trace =~ "ENV_GIT_TERMINAL_PROMPT:"
+    assert trace =~ "ENV_GIT_CONFIG_KEY_0:"
+    assert trace =~ "ENV_GIT_SSH_COMMAND:"
   end
 
   test "default Linear executor resolves only the session target credential", context do
@@ -617,7 +648,12 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     assert Enum.any?(blank_key_errors, &String.contains?(&1, ".permissions keys must be non-empty strings"))
   end
 
-  defp execution_context(context, scenario, permissions \\ %{"*" => "deny"}) do
+  defp execution_context(
+         context,
+         scenario,
+         permissions \\ %{"*" => "deny"},
+         context_issue \\ issue()
+       ) do
     runner = %{
       "kind" => "omp_acp",
       "command" => [
@@ -639,10 +675,10 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
       "execution_profiles" => %{}
     }
 
-    execution_context_with_runner(context, runner)
+    execution_context_with_runner(context, runner, context_issue)
   end
 
-  defp execution_context_with_runner(context, runner) do
+  defp execution_context_with_runner(context, runner, context_issue \\ issue()) do
     target = %TargetContext{
       target_id: "omp-test",
       workspace_layout: :flat,
@@ -688,7 +724,7 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     }
 
     assert {:ok, execution_context} =
-             ExecutionContext.new(target, issue(),
+             ExecutionContext.new(target, context_issue,
                policy: %{
                  "policy_ref" => "omp-test",
                  "policy_metadata" => %{"profile" => "implementation"}
@@ -736,6 +772,11 @@ defmodule SymphonyElixir.AgentRuntimeOmpAcpTest do
     printf 'PWD:%s\n' "$PWD" >> "$trace"
     printf 'ENV_OMP_PROFILE:%s\n' "${OMP_PROFILE:-}" >> "$trace"
     printf 'ENV_LINEAR_API_KEY:%s\n' "${LINEAR_API_KEY:-}" >> "$trace"
+    printf 'ENV_GH_TOKEN:%s\n' "${GH_TOKEN:-}" >> "$trace"
+    printf 'ENV_SSH_AUTH_SOCK:%s\n' "${SSH_AUTH_SOCK:-}" >> "$trace"
+    printf 'ENV_GIT_TERMINAL_PROMPT:%s\n' "${GIT_TERMINAL_PROMPT:-}" >> "$trace"
+    printf 'ENV_GIT_CONFIG_KEY_0:%s\n' "${GIT_CONFIG_KEY_0:-}" >> "$trace"
+    printf 'ENV_GIT_SSH_COMMAND:%s\n' "${GIT_SSH_COMMAND:-}" >> "$trace"
     printf 'PI_CODING_AGENT_SESSION_DIR:%s\n' "${PI_CODING_AGENT_SESSION_DIR:-}" >> "$trace"
 
     if [ "$scenario" = "descendant" ]; then

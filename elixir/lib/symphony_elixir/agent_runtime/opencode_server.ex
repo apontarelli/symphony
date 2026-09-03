@@ -66,7 +66,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
          true <- workspace == context.workspace_path,
          :ok <- validate_loopback_hostname(runner["hostname"]),
          {:ok, {process, config_overlay}} <-
-           launch(workspace, runner, execution_profile, server_auth),
+           launch(workspace, runner, execution_profile, server_auth, context.role),
          {:ok, session} <-
            start_launched_session(
              process,
@@ -599,14 +599,14 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
   defp validate_loopback_hostname(hostname) when hostname in @loopback_hosts, do: :ok
   defp validate_loopback_hostname(hostname), do: {:error, {:unsupported_opencode_hostname, hostname}}
 
-  defp launch(workspace, runner, execution_profile, server_auth) do
+  defp launch(workspace, runner, execution_profile, server_auth, execution_role) do
     with {:ok, port_argument} <- launch_port(runner["hostname"], runner["port"]),
          {:ok, config_overlay} <- prepare_config_overlay(workspace, runner) do
       case ProcessSupervisor.start(
              execution_profile.command ++
                ["--hostname", runner["hostname"], "--port", port_argument],
              cd: workspace,
-             env: launch_env(runner, server_auth, config_overlay),
+             env: launch_env(runner, server_auth, config_overlay, execution_role),
              line: @line_bytes
            ) do
         {:ok, process} ->
@@ -619,7 +619,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
     end
   end
 
-  defp launch_env(runner, server_auth, config_overlay) do
+  defp launch_env(runner, server_auth, config_overlay, execution_role) do
     allowed =
       inherited_env()
       |> Map.merge(%{
@@ -628,6 +628,7 @@ defmodule SymphonyElixir.AgentRuntime.OpenCodeServer do
         "OPENCODE_SERVER_USERNAME" => Map.get(server_auth, "username") || false
       })
       |> Map.merge(provider_env(runner))
+      |> Map.merge(ExecutionContext.worker_environment(execution_role))
 
     System.get_env()
     |> Map.new(fn {key, _value} -> {key, false} end)

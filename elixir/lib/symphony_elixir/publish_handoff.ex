@@ -59,6 +59,15 @@ defmodule SymphonyElixir.PublishHandoff do
           change_manifest_verified: boolean(),
           failure: failure() | nil
         }
+  @type branch_cleanup_result :: %{
+          status: :passed | :skipped | :blocked,
+          attempted: boolean(),
+          github_repository: String.t() | nil,
+          branch: String.t() | nil,
+          reason: atom(),
+          pr_urls: [String.t()],
+          failure: failure() | nil
+        }
 
   @spec run_context(ExecutionContext.t(), Issue.t(), map()) ::
           result() | {:error, atom()}
@@ -99,6 +108,229 @@ defmodule SymphonyElixir.PublishHandoff do
 
   def run_context(_context, _issue, _completion, _opts),
     do: {:error, :invalid_publish_handoff_context}
+
+  @spec cleanup_closed_branch_context(ExecutionContext.t()) ::
+          branch_cleanup_result() | {:error, atom()}
+  def cleanup_closed_branch_context(context),
+    do: cleanup_closed_branch_context(context, [])
+
+  @spec cleanup_closed_branch_context(ExecutionContext.t(), keyword()) ::
+          branch_cleanup_result() | {:error, atom()}
+  def cleanup_closed_branch_context(%ExecutionContext{} = context, opts) when is_list(opts) do
+    with :ok <- validate_delivery_context(context),
+         :ok <- validate_context_options(opts),
+         {:ok, provenance} <- ExecutionContext.safe_provenance(context) do
+      target = PublishTarget.resolve_policy(context.policy)
+      branch = branch_name(%{identifier: context.issue_identifier})
+
+      cleanup_context = %{
+        workspace: System.tmp_dir!(),
+        timeout_ms: context.timeout_ms,
+        runner: configured_runner(opts),
+        env: Keyword.get(opts, :env, []),
+        delivery_gates: context.target.external_side_effect_gates,
+        provenance: provenance,
+        target: target,
+        branch: branch
+      }
+
+      cleanup_closed_branch(cleanup_context)
+    end
+  end
+
+  def cleanup_closed_branch_context(%ExecutionContext{}, _opts),
+    do: {:error, :invalid_publish_handoff_options}
+
+  def cleanup_closed_branch_context(_context, _opts),
+    do: {:error, :invalid_publish_handoff_context}
+
+  defp cleanup_closed_branch(%{target: nil, branch: branch}) do
+    branch_cleanup_result(nil, branch, :skipped, false, :publish_target_missing, [], nil)
+  end
+
+  defp cleanup_closed_branch(context) do
+    with :ok <- require_delivery_authority(context),
+         {:ok, pull_requests} <- list_branch_pull_requests(context),
+         {:ok, decision} <- closed_branch_cleanup_decision(context, pull_requests) do
+      apply_closed_branch_cleanup(context, decision)
+    else
+      {:blocked, failure} ->
+        branch_cleanup_result(
+          context.target.github_repository,
+          context.branch,
+          :blocked,
+          true,
+          :cleanup_failed,
+          [],
+          failure
+        )
+    end
+  end
+
+  defp list_branch_pull_requests(context) do
+    [owner, _repo] = String.split(context.target.github_repository, "/", parts: 2)
+
+    args = [
+      "api",
+      "--method",
+      "GET",
+      "repos/#{context.target.github_repository}/pulls",
+      "-f",
+      "head=#{owner}:#{context.branch}",
+      "-f",
+      "state=all",
+      "-f",
+      "per_page=100",
+      "--paginate",
+      "--slurp"
+    ]
+
+    case command_ok(context, :branch_cleanup_prs, "gh", args) do
+      {:ok, output} -> decode_branch_pull_requests(output, context)
+      {:blocked, _failure} = blocked -> blocked
+    end
+  end
+
+  defp decode_branch_pull_requests(output, context) do
+    with {:ok, pages} when is_list(pages) <- Jason.decode(output),
+         true <- Enum.all?(pages, &is_list/1),
+         pull_requests = Enum.flat_map(pages, & &1),
+         true <- Enum.all?(pull_requests, &valid_cleanup_pull_request?(&1, context)) do
+      {:ok, pull_requests}
+    else
+      _invalid ->
+        {:blocked,
+         cleanup_failure(
+           :branch_cleanup_prs_invalid,
+           "GitHub returned invalid or mismatched pull request data."
+         )}
+    end
+  end
+
+  defp valid_cleanup_pull_request?(
+         %{"state" => state, "merged_at" => merged_at} = pull_request,
+         context
+       )
+       when state in ["open", "closed"] do
+    get_in(pull_request, ["head", "ref"]) == context.branch and
+      get_in(pull_request, ["head", "repo", "full_name"]) ==
+        context.target.github_repository and
+      valid_cleanup_merge_state?(state, merged_at)
+  end
+
+  defp valid_cleanup_pull_request?(_pull_request, _context), do: false
+
+  defp valid_cleanup_merge_state?("open", nil), do: true
+  defp valid_cleanup_merge_state?("closed", nil), do: true
+
+  defp valid_cleanup_merge_state?("closed", merged_at) when is_binary(merged_at) do
+    match?({:ok, _datetime, _offset}, DateTime.from_iso8601(merged_at))
+  end
+
+  defp valid_cleanup_merge_state?(_state, _merged_at), do: false
+
+  defp closed_branch_cleanup_decision(_context, []), do: {:ok, {:skip, :pull_request_missing, []}}
+
+  defp closed_branch_cleanup_decision(_context, pull_requests) do
+    urls = Enum.flat_map(pull_requests, &pull_request_url/1)
+
+    cond do
+      Enum.any?(pull_requests, &(Map.get(&1, "state") == "open")) ->
+        {:ok, {:skip, :pull_request_open, urls}}
+
+      Enum.any?(pull_requests, &is_binary(Map.get(&1, "merged_at"))) ->
+        {:ok, {:skip, :pull_request_merged, urls}}
+
+      Enum.all?(pull_requests, &(Map.get(&1, "state") == "closed")) ->
+        {:ok, {:delete, urls}}
+    end
+  end
+
+  defp pull_request_url(%{"html_url" => url}) when is_binary(url), do: [url]
+  defp pull_request_url(_pull_request), do: []
+
+  defp apply_closed_branch_cleanup(context, {:skip, reason, urls}) do
+    branch_cleanup_result(
+      context.target.github_repository,
+      context.branch,
+      :skipped,
+      true,
+      reason,
+      urls,
+      nil
+    )
+  end
+
+  defp apply_closed_branch_cleanup(context, {:delete, urls}) do
+    args = [
+      "api",
+      "--method",
+      "DELETE",
+      "repos/#{context.target.github_repository}/git/refs/heads/#{context.branch}"
+    ]
+
+    case execute_command(context, :branch_cleanup_delete, "gh", args) do
+      {:ok, %{status: 0}} ->
+        branch_cleanup_result(
+          context.target.github_repository,
+          context.branch,
+          :passed,
+          true,
+          :closed_branch_deleted,
+          urls,
+          nil
+        )
+
+      {:ok, %{status: status, output: output}} ->
+        if String.contains?(output, ["HTTP 404", "Reference does not exist"]) do
+          branch_cleanup_result(
+            context.target.github_repository,
+            context.branch,
+            :passed,
+            true,
+            :branch_already_absent,
+            urls,
+            nil
+          )
+        else
+          branch_cleanup_result(
+            context.target.github_repository,
+            context.branch,
+            :blocked,
+            true,
+            :cleanup_failed,
+            urls,
+            command_failure(:branch_cleanup_delete, "gh", args, status, output)
+          )
+        end
+
+      {:error, reason} ->
+        branch_cleanup_result(
+          context.target.github_repository,
+          context.branch,
+          :blocked,
+          true,
+          :cleanup_failed,
+          urls,
+          command_error(:branch_cleanup_delete, "gh", args, reason)
+        )
+    end
+  end
+
+  defp branch_cleanup_result(repository, branch, status, attempted, reason, urls, failure) do
+    %{
+      status: status,
+      attempted: attempted,
+      github_repository: repository,
+      branch: branch,
+      reason: reason,
+      pr_urls: urls,
+      failure: failure
+    }
+  end
+
+  defp cleanup_failure(reason, summary),
+    do: failure(reason, summary, :branch_cleanup_prs, "gh", [], nil, nil, %{})
 
   @doc false
   @spec run_for_test(
@@ -737,6 +969,16 @@ defmodule SymphonyElixir.PublishHandoff do
       metadata: metadata
     }
   end
+
+  defp validate_delivery_context(%ExecutionContext{role: role} = context)
+       when role in [:implementation, :landing] do
+    case ExecutionContext.validate(context) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :invalid_publish_handoff_context}
+    end
+  end
+
+  defp validate_delivery_context(_context), do: {:error, :invalid_publish_handoff_context}
 
   defp require_pr_url(nil, step, command, args) do
     {:blocked, failure(:"#{step}_missing_pr_url", "#{step} did not return a PR URL.", step, command, args, 0, nil, %{})}

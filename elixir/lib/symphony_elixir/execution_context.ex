@@ -18,6 +18,25 @@ defmodule SymphonyElixir.ExecutionContext do
     :docs_reviewer,
     :security_reviewer
   ]
+  @delivery_auth_environment ~w(
+    GH_TOKEN
+    GH_ENTERPRISE_TOKEN
+    GITHUB_TOKEN
+    GITHUB_ENTERPRISE_TOKEN
+    GIT_ASKPASS
+    GIT_SSH
+    GIT_SSH_COMMAND
+    SSH_ASKPASS
+    SSH_ASKPASS_REQUIRE
+    SSH_AUTH_SOCK
+  )
+  @non_landing_git_environment %{
+    "GIT_CONFIG_COUNT" => "1",
+    "GIT_CONFIG_KEY_0" => "credential.helper",
+    "GIT_CONFIG_VALUE_0" => "",
+    "GIT_SSH_COMMAND" => "false",
+    "GIT_TERMINAL_PROMPT" => "0"
+  }
 
   @enforce_keys [
     :target,
@@ -36,6 +55,7 @@ defmodule SymphonyElixir.ExecutionContext do
   defstruct @enforce_keys
 
   @type implementation_role :: :implementation
+  @type landing_role :: :landing
 
   @type review_role ::
           :source_reviewer
@@ -45,7 +65,7 @@ defmodule SymphonyElixir.ExecutionContext do
           | :docs_reviewer
           | :security_reviewer
 
-  @type role :: implementation_role() | review_role()
+  @type role :: implementation_role() | landing_role() | review_role()
   @type run_id :: {String.t(), String.t()}
 
   @type constructor_options ::
@@ -116,10 +136,11 @@ defmodule SymphonyElixir.ExecutionContext do
 
   defp build(target, issue, opts) do
     policy = opts.policy
+    role = top_level_role(issue.state)
     runner_name = target.runner_policy["default"]
     runner_config = target.runner_policy["runners"][runner_name]
 
-    with {:ok, profile_name} <- select_child_profile(runner_config, :implementation, nil),
+    with {:ok, profile_name} <- select_child_profile(runner_config, role, nil),
          {:ok, profile} <- resolve_profile(runner_config, profile_name),
          {:ok, workspace_path} <- workspace_path(target, issue.identifier, opts.worker_host) do
       {:ok,
@@ -131,7 +152,7 @@ defmodule SymphonyElixir.ExecutionContext do
          runner_name: own_binary(runner_name),
          runner_config: own_json(runner_config),
          policy: own_json(policy),
-         role: :implementation,
+         role: role,
          execution_profile: own_term(profile),
          timeout_ms: profile.timeout_ms,
          max_retries: profile.max_retries,
@@ -139,6 +160,12 @@ defmodule SymphonyElixir.ExecutionContext do
        }}
     end
   end
+
+  defp top_level_role(state) when is_binary(state) do
+    if String.downcase(String.trim(state)) == "merging", do: :landing, else: :implementation
+  end
+
+  defp top_level_role(_state), do: :implementation
 
   @spec derive_child(t(), review_role(), child_options()) :: {:ok, t()} | {:error, error()}
   def derive_child(%__MODULE__{} = parent, role, opts) do
@@ -171,6 +198,30 @@ defmodule SymphonyElixir.ExecutionContext do
       do: {target_id, issue_id}
 
   def run_id(_context), do: nil
+  @spec refresh_dispatch_role(t(), Issue.t()) :: {:ok, t()} | {:error, error()}
+  def refresh_dispatch_role(%__MODULE__{} = context, %Issue{} = issue) do
+    role = top_level_role(issue.state)
+
+    with :ok <- validate_context(context),
+         :ok <- validate_issue(issue),
+         true <- context.issue_id == issue.id and context.issue_identifier == issue.identifier,
+         {:ok, profile_name} <- select_child_profile(context.runner_config, role, nil),
+         {:ok, profile} <- resolve_profile(context.runner_config, profile_name) do
+      {:ok,
+       %{
+         context
+         | role: role,
+           execution_profile: own_term(profile),
+           timeout_ms: profile.timeout_ms,
+           max_retries: profile.max_retries
+       }}
+    else
+      false -> {:error, :invalid_issue}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def refresh_dispatch_role(_context, _issue), do: {:error, :invalid_context}
 
   @spec validate(t()) :: :ok | {:error, :invalid_context}
   def validate(%__MODULE__{} = context), do: validate_context(context)
@@ -193,6 +244,23 @@ defmodule SymphonyElixir.ExecutionContext do
 
   def safe_provenance(_context), do: {:error, :invalid_context}
 
+  @spec worker_environment(role()) :: %{String.t() => String.t() | false}
+  def worker_environment(:landing) do
+    Enum.reduce(@delivery_auth_environment, %{}, fn name, environment ->
+      case System.get_env(name) do
+        value when is_binary(value) and value != "" -> Map.put(environment, name, value)
+        _missing -> environment
+      end
+    end)
+  end
+
+  def worker_environment(role) when role in [:implementation | @review_roles] do
+    Map.merge(
+      Map.new(@delivery_auth_environment, &{&1, false}),
+      @non_landing_git_environment
+    )
+  end
+
   defp validate_review_role(role) when role in @review_roles, do: :ok
   defp validate_review_role(_role), do: {:error, :invalid_role}
 
@@ -204,7 +272,7 @@ defmodule SymphonyElixir.ExecutionContext do
          :ok <- validate_context_issue(context),
          :ok <- validate_policy(context.policy),
          :ok <- validate_worker_host(context.worker_host),
-         true <- context.role == :implementation or context.role in @review_roles,
+         true <- context.role in [:implementation, :landing] or context.role in @review_roles,
          {:ok, expected_workspace_path} <-
            workspace_path(target, context.issue_identifier, context.worker_host),
          true <- context.workspace_path == expected_workspace_path,
@@ -543,7 +611,10 @@ defmodule SymphonyElixir.ExecutionContext do
 
   defp valid_runner_entry?(runners, runner_name) do
     runner = Map.fetch!(runners, runner_name)
-    match?({:ok, _profile}, resolve_profile(runner, "implementation"))
+
+    Enum.all?(["implementation", "landing"], fn profile_name ->
+      match?({:ok, _profile}, resolve_profile(runner, profile_name))
+    end)
   end
 
   defp resolve_profile(runner, name) when is_map(runner) and not is_struct(runner) do

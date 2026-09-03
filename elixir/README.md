@@ -617,15 +617,34 @@ elsewhere in `symphony.yml` is not protected when the host proves that the effec
 policy is unchanged. Missing or inconsistent host changed-file evidence blocks auto-land.
 
 `auto_land.dry_run` defaults to `true`, so Symphony classifies and records an auto-land decision
-without merging. Setting `auto_land.dry_run: false` is the opt-in for guarded real auto-land: the
-classifier can move eligible work to `Merging`, where the existing land flow performs final check
-and review polling before merge. The project remains responsible for how deployments are performed,
-how rollback or rollback-plan proof is generated, where monitoring signals originate, and how
-incident intake creates tracker work.
+without merging. Setting `auto_land.dry_run: false` opts into guarded real auto-land. After an
+implementation worker completes, the host validates its evidence, publishes and links the pull
+request, and moves eligible work to `Merging`. That state causes a fresh, dedicated landing worker to
+revalidate checks, reviews, sync state, and mergeability before merge. An implementation worker does
+not publish its own branch or pull request and cannot enter the landing flow by changing issue state
+during its session; the prompt's dispatch-time `Current status` must already be `Merging`.
+
+Symphony uses three separate delivery terms:
+
+- **Publication** is the host-owned creation or update of the deterministic `ticket/<issue-id>`
+  branch and its pull request after implementation evidence passes.
+- **Landing** is a dedicated `:landing` execution role. It operates only on that existing pull
+  request and branch after the issue enters `Merging`.
+- **Branch cleanup** removes stale remote state after a terminal outcome. Routine `Rework` keeps the
+  same deterministic branch and pull request. GitHub's `deleteBranchOnMerge` setting removes merged
+  branches. For a terminal closed-unmerged pull request, the host deletes the deterministic branch
+  only after GitHub returns the exact repository and head ref and confirms that no matching pull
+  request is open or merged. An already absent branch is a successful cleanup result.
+
+Implementation and review worker processes do not receive the standard GitHub token or SSH
+authentication environment. Symphony also disables interactive Git authentication and credential
+helpers for those roles. The landing role receives delivery authentication and is the only worker
+role permitted to make the remote writes needed for the existing pull request. Host-side delivery
+gates remain authoritative for publication and terminal branch cleanup.
 
 For protected changes, a human authorizes landing by moving the Linear issue from `Human Review` to
-`Merging`. Symphony then revalidates pull request checks, reviews, sync state, and mergeability before
-the merge.
+`Merging`. The host then dispatches the same dedicated landing flow. The project remains responsible
+for deployment, rollback evidence, monitoring signals, and incident intake.
 
 Optional flags:
 
@@ -864,12 +883,14 @@ runtime:
   `github_publish_unavailable`. This is narrower than making `dangerFullAccess` the global default
   because only the named local runtime profile expands the Codex turn sandbox and only runs that
   declare the capability names are blocked by these checks.
-- `runtime.runners.codex.execution_profiles` covers the production-selected implementation workload
-  plus six reviewer/runtime QA workloads: `source_reviewer`, `test_reviewer`, `runtime_qa`,
-  `product_visual_review`, `docs_reviewer`, and `security_reviewer`. Each profile supports typed
-  reasoning, timeout, retry, budget, model, or command settings. Planning remains in the
-  implementation session, and quality-gate synthesis is host-owned Elixir rather than a launched
-  Codex profile. `runtime.runners.codex.model` is the default launch model. Profile `model` values
+- `runtime.runners.codex.execution_profiles` covers the production-selected implementation and
+  landing workloads plus six reviewer/runtime QA workloads: `source_reviewer`, `test_reviewer`,
+  `runtime_qa`, `product_visual_review`, `docs_reviewer`, and `security_reviewer`. The `landing`
+  profile is selected only for `Merging`; every other top-level active state uses `implementation`.
+  Each profile supports typed reasoning, timeout, retry, budget, model, or command settings. Planning
+  remains in the implementation session, and quality-gate synthesis is host-owned Elixir rather
+  than a launched Codex profile. `runtime.runners.codex.model` is the default launch model. Profile
+  `model` values
   override it for that launch, and explicit model flags already present in
   `runtime.runners.codex.command` control the command unchanged. Operators do not need to rewrite
   the argv list for normal profile tuning.

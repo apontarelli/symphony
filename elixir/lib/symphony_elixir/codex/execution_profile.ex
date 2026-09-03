@@ -22,6 +22,7 @@ defmodule SymphonyElixir.Codex.ExecutionProfile do
 
   @defaults %{
     "implementation" => %{"reasoning_effort" => nil, "budget" => "standard"},
+    "landing" => %{"reasoning_effort" => nil, "budget" => "standard"},
     "source_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
     "test_reviewer" => %{"reasoning_effort" => "medium", "budget" => "standard"},
     "runtime_qa" => %{"reasoning_effort" => "medium", "budget" => "standard"},

@@ -36,6 +36,7 @@ defmodule SymphonyElixir.PromptBuilder do
         %{
           "attempt" => Keyword.get(opts, :attempt),
           "issue" => issue |> Map.from_struct() |> to_solid_map(),
+          "execution" => %{"role" => prompt_role(issue.state)},
           "policy" => policy |> to_solid_value(),
           "policy_json" => Jason.encode!(policy, pretty: true),
           "workflow" => workflow_context(workflow_module_resolution)
@@ -75,7 +76,8 @@ defmodule SymphonyElixir.PromptBuilder do
              issue,
              context.policy,
              resolution,
-             attempt
+             attempt,
+             context.role
            ) do
       {:ok, %{prompt: prompt, workflow_module_resolution: resolution}}
     end
@@ -323,12 +325,13 @@ defmodule SymphonyElixir.PromptBuilder do
     _exception -> {:error, :prompt_template_parse_failed}
   end
 
-  defp render_context_prompt(parsed_template, issue, policy, resolution, attempt) do
+  defp render_context_prompt(parsed_template, issue, policy, resolution, attempt, role) do
     prompt =
       parsed_template
       |> Solid.render!(
         %{
           "attempt" => attempt,
+          "execution" => %{"role" => Atom.to_string(role)},
           "issue" => issue |> Map.from_struct() |> to_solid_map(),
           "policy" => to_solid_value(policy),
           "policy_json" => Jason.encode!(policy, pretty: true),
@@ -343,6 +346,12 @@ defmodule SymphonyElixir.PromptBuilder do
   rescue
     _exception -> {:error, :prompt_render_failed}
   end
+
+  defp prompt_role(state) when is_binary(state) do
+    if String.downcase(String.trim(state)) == "merging", do: "landing", else: "implementation"
+  end
+
+  defp prompt_role(_state), do: "implementation"
 
   @doc false
   @spec workpad_policy_stamp(map()) :: String.t()

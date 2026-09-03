@@ -23,6 +23,14 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert Enum.map(modules, & &1.id) == ["auto-land-routing", "land-merge"]
     assert Enum.all?(modules, &(&1.compatibility == %{workflow_schema: "v1"}))
     assert Enum.all?(modules, &(&1.pins.registry == "registry@v1"))
+
+    assert Enum.find(modules, &(&1.id == "auto-land-routing")).content =~
+             "The host validates the evidence, publishes and links the pull request"
+
+    land_merge = Enum.find(modules, &(&1.id == "land-merge"))
+    assert land_merge.content =~ "Current status` is `Merging`"
+    assert land_merge.content =~ "Do not create a new branch, bookmark, or pull request"
+    assert land_merge.content =~ "Merge only when checks are green"
   end
 
   test "core module registry exposes v1 default modules with metadata" do
@@ -133,7 +141,7 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert {:ok, prompt} = ModuleRegistry.compile_default_preset()
 
     assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `{{ issue.identifier }}`."
-    assert prompt =~ "Goal: Complete the ticket end to end"
+    assert prompt =~ "Goal: Complete the ticket in the assigned workspace"
     assert prompt =~ "End the turn after reaching the workflow-defined handoff or terminal state."
     assert prompt =~ "Stop early only when required auth, permissions, secrets, or tools are unavailable; record the exact blocker and unblock condition."
     assert prompt =~ "Success criteria:"
@@ -152,7 +160,10 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "high-signal tests"
     assert prompt =~ "Prefer simple, obvious designs"
     assert prompt =~ "plan runtime QA against the changed journey"
-    assert prompt =~ "Commit and publish only after implementation validation"
+    assert prompt =~ "Do not create, move, push, or delete a branch or bookmark."
+    assert prompt =~ "Do not create, update, merge, or close a pull request."
+    assert prompt =~ "Leave validated implementation changes for the host to publish."
+    assert prompt =~ "Run this module only when the prompt's `Current status` is `Merging`."
     assert prompt =~ "Required gates are changed-scope by default"
     assert prompt =~ "scenario QA to"
     assert prompt =~ "Review the changed scope with these lenses"
@@ -164,9 +175,9 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "future host-owned"
     assert prompt =~ "### Acceptance Criteria"
     assert prompt =~ "### Confusions"
-    assert prompt =~ "gh pr view --comments"
-    assert prompt =~ "gh api repos/<owner>/<repo>/pulls/<pr>/comments"
-    assert prompt =~ "gh pr view --json reviews"
+    assert prompt =~ "For implementation states, read an attached PR's"
+    assert prompt =~ "Do not post replies or modify the PR from an implementation worker."
+    assert prompt =~ "Merge only when checks are green"
     refute prompt =~ "## Related skills"
     refute prompt =~ ".codex/skills"
     refute Regex.match?(~r/`symphony-[a-z-]+`/, prompt)
@@ -190,10 +201,13 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert automated_review.content =~ "Fix-required findings start another repair pass"
 
     assert {:ok, vcs_commit_push} = ModuleRegistry.module_defaults("vcs-commit-push", 0)
-    assert vcs_commit_push.content =~ "after implementation validation, required quality gates"
-    assert vcs_commit_push.content =~ "no unresolved fix-required findings"
-    assert vcs_commit_push.content =~ "`Reviewer Testing` section"
-    assert vcs_commit_push.content =~ "not expand this into full UAT"
+    assert vcs_commit_push.content =~ "implementation validation"
+    assert vcs_commit_push.content =~ "required quality gates"
+    assert vcs_commit_push.content =~ "no unresolved"
+    assert vcs_commit_push.content =~ "Leave validated implementation changes for the host"
+    assert vcs_commit_push.content =~ "Do not create, move, push, or"
+    assert vcs_commit_push.content =~ "Do not create, update, merge, or close a pull request"
+    assert vcs_commit_push.content =~ "Current status` is `Merging`"
 
     assert {:ok, project_closeout} = ModuleRegistry.module_defaults("project-closeout", 0)
     assert project_closeout.content =~ "durable repository docs"
@@ -267,9 +281,48 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert prompt =~ "Role: You are an autonomous software-engineering agent resolving Linear ticket `SID-292`."
     assert prompt =~ "Identifier: SID-292"
     assert prompt =~ "## Core Workflow Modules"
+    assert prompt =~ "Execution role: `implementation`."
     assert prompt =~ "### Linear Operation"
     assert prompt =~ "### Quality Gates"
+    refute prompt =~ "### Land Merge"
+    assert prompt =~ "Keep the host-owned deterministic branch and pull request for routine rework"
+    assert prompt =~ "do not push, create or mutate pull requests, merge, deploy"
     refute prompt =~ "## Related skills"
     refute Regex.match?(~r/`symphony-[a-z-]+`/, prompt)
+
+    default_state_prompt = PromptBuilder.build_prompt(%{issue | state: nil})
+    assert default_state_prompt =~ "Execution role: `implementation`."
+    refute default_state_prompt =~ "### Land Merge"
+  end
+
+  test "Merging issues render only landing core modules" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "   \n")
+
+    issue = %Issue{
+      identifier: "SID-293",
+      title: "Land the approved pull request",
+      description: "Complete guarded landing.",
+      state: "Merging",
+      url: "https://linear.example/SID-293",
+      labels: []
+    }
+
+    prompt = PromptBuilder.build_prompt(issue)
+
+    assert prompt =~ "Execution role: `landing`."
+    assert prompt =~ "Goal: Land the existing approved pull request"
+    assert prompt =~ "Active landing module set:"
+    assert prompt =~ "### Linear Operation"
+    assert prompt =~ "### Land Merge"
+    assert prompt =~ "You may perform only the remote delivery writes required to land that pull request"
+    assert prompt =~ "### Debug Run Recovery"
+    refute prompt =~ "### Implementation Loop"
+    refute prompt =~ "### VCS Commit Push"
+    refute prompt =~ "### Pull Sync"
+    refute prompt =~ "### Quality Gates"
+    refute prompt =~ "### Automated Review"
+    refute prompt =~ "### Auto Land Routing"
+    refute prompt =~ "### Rework"
+    refute prompt =~ "### Project Closeout"
   end
 end

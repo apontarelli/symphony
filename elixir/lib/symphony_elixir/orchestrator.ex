@@ -1161,6 +1161,22 @@ defmodule SymphonyElixir.Orchestrator do
     terminate_running_issue(state, run_id, false)
   end
 
+  @doc false
+  @spec complete_issue_for_test(State.t(), ExecutionContext.t(), Issue.t(), map()) :: State.t()
+  def complete_issue_for_test(
+        %State{} = state,
+        %ExecutionContext{} = context,
+        %Issue{} = issue,
+        completion
+      )
+      when is_map(completion) do
+    complete_issue(
+      state,
+      ExecutionContext.run_id(context),
+      %{execution_context: context, issue: issue, completion: completion}
+    )
+  end
+
   defp reconcile_running_issue_states([], state, _active_states, _terminal_states), do: state
 
   defp reconcile_running_issue_states([issue | rest], state, active_states, terminal_states) do
@@ -2149,14 +2165,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp execution_context_for_dispatch(
          %State{},
-         %Issue{id: issue_id, identifier: identifier},
+         %Issue{id: issue_id, identifier: identifier} = issue,
          _preferred_worker_host,
          %ExecutionContext{issue_id: issue_id, issue_identifier: identifier} = context
        ) do
-    case ExecutionContext.validate(context) do
-      :ok -> {:ok, context}
-      {:error, _reason} -> {:error, :invalid_execution_context}
-    end
+    ExecutionContext.refresh_dispatch_role(context, issue)
   end
 
   defp execution_context_for_dispatch(
@@ -2287,19 +2300,29 @@ defmodule SymphonyElixir.Orchestrator do
          owner_id,
          authority
        ) do
-    case start_durable_authority(authority) do
-      {:ok, running_authority} ->
-        state
-        |> spawn_issue_in_context(
-          refreshed_issue,
-          attempt,
-          context,
-          running_authority
-        )
-        |> release_untracked_lease(context, owner_id)
+    case ExecutionContext.refresh_dispatch_role(context, refreshed_issue) do
+      {:ok, refreshed_context} ->
+        case start_durable_authority(authority) do
+          {:ok, running_authority} ->
+            state
+            |> spawn_issue_in_context(
+              refreshed_issue,
+              attempt,
+              refreshed_context,
+              running_authority
+            )
+            |> release_untracked_lease(refreshed_context, owner_id)
+
+          {:error, reason} ->
+            Logger.warning("Skipping dispatch; durable running transition failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+
+            release_durable_authority(authority)
+            release_coordinator_lease(pinned_context, owner_id)
+            state
+        end
 
       {:error, reason} ->
-        Logger.warning("Skipping dispatch; durable running transition failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
+        Logger.warning("Skipping dispatch; final execution role selection failed for #{execution_context_log(pinned_context)}: #{inspect(reason)}")
 
         release_durable_authority(authority)
         release_coordinator_lease(pinned_context, owner_id)
@@ -2945,16 +2968,59 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp run_durable_cleanup(%RunAuthority{} = authority, %ExecutionContext{} = context) do
-    result =
-      RunAuthority.run_side_effect(
-        authority,
-        :workspace_cleanup,
-        "cleanup:#{authority.lifecycle.sequence}",
-        %{workspace_path: context.workspace_path},
-        fn -> remove_workspace_outcome(context) end
-      )
+    with :ok <- run_durable_branch_cleanup(authority, context) do
+      result =
+        RunAuthority.run_side_effect(
+          authority,
+          :workspace_cleanup,
+          "cleanup:#{authority.lifecycle.sequence}",
+          %{workspace_path: context.workspace_path},
+          fn -> remove_workspace_outcome(context) end
+        )
 
-    finish_durable_cleanup(authority, result)
+      finish_durable_cleanup(authority, result)
+    end
+  end
+
+  defp run_durable_branch_cleanup(authority, context) do
+    if branch_cleanup_allowed?(context) do
+      result =
+        RunAuthority.run_side_effect(
+          authority,
+          :publish_handoff,
+          "terminal-branch-cleanup",
+          %{
+            issue_identifier: context.issue_identifier,
+            repository: PublishTarget.resolve_policy(context.policy).github_repository
+          },
+          fn -> closed_branch_cleanup_outcome(context) end
+        )
+
+      case result do
+        {:ok, _outcome, _effect} -> :ok
+        {:completed, _effect} -> :ok
+        {:failed, effect} -> {:error, {:branch_cleanup_failed, effect}}
+        {:blocked, effect} -> {:error, {:branch_cleanup_reconciliation_required, effect}}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :ok
+    end
+  end
+
+  defp branch_cleanup_allowed?(context) do
+    gates = context.target.external_side_effect_gates
+
+    publish_handoff_policy?(context.policy) and gates["vcs_publish"] == "allow" and
+      gates["pull_request_write"] == "allow"
+  end
+
+  defp closed_branch_cleanup_outcome(context) do
+    case PublishHandoff.cleanup_closed_branch_context(context) do
+      %{status: status} = result when status in [:passed, :skipped] -> {:ok, result}
+      %{status: :blocked} = result -> {:failed, result}
+      {:error, reason} -> {:failed, %{status: :blocked, reason: inspect(reason)}}
+    end
   end
 
   defp remove_workspace_outcome(context) do
@@ -3460,6 +3526,18 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states, _context),
     do: {:ok, issue}
+
+  defp complete_issue(
+         %State{} = state,
+         run_id,
+         %{execution_context: %ExecutionContext{role: :landing}}
+       ) do
+    %{
+      state
+      | completed: MapSet.put(state.completed, run_id),
+        retry_attempts: Map.delete(state.retry_attempts, run_id)
+    }
+  end
 
   defp complete_issue(%State{} = state, run_id, running_entry) do
     running_entry =

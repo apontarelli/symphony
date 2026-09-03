@@ -657,10 +657,10 @@ MUST be deterministic for a given preset ref and implementation version.
 
 #### 5.3.8 `auto_land` (object, OPTIONAL extension)
 
-`auto_land` describes the classification policy used before final handoff. It can select dry-run
-auto-land, guarded real auto-land, human review, rework, or blocked routing. Real auto-land MUST use
-the configured land/merge flow for the final merge; classifiers MUST NOT bypass that flow with a
-direct merge command.
+`auto_land` describes the host-side classification policy used after implementation evidence passes.
+It can select dry-run auto-land, guarded real auto-land, human review, rework, or blocked routing.
+The host owns pull-request publication. Real auto-land MUST use a dedicated landing worker for the
+final merge; classifiers and implementation workers MUST NOT bypass that flow with a direct merge.
 
 Fields:
 
@@ -687,8 +687,9 @@ Fields:
   - Default: `true`.
   - When true, Symphony may classify and record an `auto_land` decision but MUST NOT merge or land
     the PR; the selected tracker state remains the human-review visibility state.
-  - When false, the repository has explicitly opted into guarded real auto-land. A successful
-    `auto_land` decision MAY move the issue to `Merging`, where the land flow performs final
+  - When false, the repository has explicitly opted into guarded real auto-land. After the
+    implementation worker stops, a successful `auto_land` decision MAY cause the host to publish and
+    link the pull request and move the issue to `Merging`, where a fresh landing worker performs final
     check/review polling and the merge.
 
 Changing the effective `auto_land` policy is itself authority-sensitive and forces human review.
@@ -722,8 +723,13 @@ Decision routes:
 - `blocked`: one or more required evidence checks are missing.
 
 A human approves an authority-sensitive change by moving its issue from `Human Review` to `Merging`.
-The landing flow MUST revalidate the pull request checks, reviews, sync state, and mergeability before
-merge. The tracker transition authorizes the landing attempt; it does not bypass those checks.
+`Merging` MUST dispatch with the `landing` role and profile; other top-level active states dispatch
+as `implementation`. The landing worker MUST revalidate pull-request checks, reviews, sync state, and
+mergeability before merge and MUST limit delivery writes to the existing published pull request and
+its deterministic branch. Implementation and review worker launches MUST withhold standard GitHub
+token and SSH authentication, disable interactive Git authentication and credential helpers, and
+exclude landing workflow modules. The tracker transition authorizes the landing attempt; it does not
+bypass those checks.
 
 #### 5.3.9 `review_routing` (object, OPTIONAL extension)
 
@@ -1081,10 +1087,10 @@ Runner-specific config:
   - `read_timeout_ms`: integer, default `30000`.
   - `stall_timeout_ms`: integer, default `300000`; if `<= 0`, stall detection is disabled.
   - `execution_profiles`: map of named job profiles, default implementation-defined conservative
-    profiles for `implementation`, `planner`, `source_reviewer`, `test_reviewer`, `runtime_qa`,
-    `product_visual_review`, `docs_reviewer`, `security_reviewer`, and `synthesis`. Profiles MAY set
-    `model`, runtime-specific reasoning settings, `budget`, `timeout_ms`, `max_retries`, or an
-    explicit `command`.
+    profiles for `implementation`, `landing`, `source_reviewer`, `test_reviewer`, `runtime_qa`,
+    `product_visual_review`, `docs_reviewer`, and `security_reviewer`. Profiles MAY set `model`,
+    runtime-specific reasoning settings, `budget`, `timeout_ms`, `max_retries`, or an explicit
+    `command`.
 
 CodexAppServer runner-specific fields such as `approval_policy`, `thread_sandbox`, and
 `turn_sandbox_policy` are pass-through Codex config values under the selected Codex runner. Supported
@@ -2216,12 +2222,12 @@ result, or a store error MUST prevent acquisition, renewal, transfer, release, a
 
 ### 10.11 Durable Side-Effect Fencing and Process Ownership
 
-Tracker writes, publish preflight, publish handoff, handoff-route recording, and workspace cleanup
-MUST pass through a durable side-effect intent before the external call starts. The intent identity
-MUST contain the immutable admitted run ID, target ID, tracker issue ID, side-effect kind, and a
-stable idempotency key. The store MUST derive a target-scoped artifact path from the pinned workspace
-authority and that identity. It MUST validate the current owner and fencing token in the same
-transaction that creates or classifies the intent.
+Tracker writes, publish preflight, publish handoff, handoff-route recording, terminal branch cleanup,
+and workspace cleanup MUST pass through a durable side-effect intent before the external call starts.
+The intent identity MUST contain the immutable admitted run ID, target ID, tracker issue ID,
+side-effect kind, and a stable idempotency key. The store MUST derive a target-scoped artifact path
+from the pinned workspace authority and that identity. It MUST validate the current owner and fencing
+token in the same transaction that creates or classifies the intent.
 
 A known successful or failed outcome MUST be durable and idempotent. Repeating the same identity and
 intent MUST return the stored outcome without another external call. A changed intent under the same
@@ -2230,6 +2236,13 @@ outcome that cannot be proven MUST become reconciliation-required and MUST NOT r
 Stored intent and outcome evidence MUST be JSON-safe and secret-redacted. Pinned delivery gates MUST
 be checked before creating a new intent; workspace cleanup additionally requires the durable
 cleanup-pending lifecycle and pinned cleanup authority.
+
+Terminal branch cleanup MUST derive the exact deterministic `ticket/<issue-id>` ref from pinned run
+authority and fail closed on invalid repository, ref, pagination, or pull-request state data. It MUST
+preserve the branch when any matching pull request is open or merged. It MAY delete the ref only when
+every matching pull request is closed and unmerged, and MUST treat an already absent ref as complete.
+Routine `Rework` MUST preserve the same branch and pull request. Merged branch deletion remains
+GitHub's configured `deleteBranchOnMerge` responsibility.
 
 A fenced owner that starts a local process group MUST record its process-group identity durably.
 Lease transfer, release, and later acquisition MUST fail while the prior token has a running or
@@ -2394,14 +2407,15 @@ implementation explicitly moves it into runtime code.
 Route types:
 
 - `auto_land`
-  - Use when policy allows the agent to publish, merge/land, and complete the ticket without
-    additional human approval.
+  - Use when policy allows the host to publish and a dedicated landing worker to merge/land and
+    complete the ticket without additional human approval.
   - Allowed only when all required checks pass, automated review has no blocking findings, PR or
     merge checks are green if a PR is used, no actionable reviewer feedback is outstanding, and the
     risk/surface evidence stays within the configured auto-land envelope.
   - Dry-run auto-land records eligibility without merging. Real auto-land requires explicit
-    repository opt-in and should transition to `Merging` so the land flow owns final polling and
-    merge execution.
+    repository opt-in; after the implementation worker stops, the host publishes the deterministic
+    branch and pull request and should transition to `Merging` so a fresh landing worker owns final
+    polling and merge execution.
 - `human_review`
   - Use when work is complete and validated, but policy or risk requires Antonio or another human to
     review before merge/land.
@@ -2524,14 +2538,14 @@ Baseline route decision matrix:
 Reviewer feedback re-entry:
 
 - When a PR or review surface has actionable comments, the route is not complete until every
-  comment is addressed in code/docs/tests or receives an explicit justified pushback.
+  comment is addressed in code/docs/tests or has a justified rejection recorded for host delivery.
 - If new reviewer feedback arrives after `human_review` or `product_visual_review`, the tracker
   issue SHOULD move to `Rework`.
 - A Rework run MUST read top-level PR comments, inline review comments, and review summaries before
   editing, then update the single workpad checklist with each actionable item and its disposition.
-- Antonio does not need to take over locally for PR-style feedback loops; the next agent run owns
-  applying changes, replying with justified pushback when appropriate, revalidating, pushing, and
-  selecting a new completion route.
+- Routine rework MUST retain the host-owned deterministic branch and pull request. The next
+  implementation run owns the code, documentation, tests, validation, and new completion evidence;
+  the host owns replies and publication after that evidence passes.
 
 ### 11.8 Incident Signal Intake Extension (OPTIONAL)
 

@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.ExecutionContextTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.ExecutionContext
+  alias SymphonyElixir.{ExecutionContext, Orchestrator}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetContext
   alias SymphonyElixir.TargetRegistry.Composition
@@ -56,12 +56,16 @@ defmodule SymphonyElixir.ExecutionContextTest do
             ExecutionContext.implementation_role()
     def implementation(role), do: role
 
+    @spec landing(ExecutionContext.landing_role()) :: ExecutionContext.landing_role()
+    def landing(role), do: role
+
     @spec review(ExecutionContext.review_role()) :: ExecutionContext.review_role()
     def review(role), do: role
   end
 
   test "exports distinct role and closed option types" do
     assert TypespecConsumer.implementation(:implementation) == :implementation
+    assert TypespecConsumer.landing(:landing) == :landing
     assert TypespecConsumer.review(:source_reviewer) == :source_reviewer
     assert {:ok, types} = Code.Typespec.fetch_types(ExecutionContext)
 
@@ -69,7 +73,7 @@ defmodule SymphonyElixir.ExecutionContextTest do
       MapSet.new(types, fn {_kind, {name, _type, _args}} -> name end)
 
     assert MapSet.subset?(
-             MapSet.new(~w(implementation_role review_role constructor_options child_options)a),
+             MapSet.new(~w(implementation_role landing_role review_role constructor_options child_options)a),
              type_names
            )
   end
@@ -97,6 +101,73 @@ defmodule SymphonyElixir.ExecutionContextTest do
     assert context.policy == policy
     assert ExecutionContext.run_id(context) == {"alpha", "issue-407"}
     assert ExecutionContext.run_id(:invalid) == nil
+  end
+
+  @tag :tmp_dir
+  test "constructs a landing context for the Merging state", %{tmp_dir: tmp_dir} do
+    target = target_context!(tmp_dir)
+    issue = %Issue{id: "issue-408", identifier: "SID-408", state: "Merging"}
+    policy = %{"sandbox" => %{"network_access" => false}, "secrets" => []}
+
+    assert {:ok, %ExecutionContext{} = context} = ExecutionContext.new(target, issue, policy: policy)
+    assert context.role == :landing
+    assert context.execution_profile.name == "landing"
+    assert context.execution_profile.model == nil
+    assert context.workspace_path == Path.join([tmp_dir, "worktrees", "alpha", "SID-408"])
+    assert {:ok, %{role: "landing"}} = ExecutionContext.safe_provenance(context)
+  end
+
+  @tag :tmp_dir
+  test "refreshes a pinned context when dispatch moves into and out of landing", %{tmp_dir: tmp_dir} do
+    target = target_context!(tmp_dir)
+    issue = %Issue{id: "issue-409", identifier: "SID-409", state: "In Progress"}
+    policy = %{"sandbox" => %{"network_access" => false}, "secrets" => []}
+
+    assert {:ok, implementation} = ExecutionContext.new(target, issue, policy: policy)
+
+    assert {:ok, landing} =
+             ExecutionContext.refresh_dispatch_role(%{implementation | role: :implementation}, %{
+               issue
+               | state: "Merging"
+             })
+
+    assert landing.role == :landing
+    assert landing.execution_profile.name == "landing"
+
+    assert {:ok, refreshed_implementation} =
+             ExecutionContext.refresh_dispatch_role(landing, %{issue | state: "Rework"})
+
+    assert refreshed_implementation.role == :implementation
+    assert refreshed_implementation.execution_profile.name == "implementation"
+
+    assert {:error, :invalid_issue} =
+             ExecutionContext.refresh_dispatch_role(implementation, %{issue | id: "other-issue"})
+
+    assert {:error, :invalid_context} =
+             ExecutionContext.refresh_dispatch_role(%{implementation | role: :landing}, issue)
+
+    assert {:error, :invalid_context} =
+             ExecutionContext.refresh_dispatch_role(:invalid, issue)
+  end
+
+  @tag :tmp_dir
+  test "landing completion skips implementation publication and routing", %{tmp_dir: tmp_dir} do
+    target = target_context!(tmp_dir)
+    issue = %Issue{id: "issue-410", identifier: "SID-410", state: "Merging"}
+    policy = %{"sandbox" => %{"network_access" => false}, "secrets" => []}
+
+    assert {:ok, landing} = ExecutionContext.new(target, issue, policy: policy)
+
+    state =
+      Orchestrator.complete_issue_for_test(
+        %Orchestrator.State{},
+        landing,
+        issue,
+        %{changed_files: ["lib/source.ex"], checks: [%{name: "test", status: "passed"}]}
+      )
+
+    assert MapSet.member?(state.completed, ExecutionContext.run_id(landing))
+    assert state.handoff_routes == %{}
   end
 
   @tag :tmp_dir

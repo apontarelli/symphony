@@ -719,6 +719,283 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
              )
   end
 
+  test "terminal cleanup deletes only a closed unmerged deterministic branch", %{
+    issue: issue,
+    alpha: alpha
+  } do
+    parent = self()
+
+    runner = fn %{step: step, args: args} ->
+      send(parent, {:branch_cleanup, step, args})
+
+      output =
+        case step do
+          :branch_cleanup_prs ->
+            Jason.encode!([
+              [
+                %{
+                  "state" => "closed",
+                  "merged_at" => nil,
+                  "html_url" => "https://github.com/example/alpha/pull/419",
+                  "head" => %{
+                    "ref" => "ticket/sid-419",
+                    "repo" => %{"full_name" => "example/alpha"}
+                  }
+                }
+              ]
+            ])
+
+          :branch_cleanup_delete ->
+            ""
+        end
+
+      {:ok, %{status: 0, output: output}}
+    end
+
+    assert {:ok, landing} =
+             ExecutionContext.refresh_dispatch_role(alpha, %{issue | state: "Merging"})
+
+    assert %{
+             status: :passed,
+             reason: :closed_branch_deleted,
+             branch: "ticket/sid-419",
+             pr_urls: ["https://github.com/example/alpha/pull/419"]
+           } = PublishHandoff.cleanup_closed_branch_context(landing, runner: runner)
+
+    assert_receive {:branch_cleanup, :branch_cleanup_prs, list_args}
+    assert ["api", "--method", "GET", "repos/example/alpha/pulls" | _rest] = list_args
+    assert "--paginate" in list_args
+    assert "--slurp" in list_args
+
+    assert_receive {:branch_cleanup, :branch_cleanup_delete,
+                    [
+                      "api",
+                      "--method",
+                      "DELETE",
+                      "repos/example/alpha/git/refs/heads/ticket/sid-419"
+                    ]}
+  end
+
+  test "terminal cleanup preserves branches with no PR or an open or merged PR", %{
+    alpha: alpha
+  } do
+    cases = [
+      {[], :pull_request_missing},
+      {
+        [
+          %{
+            "state" => "open",
+            "merged_at" => nil,
+            "head" => %{
+              "ref" => "ticket/sid-419",
+              "repo" => %{"full_name" => "example/alpha"}
+            }
+          }
+        ],
+        :pull_request_open
+      },
+      {
+        [
+          %{
+            "state" => "closed",
+            "merged_at" => "2026-09-02T12:00:00Z",
+            "head" => %{
+              "ref" => "ticket/sid-419",
+              "repo" => %{"full_name" => "example/alpha"}
+            }
+          }
+        ],
+        :pull_request_merged
+      }
+    ]
+
+    for {pull_requests, expected_reason} <- cases do
+      runner = fn
+        %{step: :branch_cleanup_prs} ->
+          {:ok, %{status: 0, output: Jason.encode!([pull_requests])}}
+
+        %{step: :branch_cleanup_delete} ->
+          flunk("safe cleanup must not delete this branch")
+      end
+
+      assert %{status: :skipped, reason: ^expected_reason} =
+               PublishHandoff.cleanup_closed_branch_context(alpha, runner: runner)
+    end
+  end
+
+  test "terminal cleanup blocks when GitHub returns a different head repository", %{
+    alpha: alpha
+  } do
+    runner = fn
+      %{step: :branch_cleanup_prs} ->
+        {:ok,
+         %{
+           status: 0,
+           output:
+             Jason.encode!([
+               [
+                 %{
+                   "state" => "closed",
+                   "merged_at" => nil,
+                   "head" => %{
+                     "ref" => "ticket/sid-419",
+                     "repo" => %{"full_name" => "other/alpha"}
+                   }
+                 }
+               ]
+             ])
+         }}
+
+      %{step: :branch_cleanup_delete} ->
+        flunk("cleanup must not delete an unverified branch")
+    end
+
+    assert %{
+             status: :blocked,
+             reason: :cleanup_failed,
+             failure: %{reason: :branch_cleanup_prs_invalid}
+           } = PublishHandoff.cleanup_closed_branch_context(alpha, runner: runner)
+  end
+
+  test "terminal cleanup blocks incomplete or inconsistent pull request state", %{
+    alpha: alpha
+  } do
+    invalid_pull_requests = [
+      %{
+        "state" => "closed",
+        "head" => %{
+          "ref" => "ticket/sid-419",
+          "repo" => %{"full_name" => "example/alpha"}
+        }
+      },
+      %{
+        "state" => "open",
+        "merged_at" => "2026-09-02T12:00:00Z",
+        "head" => %{
+          "ref" => "ticket/sid-419",
+          "repo" => %{"full_name" => "example/alpha"}
+        }
+      },
+      %{
+        "state" => "closed",
+        "merged_at" => "not-a-timestamp",
+        "head" => %{
+          "ref" => "ticket/sid-419",
+          "repo" => %{"full_name" => "example/alpha"}
+        }
+      }
+    ]
+
+    for pull_request <- invalid_pull_requests do
+      runner = fn
+        %{step: :branch_cleanup_prs} ->
+          {:ok, %{status: 0, output: Jason.encode!([[pull_request]])}}
+
+        %{step: :branch_cleanup_delete} ->
+          flunk("cleanup must not delete a branch from invalid pull request state")
+      end
+
+      assert %{
+               status: :blocked,
+               failure: %{reason: :branch_cleanup_prs_invalid}
+             } = PublishHandoff.cleanup_closed_branch_context(alpha, runner: runner)
+    end
+  end
+
+  test "terminal cleanup treats an already absent branch as complete", %{alpha: alpha} do
+    runner = fn
+      %{step: :branch_cleanup_prs} ->
+        {:ok,
+         %{
+           status: 0,
+           output:
+             Jason.encode!([
+               [
+                 %{
+                   "state" => "closed",
+                   "merged_at" => nil,
+                   "head" => %{
+                     "ref" => "ticket/sid-419",
+                     "repo" => %{"full_name" => "example/alpha"}
+                   }
+                 }
+               ]
+             ])
+         }}
+
+      %{step: :branch_cleanup_delete} ->
+        {:ok, %{status: 1, output: "HTTP 404: Reference does not exist"}}
+    end
+
+    assert %{status: :passed, reason: :branch_already_absent} =
+             PublishHandoff.cleanup_closed_branch_context(alpha, runner: runner)
+  end
+
+  test "terminal cleanup fails closed on invalid authority and command failures", %{
+    alpha: alpha
+  } do
+    refute_runner = fn _command -> flunk("invalid cleanup must not run a command") end
+
+    assert {:error, :invalid_publish_handoff_context} =
+             PublishHandoff.cleanup_closed_branch_context(:invalid)
+
+    assert {:error, :invalid_publish_handoff_options} =
+             PublishHandoff.cleanup_closed_branch_context(alpha, %{})
+
+    assert {:error, :invalid_publish_handoff_context} =
+             PublishHandoff.cleanup_closed_branch_context(%{alpha | issue_id: ""},
+               runner: refute_runner
+             )
+
+    assert %{status: :skipped, attempted: false, reason: :publish_target_missing} =
+             PublishHandoff.cleanup_closed_branch_context(
+               %{alpha | policy: %{"sandbox" => "restricted"}},
+               runner: refute_runner
+             )
+
+    list_failure_runner = fn
+      %{step: :branch_cleanup_prs} ->
+        {:ok, %{status: 1, output: "list denied"}}
+
+      %{step: :branch_cleanup_delete} ->
+        flunk("cleanup must not delete after pull request lookup fails")
+    end
+
+    assert %{
+             status: :blocked,
+             failure: %{reason: :branch_cleanup_prs_failed}
+           } = PublishHandoff.cleanup_closed_branch_context(alpha, runner: list_failure_runner)
+
+    closed_pull_request = %{
+      "state" => "closed",
+      "merged_at" => nil,
+      "head" => %{
+        "ref" => "ticket/sid-419",
+        "repo" => %{"full_name" => "example/alpha"}
+      }
+    }
+
+    delete_failures = [
+      {:ok, %{status: 1, output: "delete denied"}},
+      {:error, :eacces}
+    ]
+
+    for delete_failure <- delete_failures do
+      runner = fn
+        %{step: :branch_cleanup_prs} ->
+          {:ok, %{status: 0, output: Jason.encode!([[closed_pull_request]])}}
+
+        %{step: :branch_cleanup_delete} ->
+          delete_failure
+      end
+
+      assert %{
+               status: :blocked,
+               failure: %{reason: :branch_cleanup_delete_failed}
+             } = PublishHandoff.cleanup_closed_branch_context(alpha, runner: runner)
+    end
+  end
+
   test "review child contexts cannot publish mutate trackers or write evidence", %{
     root: root,
     issue: issue,
@@ -740,6 +1017,9 @@ defmodule SymphonyElixir.QualityDeliveryContextTest do
 
     assert {:error, :invalid_publish_handoff_context} =
              PublishHandoff.run_context(child, issue, %{}, runner: notifier)
+
+    assert {:error, :invalid_publish_handoff_context} =
+             PublishHandoff.cleanup_closed_branch_context(child, runner: notifier)
 
     assert {:error, :invalid_handoff_context} =
              HandoffRouteRecorder.classify_completion_context(child, issue, %{})
