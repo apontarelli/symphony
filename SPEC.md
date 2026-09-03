@@ -2279,6 +2279,12 @@ returning admitted or retrying work to execution. Missing or failed credential r
 only that run and MUST NOT persist or inspect the resolved value. Cleanup recovery uses its pinned
 cleanup authority and must remain blocked if prior process ownership is unverifiable.
 
+After a terminal workspace is removed, target-scoped control-plane records MUST remain available for
+inspection and MUST retain the target ID, admitted run ID, pinned policy and repository hashes,
+budget totals, handoff outcome, lifecycle history, and cleanup completion. These retained records
+are evidence about the run; they MUST NOT retain or imply retention of the removed workspace's
+contents.
+
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
 ### 11.1 REQUIRED Operations
