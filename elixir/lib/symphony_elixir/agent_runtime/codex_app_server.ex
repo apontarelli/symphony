@@ -1192,7 +1192,7 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
         {:error, {:response_error, response_payload}}
 
       {:ok, %{} = other} ->
-        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}")
+        Logger.debug("Ignoring message while waiting for response: #{inspect(other)}", operator_payload: :unsafe)
         with_timeout_response(port, request_id, timeout, "")
 
       {:error, _} ->
@@ -1210,9 +1210,9 @@ defmodule SymphonyElixir.AgentRuntime.CodexAppServer do
 
     if text != "" do
       if String.match?(text, ~r/\b(error|warn|warning|failed|fatal|panic|exception)\b/i) do
-        Logger.warning("Codex #{stream_label} output: #{text}")
+        Logger.warning("Codex #{stream_label} output: #{text}", operator_payload: :unsafe)
       else
-        Logger.debug("Codex #{stream_label} output: #{text}")
+        Logger.debug("Codex #{stream_label} output: #{text}", operator_payload: :unsafe)
       end
     end
   end

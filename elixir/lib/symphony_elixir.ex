@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Application do
         control_plane_children() ++
           [
             {Phoenix.PubSub, name: SymphonyElixir.PubSub},
+            SymphonyElixir.OperatorInterface,
             {Task.Supervisor, name: SymphonyElixir.TaskSupervisor},
             SymphonyElixir.WorkflowStore,
             SymphonyElixir.TargetSupervisor,

@@ -2721,6 +2721,19 @@ RECOMMENDED snapshot error modes:
 - `timeout`
 - `unavailable`
 
+An implementation that exposes a client-facing operator read interface SHOULD publish an explicit
+interface version and schema version. A complete snapshot SHOULD include host identity, registry
+generation, freshness by source, aggregate and target capacity, ordered pending queue entries with
+host-owned wait or admission reasons, durable run stage, handoff, landing and cleanup state,
+warnings, and host-owned command availability. Missing, partial, stale, timed-out, and unavailable
+values MUST remain distinct from empty or healthy values.
+
+An operator event feed SHOULD use a cursor that increases monotonically within one host identity.
+Responses SHOULD include the retained cursor range, dropped-event count, response-limit
+truncation, and explicit gap state. A changed host identity, a cursor before retained history, or a
+cursor ahead of the host MUST require a complete snapshot replacement. The feed MUST apply the
+same credential and prompt redaction boundary as the snapshot.
+
 ### 13.4 OPTIONAL Human-Readable Status Surface
 
 A human-readable status surface (terminal output, dashboard, etc.) is OPTIONAL and

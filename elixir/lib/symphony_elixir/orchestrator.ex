@@ -17,6 +17,7 @@ defmodule SymphonyElixir.Orchestrator do
     HostScheduler,
     LandingQueue,
     LandingRevalidation,
+    OperatorInterface,
     ProcessSupervisor,
     PublishHandoff,
     PublishPreflight,
@@ -56,7 +57,9 @@ defmodule SymphonyElixir.Orchestrator do
     defstruct handoff_routes: %{},
               landing_queue: [],
               landing_decisions: %{},
-              landing_revalidator: nil
+              landing_revalidator: nil,
+              pending_queue: nil,
+              pending_queue_observed_at: nil
   end
 
   defmodule State do
@@ -437,6 +440,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> then(&%{&1 | running: Map.put(running, run_id, updated_running_entry)})
           |> persist_or_stop_token_usage(run_id, updated_running_entry)
 
+        publish_runtime_event(run_id, updated_running_entry)
         notify_dashboard()
         {:noreply, state}
     end
@@ -504,7 +508,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info(msg, state) do
-    Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
+    Logger.debug("Orchestrator ignored message: #{inspect(msg)}", operator_payload: :unsafe)
     {:noreply, state}
   end
 
@@ -611,11 +615,13 @@ defmodule SymphonyElixir.Orchestrator do
 
     with false <- tracker_backoff_active?(state),
          true <- dispatch_budget_available?(state),
-         {:ok, resolution} <- Tracker.resolve_candidate_issues(target),
-         true <- available_slots(state) > 0 do
-      resolution
-      |> log_target_resolution_warnings()
-      |> then(&choose_issues(&1, clear_tracker_rate_limit(state)))
+         {:ok, resolution} <- Tracker.resolve_candidate_issues(target) do
+      resolution = log_target_resolution_warnings(resolution)
+      state = clear_tracker_rate_limit(state)
+
+      if available_slots(state) > 0,
+        do: choose_issues(resolution, state),
+        else: put_pending_queue(state, resolution)
     else
       {:error, reason} ->
         handle_tracker_fetch_error(state, reason, :candidate_fetch, fn ->
@@ -1879,9 +1885,11 @@ defmodule SymphonyElixir.Orchestrator do
     terminal_states = terminal_state_set(target)
     {issues, state} = prepare_candidate_issues(resolution, state)
 
-    Enum.reduce_while(issues, state, fn issue, state_acc ->
+    issues
+    |> Enum.reduce_while(state, fn issue, state_acc ->
       maybe_choose_granted_issue(issue, state_acc, active_states, terminal_states)
     end)
+    |> put_pending_queue(resolution)
   end
 
   defp choose_issues(%RunTarget.Resolution{} = resolution, %State{target_context: target} = state) do
@@ -1889,9 +1897,11 @@ defmodule SymphonyElixir.Orchestrator do
     terminal_states = terminal_state_set(target)
     {issues, state} = prepare_candidate_issues(resolution, state)
 
-    Enum.reduce_while(issues, state, fn issue, state_acc ->
+    issues
+    |> Enum.reduce_while(state, fn issue, state_acc ->
       maybe_choose_issue(issue, state_acc, active_states, terminal_states)
     end)
+    |> put_pending_queue(resolution)
   end
 
   defp maybe_choose_granted_issue(issue, state, active_states, terminal_states) do
@@ -1939,6 +1949,83 @@ defmodule SymphonyElixir.Orchestrator do
       {:cont, state}
     end
   end
+
+  defp put_pending_queue(%State{target_context: target} = state, %RunTarget.Resolution{} = resolution) do
+    active_states = active_state_set(target)
+    terminal_states = terminal_state_set(target)
+
+    pending_queue =
+      resolution
+      |> order_candidate_issues()
+      |> Enum.filter(
+        &(candidate_issue?(&1, target, active_states, terminal_states) and
+            issue_not_tracked?(&1, state))
+      )
+      |> Enum.with_index(1)
+      |> Enum.map(fn {issue, position} ->
+        reason = pending_issue_reason(issue, state, terminal_states)
+
+        %{
+          position: position,
+          issue_id: issue.id,
+          issue_identifier: issue.identifier,
+          state: issue.state,
+          priority: issue.priority,
+          status: if(reason == :eligible, do: :ready, else: :waiting),
+          reason: reason
+        }
+      end)
+
+    delivery = %{
+      state.delivery
+      | pending_queue: pending_queue,
+        pending_queue_observed_at: DateTime.utc_now()
+    }
+
+    %{state | delivery: delivery}
+  end
+
+  defp pending_issue_reason(issue, state, terminal_states) do
+    case pending_issue_policy_reason(issue, state, terminal_states) do
+      nil -> pending_issue_capacity_reason(issue, state)
+      reason -> reason
+    end
+  end
+
+  defp pending_issue_policy_reason(issue, state, terminal_states) do
+    landing_reason = landing_queue_reason(issue, state.delivery.landing_queue)
+    dispatch_reason = issue_dispatch_block_reason(issue, terminal_states)
+
+    cond do
+      not is_nil(dispatch_reason) -> dispatch_reason
+      not issue_policy_allows_dispatch?(issue, state.target_context) -> :policy_blocked
+      not is_nil(landing_reason) -> landing_reason
+      true -> nil
+    end
+  end
+
+  defp pending_issue_capacity_reason(issue, state) do
+    cond do
+      tracker_backoff_active?(state) -> :tracker_backoff
+      not dispatch_budget_available?(state) -> :budget_exhausted
+      available_slots(state) <= 0 -> :target_agent_capacity
+      not state_slots_available?(issue, state, state.running) -> :linear_state_capacity
+      not landing_slot_available?(issue, state) -> :landing_capacity
+      not worker_slots_available?(state) -> :worker_capacity
+      true -> :eligible
+    end
+  end
+
+  defp landing_queue_reason(%Issue{id: issue_id}, landing_queue) when is_list(landing_queue) do
+    case Enum.find(landing_queue, &(Map.get(&1, :issue_id) == issue_id)) do
+      %{blocked_reasons: [reason | _rest]} -> reason
+      %{status: :blocked} -> :landing_blocked
+      %{status: status} when status not in [:selected, :ready] -> :landing_wait
+      _missing_or_selected -> nil
+    end
+  end
+
+  defp landing_queue_reason(_issue, _landing_queue), do: nil
 
   defp order_candidate_issues(%RunTarget.Resolution{ordering: :target, issues: issues})
        when is_list(issues), do: issues
@@ -4074,6 +4161,24 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_issue_workspace(%ExecutionContext{} = context, _identifier, _worker_host),
     do: Workspace.remove(context)
 
+  defp publish_runtime_event(run_id, running_entry) do
+    {target_id, issue_id} = run_id
+
+    OperatorInterface.publish_runtime_event(%{
+      target_id: target_id,
+      issue_id: issue_id,
+      issue_identifier: Map.get(running_entry, :identifier),
+      admitted_run_id: admitted_run_id(running_entry),
+      event: Map.get(running_entry, :last_runtime_event),
+      timestamp: Map.get(running_entry, :last_runtime_timestamp)
+    })
+  end
+
+  defp admitted_run_id(%{durable_authority: %RunAuthority{admission: %{admitted_run_id: run_id}}}),
+    do: run_id
+
+  defp admitted_run_id(_running_entry), do: nil
+
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
@@ -5015,6 +5120,8 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        blocked: blocked,
+       pending_queue: state.delivery.pending_queue,
+       pending_queue_observed_at: state.delivery.pending_queue_observed_at,
        landing_queue: state.delivery.landing_queue,
        handoff_routes: handoff_route_entries(state.delivery.handoff_routes),
        runtime_totals: state.runtime_totals,

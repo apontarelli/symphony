@@ -26,7 +26,7 @@ fmt-check:
 lint:
 	$(MIX) lint
 
-coverage:
+coverage: build
 	@original_home="$$HOME"; \
 	temp_home="$$(mktemp -d)" || exit 1; \
 	trap 'rm -rf "$$temp_home"' EXIT; \

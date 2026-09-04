@@ -326,6 +326,7 @@ defmodule SymphonyElixir.HostScheduler do
     if reviewer_capacity_available?(state, target_id) do
       reservation = make_ref()
       reviewer = %{target_id: target_id, owner: owner}
+      SymphonyElixir.OperatorInterface.publish_state_change()
       {:reply, {:ok, reservation}, %{state | reviewers: Map.put(state.reviewers, reservation, reviewer)}}
     else
       {:reply, {:error, :capacity}, state}
@@ -334,6 +335,7 @@ defmodule SymphonyElixir.HostScheduler do
 
   def handle_call({:release_reviewer, reservation}, _from, state) do
     state = %{state | reviewers: Map.delete(state.reviewers, reservation)} |> stop_idle_retired_targets()
+    SymphonyElixir.OperatorInterface.publish_state_change()
     {:reply, :ok, state}
   end
 
@@ -904,6 +906,7 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   defp schedule_dispatch(%State{} = state) do
+    SymphonyElixir.OperatorInterface.publish_state_change()
     state = cancel_poll_timer(state)
 
     case next_dispatch_delay(state) do
@@ -982,6 +985,8 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   defp put_grant(state, grant_id, entry) do
+    SymphonyElixir.OperatorInterface.publish_state_change()
+
     if entry.poll or entry.agent or entry.startup,
       do: %{state | grants: Map.put(state.grants, grant_id, entry)},
       else: %{state | grants: Map.delete(state.grants, grant_id)}
@@ -1310,9 +1315,34 @@ defmodule SymphonyElixir.HostScheduler do
            active: is_integer(backoff_until_ms) and backoff_until_ms > now_ms,
            remaining_ms: if(is_integer(backoff_until_ms), do: max(backoff_until_ms - now_ms, 0), else: nil)
          },
-         next_poll_in_ms: due_in_ms(target.next_poll_due_at_ms)
+         next_poll_in_ms: due_in_ms(target.next_poll_due_at_ms),
+         operator: operator_projection(target.context)
        }}
     end)
+  end
+
+  defp operator_projection(%TargetContext{} = context) do
+    run_target = context.run_target || %{}
+    tracker_policy = get_in(context.tracker_connection || %{}, ["policy"]) || %{}
+
+    %{
+      dispatch_mode: context.dispatch_mode,
+      policy_hash: context.policy_hash,
+      repository: %{
+        path: get_in(context.repo_policy || %{}, ["manifest_source_dir"])
+      },
+      tracker: %{
+        connection_id: get_in(context.tracker_connection || %{}, ["id"]),
+        kind: Map.get(tracker_policy, "kind"),
+        scope:
+          Map.take(run_target, [
+            "type",
+            "project_id",
+            "project_slug",
+            "team_key"
+          ])
+      }
+    }
   end
 
   defp effective_target_state(_state, %TargetState{context: %{state: state}}, _now_ms)
