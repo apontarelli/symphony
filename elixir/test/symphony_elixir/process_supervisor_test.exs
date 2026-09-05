@@ -528,7 +528,7 @@ defmodule SymphonyElixir.ProcessSupervisorTest do
       Agent.update(cleanup_agent, &Map.put(&1, :launcher, launcher))
       send(launcher, :launch)
 
-      assert_receive {:launched, process}
+      assert_receive {:launched, process}, 1_000
       root_pid = ProcessSupervisor.identity(process).os_pid
       assert eventually(fn -> if read_pid(root_pid_file) == root_pid, do: root_pid, else: nil end) == root_pid
       child_pid = eventually(fn -> read_pid(child_pid_file) end)

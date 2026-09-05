@@ -75,16 +75,25 @@ defmodule SymphonyElixir.TargetRegistry.Yaml do
     owner = self()
     reference = make_ref()
 
-    :yamerl_parser.string(content,
-      token_fun: token_collector(owner, reference, {[], false})
-    )
+    try do
+      :yamerl_parser.string(content,
+        token_fun: token_collector(owner, reference, {[], false})
+      )
 
-    receive do
-      {^reference, {_merge_key_locations, true}} ->
-        {:error, :invalid_merge_tag}
+      receive do
+        {^reference, {_merge_key_locations, true}} ->
+          {:error, :invalid_merge_tag}
 
-      {^reference, {merge_key_locations, false}} ->
-        {:ok, merge_key_locations}
+        {^reference, {merge_key_locations, false}} ->
+          {:ok, merge_key_locations}
+      end
+    after
+      # The parser can emit stream_end before raising for malformed YAML.
+      receive do
+        {^reference, _merge_state} -> :ok
+      after
+        0 -> :ok
+      end
     end
   end
 

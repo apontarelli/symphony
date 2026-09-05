@@ -3,6 +3,10 @@ defmodule SymphonyElixir.OperatorInterfaceTest do
 
   alias SymphonyElixir.{OperatorInterface, OperatorLogHandler, OperatorSnapshot}
 
+  test "credential discovery reports an unavailable interface without exiting the caller" do
+    assert {:error, :unavailable} = OperatorInterface.credentials({:global, {__MODULE__, make_ref()}})
+  end
+
   test "complete snapshot preserves ordering, versions, explicit availability, and redaction" do
     now = ~U[2026-09-04 20:00:00.000Z]
     secret = "operator-contract-secret"
@@ -116,6 +120,7 @@ defmodule SymphonyElixir.OperatorInterfaceTest do
     assert snapshot.snapshot == %{mode: "complete", replacement_required: false, event_cursor: 41}
     assert snapshot.host.id == "host-contract"
     assert snapshot.host.registry == %{status: "verified", generation: "sha256:generation", verified: true, error: nil}
+    assert %{available: true, disabled_reason: nil} = Enum.find(snapshot.host.commands, &(&1.action == "prune"))
     assert Enum.map(snapshot.targets, & &1.target_id) == ["alpha", "beta"]
     assert snapshot.aggregate.capacity.used.agents == 1
     assert snapshot.aggregate.capacity.limits.agents == 3
@@ -139,8 +144,8 @@ defmodule SymphonyElixir.OperatorInterfaceTest do
     assert run.handoff_state == %{status: "recorded", route: "auto_land", target_state: "Merging"}
     assert run.landing_state == %{status: "selected", position: 1, reasons: [], wait_ms: 0}
     assert run.cleanup_state == %{status: "not_applicable"}
-    assert Enum.find(run.commands, &(&1.action == "abandon")).available
-    refute Enum.find(run.commands, &(&1.action == "resume")).available
+    assert Enum.find(run.commands, &(&1.action == "abandon_run")).available
+    refute Enum.find(run.commands, &(&1.action == "resume_run")).available
 
     encoded = Jason.encode!(snapshot)
     refute encoded =~ secret
@@ -162,6 +167,23 @@ defmodule SymphonyElixir.OperatorInterfaceTest do
     assert failed_run.execution.status == "timeout"
     assert failed_run.handoff_state.status == "timeout"
     assert failed_run.landing_state.status == "timeout"
+  end
+
+  test "prune availability requires both the registry and durable control plane" do
+    now = ~U[2026-09-04 20:00:00Z]
+    marker = %{host_id: "host-prune", started_at: DateTime.to_iso8601(now), cursor: 0, interface_version: 1, schema_version: 1}
+    host = %{registry: %{generation: "sha256:generation", verified?: true}, targets: %{}}
+
+    snapshot = OperatorSnapshot.project({:current, host}, %{}, {:unavailable, nil}, {:unavailable, nil}, marker, now)
+
+    assert %{available: false, disabled_reason: "control_plane_unavailable"} =
+             Enum.find(snapshot.host.commands, &(&1.action == "prune"))
+
+    host = put_in(host, [:registry, :verified?], false)
+    snapshot = OperatorSnapshot.project({:current, host}, %{}, {:current, []}, {:current, []}, marker, now)
+
+    assert %{available: false, disabled_reason: "registry_unverified"} =
+             Enum.find(snapshot.host.commands, &(&1.action == "prune"))
   end
 
   test "stale queue data remains visible and labeled stale" do
@@ -240,6 +262,10 @@ defmodule SymphonyElixir.OperatorInterfaceTest do
 
     assert snapshot.host.status == "timeout"
     assert snapshot.host.capacity == %{status: "timeout", used: nil, limits: nil}
+
+    assert %{available: false, disabled_reason: "host_unavailable"} =
+             Enum.find(snapshot.host.commands, &(&1.action == "prune"))
+
     assert snapshot.aggregate.counts == %{status: "timeout", queued: nil, running: nil, retrying: nil, blocked: nil}
     assert snapshot.targets == []
     assert snapshot.runs == %{status: "unavailable", entries: []}

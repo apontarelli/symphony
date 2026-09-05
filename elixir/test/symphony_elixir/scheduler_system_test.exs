@@ -188,8 +188,12 @@ defmodule SymphonyElixir.SchedulerSystemTest do
 
     {:ok, restarted_beta_pid} = TargetDouble.start_link(recipient: self(), snapshot: beta_snapshot)
     HostScheduler.register_target(scheduler, restarted_beta, restarted_beta_pid)
-    restart_grant = receive_grant()
+    :ok = HostScheduler.activate_target(scheduler, restarted_beta, false)
+
+    assert_receive {:scheduler_grant, %Grant{target_pid: ^restarted_beta_pid} = restart_grant}, 1_000
+
     assert restart_grant.target_id == "beta"
+    assert restart_grant.registry_generation == generation_three
     assert :ok = HostScheduler.finish_poll(restart_grant, false)
 
     :ok =

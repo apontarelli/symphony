@@ -526,16 +526,81 @@ Known raw runtime output is tagged `operator_payload: :unsafe` by its producer. 
 log handler omits these bodies and OTP report bodies while preserving level and source; normal
 host log text passes through the shared credential and multiline-prompt redaction boundary.
 
+Operator mutations use `POST /api/v1/operator/commands/preview` followed by
+`POST /api/v1/operator/commands/confirm`. Both require a loopback connection and
+`Authorization: Bearer <operator-session-token>`. The host creates a new session credential on
+each interface start. `OperatorInterface.credentials/0` returns local launcher metadata containing
+the host ID and token file path, not the token value. The file is
+`<config-root>/.credentials/operator/<host-id>/token`, with mode `0600` inside `0700`
+credential directories. It is not part of the HTTP snapshot. Insecure paths fail closed.
+The interface resolves this root once at startup: an explicit interface `config_root`, then the
+selected control-plane root (`--config-root` or registry `host.state_root`), then the local config
+root. Credentials and pruning policy use this same root; HTTP transport options cannot replace it.
+
+A preview request contains exactly these fields:
+
+```json
+{
+  "interface_version": 1,
+  "host_id": "<host ID from snapshot>",
+  "registry_generation": "<generation from snapshot>",
+  "command": {
+    "action": "activate",
+    "target_id": "alpha",
+    "inputs": {"dispatch_mode": "explicit"}
+  }
+}
+```
+
+Supported commands:
+
+| Action | Identity field | Inputs |
+| --- | --- | --- |
+| `activate` | `target_id` | `{"dispatch_mode":"explicit"}` or `{"dispatch_mode":"watch"}` |
+| `pause`, `drain`, `retire` | `target_id` | `{}` |
+| `patch` | `target_id` | `{"changes":{...}}`, using `OperatorCommandService` patch fields |
+| `resume_run`, `abandon_run` | `run_id` | `{}` |
+| `refresh`, `shutdown`, `prune` | none | `{}` |
+
+The host returns affected identity, current and proposed state, consequences, warnings,
+`disabled_reason`, `confirmation_token`, and `expires_at`. A disabled preview has no token.
+Confirmation submits the exact original request plus `confirmation_token`; it does not submit
+an edited preview. Tokens expire after 60 seconds and are single-use. They bind the session,
+host identity, registry generation, action, target or run identity, and exact inputs. Run recovery
+also checks the durable lifecycle and fencing generation. Target changes use the registry
+service's compare-and-swap commit. Navigation, snapshot reads, and disconnects never confirm.
+
+Confirmation returns `202` with a command `id` and `status: "accepted"`. This is not proof of
+completion. Observe `command_result` events and the snapshot's `command_results` collection for
+`completed`, `rejected`, or `failed`. The snapshot retains the latest result for up to 100 command
+IDs; the event feed retains transitions within its normal bounded history. Every result invalidates
+the snapshot. Errors include a stable code, `state_may_have_changed`, `snapshot_required`, and the
+next safe action. A failed operation can have committed a registry change or acquired a lease;
+fetch a complete snapshot before requesting another preview. Never retry an old token.
+
+`refresh` reloads the registry and requests tracker polling and reconciliation. `shutdown` is
+disabled until all targets are paused, draining, or retired and tracked work is empty. Confirmation
+atomically prevents new grants and then requests host shutdown. The command remains `accepted`
+until shutdown initiation succeeds or fails. A `completed` result means initiation succeeded, not
+that an offline host acknowledged exit. Initiation failure produces `failed`, never an earlier
+`completed` result for the same command.
+
+The old HTTP resume, abandon, prune, and refresh routes return
+`410 operator_confirmation_required`; they cannot bypass session authorization. Read routes and
+local CLI automation remain available. Browser mutation controls must use the new contract before
+they can be enabled.
+
 `symphony control-plane resume <run-id>` and `abandon <run-id>` first return a confirmation token
 bound to the current lifecycle sequence and fencing generation. Supplying that token with
 `--confirm` and `--owner` acquires a new lease before the mutation; active leases, changed state,
-running process ownership, and unresolved side-effect reconciliation fail closed. The equivalent
-JSON API operations are `POST /api/v1/control-plane/runs/:run_id/resume` and `abandon`; mutating
-control-plane API requests are accepted only from loopback clients.
+running process ownership, and unresolved side-effect reconciliation fail closed. The HTTP
+equivalents are `resume_run` and `abandon_run` through the authenticated operator command contract.
+The HTTP host supplies the run owner; clients cannot choose one.
 
 `control_plane.terminal_retention_days` defaults to `30` and must be a positive integer.
-`symphony control-plane prune` and `POST /api/v1/control-plane/prune` return a preview token before
-deleting anything. Confirmation recomputes eligibility, then atomically removes only old completed
+`symphony control-plane prune` and the operator API's `prune` command return a preview token before
+deleting anything. HTTP retention comes from host configuration, not client inputs.
+Confirmation recomputes eligibility, then atomically removes only old completed
 or cleaned runs. Blocked and other nonterminal runs, active leases, uncertain process ownership,
 pending or reconciliation-required side effects, and runs linked to durable publish-handoff or
 handoff-route artifacts are preserved.
@@ -1040,8 +1105,8 @@ runtime:
   admissions.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/operator/snapshot`, `/api/v1/operator/events`,
-  `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. Add `?target_id=<target-id>` to the issue
-  route when registry targets overlap.
+  `/api/v1/<issue_identifier>`, and `/api/v1/operator/commands/{preview,confirm}`. Add
+  `?target_id=<target-id>` to the issue route when registry targets overlap.
 
 ## Incident-triggered issues
 
