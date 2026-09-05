@@ -2963,26 +2963,31 @@ Minimum endpoints:
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
-- `POST /api/v1/refresh`
-  - Queues an immediate tracker poll + reconciliation cycle (best-effort trigger; implementations
-    MAY coalesce repeated requests).
-  - Suggested request body: empty body or `{}`.
-  - Suggested response (`202 Accepted`) shape:
-
-    ```json
-    {
-      "queued": true,
-      "coalesced": false,
-      "requested_at": "2026-02-24T20:15:30Z",
-      "operations": ["poll", "reconcile"]
-    }
-    ```
+- `POST /api/v1/operator/commands/preview`
+  - Requires loopback access and a restrictive per-host operator session credential.
+  - Accepts interface version, host identity, registry generation, and a typed command with exact
+    inputs. Lifecycle commands route through `OperatorCommandService`; durable run recovery routes
+    through `ControlPlane`.
+  - Returns affected identity, current and proposed state, consequences, warnings, disabled reason,
+    and a short-lived, single-use confirmation token. Disabled commands have no token.
+- `POST /api/v1/operator/commands/confirm`
+  - Requires the same authorization and the exact preview request plus its confirmation token.
+  - Rejects host, version, generation, identity, action, or input mismatches, expiration, and replay.
+  - Returns an accepted command ID; completion and failure appear in authoritative operator
+    snapshots and `command_result` events. Rejections also enter that result path.
+  - Failures state whether host state may have changed and require a fresh snapshot before retry.
+  - Shutdown remains accepted until shutdown initiation succeeds or fails; it MUST NOT publish
+    completed before initiation can fail. Completion does not acknowledge process exit.
+  - Refresh, target lifecycle/settings changes, run recovery, retention pruning, and controlled
+    host shutdown use this contract. Reads, navigation, and quitting never confirm a mutation.
+- Legacy HTTP mutation routes, including `POST /api/v1/refresh`, return
+  `410 operator_confirmation_required`. Local CLI automation remains available.
 
 API design notes:
 
 - The JSON shapes above are the RECOMMENDED baseline for interoperability and debugging ergonomics.
 - Implementations MAY add fields, but SHOULD avoid breaking existing fields within a version.
-- Endpoints SHOULD be read-only except for operational triggers like `/refresh`.
+- Read endpoints MUST NOT mutate. Operational triggers use authenticated preview and confirmation.
 - Unsupported methods on defined routes SHOULD return `405 Method Not Allowed`.
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state

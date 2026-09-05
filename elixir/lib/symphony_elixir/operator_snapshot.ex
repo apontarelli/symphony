@@ -152,7 +152,7 @@ defmodule SymphonyElixir.OperatorSnapshot do
         status: "available",
         registry: registry_projection(host),
         capacity: host_capacity(host),
-        commands: host_commands(host)
+        commands: host_commands(host, durable_runs_result)
       },
       freshness: %{
         status: freshness_status,
@@ -185,7 +185,10 @@ defmodule SymphonyElixir.OperatorSnapshot do
         status: source_status,
         registry: %{status: source_status, generation: nil, verified: nil, error: nil},
         capacity: %{status: source_status, used: nil, limits: nil},
-        commands: [%{action: "refresh", available: false, disabled_reason: "host_unavailable"}]
+        commands:
+          Enum.map(~w(refresh shutdown prune), fn action ->
+            %{action: action, available: false, disabled_reason: "host_unavailable"}
+          end)
       },
       freshness: %{
         status: source_status,
@@ -230,14 +233,32 @@ defmodule SymphonyElixir.OperatorSnapshot do
     }
   end
 
-  defp host_commands(host) do
+  defp host_commands(host, durable_runs_result) do
     registry_verified = get_in(host, [:registry, :verified?]) == true
+    shutdown = Map.get(host, :shutdown, %{ready?: false, reason: :host_unavailable})
+
+    prune_disabled_reason =
+      cond do
+        not registry_verified -> "registry_unverified"
+        not match?({:current, _}, durable_runs_result) -> "control_plane_unavailable"
+        true -> nil
+      end
 
     [
       %{
         action: "refresh",
         available: registry_verified,
         disabled_reason: if(registry_verified, do: nil, else: "registry_unverified")
+      },
+      %{
+        action: "shutdown",
+        available: registry_verified and shutdown.ready?,
+        disabled_reason: if(registry_verified and shutdown.ready?, do: nil, else: token(shutdown.reason || :registry_unverified))
+      },
+      %{
+        action: "prune",
+        available: is_nil(prune_disabled_reason),
+        disabled_reason: prune_disabled_reason
       }
     ]
   end
@@ -491,7 +512,7 @@ defmodule SymphonyElixir.OperatorSnapshot do
       handoff_state: handoff_projection(handoff) |> with_source_status(runtime_status),
       landing_state: landing_projection(landing) |> with_source_status(runtime_status),
       cleanup_state: cleanup_projection(lifecycle_state),
-      commands: ControlPlane.operator_action_availability(run)
+      commands: Enum.map(ControlPlane.operator_action_availability(run), &Map.update!(&1, :action, fn action -> action <> "_run" end))
     }
   end
 

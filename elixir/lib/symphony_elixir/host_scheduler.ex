@@ -85,6 +85,7 @@ defmodule SymphonyElixir.HostScheduler do
                   :poll_timer_ref,
                   :poll_timer_token,
                   :next_poll_due_at_ms,
+                  shutdown_requested?: false,
                   registry_verified?: true,
                   next_grant_id: 1,
                   grants: %{},
@@ -181,6 +182,28 @@ defmodule SymphonyElixir.HostScheduler do
 
   @spec snapshot(GenServer.server()) :: map()
   def snapshot(server \\ __MODULE__), do: GenServer.call(server, :snapshot)
+
+  @doc """
+  Reloads the registry synchronously and returns the resulting safe snapshot.
+
+  Supplying an expected generation fences the reload to the generation observed
+  by a preview, preventing a confirmation from accepting an intervening change.
+  """
+  @spec refresh(GenServer.server(), String.t() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def refresh(server \\ __MODULE__, expected_generation \\ nil) do
+    GenServer.call(server, {:refresh, expected_generation})
+  end
+
+  @spec reload(GenServer.server(), String.t() | nil) :: {:ok, map()} | {:error, term()}
+  def reload(server \\ __MODULE__, expected_generation \\ nil),
+    do: GenServer.call(server, {:reload, expected_generation})
+
+  @doc """
+  Atomically fences new grants before the host process is stopped.
+  """
+  @spec begin_shutdown(GenServer.server(), String.t()) :: :ok | {:error, term()}
+  def begin_shutdown(server, expected_generation), do: GenServer.call(server, {:begin_shutdown, expected_generation})
 
   @impl true
   def init(opts) do
@@ -340,21 +363,79 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   def handle_call(:snapshot, _from, state) do
-    {:reply,
-     %{
-       counts: slot_counts(state),
-       limits: state.host_limits,
-       grants: map_size(state.grants),
-       next_poll_in_ms: next_poll_in_ms(state),
-       policy: state.policy,
-       registry: %{
-         path: state.registry_path,
-         generation: state.registry_generation,
-         verified?: state.registry_verified?,
-         error: state.registry_error
-       },
-       targets: target_snapshots(state)
-     }, state}
+    {:reply, scheduler_snapshot(state), state}
+  end
+
+  def handle_call({operation, _generation}, _from, %State{shutdown_requested?: true} = state)
+      when operation in [:refresh, :reload] do
+    {:reply, {:error, :shutdown_requested}, state}
+  end
+
+  def handle_call({operation, expected_generation}, _from, state) when operation in [:refresh, :reload] do
+    if is_binary(expected_generation) and expected_generation != state.registry_generation do
+      {:reply, {:error, :stale_generation}, state}
+    else
+      case load_registry(state) do
+        {:ok, %{snapshot: %{generation: generation}}}
+        when is_binary(expected_generation) and generation != expected_generation ->
+          {:reply, {:error, :stale_generation}, state}
+
+        {:ok, loaded} ->
+          state =
+            state
+            |> apply_loaded_registry(loaded)
+            |> queue_refresh(operation)
+            |> schedule_dispatch()
+
+          {:reply, {:ok, scheduler_snapshot(state)}, state}
+
+        {:error, reason} ->
+          {:reply, {:error, reason}, %{state | registry_verified?: false, registry_error: reason}}
+      end
+    end
+  end
+
+  def handle_call({:begin_shutdown, expected_generation}, _from, state) do
+    status =
+      with true <- expected_generation == state.registry_generation,
+           :ok <- verify_shutdown_generation(state, expected_generation) do
+        shutdown_status(state)
+      else
+        _ -> %{reason: :stale_generation}
+      end
+
+    case status do
+      %{ready?: true} ->
+        state =
+          state
+          |> Map.put(:shutdown_requested?, true)
+          |> cancel_poll_timer()
+          |> cancel_registry_reload()
+
+        SymphonyElixir.OperatorInterface.publish_state_change()
+        {:reply, :ok, state}
+
+      %{reason: reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp verify_shutdown_generation(%State{registry_path: nil}, _generation), do: :ok
+
+  defp verify_shutdown_generation(state, generation) do
+    case load_registry(state) do
+      {:ok, %{snapshot: %{generation: ^generation}}} -> :ok
+      _ -> {:error, :stale_generation}
+    end
+  end
+
+  defp queue_refresh(state, :reload), do: state
+
+  defp queue_refresh(state, :refresh) do
+    Enum.reduce(Map.keys(state.targets), state, fn target_id, current ->
+      {_result, next} = queue_target_poll(current, target_id, :poll)
+      next
+    end)
   end
 
   defp queue_target_poll(state, target_id, purpose) do
@@ -437,6 +518,9 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   def handle_info({:poll_tick, _stale_token}, state), do: {:noreply, state}
+
+  def handle_info({:registry_reload, _token}, %State{shutdown_requested?: true} = state),
+    do: {:noreply, state}
 
   def handle_info({:registry_reload, token}, %State{reload_timer_token: token} = state) do
     state = %{state | reload_timer_ref: nil, reload_timer_token: nil}
@@ -763,7 +847,8 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   defp issue_available_poll_grants(state) do
-    if state.registry_verified? and slot_counts(state).polls < state.host_limits.polls.max_concurrent do
+    if not state.shutdown_requested? and state.registry_verified? and
+         slot_counts(state).polls < state.host_limits.polls.max_concurrent do
       now_ms = monotonic_ms()
       eligible = eligible_target_ids(state, now_ms)
 
@@ -905,6 +990,11 @@ defmodule SymphonyElixir.HostScheduler do
     end
   end
 
+  defp schedule_dispatch(%State{shutdown_requested?: true} = state) do
+    SymphonyElixir.OperatorInterface.publish_state_change()
+    cancel_poll_timer(state)
+  end
+
   defp schedule_dispatch(%State{} = state) do
     SymphonyElixir.OperatorInterface.publish_state_change()
     state = cancel_poll_timer(state)
@@ -964,6 +1054,8 @@ defmodule SymphonyElixir.HostScheduler do
   defp cancel_poll_timer(state),
     do: %{state | poll_timer_ref: nil, poll_timer_token: nil, next_poll_due_at_ms: nil}
 
+  defp schedule_registry_reload(%State{shutdown_requested?: true} = state), do: cancel_registry_reload(state)
+
   defp schedule_registry_reload(%State{registry_path: path} = state) when is_binary(path) do
     if is_reference(state.reload_timer_ref), do: Process.cancel_timer(state.reload_timer_ref)
     token = make_ref()
@@ -972,6 +1064,15 @@ defmodule SymphonyElixir.HostScheduler do
   end
 
   defp schedule_registry_reload(state), do: state
+
+  defp cancel_registry_reload(%State{reload_timer_ref: timer_ref} = state)
+       when is_reference(timer_ref) do
+    Process.cancel_timer(timer_ref)
+    %{state | reload_timer_ref: nil, reload_timer_token: nil}
+  end
+
+  defp cancel_registry_reload(state),
+    do: %{state | reload_timer_ref: nil, reload_timer_token: nil}
 
   defp release_slots(state, %Grant{} = grant, slots) do
     case Map.get(state.grants, grant.id) do
@@ -1015,6 +1116,8 @@ defmodule SymphonyElixir.HostScheduler do
       target_counts.startups < target.limits.startups and
       runner_capacity_available?(state, entry.runner_id)
   end
+
+  defp reviewer_capacity_available?(%State{shutdown_requested?: true}, _target_id), do: false
 
   defp reviewer_capacity_available?(state, target_id) do
     case Map.get(state.targets, target_id) do
@@ -1288,6 +1391,49 @@ defmodule SymphonyElixir.HostScheduler do
        do: true
 
   defp valid_budget_proof?(_proof, _grant), do: false
+
+  defp scheduler_snapshot(state) do
+    %{
+      counts: slot_counts(state),
+      limits: state.host_limits,
+      grants: map_size(state.grants),
+      next_poll_in_ms: next_poll_in_ms(state),
+      policy: state.policy,
+      registry: %{
+        path: state.registry_path,
+        generation: state.registry_generation,
+        verified?: state.registry_verified?,
+        error: state.registry_error
+      },
+      shutdown: shutdown_status(state),
+      targets: target_snapshots(state)
+    }
+  end
+
+  defp shutdown_status(state) do
+    reason =
+      cond do
+        state.shutdown_requested? ->
+          :shutdown_requested
+
+        map_size(state.grants) > 0 or map_size(state.reviewers) > 0 ->
+          :work_in_progress
+
+        map_size(state.retired_targets) > 0 ->
+          :targets_stopping
+
+        Enum.any?(state.targets, fn {_target_id, target} ->
+          target.context.state not in [:paused, :draining, :retired] or
+              target_queue_count(state, target.context.target_id, target) > 0
+        end) ->
+          :targets_not_drained
+
+        true ->
+          nil
+      end
+
+    %{ready?: is_nil(reason), requested?: state.shutdown_requested?, reason: reason}
+  end
 
   defp target_snapshots(state) do
     now_ms = monotonic_ms()

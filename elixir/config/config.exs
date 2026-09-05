@@ -6,6 +6,7 @@ config :symphony_elixir,
   default_workflow_file_path: Path.expand("../../symphony.yml", __DIR__)
 
 config :phoenix, :json_library, Jason
+config :phoenix, :filter_parameters, ["password", "token", "secret", "authorization", "command"]
 
 config :logger, :default_formatter, metadata: [:operator_payload]
 

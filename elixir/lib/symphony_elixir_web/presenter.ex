@@ -364,17 +364,6 @@ defmodule SymphonyElixirWeb.Presenter do
   defp issue_entry_match?(entry, issue_identifier, target_id),
     do: entry.identifier == issue_identifier and Map.get(entry, :target_id) == target_id
 
-  @spec refresh_payload(GenServer.name()) :: {:ok, map()} | {:error, :unavailable}
-  def refresh_payload(orchestrator) do
-    case Orchestrator.request_refresh(orchestrator) do
-      :unavailable ->
-        {:error, :unavailable}
-
-      payload ->
-        {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
-    end
-  end
-
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
     %{
       issue_identifier: issue_identifier,
