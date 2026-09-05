@@ -13,6 +13,10 @@ defmodule SymphonyElixir.RunSetup do
   @modes [:watch, :drain, :issue_batch]
   @restrictive_flags [:human_review_only, :no_land, :require_review, :require_validation]
   @weakening_flags [:allow_missing_capabilities, :auto_land, :ignore_markers, :skip_review, :skip_validation]
+  @type settings_choice :: %{
+          cardinality: String.t(),
+          values: [String.t()]
+        }
 
   defstruct [
     :repo_setup_path,
@@ -58,6 +62,14 @@ defmodule SymphonyElixir.RunSetup do
           source_provenance: map(),
           warnings: [String.t()]
         }
+
+  @spec settings_choices() :: %{String.t() => settings_choice()}
+  def settings_choices do
+    %{
+      "mode" => %{cardinality: "scalar", values: Enum.map(@modes, &Atom.to_string/1)},
+      "auto_land.posture" => Map.fetch!(Schema.settings_choices(), "auto_land.posture")
+    }
+  end
 
   @spec resolve(keyword()) :: {:ok, t()} | {:error, String.t()}
   def resolve(opts) when is_list(opts) do

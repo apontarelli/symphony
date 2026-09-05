@@ -88,6 +88,26 @@ defmodule SymphonyElixir.Config.Schema do
   @default_runners %{@default_runner_name => @default_runner_config}
 
   @type t :: %__MODULE__{}
+  @type settings_choice :: %{
+          cardinality: String.t(),
+          values: [String.t()]
+        }
+
+  @spec settings_choices() :: %{String.t() => settings_choice()}
+  def settings_choices do
+    scalar = fn values -> %{cardinality: "scalar", values: values} end
+
+    %{
+      "runners.*.kind" => scalar.(@supported_runner_kinds |> MapSet.to_list() |> Enum.sort()),
+      "runners.*.thinking" => scalar.(@omp_thinking_values |> Enum.sort()),
+      "runners.*.permissions.*" => scalar.(@omp_permission_decisions |> Enum.sort()),
+      "runners.*.hostname" => scalar.(@opencode_loopback_hosts |> MapSet.to_list() |> Enum.sort()),
+      "project.criticality" => scalar.(__MODULE__.Project.criticalities()),
+      "project.deployment_coupling" => scalar.(__MODULE__.Project.deployment_couplings()),
+      "auto_land.posture" => scalar.(__MODULE__.AutoLand.postures()),
+      "quality_gate.runtime_isolation" => scalar.(__MODULE__.QualityGate.runtime_isolation_modes())
+    }
+  end
 
   defmodule RunnerCatalogError do
     @moduledoc false
@@ -403,7 +423,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_repair_passes, greater_than_or_equal_to: 0)
       |> validate_number(:reviewer_timeout_ms, greater_than: 0)
       |> validate_number(:reviewer_max_retries, greater_than_or_equal_to: 0)
-      |> validate_inclusion(:runtime_isolation, @runtime_isolation_modes)
+      |> validate_inclusion(:runtime_isolation, runtime_isolation_modes())
     end
 
     defp normalize_runtime_isolation(value) when is_binary(value) do
@@ -411,6 +431,9 @@ defmodule SymphonyElixir.Config.Schema do
       |> String.trim()
       |> String.downcase()
     end
+
+    @spec runtime_isolation_modes() :: [String.t()]
+    def runtime_isolation_modes, do: @runtime_isolation_modes
   end
 
   defmodule Hooks do
@@ -455,8 +478,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> cast(attrs, [:criticality, :deployment_coupling], empty_values: [])
       |> update_change(:criticality, &normalize_token/1)
       |> update_change(:deployment_coupling, &normalize_token/1)
-      |> validate_inclusion(:criticality, @criticalities)
-      |> validate_inclusion(:deployment_coupling, @deployment_couplings)
+      |> validate_inclusion(:criticality, criticalities())
+      |> validate_inclusion(:deployment_coupling, deployment_couplings())
     end
 
     defp normalize_token(value) when is_binary(value) do
@@ -464,6 +487,12 @@ defmodule SymphonyElixir.Config.Schema do
       |> String.trim()
       |> String.downcase()
     end
+
+    @spec criticalities() :: [String.t()]
+    def criticalities, do: @criticalities
+
+    @spec deployment_couplings() :: [String.t()]
+    def deployment_couplings, do: @deployment_couplings
   end
 
   defmodule AutoLand do
@@ -509,7 +538,7 @@ defmodule SymphonyElixir.Config.Schema do
     defp validate_posture(changeset) do
       validate_change(changeset, :posture, fn
         :posture, posture ->
-          if posture in @postures do
+          if posture in postures() do
             []
           else
             [posture: "is invalid"]
@@ -543,6 +572,9 @@ defmodule SymphonyElixir.Config.Schema do
       |> Enum.reject(&(&1 == ""))
       |> Enum.uniq()
     end
+
+    @spec postures() :: [String.t()]
+    def postures, do: @postures
   end
 
   defmodule Observability do

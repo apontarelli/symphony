@@ -7,6 +7,66 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
 
+  test "settings choices stay aligned with target and host enum validation" do
+    choices = Schema.settings_choices()
+
+    base =
+      valid_document()
+      |> put_in(["targets", "main"], put_in(valid_target(), ["state"], "active"))
+      |> put_in(["targets", "main", "dispatch_mode"], "explicit")
+      |> put_in(["targets", "main", "runners", "settings", "codex"], %{})
+
+    for {path, definition} <- choices do
+      for value <- definition.values do
+        value = if definition.cardinality == "list", do: [value], else: value
+
+        keys =
+          if String.starts_with?(path, "host.") do
+            path |> String.replace("*", "linear-main") |> String.split(".")
+          else
+            path
+            |> String.replace("*", "codex")
+            |> then(&(["targets", "main"] ++ String.split(&1, ".")))
+          end
+
+        assert {:ok, %Snapshot{globally_valid?: true, targets: %{"main" => %Target{valid?: true}}}} =
+                 Schema.validate(put_in(base, keys, value), home: "/tmp/schema-home")
+      end
+    end
+
+    invalid_cases = [
+      {"state", "unknown", :unknown_state},
+      {"dispatch_mode", "poll", :unknown_dispatch_mode},
+      {"worktree.strategy", "shared", :invalid_value},
+      {"linear.scope.type", "workspace", :invalid_value},
+      {"runners.settings.codex.reasoning_effort", "unsupported", :invalid_value},
+      {"checks.pre_dispatch", ["unknown_check"], :unknown_check},
+      {"external_side_effects.merge", "maybe", :unknown_gate}
+    ]
+
+    for {path, value, code} <- invalid_cases do
+      assert_target_diagnostic(
+        put_in(base, ["targets", "main"] ++ String.split(path, "."), value),
+        "$.targets.main.#{path}" <> if(is_list(value), do: "[0]", else: ""),
+        code
+      )
+    end
+
+    assert_diagnostic(
+      put_in(base, ["host", "scheduling", "algorithm"], "round_robin"),
+      :host,
+      "$.host.scheduling.algorithm",
+      :invalid_value
+    )
+
+    assert_diagnostic(
+      put_in(base, ["host", "tracker_connections", "linear-main", "kind"], "github"),
+      :host,
+      "$.host.tracker_connections.linear-main.kind",
+      :invalid_value
+    )
+  end
+
   test "version failures are global structured errors" do
     assert {:error,
             %Error{

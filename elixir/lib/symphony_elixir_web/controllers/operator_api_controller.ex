@@ -11,7 +11,7 @@ defmodule SymphonyElixirWeb.OperatorApiController do
 
   @default_event_limit 200
 
-  plug(:require_local_session when action in [:preview, :confirm])
+  plug(:require_local_session when action in [:preview, :confirm, :settings])
 
   @spec preview(Conn.t(), map()) :: Conn.t()
   def preview(conn, _params) do
@@ -29,6 +29,17 @@ defmodule SymphonyElixirWeb.OperatorApiController do
   def confirm(conn, _params) do
     OperatorInterface.confirm(operator_interface(), conn.assigns.operator_credential, conn.body_params)
     |> command_response(conn, 202)
+  end
+
+  @spec settings(Conn.t(), map()) :: Conn.t()
+  def settings(conn, _params) do
+    OperatorInterface.settings(
+      operator_interface(),
+      conn.assigns.operator_credential,
+      conn.body_params,
+      host_scheduler()
+    )
+    |> command_response(conn, 200)
   end
 
   defp require_local_session(conn, _opts) do

@@ -26,15 +26,51 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   @runner_target_keys ~w(allowed default settings)
   @runner_setting_keys ~w(model reasoning_effort max_turns execution_profiles)
   @host_runner_limit_keys ~w(max_concurrent_agents max_concurrent_startups)
+  @reasoning_efforts ~w(minimal low medium high xhigh)
   @concurrency_keys ~w(max_concurrent_agents max_concurrent_startups max_concurrent_reviewers by_linear_state)
   @budget_periods ~w(per_run daily weekly)
+  @target_states ~w(paused active draining retired)
+  @dispatch_modes ~w(explicit watch)
+  @worktree_strategies ~w(per_issue)
+  @scope_types ~w(project team query issues)
+  @host_scheduling_algorithms ~w(weighted_deficit_round_robin)
+  @connection_kinds ~w(linear)
   @check_phases ~w(pre_dispatch pre_handoff pre_publish pre_merge)
   @check_ids ~w(capability_preflight repo_validation quality_gate publish_preflight pr_checks review_feedback_sweep)
   @gate_operations ~w(tracker_write vcs_publish pull_request_write merge deployment production_data)
   @gate_values ~w(deny manual_approval allow)
   @target_scheduling_keys ~w(weight)
 
+  @type settings_choice :: %{
+          cardinality: String.t(),
+          values: [String.t()]
+        }
+
   @type lifecycle_action :: :activate | :pause | :drain | :retire
+  @spec settings_choices() :: %{String.t() => settings_choice()}
+  def settings_choices do
+    scalar = fn values -> %{cardinality: "scalar", values: values} end
+    list = fn values -> %{cardinality: "list", values: values} end
+
+    Enum.into(
+      [
+        {"state", scalar.(@target_states)},
+        {"dispatch_mode", scalar.(@dispatch_modes)},
+        {"worktree.strategy", scalar.(@worktree_strategies)},
+        {"linear.scope.type", scalar.(@scope_types)},
+        {"host.scheduling.algorithm", scalar.(@host_scheduling_algorithms)},
+        {"host.tracker_connections.*.kind", scalar.(@connection_kinds)},
+        {"runners.settings.*.reasoning_effort", scalar.(@reasoning_efforts)}
+      ] ++
+        Enum.map(@check_phases, fn phase ->
+          {"checks.#{phase}", list.(@check_ids)}
+        end) ++
+        Enum.map(@gate_operations, fn operation ->
+          {"external_side_effects.#{operation}", scalar.(@gate_values)}
+        end),
+      %{}
+    )
+  end
 
   @spec transition_target(map(), String.t(), lifecycle_action(), :explicit | :watch | nil) ::
           {:ok, map()} | {:error, Error.t()}
@@ -235,7 +271,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
           )
         ]
 
-      {:ok, state} when state in ["paused", "active", "draining", "retired"] ->
+      {:ok, state} when state in @target_states ->
         []
 
       {:ok, state} when is_binary(state) ->
@@ -254,7 +290,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
         :error ->
           []
 
-        {:ok, mode} when mode in ["explicit", "watch"] ->
+        {:ok, mode} when mode in @dispatch_modes ->
           []
 
         {:ok, mode} when is_binary(mode) ->
@@ -341,7 +377,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
         requested -> requested
       end
 
-    if mode in [:explicit, :watch] do
+    if is_atom(mode) and Atom.to_string(mode) in @dispatch_modes do
       {:ok, mode}
     else
       {:error,
@@ -468,7 +504,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
     unknown_key_diagnostics(worktree, @worktree_keys, scope, path) ++
       required_field_diagnostics(worktree, ["root", "strategy"], scope, path) ++
       validate_nonempty_string_field(worktree, "root", scope, "#{path}.root") ++
-      validate_enum_field(worktree, "strategy", ["per_issue"], scope, "#{path}.strategy") ++
+      validate_enum_field(worktree, "strategy", @worktree_strategies, scope, "#{path}.strategy") ++
       validate_hooks(worktree, scope, "#{path}.hooks")
   end
 
@@ -519,7 +555,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
           validate_enum_field(
             scope_map,
             "type",
-            ~w(project team query issues),
+            @scope_types,
             scope,
             "#{path}.type"
           ) ++
@@ -594,7 +630,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
       validate_optional_enum_field(
         setting,
         "reasoning_effort",
-        ~w(minimal low medium high xhigh),
+        @reasoning_efforts,
         scope,
         "#{path}.reasoning_effort"
       ) ++
@@ -1163,7 +1199,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
       validate_enum_field(
         scheduling,
         "algorithm",
-        ["weighted_deficit_round_robin"],
+        @host_scheduling_algorithms,
         :host,
         "#{path}.algorithm"
       ) ++
@@ -1195,7 +1231,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   defp validate_tracker_connection(connection, path) when is_map(connection) do
     unknown_key_diagnostics(connection, @connection_keys, :host, path) ++
       required_field_diagnostics(connection, @connection_keys, :host, path) ++
-      validate_enum_field(connection, "kind", ["linear"], :host, "#{path}.kind") ++
+      validate_enum_field(connection, "kind", @connection_kinds, :host, "#{path}.kind") ++
       validate_https_endpoint(connection, "endpoint", :host, "#{path}.endpoint") ++
       validate_secret_reference(connection, "api_key", :host, "#{path}.api_key")
   end
