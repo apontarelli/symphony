@@ -572,6 +572,9 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
 
   @module_by_id Map.new(@modules, &{&1.id, &1})
 
+  @spec module_names() :: [String.t()]
+  def module_names, do: Enum.sort(Map.keys(@module_by_id))
+
   @spec preset(String.t()) :: {:ok, preset_defaults()} | {:error, diagnostic()}
   def preset(name) when is_binary(name) do
     case Map.fetch(@presets, name) do

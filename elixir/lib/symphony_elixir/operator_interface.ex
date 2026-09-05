@@ -104,6 +104,21 @@ defmodule SymphonyElixir.OperatorInterface do
     end
   end
 
+  @doc "Returns authenticated settings catalogs without creating a mutation preview."
+  @spec settings(GenServer.server(), String.t(), map(), GenServer.server()) :: {:ok, map()} | {:error, map()}
+  def settings(server, credential, request, scheduler) do
+    with {:ok, context} <- command_call(server, {:settings_context, credential}, false) do
+      if is_map(request) and is_map(Map.get(request, "selections", %{})) and
+           Enum.all?(Map.keys(request), &(&1 in ["target_id", "repository", "selections"])) and
+           Enum.all?(["target_id", "repository"], &(is_nil(request[&1]) or is_binary(request[&1]))) do
+        catalog = SymphonyElixir.OperatorSettings.build(scheduler, request, config_root: context.config_root)
+        {:ok, Map.merge(catalog, Map.drop(context, [:config_root]))}
+      else
+        {:error, %{error: %{code: "invalid_inputs", message: "Settings inputs are invalid."}}}
+      end
+    end
+  end
+
   @spec events(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, :invalid_cursor | :invalid_limit | :unavailable}
   def events(host_id, after_cursor),
@@ -208,6 +223,23 @@ defmodule SymphonyElixir.OperatorInterface do
 
   def handle_call(:credentials, _from, state) do
     {:reply, OperatorSession.credentials(state.session), state}
+  end
+
+  def handle_call({:settings_context, credential}, _from, state) do
+    case OperatorSession.authenticate(state.session, credential) do
+      :ok ->
+        {:reply,
+         {:ok,
+          %{
+            host_id: state.host_id,
+            interface_version: @interface_version,
+            schema_version: @schema_version,
+            config_root: state.config_root
+          }}, state}
+
+      {:error, code} ->
+        reject_reply(state, code)
+    end
   end
 
   def handle_call({:reject, code}, _from, state), do: reject_reply(state, code)

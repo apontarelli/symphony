@@ -2963,6 +2963,17 @@ Minimum endpoints:
   - If the issue is unknown to the current in-memory state, return `404` with an error response (for
     example `{\"error\":{\"code\":\"issue_not_found\",\"message\":\"...\"}}`).
 
+- `POST /api/v1/operator/settings/choices`
+  - Requires loopback access and the per-host operator session credential. This is a read-only
+    catalog request; it MUST NOT create a mutation preview or contact Linear.
+  - Returns schema-owned finite choices, validated host runner and tracker identifiers, and local
+    capacity profiles. A known repository enables compatible saved workflows, profiles, and modules.
+  - Each field declares scalar or list cardinality. Choices retain current, available, unavailable,
+    stale, or invalid status with stable reasons, including removed draft selections.
+  - The default runner MUST belong to the allowed runner list. Invalid cardinality, incompatible
+    selections, and a stale registry generation block Apply. An unblocked catalog does not replace
+    validated preview and exact confirmation.
+
 - `POST /api/v1/operator/commands/preview`
   - Requires loopback access and a restrictive per-host operator session credential.
   - Accepts interface version, host identity, registry generation, and a typed command with exact

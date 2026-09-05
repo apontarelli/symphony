@@ -537,6 +537,47 @@ The interface resolves this root once at startup: an explicit interface `config_
 selected control-plane root (`--config-root` or registry `host.state_root`), then the local config
 root. Credentials and pruning policy use this same root; HTTP transport options cannot replace it.
 
+Settings clients use `POST /api/v1/operator/settings/choices` with the same loopback and
+bearer-token requirements. This is a read-only request; it does not create a preview or
+change configuration. Its optional inputs are `target_id`, an explicit `repository` path,
+and `selections`, a map from catalog field paths to draft values:
+
+```json
+{
+  "target_id": "alpha",
+  "selections": {
+    "state": "paused",
+    "runners.allowed": ["codex"],
+    "runners.default": "codex",
+    "checks.pre_dispatch": ["capability_preflight", "repo_validation"]
+  }
+}
+```
+
+The response includes interface and schema versions, host identity, registry generation,
+and `fields`. Each field declares `cardinality` (`scalar` or `list`), its `selected` value,
+`valid`, and choices with `value`, `selected`, `status`, and a stable `reason` code.
+Choice status is `available`, `current` (selected and available), `unavailable`, `stale`,
+or `invalid`. Scalar fields accept one value; list fields accept an array. Omitted draft
+fields retain configured target values where available. Wildcard paths such as
+`runners.*.kind` describe schema choices, not a particular configured runner.
+
+Catalogs come from schema-owned enums, validated host runner and tracker definitions,
+local capacity profiles, and repository-compatible saved workflows. Repository profiles
+and workflow modules require a known repository; the service does not discover repositories
+or query Linear. Runner entries include their kind, but not commands or credentials.
+OMP thinking and permission choices apply to `omp_acp` runners.
+Loopback hostname choices apply to `opencode_server` runners. Target runner settings expose
+their schema-owned reasoning-effort choices; provider-defined model names are not finite catalogs.
+
+Clients must keep their draft selections when they request fresh choices. Removed selections
+remain visible with `selection_removed`; incompatible definitions carry explicit reason codes.
+`invalid_cardinality` and `default_runner_not_allowed` block invalid drafts. A registry file
+that differs from the scheduler generation reports `registry_stale` and blocks Apply.
+`apply_blocked` and `errors` describe catalog constraints only: an unblocked catalog is not
+authorization to mutate. Apply still requires the existing validated preview and exact
+confirmation flow.
+
 A preview request contains exactly these fields:
 
 ```json

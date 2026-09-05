@@ -37,6 +37,8 @@ defmodule SymphonyElixirWeb.Router do
     match(:*, "/api/v1/operator/snapshot", ObservabilityApiController, :method_not_allowed)
     get("/api/v1/operator/events", OperatorApiController, :events)
     match(:*, "/api/v1/operator/events", ObservabilityApiController, :method_not_allowed)
+    post("/api/v1/operator/settings/choices", OperatorApiController, :settings)
+    match(:*, "/api/v1/operator/settings/choices", ObservabilityApiController, :method_not_allowed)
     post("/api/v1/operator/commands/preview", OperatorApiController, :preview)
     match(:*, "/api/v1/operator/commands/preview", ObservabilityApiController, :method_not_allowed)
     post("/api/v1/operator/commands/confirm", OperatorApiController, :confirm)
