@@ -1,7 +1,9 @@
 defmodule SymphonyElixirWeb.ObservabilityPubSub do
   @moduledoc """
   PubSub helpers for observability dashboard updates.
+
   """
+  alias SymphonyElixir.OperatorInterface
 
   @pubsub SymphonyElixir.PubSub
   @topic "observability:dashboard"
@@ -13,7 +15,10 @@ defmodule SymphonyElixirWeb.ObservabilityPubSub do
   end
 
   @spec broadcast_update() :: :ok
+
   def broadcast_update do
+    OperatorInterface.publish_state_change()
+
     case Process.whereis(@pubsub) do
       pid when is_pid(pid) ->
         Phoenix.PubSub.broadcast(@pubsub, @topic, @update_message)

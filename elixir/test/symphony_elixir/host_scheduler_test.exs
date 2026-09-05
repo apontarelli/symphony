@@ -47,11 +47,20 @@ defmodule SymphonyElixir.HostSchedulerTest do
     assert :ok = HostScheduler.release_startup(grant)
     assert HostScheduler.snapshot(scheduler).counts.startups == 0
 
+    assert {:ok, marker} = SymphonyElixir.OperatorInterface.marker()
     assert {:ok, reviewer} = HostScheduler.reserve_reviewer(scheduler, target.target_id, self())
     assert {:error, :capacity} = HostScheduler.reserve_reviewer(scheduler, target.target_id, self())
     assert HostScheduler.snapshot(scheduler).counts.reviewers == 1
+    assert {:ok, feed} = SymphonyElixir.OperatorInterface.events(marker.host_id, marker.cursor)
+    assert Enum.any?(feed.events, &(&1.kind == "snapshot_invalidated"))
+    assert {:ok, release_marker} = SymphonyElixir.OperatorInterface.marker()
     assert :ok = HostScheduler.release_reviewer(scheduler, reviewer)
     assert :ok = HostScheduler.release_reviewer(scheduler, reviewer)
+
+    assert {:ok, released_feed} =
+             SymphonyElixir.OperatorInterface.events(release_marker.host_id, release_marker.cursor)
+
+    assert Enum.any?(released_feed.events, &(&1.kind == "snapshot_invalidated"))
 
     assert :ok = HostScheduler.finish_poll(grant, false)
     assert HostScheduler.snapshot(scheduler).counts == %{agents: 1, startups: 0, reviewers: 0, polls: 0}

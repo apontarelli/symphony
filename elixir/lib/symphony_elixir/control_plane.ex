@@ -520,6 +520,34 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   @doc """
+  Returns host-owned availability for durable operator run actions.
+  """
+  @spec operator_action_availability(map()) :: [
+          %{action: String.t(), available: boolean(), disabled_reason: String.t() | nil}
+        ]
+  def operator_action_availability(snapshot) when is_map(snapshot) do
+    Enum.map(@operator_run_actions, fn action ->
+      result =
+        with :ok <- validate_operator_action_state(action, snapshot),
+             :ok <- require_reconciled_side_effects(snapshot) do
+          lease_available(snapshot[:owner_id], snapshot[:lease_expires_at_ms], System.system_time(:millisecond))
+        end
+
+      case result do
+        :ok ->
+          %{action: Atom.to_string(action), available: true, disabled_reason: nil}
+
+        {:error, reason} ->
+          %{
+            action: Atom.to_string(action),
+            available: false,
+            disabled_reason: Atom.to_string(reason)
+          }
+      end
+    end)
+  end
+
+  @doc """
   Returns credential-safe token reservation and charged-use totals by target.
   """
   @spec inspect_target_budgets(GenServer.server()) :: {:ok, [map()]} | {:error, Error.t()}
@@ -8383,6 +8411,7 @@ defmodule SymphonyElixir.ControlPlane do
   defp finish_transaction(connection, database_path, {:ok, _value} = result) do
     case execute(connection, "COMMIT", database_path, :transaction_failed) do
       :ok ->
+        SymphonyElixir.OperatorInterface.publish_state_change()
         result
 
       {:error, %Error{} = commit_error} ->

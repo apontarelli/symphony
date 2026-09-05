@@ -507,6 +507,25 @@ object with host capacity and target rows. `GET /api/v1/<issue_identifier>` retu
 `409 ambiguous_issue` when more than one target has the identifier; add
 `?target_id=<target-id>` to select the durable run.
 
+The production terminal client reads `GET /api/v1/operator/snapshot` and
+`GET /api/v1/operator/events?host_id=<host-id>&after=<cursor>`. The snapshot is a complete
+versioned replacement with host identity, registry generation, freshness, aggregate and target
+capacity, ordered pending queues, durable run stage, landing and cleanup state, warnings, and
+host-owned command availability. Missing, stale, partial, timed-out, and unavailable sources remain
+explicit.
+
+The event feed returns ordered structured runtime events and redacted host logs. Cursors increase
+within one host identity. A host identity change, a cursor before retained history, or a cursor ahead
+of the host returns `snapshot_replacement.required = true`; clients must discard domain state and
+fetch a complete snapshot. Retention and per-response truncation are separate metadata. The
+interface omits credentials, credential references, raw runtime payloads, and prompts.
+`snapshot_invalidated` means that a snapshot-owning process changed; fetch another complete
+snapshot rather than reconstructing domain state from logs. Aggregate capacity uses host limits,
+not the sum of target limits. A stale or missing queue makes overall freshness partial.
+Known raw runtime output is tagged `operator_payload: :unsafe` by its producer. The operator
+log handler omits these bodies and OTP report bodies while preserving level and source; normal
+host log text passes through the shared credential and multiline-prompt redaction boundary.
+
 `symphony control-plane resume <run-id>` and `abandon <run-id>` first return a confirmation token
 bound to the current lifecycle sequence and fencing generation. Supplying that token with
 `--confirm` and `--owner` acquires a new lease before the mutation; active leases, changed state,
@@ -1020,8 +1039,9 @@ runtime:
   recovery uses that context; later workflow, profile, and target-registry changes apply only to new
   admissions.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
-  `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. Add
-  `?target_id=<target-id>` to the issue route when registry targets overlap.
+  `/`, `/api/v1/state`, `/api/v1/operator/snapshot`, `/api/v1/operator/events`,
+  `/api/v1/<issue_identifier>`, and `/api/v1/refresh`. Add `?target_id=<target-id>` to the issue
+  route when registry targets overlap.
 
 ## Incident-triggered issues
 

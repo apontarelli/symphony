@@ -89,10 +89,8 @@ defmodule SymphonyElixir.QualityGate.HostVisualQaTest do
              })
 
     assert output =~ "missing browser"
-    assert output =~ "Authorization: Bearer <redacted:secret>"
-    assert output =~ "api_key=<redacted:secret>"
-    assert output =~ "<redacted:absolute-path>"
     refute output =~ "leak-token"
+    refute output =~ "abc123"
     refute output =~ "/tmp/symphony"
   end
 

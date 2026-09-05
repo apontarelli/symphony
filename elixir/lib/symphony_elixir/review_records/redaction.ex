@@ -9,8 +9,10 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
   @secret_key ~r/(api[_-]?key|authorization|credential|password|secret|token)/i
   @authorization_bearer ~r{(?i)(authorization\s*:\s*bearer\s+)[^\s,"')\]\}]+}
   @bare_bearer ~r{(?i)(bearer\s+)[^\s,"')\]\}]+}
-  @secret_assignment ~r{(?i)((?:api[_-]?key|credential|password|secret|token)\s*[=:]\s*)[^\s,"')\]\}]+}
+  @secret_assignment ~r{(?is)((?:["']?[A-Za-z0-9_-]*(?:api[_-]?key|authorization|credential|password|secret|token)[A-Za-z0-9_-]*["']?)\s*(?:=>|[=:])\s*)(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|[^\s,"')\]\}]+)}
   @embedded_absolute_path ~r{(?<![:/A-Za-z0-9_.-])/(?:[^\s,"')\]\}]+/?)+}
+  @operator_prompt ~r{((?:["']?(?:prompt|input)["']?)\s*(?:=>|[=:])\s*).*}is
+  @secret_reference ~r{secret://[^\s"'<>),\]\}]+}i
 
   @spec json_ready(term()) :: term()
   def json_ready(%DateTime{} = value), do: DateTime.to_iso8601(value)
@@ -83,6 +85,18 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
     value
     |> to_string()
     |> redact_string()
+  end
+
+  @doc """
+  Redacts operator-visible strings without hiding intentional workspace paths.
+  Prompt-bearing text is removed through the end, including multiline payloads.
+  """
+  @spec redact_operator_string(String.t()) :: String.t()
+  def redact_operator_string(value) when is_binary(value) do
+    value
+    |> then(&Regex.replace(@secret_reference, &1, "<redacted:secret-reference>"))
+    |> redact_secret_values()
+    |> then(&Regex.replace(@operator_prompt, &1, "\\1<redacted:prompt>"))
   end
 
   defp json_ready_value(key, value) do

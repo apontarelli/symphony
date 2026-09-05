@@ -24,6 +24,10 @@ defmodule SymphonyElixir.HttpServer do
         orchestrator = Keyword.get(opts, :orchestrator)
         host_scheduler = Keyword.get(opts, :host_scheduler, SymphonyElixir.HostScheduler)
         control_plane = Keyword.get(opts, :control_plane, SymphonyElixir.ControlPlane)
+
+        operator_interface =
+          Keyword.get(opts, :operator_interface, SymphonyElixir.OperatorInterface)
+
         snapshot_timeout_ms = Keyword.get(opts, :snapshot_timeout_ms, 15_000)
 
         with {:ok, ip} <- parse_host(host) do
@@ -34,6 +38,7 @@ defmodule SymphonyElixir.HttpServer do
               url: [host: normalize_host(host)],
               host_scheduler: host_scheduler,
               control_plane: control_plane,
+              operator_interface: operator_interface,
               snapshot_timeout_ms: snapshot_timeout_ms,
               secret_key_base: secret_key_base()
             ]

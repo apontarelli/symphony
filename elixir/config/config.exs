@@ -7,6 +7,8 @@ config :symphony_elixir,
 
 config :phoenix, :json_library, Jason
 
+config :logger, :default_formatter, metadata: [:operator_payload]
+
 config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   adapter: Bandit.PhoenixAdapter,
   url: [host: "localhost"],
