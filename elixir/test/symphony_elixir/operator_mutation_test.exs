@@ -1,5 +1,5 @@
 defmodule SymphonyElixir.OperatorMutationTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.{ControlPlane, ExecutionContext, HostScheduler, OperatorInterface, OperatorMutation, PathSafety}
   alias SymphonyElixir.HostScheduler.Registry
