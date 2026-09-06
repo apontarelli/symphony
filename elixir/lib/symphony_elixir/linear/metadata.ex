@@ -137,8 +137,6 @@ defmodule SymphonyElixir.Linear.Metadata do
       _ ->
         {:error, :invalid_response}
     end
-  rescue
-    _error -> {:error, :invalid_response}
   end
 
   defp resolve_api_key(connection, opts) do
@@ -264,12 +262,10 @@ defmodule SymphonyElixir.Linear.Metadata do
     end
   end
 
-  defp fetch_project_teams(_nodes, _endpoint, _headers, _limits, _request_fun), do: {:error, :invalid_response}
-
   defp fetch_project_teams_list(nodes, endpoint, headers, limits, request_fun) do
     Enum.reduce_while(nodes, {:ok, []}, fn node, {:ok, acc} ->
-      with {:ok, project} <- normalize_project(node),
-           {:ok, team_ids} <- paginate_project_teams(node, project.id, endpoint, headers, limits, request_fun) do
+      with {:ok, project_id} <- required_text(node, "id"),
+           {:ok, team_ids} <- paginate_project_teams(node, project_id, endpoint, headers, limits, request_fun) do
         {:cont, {:ok, [Map.put(node, "team_ids", team_ids) | acc]}}
       else
         error -> {:halt, error}
@@ -320,9 +316,6 @@ defmodule SymphonyElixir.Linear.Metadata do
 
       {:error, reason} ->
         {:error, reason}
-
-      _ ->
-        {:error, :invalid_response}
     end
   end
 
@@ -334,8 +327,6 @@ defmodule SymphonyElixir.Linear.Metadata do
       {:error, :invalid_response}
     end
   end
-
-  defp paginate(_fetch_page, _limits, _initial), do: {:error, :invalid_response}
 
   defp start_pagination(fetch_page, limits, pages, page_nodes, page_info) do
     count = length(page_nodes)
@@ -350,21 +341,10 @@ defmodule SymphonyElixir.Linear.Metadata do
         Enum.reverse(page_nodes),
         count,
         next_cursor(page_info),
-        MapSet.new()
+        []
       )
     end
   end
-
-  defp paginate_pages(
-         _fetch_page,
-         _limits,
-         _pages,
-         _nodes,
-         _count,
-         :malformed,
-         _seen
-       ),
-       do: {:error, :invalid_response}
 
   defp paginate_pages(
          _fetch_page,
@@ -373,16 +353,16 @@ defmodule SymphonyElixir.Linear.Metadata do
          _nodes,
          _count,
          cursor,
-         _seen
+         _seen_cursors
        )
        when pages >= max_pages and not is_nil(cursor),
        do: {:error, :catalog_limit}
 
-  defp paginate_pages(_fetch_page, _limits, _pages, nodes, _count, nil, _seen),
+  defp paginate_pages(_fetch_page, _limits, _pages, nodes, _count, nil, _seen_cursors),
     do: {:ok, Enum.reverse(nodes)}
 
   defp paginate_pages(fetch_page, limits, pages, nodes, count, cursor, seen_cursors) do
-    with false <- MapSet.member?(seen_cursors, cursor),
+    with false <- cursor in seen_cursors,
          {:ok, %{nodes: page_nodes, page_info: page_info}} <- fetch_page.(cursor) do
       new_count = count + length(page_nodes)
 
@@ -396,20 +376,18 @@ defmodule SymphonyElixir.Linear.Metadata do
           Enum.reverse(page_nodes, nodes),
           new_count,
           next_cursor(page_info),
-          MapSet.put(seen_cursors, cursor)
+          [cursor | seen_cursors]
         )
       end
     else
+      true -> {:error, :invalid_response}
       {:error, reason} -> {:error, reason}
-      _ -> {:error, :invalid_response}
     end
   end
 
   defp next_cursor(%{has_next_page: false}), do: nil
   defp next_cursor(%{has_next_page: true, end_cursor: cursor}) when is_binary(cursor) and cursor != "", do: cursor
-  defp next_cursor(_page_info), do: :malformed
 
-  defp normalize_catalog({:error, :malformed}, _kind), do: {:error, :invalid_response}
   defp normalize_catalog({:error, reason}, _kind), do: {:error, reason}
 
   defp normalize_catalog({:ok, nodes}, :teams) do
@@ -457,31 +435,10 @@ defmodule SymphonyElixir.Linear.Metadata do
   defp normalize_project(node) do
     with {:ok, id} <- required_text(node, "id"),
          {:ok, name} <- required_text(node, "name"),
-         {:ok, slug_id} <- required_text(node, "slugId"),
-         {:ok, team_ids} <- project_team_ids(node) do
-      {:ok, %{id: id, name: name, slug_id: slug_id, team_ids: team_ids}}
+         {:ok, slug_id} <- required_text(node, "slugId") do
+      {:ok, %{id: id, name: name, slug_id: slug_id, team_ids: Map.fetch!(node, "team_ids")}}
     end
   end
-
-  defp project_team_ids(node) when is_map(node) do
-    cond do
-      Map.has_key?(node, "team_ids") -> normalize_existing_team_ids(Map.get(node, "team_ids"))
-      Map.has_key?(node, :team_ids) -> normalize_existing_team_ids(Map.get(node, :team_ids))
-      true -> {:ok, []}
-    end
-  end
-
-  defp project_team_ids(_node), do: {:error, :invalid_response}
-
-  defp normalize_existing_team_ids(team_ids) when is_list(team_ids) do
-    if proper_list?(team_ids) and Enum.all?(team_ids, &(is_binary(&1) and String.trim(&1) != "")) do
-      {:ok, Enum.uniq(Enum.map(team_ids, &String.trim/1))}
-    else
-      {:error, :invalid_response}
-    end
-  end
-
-  defp normalize_existing_team_ids(_team_ids), do: {:error, :invalid_response}
 
   defp normalize_state(node) do
     with {:ok, id} <- required_text(node, "id"),
@@ -611,24 +568,12 @@ defmodule SymphonyElixir.Linear.Metadata do
         if is_binary(code), do: [String.upcase(code)], else: []
       end)
 
-    messages =
-      Enum.flat_map(errors, fn error ->
-        message = value(error, "message")
-        if is_binary(message), do: [String.downcase(message)], else: []
-      end)
-
     cond do
       Enum.any?(codes, &(&1 in ~w(UNAUTHENTICATED UNAUTHORIZED FORBIDDEN AUTHENTICATION_ERROR AUTHENTICATION_FAILED INVALID_API_KEY))) ->
         :authentication_failed
 
       Enum.any?(codes, &(&1 in ~w(RATELIMITED RATE_LIMITED TOO_MANY_REQUESTS))) ->
         :rate_limited
-
-      Enum.any?(messages, &String.contains?(&1, ["rate limit", "ratelimit", "too many request"])) ->
-        :rate_limited
-
-      Enum.any?(messages, &String.contains?(&1, ["unauthoriz", "forbidden", "authentication", "api key"])) ->
-        :authentication_failed
 
       true ->
         :invalid_response
@@ -677,8 +622,6 @@ defmodule SymphonyElixir.Linear.Metadata do
       _ -> {:error, :invalid_response}
     end
   end
-
-  defp data(_body), do: {:error, :invalid_response}
 
   defp proper_list?([]), do: true
   defp proper_list?([_head | tail]), do: proper_list?(tail)

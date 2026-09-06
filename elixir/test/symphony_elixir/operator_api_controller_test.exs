@@ -394,8 +394,22 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     assert SymphonyElixir.OperatorSettings.build(context.scheduler, stale, opts).apply_blocked
   end
 
-  test "query files and explicit issues remain distinct from catalog scope choices", context do
+  test "stale Linear choices retain selected identities but block Apply", context do
+    clock = start_supervised!({Agent, fn -> 0 end}, id: :metadata_clock)
+    {opts, _revision} = linear_catalog_fixture(context, catalog_target(), now_fun: fn -> Agent.get(clock, & &1) end, fresh_ttl_ms: 10)
+    Agent.update(clock, fn _ -> 11 end)
+    catalog = SymphonyElixir.OperatorSettings.build(context.scheduler, %{"target_id" => "alpha", "repository" => ""}, opts)
+
+    assert catalog.linear.status == "stale_cache"
+    assert catalog.apply_blocked
+
+    assert %{selected: true, status: "unavailable", members: [%{id: "todo-eng"}]} =
+             Enum.find(catalog.fields["linear.active_states"].choices, &(&1.value == "Todo"))
+  end
+
+  test "connection changes preserve explicit query and issue scope modes after reselection", context do
     {opts, _revision} = linear_catalog_fixture(context)
+    revision = await_linear_catalog(opts, "linear-other").connection_revision
 
     for {type, path, value} <- [
           {"query", "linear.scope.query_file", "/tmp/linear-query.json"},
@@ -403,8 +417,13 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
         ] do
       request = %{
         "target_id" => "alpha",
+        "linear_revision" => revision,
         "repository" => "",
         "selections" => %{
+          "linear.connection" => "linear-other",
+          "linear.active_states" => ["Todo"],
+          "linear.terminal_states" => ["Done"],
+          "linear.required_labels" => [],
           "linear.scope.type" => type,
           "linear.scope.team_key" => nil,
           path => value
@@ -423,7 +442,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     end
   end
 
-  defp linear_catalog_fixture(context, target \\ catalog_target()) do
+  defp linear_catalog_fixture(context, target \\ catalog_target(), overrides \\ []) do
     document = catalog_document(%{"alpha" => target})
     connection = document["host"]["tracker_connections"]["linear-main"]
     document = put_in(document, ["host", "tracker_connections", "linear-other"], connection)
@@ -450,7 +469,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     }
 
     cache_opts = [name: nil, fetch_fun: fn _ -> {:ok, data} end, env_fetcher: fn _ -> "fixture-key" end]
-    cache = start_supervised!({MetadataCache, cache_opts})
+    cache = start_supervised!({MetadataCache, Keyword.merge(cache_opts, overrides)})
     opts = [metadata_cache: [server: cache]]
     result = await_linear_catalog(opts, "linear-main")
     {opts, result.connection_revision}
