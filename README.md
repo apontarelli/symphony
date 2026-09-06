@@ -69,6 +69,12 @@ host runtime settings belong in local config or run setup instead of the checked
 
 ## Run the Elixir implementation
 
+> **Approved direction, not yet shipped:** Symphony is moving to one local host with host-owned
+> repository/target configuration, no required repository `symphony.yml`, and separate Apply and
+> Activate actions. See [PRODUCT.md](PRODUCT.md#configuration-ownership-and-domain-language) and
+> [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463). The commands below describe the
+> current pre-cutover implementation; keep its manifests until reviewed migration is available.
+
 ```bash
 git clone https://github.com/apontarelli/symphony
 cd symphony/elixir

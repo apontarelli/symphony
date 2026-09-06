@@ -13,8 +13,8 @@ product boundaries.
 - [`README.md`](README.md) is the public repo front door and quickstart.
 - [`elixir/README.md`](elixir/README.md) owns setup, configuration, and operation for the Elixir
   reference implementation.
-- [`symphony.yml`](symphony.yml) is this fork's dogfood manifest and an example of manifest shape,
-  not a reusable template.
+- [`symphony.yml`](symphony.yml) is this fork's pre-cutover dogfood manifest, not a required
+  artifact in the approved host-owned configuration model.
 - Linear owns active PDRs, Requirement issues, implementation tickets, acceptance criteria, and
   project closeout state.
 
@@ -26,6 +26,44 @@ secrets, host permissions, and review or landing policy.
 
 Symphony should help that operator run more work through agents while preserving host-owned control
 over workspace boundaries, publishing, quality gates, and handoff decisions.
+
+## Configuration Ownership and Domain Language
+
+Approved product direction (2026-09-06): one local host, host-owned Symphony configuration,
+explicit single-repository routing, and one terminal-first operator surface. This changes the
+product contract; it does not claim the runtime cutover has shipped. Current setup commands still
+require the pre-cutover manifest path. The active design and delivery criteria live in
+[SID-463](https://linear.app/antonio-pontarelli/issue/SID-463) and its
+[terminal operator design](https://linear.app/antonio-pontarelli/document/technical-design-terminal-operator-ux-and-opentui-575d2710661e).
+
+- **Host:** the one local runtime that owns connections, runners, credentials, capacity, and all
+  configured targets. A registry is internal storage, not a normal operator selection.
+- **Repository:** an execution location with verified identity, validation references, and
+  workspace preparation. Existing repository docs, scripts, and CI remain project-owned inputs.
+- **Target:** a work selection bound to an explicit repository and execution policy.
+- **Run:** one admitted execution with a pinned configuration revision.
+- **Profile:** optional reusable policy for targets. Profiles are not required for onboarding
+  and do not form inheritance chains.
+
+Symphony-specific repository configuration, automation policy, and target settings live with the
+host. Target repositories need no `symphony.yml` or generated Symphony files after cutover.
+Store confirmed references to repository commands and docs rather than duplicate their contents.
+Keep host configuration revisioned, inspectable, exportable, and backed up without resolved secrets.
+
+Each admitted issue resolves to exactly one repository. Dedicated project bindings need no extra
+labels. Broad team, project, and query selections require explicit host-owned routing; missing or
+ambiguous routing blocks admission with a reason. Agents do not guess the repository.
+
+Configuration resolves from host defaults through explicit target overrides into a pinned run
+configuration. Show inherited values and sources; shared-profile edits preview all affected targets.
+Deployment ceilings and explicit safety constraints remain enforced. Changes affect future
+admissions, not active runs. Apply saves configuration and creates new targets paused; Activate
+requires a separate preview and confirmation.
+
+Legacy manifests and saved setups are explicit import sources, not a second live authority.
+Migration previews preserve validation, capabilities, protected paths, review/landing restrictions,
+and repository identity. Conflicts or unsupported policy block import rather than weaken it.
+Do not delete user repository files automatically.
 
 ## Product Promise
 
@@ -44,21 +82,22 @@ Symphony should make autonomous engineering work:
 
 ## Core Workflows
 
-- Bootstrap a target repository by committing a thin repo setup `symphony.yml` manifest and
-  validating the compiled workflow before running unattended automation.
-- Compose a local run setup at launch time for the active Linear target, workspace root, runner
-  command, polling, and capacity. Run setup may add restrictions such as smaller capacity or
-  human-review-only routing, but it must not weaken repo-owned validation, delivery, capability, or
-  safety policy.
-- Poll Linear for eligible issue work and dispatch bounded concurrent agent sessions.
-- Launch the configured coding-agent runtime with Symphony-owned harness isolation, then layer target
-  repo instructions and docs after harness policy. The current reference implementation launches
-  Codex, but the product direction is runner-agnostic.
-- Validate completed work with repo-declared commands and host-owned quality gates.
-- Publish reviewable workspace changes under host control and route the result to auto-land,
-  human review, product visual review, rework, decision-needed, or blocked handoff.
-- Expose current runtime state through structured logs, the optional dashboard, and JSON API
-  surfaces.
+- Run `symphony` from any directory to attach to the local host or create host configuration and
+  the registry through first-use setup. No normal registry picker or required YAML editing.
+- Configure tracker connections and runners, select work and a repository, inspect existing
+  validation inputs without executing repository code, and Apply a paused target.
+- Preview and confirm activation separately. Explicit issue batches use an existing target policy
+  and the same host, not another daemon or saved-workflow format.
+- Poll Linear for eligible, unambiguously routed work and dispatch bounded concurrent sessions.
+- Launch the selected runtime with Symphony-owned harness isolation and pinned execution policy;
+  preserve target repository instructions, documentation, and architecture ownership.
+- Validate completed work with confirmed repository commands and host-owned quality gates.
+- Publish under host control and route to auto-land, human review, product visual review, rework,
+  decision-needed, or blocked handoff according to policy and evidence.
+- Monitor actionable blockers, active progress, capacity, and targets from one keyboard-first
+  terminal. Drill into runs for meaningful activity, logs, landing, and safe recovery.
+- Keep non-interactive commands for automation on the same host-owned contracts, not as competing
+  primary operator workflows.
 
 ## Execution Isolation Posture
 
@@ -68,11 +107,10 @@ admissions. Active-run and artifact identity includes the target ID; identical L
 identifiers under two targets do not share tracker, filesystem, runner, check, delivery, retry,
 handoff, or cleanup state.
 
-Registry-backed host runs activate every valid active or draining target from one verified
-generation. One host scheduler applies weighted-deficit fairness, host/target/runner capacity,
-durable token-budget reservations, tracker-connection backoff, pause, drain, restart, cancellation,
-and lease-loss fencing. Saved-workflow and explicit-workflow launches remain convenient
-single-target admission forms on the same scheduler boundary.
+The current registry-backed implementation starts active or draining targets from one verified
+generation and applies host scheduling, capacity, budgets, and fencing. Its saved-workflow and
+explicit-runtime launch paths are pre-cutover behavior, not separate product models to preserve.
+The approved cutover keeps this execution isolation while moving configuration authority to the host.
 
 ## Near-Term Horizon
 
@@ -89,8 +127,8 @@ Roadmap work should prioritize:
 - Restart durability for retry queues, session metadata, and attempt policy where unattended
   reliability depends on it.
 - Host-owned evidence for quality gates, publishability, handoff routing, and retrospective review.
-- Manifest and docs inspection that keeps target repo setup obvious and avoids copied workflow
-  prompt files.
+- Host-owned repository setup that uses existing project docs and validation commands without
+  requiring Symphony files in target repositories.
 
 Public reusable automation remains experimental until these operational surfaces are dependable.
 
@@ -102,9 +140,10 @@ Public reusable automation remains experimental until these operational surfaces
   contracts.
 - Symphony does not require target repositories to copy generated workflow prompts or install
   private global workflow skills.
-- Symphony does not yet import team/cloud-managed run setups. Current saved run setups are
-  local-operator files; future shared run setup import must preserve the same repo-safety invariant.
-- Symphony does not default to production auto-land without explicit repository policy and
-  evidence.
+- Symphony does not coordinate one issue across multiple repositories or infer repository routing.
+- Symphony does not expose presets, modules, compiled manifests, or saved runtime files as
+  competing primary ways to start work.
+- Symphony does not default to production auto-land without explicit host-owned repository-specific
+  policy and evidence.
 - Linear is the current issue-tracker integration. Additional tracker adapters should not outrank
   operator reliability and host-owned write semantics.

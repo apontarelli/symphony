@@ -5,6 +5,14 @@ This directory contains the current Elixir/OTP implementation of Symphony in thi
 posture and prioritization; the root [`README.md`](../README.md) is the public fork overview. This
 file is the implementation setup and operation guide.
 
+> **Configuration cutover status:** The approved product model is one local host with host-owned
+> repository setup and explicit single-repository routing. Target repositories will not require
+> `symphony.yml`; Apply will save configuration without activation. This guide still documents
+> current pre-cutover commands and interfaces. See
+> [product ownership](../PRODUCT.md#configuration-ownership-and-domain-language) and
+> [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463) for the approved design.
+> Existing manifests remain necessary until reviewed migration ships; do not delete them now.
+
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation in trusted environments. This fork
 > is an independent public fork, not an official OpenAI distribution. Harden and operate it under

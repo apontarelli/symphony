@@ -4,6 +4,21 @@ Status: Draft v1 (language-agnostic)
 
 Purpose: Define a service that orchestrates coding agents to get project work done.
 
+## Approved Configuration Direction and Implementation Status
+
+The approved product decision of 2026-09-06 is defined in
+[PRODUCT.md](PRODUCT.md#configuration-ownership-and-domain-language). Symphony-specific
+repository configuration and policy belong to the single local host; target repositories do not
+need Symphony files after cutover. Each issue resolves to one explicit repository. Apply saves
+configuration; Activate separately permits admission. Runs retain their pinned configuration.
+
+The manifest, saved-setup, and launcher contracts below describe the pre-cutover implementation.
+Their repository-file authority and multiple launch forms are superseded as product direction,
+but remain necessary operational guidance until replacement and reviewed migration ship.
+Do not interpret this decision as permission to remove current manifests or weaken their policy.
+The active design, implementation dependencies, and acceptance evidence are in
+[SID-463](https://linear.app/antonio-pontarelli/issue/SID-463).
+
 ## Normative Language
 
 The key words `MUST`, `MUST NOT`, `REQUIRED`, `SHOULD`, `SHOULD NOT`, `RECOMMENDED`, `MAY`, and
@@ -1348,6 +1363,10 @@ Dispatch gating behavior:
 - Template errors fail only the affected run attempt.
 
 ### 6.8 Target Repo Manifest CLI Contract
+
+This section documents the pre-cutover manifest interface. The approved host-owned configuration
+model above replaces mandatory repository manifests; these fields must be migrated with their
+restrictions intact before the runtime stops reading them.
 
 Implementations MAY expose a target-repo manifest named `symphony.yml` as the operator-facing setup
 contract. The manifest records durable repo facts and workflow selections, while the implementation
