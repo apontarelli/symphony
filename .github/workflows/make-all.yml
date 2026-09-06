@@ -62,6 +62,7 @@ jobs:
           UBSAN_OPTIONS: halt_on_error=1
         run: |
           make --always-make native CFLAGS="-O1 -g -std=c99 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
+          printf 'NQ' | priv/native/directory_iterator "$PWD" >/dev/null
           mix test test/symphony_elixir/directory_entries_test.exs test/symphony_elixir/operator_repository_browser_test.exs test/symphony_elixir/operator_repository_sources_test.exs test/symphony_elixir/operator_repository_api_test.exs
 
   coverage:
