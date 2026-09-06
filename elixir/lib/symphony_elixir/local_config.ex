@@ -68,6 +68,15 @@ defmodule SymphonyElixir.LocalConfig do
         "max_retry_backoff_ms" => 300_000
       },
       "control_plane" => %{"terminal_retention_days" => 30},
+      "repository_browser" => %{
+        "roots" => [],
+        "max_depth" => 3,
+        "max_results" => 100,
+        "max_entries" => 10_000,
+        "timeout_ms" => 5_000,
+        "exclusions" => [],
+        "worktree_roots" => []
+      },
       "capacity_profiles" => %{
         "light" => %{"max_concurrent_agents" => 1, "max_concurrent_startups" => 1},
         "normal" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 1},
@@ -153,6 +162,47 @@ defmodule SymphonyElixir.LocalConfig do
 
   def terminal_retention_days(config),
     do: {:error, {:invalid_terminal_retention_days, config}}
+
+  @spec repository_browser(config()) :: {:ok, map()} | {:error, :invalid_repository_browser}
+  def repository_browser(config) when is_map(config) do
+    defaults = default_config()["repository_browser"]
+    settings = Map.get(config, "repository_browser", %{})
+
+    if is_map(settings) do
+      settings = Map.merge(defaults, settings)
+
+      valid? =
+        Enum.all?(Map.keys(settings), &Map.has_key?(defaults, &1)) and
+          browser_limits?(settings) and path_list?(settings["roots"]) and
+          path_list?(settings["worktree_roots"]) and exclusion_names?(settings["exclusions"])
+
+      if valid?, do: {:ok, settings}, else: {:error, :invalid_repository_browser}
+    else
+      {:error, :invalid_repository_browser}
+    end
+  end
+
+  defp browser_limits?(settings) do
+    Enum.all?(
+      [{"max_depth", 0, 32}, {"max_results", 1, 1_000}, {"max_entries", 1, 100_000}, {"timeout_ms", 1, 30_000}],
+      fn {key, minimum, maximum} -> bounded_integer?(settings[key], minimum, maximum) end
+    )
+  end
+
+  defp exclusion_names?(names) when is_list(names) and length(names) <= 100 do
+    Enum.all?(names, &(is_binary(&1) and &1 not in ["", ".", ".."] and Path.basename(&1) == &1))
+  end
+
+  defp exclusion_names?(_names), do: false
+
+  defp bounded_integer?(value, minimum, maximum),
+    do: is_integer(value) and value >= minimum and value <= maximum
+
+  defp path_list?(paths) when is_list(paths) and length(paths) <= 100 do
+    Enum.all?(paths, &(is_binary(&1) and (&1 == "~" or String.starts_with?(&1, "~/") or Path.type(&1) == :absolute)))
+  end
+
+  defp path_list?(_paths), do: false
 
   @spec resolve_capacity(config(), String.t() | map() | nil) :: {:ok, capacity()} | {:error, term()}
   def resolve_capacity(config, nil), do: resolve_capacity(config, "normal")

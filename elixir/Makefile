@@ -1,9 +1,24 @@
-.PHONY: help all setup deps audit build fmt fmt-check lint test coverage ci dialyzer e2e omp-live
+.PHONY: help all setup deps audit build fmt fmt-check lint test coverage ci dialyzer e2e omp-live native
+
+.DEFAULT_GOAL := help
 
 MIX ?= mix
+CC ?= cc
+CPPFLAGS ?=
+CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Wpedantic
+LDFLAGS ?=
+
+NATIVE_SOURCE := c_src/directory_iterator.c
+NATIVE_OUTPUT := priv/native/directory_iterator
+
+native: $(NATIVE_OUTPUT)
+
+$(NATIVE_OUTPUT): $(NATIVE_SOURCE) Makefile
+	@mkdir -p priv/native
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o "$@" "$<" $(LDFLAGS)
 
 help:
-	@echo "Targets: setup, deps, audit, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, omp-live, ci"
+	@echo "Targets: setup, deps, audit, build, native, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, omp-live, ci"
 
 setup:
 	$(MIX) setup

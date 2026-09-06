@@ -578,6 +578,84 @@ that differs from the scheduler generation reports `registry_stale` and blocks A
 authorization to mutate. Apply still requires the existing validated preview and exact
 confirmation flow.
 
+Repository discovery uses authenticated `POST /api/v1/operator/repositories` on the selected
+host. Discovery returns directory candidates only. It does not read repository manifests,
+check readiness, run repository commands, or change repository files.
+
+Start requests return HTTP `202` with a `scan_id`:
+
+```json
+{"action": "recent"}
+{"action": "browse", "path": "/absolute/workspace"}
+{"action": "scan", "path": "/absolute/workspace"}
+{"action": "manual", "path": "/absolute/repository"}
+```
+
+`recent` lists repositories from the verified target registry and local saved/current workflows.
+`browse` lists one level of child directories. `scan` traverses configured roots; omit `path`
+to scan all seeded roots. An explicit scan path must be within an allowed root. `manual`
+accepts an absolute directory outside scan roots, but still enforces exclusions.
+Repository inspection remains a separate step.
+`browse` and `manual` require `path`; `recent` rejects it. Invalid start requests return
+HTTP `400` without replacing an active scan. Requests that expire while queued do not
+start or cancel a scan later.
+
+Poll with `{"action":"poll","scan_id":"<id>","after":0}`. Responses include host identity,
+interface/schema versions, incremental candidate/error `events`, `next_cursor`, `latest_cursor`,
+`dropped_events`, and a terminal `result`. Pass `next_cursor` as `after` on the next poll.
+Candidate events contain `candidate.path` and `candidate.kind: "directory"`.
+Terminal status is `completed`, `partial` (directory errors), `limit`, `timeout`, `cancelled`,
+or `failed`. The final result includes candidates, errors, and visited-entry count. The count
+is `null` when cancellation or an outer timeout kills the worker before it can report its
+actual work; it is never inferred from the number of candidate events.
+If events were dropped, use the terminal candidate list to replace the client list.
+Polling with a cursor greater than `latest_cursor` is rejected as an invalid request.
+
+Cancel with `{"action":"cancel","scan_id":"<id>"}`. One job runs at a time per host interface;
+a new start cancels the previous active job. Refresh means starting a new job, which reloads
+local sources and reads the filesystem again. Discovery paths remain in authenticated
+responses, not the public host event feed.
+
+If workflow storage is unreadable or contains more entries than `max_entries`, discovery
+fails rather than scanning with an incomplete worktree exclusion list. Individual workflow
+documents must be readable regular YAML mappings no larger than 1 MiB; malformed,
+oversized, or unreadable documents also block discovery.
+
+Configure discovery in local `config.yml`, not the committed repository manifest:
+
+```yaml
+repository_browser:
+  roots: []                 # Explicit source workspaces, such as ~/dev
+  max_depth: 3              # Scan root is depth zero; maximum 32
+  max_results: 100          # Maximum 1000 candidates
+  max_entries: 10000        # Maximum 100000 traversal work entries
+  timeout_ms: 5000          # Maximum 30000 per traversal
+  exclusions: []            # Additional directory basenames
+  worktree_roots: []        # Additional generated worktree trees to exclude
+```
+
+Roots also include parents of known repository paths, deduplicated by canonical path.
+Neither `$HOME` nor `/` is added implicitly. The local `workspace.root` is an agent worktree
+root, not a source workspace: it is excluded along with target/workflow worktree roots,
+the host state root, registry directory, and local config root. Hidden directories, VCS
+metadata, dependencies, and caches are excluded. Exclusions apply to physical symlink targets
+as well as entered paths; traversal does not follow links outside its allowed scope.
+
+Traversal stops at depth, result, work, cancellation, or timeout boundaries. Directory names
+are read on demand by a bundled POSIX helper, with one outstanding request and a bounded
+response buffer. Scans and workflow catalog loading never materialize a whole directory
+listing. The helper opens canonical path components without following symlinks and retains
+directory descriptors during enumeration. It runs in an owned process group outside the
+Erlang VM; worker exit and cancellation also terminate the helper. An outer worker deadline
+bounds blocked jobs. Filenames that cannot be represented in UTF-8 produce a directory-level
+error rather than entering JSON responses.
+
+`mix compile`, `mix test`, and `mix build` compile `c_src/directory_iterator.c` into
+`priv/native/directory_iterator` through `elixir_make`. A POSIX C compiler and Make are
+required on macOS and Linux. Include the generated executable with deployed `priv` assets;
+discovery fails explicitly when the helper is unavailable. The helper reads directory names
+only and never executes repository code.
+
 A preview request contains exactly these fields:
 
 ```json

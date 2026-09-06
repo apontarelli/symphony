@@ -56,6 +56,14 @@ jobs:
       - name: Lint
         run: make lint
 
+      - name: Check native memory safety
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1
+        run: |
+          make --always-make native CFLAGS="-O1 -g -std=c99 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer"
+          mix test test/symphony_elixir/directory_entries_test.exs test/symphony_elixir/operator_repository_browser_test.exs test/symphony_elixir/operator_repository_sources_test.exs test/symphony_elixir/operator_repository_api_test.exs
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
