@@ -2979,6 +2979,8 @@ Minimum endpoints:
     Project/team choices retain identity even when names are equal. State and label choices retain
     team membership; project scope uses its teams and labels also include workspace labels.
     Registry state/label values remain names, with all matching identities grouped in each choice.
+    Label values use the registry's trimmed, lowercase identity and retain original names in their
+    members. Label-group containers MUST NOT appear as selectable required labels.
   - Project/team scopes are single-choice. Query-file and explicit-issue scopes remain distinct.
     Active states, terminal states, and required labels are multi-select.
   - Linear catalogs MUST expose loading, current, empty, authentication failure, rate limit, offline,

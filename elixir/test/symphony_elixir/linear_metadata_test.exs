@@ -79,7 +79,8 @@ defmodule SymphonyElixir.Linear.MetadataTest do
             response(
               page("issueLabels", [
                 %{"id" => "l-1", "name" => "Ops", "team" => nil},
-                %{"id" => "l-2", "name" => "Ops", "team" => %{"id" => "t-1"}}
+                %{"id" => "l-2", "name" => "Ops", "team" => %{"id" => "t-1"}},
+                %{"id" => "group", "name" => "Category", "team" => nil, "isGroup" => true}
               ])
             )
 
@@ -169,7 +170,8 @@ defmodule SymphonyElixir.Linear.MetadataTest do
           {response(%{}, 401), :authentication_failed},
           {response(%{}, 429), :rate_limited},
           {response(%{"errors" => [%{"extensions" => %{"code" => "UNAUTHENTICATED"}, "message" => "secret token"}]}), :authentication_failed},
-          {response(%{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}, "message" => "too many"}]}), :rate_limited},
+          {response(%{"errors" => [%{"extensions" => %{"code" => "RATELIMITED"}, "message" => "too many"}]}, 400), :rate_limited},
+          {response(%{"errors" => [%{"extensions" => %{"code" => "AUTHENTICATION_ERROR"}, "message" => "Authentication required"}]}, 400), :authentication_failed},
           {{:error, {:closed, "private transport details"}}, :offline}
         ] do
       request_fun = fn _endpoint, _payload, _headers -> response_value end
