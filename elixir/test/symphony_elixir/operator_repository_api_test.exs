@@ -22,6 +22,9 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
 
     def handle_call(:snapshot, _from, %{snapshot: snapshot} = state), do: {:reply, snapshot, state}
 
+    def handle_call({:registry, registry}, _from, state),
+      do: {:reply, :ok, put_in(state, [:snapshot, :registry], registry)}
+
     def handle_call(:block, _from, state), do: {:reply, :ok, %{state | blocked?: true}}
 
     def handle_call(:release, _from, %{waiter: nil} = state), do: {:reply, :ok, %{state | blocked?: false}}
@@ -102,6 +105,80 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
     response = post(build_conn(), "/api/v1/operator/repositories", %{"action" => "recent"})
     assert response.status == 401
     assert json_response(response, 401)["error"]["code"] == "unauthorized"
+  end
+
+  test "inspection returns a host error if the selected scheduler has stopped", context do
+    GenServer.stop(context.scheduler)
+    response = authorized_post(context, %{"action" => "inspect", "path" => context.manual})
+    refute response.status == 200
+    assert Jason.decode!(response.resp_body)["error"]["code"] == "host_unavailable"
+    assert Process.alive?(context.interface)
+  end
+
+  test "repository inspection requires local authentication", context do
+    response =
+      post(build_conn(), "/api/v1/operator/repositories", %{
+        "action" => "inspect",
+        "path" => context.manual
+      })
+
+    assert response.status == 401
+    assert json_response(response, 401)["error"]["code"] == "unauthorized"
+  end
+
+  test "repository inspection rejects malformed or authority-injecting requests", context do
+    for request <- [
+          %{"action" => "inspect", "path" => "relative"},
+          %{"action" => "inspect", "path" => context.manual, "target_id" => 42},
+          %{"action" => "inspect", "path" => context.manual, "registry_path" => "/tmp/other-targets.yml"},
+          %{"action" => "inspect", "path" => context.manual, "config_root" => "/tmp/other-config"}
+        ] do
+      response = authorized_post(context, request)
+      assert response.status == 400
+      assert json_response(response, 400)["error"]["code"] == "invalid_repository_request"
+    end
+  end
+
+  test "repository inspection returns readiness fields and keeps non-ready paths visible", context do
+    File.write!(Path.join(context.manual, "README.md"), "Repository documentation\n")
+
+    File.write!(
+      Path.join(context.manual, "symphony.yml"),
+      """
+      version: 1
+      project:
+        slug: api-manual
+        repository: https://github.com/example/api-manual
+      docs:
+        entrypoints:
+          - README.md
+      vcs:
+        mode: git
+        default_branch: main
+      delivery:
+        pr_target: main
+      """
+    )
+
+    response = authorized_post(context, %{"action" => "inspect", "path" => context.manual})
+    assert response.status == 200
+    payload = json_response(response, 200)
+
+    assert payload["path"] == canonical!(context.manual)
+    assert payload["state"] == "needs_setup"
+    assert payload["apply_allowed"] == false
+    assert is_binary(payload["reason"])
+    {:ok, identity} = OperatorInterface.credentials(context.interface)
+    assert payload["host_id"] == identity.host_id
+  end
+
+  test "inspection fails closed when the selected host registry is unavailable", context do
+    :ok = GenServer.call(context.scheduler, {:registry, %{path: Path.join(context.root, "host-targets.yml"), verified?: false}})
+
+    response = authorized_post(context, %{"action" => "inspect", "path" => context.manual})
+
+    assert response.status != 200
+    assert Jason.decode!(response.resp_body)["error"]["code"] == "registry_unavailable"
   end
 
   test "start and poll expose incremental candidates and a bounded terminal result", context do

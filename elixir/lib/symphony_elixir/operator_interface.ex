@@ -15,6 +15,7 @@ defmodule SymphonyElixir.OperatorInterface do
     LocalConfig,
     OperatorMutation,
     OperatorRepositoryBrowser,
+    OperatorRepositoryInspection,
     OperatorRepositorySources,
     OperatorSession,
     OperatorSnapshot
@@ -293,7 +294,7 @@ defmodule SymphonyElixir.OperatorInterface do
     with false <- repository_request_expired?(deadline),
          :ok <- OperatorSession.authenticate(state.session, credential),
          false <- repository_request_expired?(deadline) do
-      {reply, state} = handle_repository_request(state, request, scheduler)
+      {reply, state} = handle_repository_request(state, request, scheduler, deadline)
       {:reply, reply, state}
     else
       true ->
@@ -419,8 +420,11 @@ defmodule SymphonyElixir.OperatorInterface do
     {:noreply, append_event(state, kind, source, data)}
   end
 
-  defp handle_repository_request(state, request, scheduler) do
+  defp handle_repository_request(state, request, scheduler, deadline) do
     case normalize_repository_request(request) do
+      {:ok, :inspect, normalized} ->
+        inspect_repository(state, normalized, scheduler, deadline)
+
       {:ok, :start, normalized} ->
         start_repository_job(state, normalized, scheduler)
 
@@ -434,6 +438,52 @@ defmodule SymphonyElixir.OperatorInterface do
         {{:error, repository_error(reason)}, state}
     end
   end
+
+  defp inspect_repository(state, request, scheduler, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    if remaining == 0 do
+      {{:error, repository_error(:operator_interface_unavailable)}, state}
+    else
+      task = Task.async(fn -> inspect_host_repository(request, scheduler, state.config_root) end)
+
+      outcome =
+        case Task.yield(task, remaining) || Task.shutdown(task, :brutal_kill) do
+          {:ok, result} when is_map(result) ->
+            {:ok,
+             result
+             |> safe_projection()
+             |> Map.merge(%{host_id: state.host_id, interface_version: @interface_version, schema_version: @schema_version})}
+
+          {:ok, {:error, reason}} ->
+            {:error, reason}
+
+          {:exit, _reason} ->
+            {:error, :repository_inspection_failed}
+
+          nil ->
+            {:error, :operator_interface_unavailable}
+
+          _other ->
+            {:error, :repository_inspection_failed}
+        end
+
+      {repository_inspection_reply(outcome), state}
+    end
+  end
+
+  defp inspect_host_repository(request, scheduler, config_root) do
+    with {:ok, registry_path} <- OperatorRepositorySources.registry_path(scheduler, config_root: config_root) do
+      OperatorRepositoryInspection.inspect(
+        request["path"],
+        registry_path: registry_path,
+        target_id: Map.get(request, "target_id")
+      )
+    end
+  end
+
+  defp repository_inspection_reply({:ok, result}), do: {:ok, result}
+  defp repository_inspection_reply({:error, reason}), do: {:error, repository_error(reason)}
 
   defp start_repository_job(state, request, scheduler) do
     state = cancel_active_repository(state)
@@ -502,6 +552,12 @@ defmodule SymphonyElixir.OperatorInterface do
     send(parent, {:repository_complete, scan_id, outcome})
   end
 
+  defp normalize_repository_request(%{"action" => "inspect"} = request) do
+    if valid_inspect_request?(request),
+      do: {:ok, :inspect, request},
+      else: {:error, :invalid_repository_request}
+  end
+
   defp normalize_repository_request(request) when is_map(request) do
     action = Map.get(request, "action")
 
@@ -551,6 +607,17 @@ defmodule SymphonyElixir.OperatorInterface do
       _invalid -> {:error, :invalid_repository_request}
     end
   end
+
+  defp valid_inspect_request?(%{"action" => "inspect"} = request) do
+    Enum.all?(Map.keys(request), &(&1 in ["action", "path", "target_id"])) and
+      valid_absolute_repository_path?(Map.get(request, "path")) and
+      valid_optional_target_id?(Map.get(request, "target_id"))
+  end
+
+  defp valid_inspect_request?(_request), do: false
+
+  defp valid_optional_target_id?(nil), do: true
+  defp valid_optional_target_id?(target_id), do: is_binary(target_id) and String.trim(target_id) != ""
 
   defp normalize_repository_cancel(request) do
     with true <- Enum.all?(Map.keys(request), &(&1 in ["action", "scan_id"])),

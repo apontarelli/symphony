@@ -4,6 +4,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   alias SymphonyElixir.LocalConfig
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
+  alias SymphonyElixir.OperatorRepositoryInspection
   alias SymphonyElixir.TargetRegistry
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.FileStore
@@ -824,6 +825,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          {:ok, proposed_snapshot} <-
            snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
          proposed_snapshot <- Composition.compose(proposed_snapshot),
+         :ok <- ensure_repository_ready_for_action(proposed_snapshot, target_id, {:patch, patch}),
          true <-
            current_snapshot.globally_valid? and
              patch_applicable?(proposed_snapshot, target_id, patch),
@@ -910,7 +912,8 @@ defmodule SymphonyElixir.OperatorCommandService do
     proposed_bytes = Yaml.encode(proposed_document)
 
     with {:ok, proposed_snapshot} <-
-           snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]) do
+           snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
+         :ok <- ensure_repository_ready_for_action(proposed_snapshot, envelope["target_id"], :import) do
       proposed_snapshot = Composition.compose(proposed_snapshot)
 
       if current_snapshot.globally_valid? and import_result.applicable? and
@@ -928,6 +931,62 @@ defmodule SymphonyElixir.OperatorCommandService do
       do: :ok,
       else: error(:plan_not_applicable, "rebuilt add proposal is not applicable", "$.plan")
   end
+
+  defp ensure_repository_ready_for_action(snapshot, target_id, {:patch, patch}) do
+    if repository_patch_input?(patch),
+      do: ensure_repository_ready_for_action(snapshot, target_id, :patch),
+      else: :ok
+  end
+
+  defp ensure_repository_ready_for_action(snapshot, target_id, _action) do
+    if ensure_repository_ready?(snapshot, target_id) do
+      :ok
+    else
+      error(:repository_not_ready, "repository is not ready for Apply", "$.targets.#{target_id}.repo.path")
+    end
+  end
+
+  defp ensure_repository_ready?(snapshot, target_id) do
+    case Map.get(snapshot.targets, target_id) do
+      %TargetRegistry.Target{configured: configured} when is_map(configured) ->
+        repo = Map.get(configured, "repo", %{})
+        path = Map.get(repo, "path")
+
+        if is_binary(path) and String.trim(path) != "" do
+          expected = Map.get(repo, "expected_repository")
+          manifest = Map.get(repo, "manifest")
+
+          inspection =
+            OperatorRepositoryInspection.inspect(
+              path,
+              registry_path: snapshot.path,
+              target_id: target_id,
+              manifest: manifest,
+              expected_repository: expected
+            )
+
+          inspection.apply_allowed
+        else
+          true
+        end
+
+      _missing_or_invalid ->
+        false
+    end
+  rescue
+    _exception -> false
+  catch
+    _kind, _reason -> false
+  end
+
+  defp repository_patch_input?(patch) when is_map(patch) do
+    case Map.get(patch, "repo") do
+      value when is_map(value) -> true
+      _absent_or_invalid -> false
+    end
+  end
+
+  defp repository_patch_input?(_patch), do: false
 
   defp ensure_lifecycle_applicable(current_snapshot, proposed_snapshot, target_id, action) do
     target = proposed_snapshot.targets[target_id]
@@ -1514,10 +1573,12 @@ defmodule SymphonyElixir.OperatorCommandService do
   defp patch_applicable?(snapshot, target_id, patch) do
     case snapshot.targets[target_id] do
       %TargetRegistry.Target{valid?: true} ->
-        snapshot.globally_valid?
+        snapshot.globally_valid? and
+          (not repository_patch_input?(patch) or ensure_repository_ready?(snapshot, target_id))
 
       %TargetRegistry.Target{effective_state: :paused, diagnostics: diagnostics} ->
         snapshot.globally_valid? and required_patch_removal?(patch) and
+          (not repository_patch_input?(patch) or ensure_repository_ready?(snapshot, target_id)) and
           Enum.all?(diagnostics, fn
             %TargetRegistry.Diagnostic{severity: :error, code: code}
             when code in [:missing_required_field, :incomplete_policy] ->
@@ -2183,7 +2244,18 @@ defmodule SymphonyElixir.OperatorCommandService do
          )}
       end
     else
-      nonapplicable_proposal(command, registry_path, current_file, registry_preview, opts)
+      {:ok,
+       %Plan{
+         id: nil,
+         action: :add,
+         target_id: command.target_id,
+         registry_path: registry_path,
+         expected_generation: current_file.generation,
+         proposed_generation: registry_preview.proposed_generation,
+         applicable?: false,
+         preview: %{"registry" => json_value(registry_preview), "normalization" => json_value(normalization_preview)},
+         created_at: now(opts)
+       }}
     end
   end
 
@@ -2219,6 +2291,7 @@ defmodule SymphonyElixir.OperatorCommandService do
     diagnostics = snapshot.diagnostics ++ target_diagnostics
 
     snapshot.globally_valid? and
+      ensure_repository_ready?(snapshot, target_id) and
       not Enum.any?(diagnostics, fn diagnostic ->
         diagnostic.scope == {:target, target_id} and diagnostic.code in blocking_codes
       end)
@@ -2274,21 +2347,6 @@ defmodule SymphonyElixir.OperatorCommandService do
       preview: preview,
       created_at: envelope["created_at"]
     }
-  end
-
-  defp nonapplicable_proposal(command, registry_path, current_file, preview, opts) do
-    {:ok,
-     %Plan{
-       id: nil,
-       action: :add,
-       target_id: command.target_id,
-       registry_path: registry_path,
-       expected_generation: current_file.generation,
-       proposed_generation: preview.proposed_generation,
-       applicable?: false,
-       preview: %{"registry" => json_value(preview)},
-       created_at: now(opts)
-     }}
   end
 
   defp nonapplicable_plan(

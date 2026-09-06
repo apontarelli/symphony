@@ -616,6 +616,37 @@ a new start cancels the previous active job. Refresh means starting a new job, w
 local sources and reads the filesystem again. Discovery paths remain in authenticated
 responses, not the public host event feed.
 
+Inspect a selected candidate with `{"action":"inspect","path":"/absolute/repository"}`.
+An optional `target_id` uses that target's configured expected repository identity.
+The selected host resolves its own registry path; client-supplied registry paths and
+configuration roots are rejected. Inspection returns HTTP `200` for both Ready and
+non-Ready candidates, with `host_id`, interface/schema versions, canonical `path`,
+`vcs` (`git`, `jj`, or `unsupported`), `project`, `default_branch`,
+`expected_repository` (normalized GitHub owner/repository), `warnings`, `reason`,
+and `apply_allowed`.
+
+The stable `state` values are `ready`, `needs_setup`, `invalid`, `unreadable`, and
+`identity_mismatch`. Only `ready` permits Apply. Non-Ready candidates remain visible
+with a reason; clients must not remove them from the candidate list. Inspection uses
+the manifest validators and the registry's canonical path, manifest confinement, and
+overlap checks. Repository roots may be shared by targets, but cannot overlap host
+state, the registry directory, or eligible targets' worktree roots. Quarantined targets
+are excluded, as in target-registry admission validation.
+
+Inspection reads local Git/Jujutsu metadata and the repository-local Git `origin`
+fetch and push URLs. These URLs must identify the same repository. Git includes,
+worktree-specific configuration, and local URL rewrites return `invalid` with
+`repository_git_config_unsupported`; inspection does not guess their effective identity.
+Global and system Git configuration are not used. The manifest VCS mode must be
+available in the checkout; colocated Jujutsu repositories can use either Git or Jujutsu.
+Inspection does not contact a remote, run hooks or project commands, discover refs, or
+invoke `jj` (which can snapshot a working copy). Git config parsing has a one-second
+deadline and managed process cleanup. Requests also have the existing operator request
+deadline. A missing or unavailable selected-host registry fails closed. Add/import operations
+with a repository path and patches that change repository inputs require readiness;
+Apply checks it again under the registry lock. Drafts without a repository path and
+non-repository control edits retain their existing behavior.
+
 If workflow storage is unreadable or contains more entries than `max_entries`, discovery
 fails rather than scanning with an incomplete worktree exclusion list. Individual workflow
 documents must be readable regular YAML mappings no larger than 1 MiB; malformed,
