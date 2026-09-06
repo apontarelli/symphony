@@ -1,246 +1,187 @@
 defmodule SymphonyElixir.OperatorRepositoryChoicesTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.{LocalConfig, OperatorRepositoryChoices}
-  alias SymphonyElixir.Workflow.Renderer
+  alias SymphonyElixir.OperatorRepositoryChoices
 
-  test "repository-dependent fields are unavailable while host capacity remains available" do
-    root = tmp_dir!("operator-choices-no-repo")
-    on_exit(fn -> File.rm_rf!(root) end)
+  test "repository policy fields require a repository path" do
+    choices = OperatorRepositoryChoices.build(nil, host: host(), configured: configured())
 
-    choices = OperatorRepositoryChoices.build(nil, config_root: root)
-
-    assert choices["workflow"].status == "unavailable"
-    assert choices["workflow"].reason == "repository_required"
-    assert choices["profile"].status == "unavailable"
-    assert choices["workflow.modules"].status == "unavailable"
-    assert choices["capacity"].status == "current"
-    assert Enum.any?(choices["capacity"].choices, &(&1.value == "normal" and &1.status == "available"))
+    assert choices["repository_profile"].status == "unavailable"
+    assert choices["repository_profile"].reason == "repository_required"
+    assert choices["repository_policy.workflow.modules"].status == "unavailable"
+    assert choices["repository_policy.workflow.modules"].reason == "repository_required"
   end
 
-  test "reports an unavailable catalog when the repository manifest is missing" do
-    root = tmp_dir!("operator-choices-missing-repo")
-    config_root = Path.join(root, "config")
-    missing_repo = Path.join(root, "missing-repo")
-    on_exit(fn -> File.rm_rf!(root) end)
-
-    choices = OperatorRepositoryChoices.build(missing_repo, config_root: config_root)
-
-    assert choices["workflow"].status == "unavailable"
-    assert choices["workflow"].reason == "repository_unavailable"
-    assert choices["profile"].reason == "repository_unavailable"
-    assert choices["workflow.modules"].reason == "repository_unavailable"
-    assert choices["capacity"].status == "current"
-    assert Enum.any?(choices["capacity"].choices, &(&1.value == "normal" and &1.status == "available"))
-  end
-
-  test "contains malformed local config at the filesystem boundary" do
-    root = tmp_dir!("operator-choices-malformed-config")
+  test "configured policy catalog does not require a repository manifest" do
+    root = tmp_dir!("operator-choices-no-manifest")
     repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config")
     File.mkdir_p!(repo)
-    File.mkdir_p!(config_root)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-    File.write!(Path.join(config_root, "config.yml"), "profiles: [unclosed\n")
     on_exit(fn -> File.rm_rf!(root) end)
 
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
+    choices =
+      OperatorRepositoryChoices.build(repo,
+        host: host(),
+        configured: configured()
+      )
 
-    assert choices["profile"] == %{
-             cardinality: "scalar",
-             choices: [],
-             status: "unavailable",
-             reason: "invalid_local_config"
-           }
-
-    assert choices["capacity"].status == "unavailable"
-    assert choices["capacity"].reason == "invalid_local_config"
-    assert choices["workflow.modules"].status == "current"
-    refute inspect(choices) =~ "unclosed"
+    assert Enum.any?(choices["repository_profile"].choices, &(&1.value == "strict"))
+    assert choices["repository_policy.workflow.modules"].status == "current"
+    assert Enum.any?(choices["repository_policy.workflow.modules"].choices, &(&1.value == "workspace"))
+    refute File.exists?(Path.join(repo, "symphony.yml"))
   end
 
-  test "contains an unreadable local config root without exposing its contents" do
-    root = tmp_dir!("operator-choices-unreadable-config")
-    repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config-root")
-    File.mkdir_p!(repo)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-    File.write!(config_root, "operator-secret-unreadable-config")
-    on_exit(fn -> File.rm_rf!(root) end)
+  test "delivery.github_pr is available for valid GitHub identity and explicit pr target" do
+    choices =
+      OperatorRepositoryChoices.build("/tmp/operator-choices-delivery",
+        host: host(),
+        configured: configured()
+      )
 
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
+    field = choices["repository_policy.workflow.modules"]
+    assert field.status == "current"
 
-    assert choices["profile"].reason == "invalid_local_config"
-    assert choices["capacity"].reason == "invalid_local_config"
-    refute inspect(choices) =~ "operator-secret-unreadable-config"
+    delivery = Enum.find(field.choices, &(&1.value == "delivery.github_pr"))
+    assert delivery.status == "available"
+    assert is_nil(delivery.reason)
+
+    assert Enum.any?(field.choices, &(&1.value == "workspace" and &1.status == "available"))
   end
 
-  test "rejects malformed choice containers without offering their contents" do
-    root = tmp_dir!("operator-choices-invalid-containers")
+  test "non-GitHub repository identity keeps module choices unavailable" do
+    host =
+      put_in(host(), ["repository_defaults", "project", "repository"], "https://gitlab.com/example/choices")
+
+    choices =
+      OperatorRepositoryChoices.build("/tmp/operator-choices-delivery",
+        host: host,
+        configured: configured()
+      )
+
+    field = choices["repository_policy.workflow.modules"]
+    assert field.status == "unavailable"
+    assert field.reason == "repository_policy_invalid"
+    assert field.choices == []
+  end
+
+  test "invalid host policy keeps module choices unavailable without exposing raw policy" do
+    root = tmp_dir!("operator-choices-invalid-policy")
     repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config")
     File.mkdir_p!(repo)
-    File.mkdir_p!(config_root)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-
-    File.write!(
-      Path.join(config_root, "config.yml"),
-      "capacity_profiles: [private-value]\nworkflow_modules: [private-value]\n"
-    )
-
     on_exit(fn -> File.rm_rf!(root) end)
 
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
+    choices =
+      OperatorRepositoryChoices.build(repo,
+        host: %{"repository_defaults" => %{"capabilities" => %{"token" => "private-value"}}},
+        configured: configured()
+      )
 
-    assert choices["capacity"].status == "unavailable"
-    assert choices["capacity"].reason == "invalid_local_config"
-    assert Enum.any?(choices["profile"].choices, &(&1.value == "default" and &1.status == "invalid"))
+    assert choices["repository_profile"].status == "current"
+    assert choices["repository_profile"].choices == []
+    assert is_nil(choices["repository_profile"].reason)
+    assert choices["repository_policy.workflow.modules"].reason == "repository_policy_invalid"
     refute inspect(choices) =~ "private-value"
   end
 
-  test "lists saved workflows, repository profiles, registered modules, and valid capacities" do
-    root = tmp_dir!("operator-choices-valid")
+  test "unknown configured profile keeps host profile choices selectable" do
+    root = tmp_dir!("operator-choices-unknown-profile")
     repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config")
     File.mkdir_p!(repo)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-
-    assert {:ok, _path} =
-             LocalConfig.write(
-               %{
-                 "profiles" => %{
-                   "default" => %{"delivery" => %{"pr_target" => "main"}},
-                   "strict" => %{"delivery" => %{"pr_target" => "human-review"}}
-                 }
-               },
-               config_root: config_root
-             )
-
-    File.mkdir_p!(Path.join(config_root, "runs"))
-
-    File.write!(
-      Path.join([config_root, "runs", "default.yml"]),
-      Renderer.to_yaml(%{
-        "repo" => %{"path" => repo},
-        "target" => %{"type" => "query_manual"},
-        "mode" => "watch",
-        "capacity" => "normal"
-      })
-    )
-
-    on_exit(fn -> File.rm_rf!(root) end)
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
-
-    assert Enum.any?(choices["workflow"].choices, &(&1.value == "default" and &1.status == "available"))
-    assert Enum.any?(choices["profile"].choices, &(&1.value == "strict" and &1.status == "available"))
-    assert Enum.any?(choices["workflow.modules"].choices, &(&1.value == "repo.docs" and &1.status == "available"))
-    assert Enum.any?(choices["capacity"].choices, &(&1.value == "normal" and &1.status == "available"))
-  end
-
-  test "retains malformed saved workflows alongside selectable ones" do
-    root = tmp_dir!("operator-choices-saved-workflow-failures")
-    repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config")
-    File.mkdir_p!(repo)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-    File.mkdir_p!(Path.join(config_root, "runs"))
-
-    File.write!(
-      Path.join([config_root, "runs", "default.yml"]),
-      Renderer.to_yaml(%{
-        "repo" => %{"path" => repo},
-        "target" => %{"type" => "query_manual"},
-        "mode" => "watch",
-        "capacity" => "normal"
-      })
-    )
-
-    File.write!(Path.join([config_root, "runs", "broken.yml"]), "[not yaml")
     on_exit(fn -> File.rm_rf!(root) end)
 
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
+    configured = Map.put(configured(), "repository_profile", "removed")
 
-    assert Enum.any?(choices["workflow"].choices, &(&1.value == "default" and &1.status == "available"))
+    choices = OperatorRepositoryChoices.build(repo, host: host(), configured: configured)
 
-    assert Enum.any?(choices["workflow"].choices, fn choice ->
-             choice.value == "broken" and choice.status == "invalid" and
-               choice.reason == "incompatible_workflow_definition"
-           end)
+    assert choices["repository_profile"].status == "current"
+    assert [%{value: "strict", status: "available"}] = choices["repository_profile"].choices
+    assert choices["repository_policy.workflow.modules"].status == "unavailable"
+    assert choices["repository_policy.workflow.modules"].reason == "repository_policy_invalid"
 
-    write_repo_manifest!(repo, ["missing-module"])
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
+    drafted =
+      OperatorRepositoryChoices.build(repo,
+        host: host(),
+        configured: configured,
+        selections: %{"repository_profile" => "strict"}
+      )
 
-    assert Enum.any?(choices["workflow.modules"].choices, fn choice ->
-             choice.value == "missing-module" and choice.status == "invalid" and
-               choice.reason == "incompatible_workflow_module"
-           end)
+    assert drafted["repository_policy.workflow.modules"].status == "current"
+    assert Enum.any?(drafted["repository_policy.workflow.modules"].choices, &(&1.value == "workspace"))
+
+    cleared =
+      OperatorRepositoryChoices.build(repo,
+        host: host(),
+        configured: configured,
+        selections: %{"repository_profile" => nil}
+      )
+
+    assert cleared["repository_policy.workflow.modules"].status == "current"
+
+    invalid =
+      OperatorRepositoryChoices.build(repo,
+        host: host(),
+        configured: configured,
+        selections: %{"repository_profile" => "bogus"}
+      )
+
+    assert invalid["repository_policy.workflow.modules"].status == "unavailable"
+    assert invalid["repository_policy.workflow.modules"].reason == "repository_policy_invalid"
   end
 
-  test "keeps incompatible entries visible without leaking credentials" do
-    root = tmp_dir!("operator-choices-invalid")
+  test "profile-only policy resolves once a profile is drafted when defaults are incomplete" do
+    root = tmp_dir!("operator-choices-profile-only")
     repo = Path.join(root, "repo")
-    config_root = Path.join(root, "config")
     File.mkdir_p!(repo)
-    File.write!(Path.join(repo, "README.md"), "docs\n")
-    write_repo_manifest!(repo)
-
-    assert {:ok, _path} =
-             LocalConfig.write(
-               %{
-                 "tracker" => %{"api_key" => "operator-secret-value"},
-                 "profiles" => %{
-                   "broken" => %{
-                     "delivery" => %{"pr_target" => "main", "unsupported" => "operator-private"}
-                   }
-                 },
-                 "workflow_modules" => %{"configured-missing" => %{"enabled" => true}},
-                 "capacity_profiles" => %{
-                   "broken" => %{"max_concurrent_agents" => 99, "max_concurrent_startups" => 99}
-                 }
-               },
-               config_root: config_root
-             )
-
     on_exit(fn -> File.rm_rf!(root) end)
-    choices = OperatorRepositoryChoices.build(repo, config_root: config_root)
 
-    assert Enum.any?(choices["profile"].choices, fn choice ->
-             choice.value == "broken" and choice.status == "invalid" and
-               choice.reason == "incompatible_profile_definition"
-           end)
+    host = %{
+      "repository_defaults" => Map.drop(host()["repository_defaults"], ["project", "workflow"]),
+      "repository_profiles" => %{
+        "strict" => %{
+          "project" => %{"slug" => "choices", "repository" => "https://github.com/example/choices"}
+        }
+      }
+    }
 
-    assert Enum.any?(choices["workflow.modules"].choices, fn choice ->
-             choice.value == "configured-missing" and choice.status == "invalid" and
-               choice.reason == "incompatible_workflow_module"
-           end)
+    choices = OperatorRepositoryChoices.build(repo, host: host, configured: configured())
 
-    assert Enum.any?(choices["capacity"].choices, fn choice ->
-             choice.value == "broken" and choice.status == "invalid" and
-               choice.reason == "invalid_capacity_profile"
-           end)
+    assert choices["repository_profile"].status == "current"
+    assert Enum.any?(choices["repository_profile"].choices, &(&1.value == "strict"))
+    assert choices["repository_policy.workflow.modules"].status == "unavailable"
+    assert choices["repository_policy.workflow.modules"].reason == "repository_policy_invalid"
 
-    refute inspect(choices) =~ "operator-secret-value"
+    drafted =
+      OperatorRepositoryChoices.build(repo,
+        host: host,
+        configured: configured(),
+        selections: %{"repository_profile" => "strict"}
+      )
+
+    assert drafted["repository_policy.workflow.modules"].status == "current"
+
+    assert Enum.any?(
+             drafted["repository_policy.workflow.modules"].choices,
+             &(&1.value == "delivery.github_pr" and &1.status == "available")
+           )
   end
 
-  defp write_repo_manifest!(repo, modules \\ []) do
-    workflow = if modules == [], do: %{}, else: %{"modules" => modules}
-
-    File.write!(
-      Path.join(repo, "symphony.yml"),
-      Renderer.to_yaml(%{
-        "version" => 1,
-        "project" => %{"slug" => "choices-repo", "repository" => "https://github.com/example/choices"},
-        "docs" => %{"entrypoints" => ["README.md"]},
+  defp host do
+    %{
+      "repository_defaults" => %{
+        "project" => %{"slug" => "choices", "repository" => "https://github.com/example/choices"},
+        "docs" => %{"entrypoints" => []},
+        "validation" => %{"commands" => [], "required_files" => []},
+        "vcs" => %{"mode" => "git", "default_branch" => "main"},
         "delivery" => %{"pr_target" => "main"},
-        "workflow" => workflow
-      })
-    )
+        "workflow" => %{"modules" => ["workspace"]},
+        "capabilities" => %{"required" => []}
+      },
+      "repository_profiles" => %{
+        "strict" => %{"workflow" => %{"modules" => ["workspace"]}}
+      }
+    }
   end
+
+  defp configured, do: %{"repo" => %{"path" => "/tmp/choices"}}
 
   defp tmp_dir!(prefix) do
     path = Path.join(System.tmp_dir!(), "#{prefix}-#{System.unique_integer([:positive])}")

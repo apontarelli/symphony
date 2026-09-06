@@ -1,8 +1,11 @@
 defmodule SymphonyElixir.ExecutionContextTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.{ExecutionContext, Orchestrator}
+  alias SymphonyElixir.Codex.HarnessHome
+  alias SymphonyElixir.ExecutionContext
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator
+  alias SymphonyElixir.PromptBuilder
   alias SymphonyElixir.TargetContext
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.Preview
@@ -12,21 +15,6 @@ defmodule SymphonyElixir.ExecutionContextTest do
   defmodule ManifestAdapter do
     @moduledoc false
 
-    def read(_path, _opts), do: {:ok, manifest()}
-    def validate(_repo_path, _manifest), do: %{errors: [], modules: [], preset: "default"}
-
-    def compile(manifest) do
-      %{
-        config: %{"manifest" => manifest},
-        workflow_module_resolution: %{
-          module_names: ["quality"],
-          module_refs: [%{name: "quality", version: "v1"}],
-          policy_hash: "sha256:" <> String.duplicate("d", 64),
-          rendered: "quality policy"
-        }
-      }
-    end
-
     def manifest do
       %{
         "version" => 1,
@@ -35,7 +23,7 @@ defmodule SymphonyElixir.ExecutionContextTest do
         "docs" => %{},
         "validation" => %{"commands" => [%{"command" => "mix test", "name" => "test"}]},
         "vcs" => %{},
-        "delivery" => %{},
+        "delivery" => %{"pr_target" => "main"},
         "automation" => %{},
         "harness" => %{},
         "capabilities" => %{},
@@ -432,12 +420,47 @@ defmodule SymphonyElixir.ExecutionContextTest do
       Map.put(repo_policy, "manifest_source_dir", "relative/source"),
       Map.put(repo_policy, "manifest_source_dir", <<0xFF>>),
       Map.put(repo_policy, "manifest", []),
-      Map.put(repo_policy, "workflow_module_resolution", [])
+      Map.put(repo_policy, "workflow_module_resolution", []),
+      Map.put(repo_policy, "configuration_revision", "forged"),
+      Map.put(repo_policy, "configuration_sources", [])
     ]
 
     for malformed_repo_policy <- malformed_repo_policies do
       assert ExecutionContext.new(%{target | repo_policy: malformed_repo_policy}, issue, opts) ==
                {:error, :invalid_target}
+    end
+  end
+
+  @tag :tmp_dir
+  test "host-composed repository policy reaches prompt and harness consumers with pinned metadata",
+       %{tmp_dir: tmp_dir} do
+    target = target_context!(tmp_dir)
+    issue = %Issue{id: "issue-411", identifier: "SID-411", title: "Host composed run"}
+    policy = %{"sandbox" => %{"network_access" => false}, "secrets" => []}
+    repo_policy = target.repo_policy
+
+    assert {:ok, %ExecutionContext{} = context} = ExecutionContext.new(target, issue, policy: policy)
+
+    assert {:ok, bundle} = PromptBuilder.build_prompt_bundle(context, issue, [])
+    assert bundle.prompt =~ issue.identifier
+
+    assert bundle.workflow_module_resolution.policy_hash ==
+             repo_policy["workflow_module_resolution"]["policy_hash"]
+
+    assert {:ok, harness} = HarnessHome.path(context)
+    assert harness.path == Path.join([Path.dirname(context.workspace_path), ".symphony", "codex_home"])
+
+    for malformed_repo_policy <- [
+          Map.put(repo_policy, "unknown", "forged"),
+          Map.put(repo_policy, "configuration_revision", "forged"),
+          Map.put(repo_policy, "configuration_sources", [])
+        ] do
+      forged = %{context | target: %{context.target | repo_policy: malformed_repo_policy}}
+
+      assert PromptBuilder.build_prompt_bundle(forged, issue, []) ==
+               {:error, :invalid_prompt_context}
+
+      assert HarnessHome.path(forged) == {:error, :invalid_harness_home_context}
     end
   end
 
@@ -1255,7 +1278,9 @@ defmodule SymphonyElixir.ExecutionContextTest do
   defp target_context!(tmp_dir, document \\ nil) do
     repo_path = Path.join(tmp_dir, "repo")
     File.mkdir_p!(repo_path)
-    File.write!(Path.join(repo_path, "symphony.yml"), "version: 1\n")
+    File.mkdir_p!(Path.join(repo_path, ".git/objects"))
+    File.write!(Path.join(repo_path, ".git/HEAD"), "ref: refs/heads/main\n")
+    File.write!(Path.join(repo_path, ".git/config"), "[remote \"origin\"]\nurl = https://github.com/example/repo\n")
 
     document = document || registry_document(tmp_dir)
     assert {:ok, structured} = Schema.validate(document, home: tmp_dir)
@@ -1272,7 +1297,7 @@ defmodule SymphonyElixir.ExecutionContextTest do
     assert validated.globally_valid?, inspect(validated.diagnostics)
     assert validated.targets["alpha"].valid?, inspect(validated.targets["alpha"].diagnostics)
 
-    composed = Composition.compose(validated, manifest: ManifestAdapter)
+    composed = Composition.compose(validated)
     assert composed.targets["alpha"].valid?, inspect(composed.targets["alpha"].diagnostics)
 
     generation = Preview.generation("execution-context-fixture")
@@ -1320,9 +1345,9 @@ defmodule SymphonyElixir.ExecutionContextTest do
           "display_name" => "Alpha",
           "state" => "active",
           "dispatch_mode" => "explicit",
+          "repository_policy" => ManifestAdapter.manifest(),
           "repo" => %{
             "path" => Path.join(tmp_dir, "repo"),
-            "manifest" => "symphony.yml",
             "expected_repository" => "https://github.com/example/repo"
           },
           "worktree" => %{

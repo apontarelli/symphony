@@ -9,15 +9,15 @@ Purpose: Define a service that orchestrates coding agents to get project work do
 The approved product decision of 2026-09-06 is defined in
 [PRODUCT.md](PRODUCT.md#configuration-ownership-and-domain-language). Symphony-specific
 repository configuration and policy belong to the single local host; target repositories do not
-need Symphony files after cutover. Each issue resolves to one explicit repository. Apply saves
-configuration; Activate separately permits admission. Runs retain their pinned configuration.
+need Symphony files for host-registry admission. Each issue resolves to one explicit repository.
+Apply saves configuration; Activate separately permits admission. Runs retain pinned configuration.
 
-The manifest, saved-setup, and launcher contracts below describe the pre-cutover implementation.
-Their repository-file authority and multiple launch forms are superseded as product direction,
-but remain necessary operational guidance until replacement and reviewed migration ship.
-Do not interpret this decision as permission to remove current manifests or weaken their policy.
-The active design, implementation dependencies, and acceptance evidence are in
+Host-registry policy authority, manifest-free admission, immutable run revisions, and source revision
+history/export/backup are implemented by SID-494. Legacy single-run manifest discovery and saved
+launchers below remain operational only for those legacy paths. The full terminal setup flow and
+reviewed migration remain separate work under
 [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463).
+Do not remove legacy setup files before migrating the setup that uses them.
 
 ## Normative Language
 
@@ -394,29 +394,53 @@ Fields:
 - `Session ID`
   - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
 
-## 5. Manifest and Workflow Module Specification
+## 5. Repository Policy and Workflow Module Specification
 
 ### 5.1 Source-of-Truth Model
 
-Target repositories commit a thin `symphony.yml` manifest. Symphony owns presets, workflow modules,
-compiled workflow generation, and the harness runtime policy.
+The host target registry is the sole Symphony configuration authority for host runs. Repository
+`symphony.yml` files MUST NOT be required or read by host readiness, catalogs, composition, or
+admission. The policy schema below also serves legacy manifest loaders; an internal field named
+`manifest` describes normalized policy data, not repository-file authority for host runs.
 
 Source-of-truth rules:
 
-- `symphony.yml` is the committed target-repo entry point for Symphony v1.
-- Workflow modules and presets are authored, versioned, and distributed by Symphony.
-- The compiled workflow is a runtime artifact produced from the manifest, selected modules, service
-  deployment config, and selected workflow profile.
+- Host policy resolves from optional `host.repository_defaults`, then an optional flat
+  `host.repository_profiles` entry selected by target `repository_profile`, then target
+  `repository_policy` overrides. Maps merge recursively; lists replace. Profiles MUST NOT inherit
+  profiles. Unknown profiles and invalid resolved policy MUST block admission.
+- Workflow modules and execution profiles are authored, versioned, and distributed by Symphony.
+- The compiled workflow is a runtime artifact produced from resolved host repository policy,
+  selected modules, host runtime policy, and execution profiles.
 - Target repo docs remain authoritative for project style, setup, domain language, app-specific
   commands, architecture, and design conventions.
 - Target repo `AGENTS.md` layers after the harness global `AGENTS.md`; it does not replace or
   duplicate Symphony workflow modules.
 - Rendered workflow exports are generated inspection/debugging artifacts. They MUST NOT be the setup
   path that target repos copy and customize.
+- Repository identity MUST agree between host policy, target `repo.expected_repository`, and the
+  inspected Git or Jujutsu origin metadata. Inspection MUST NOT execute repository code.
+- Missing `docs.entrypoints` or `validation.required_files`, unsafe file references, and unavailable
+  required capabilities MUST remain explicit blockers. Files remain in the repository; policy
+  stores references. Required capabilities MUST be declared available on the host or on every
+  selectable runner; runtime capability preflight remains independent.
+- A run MUST pin resolved policy, compiled modules, configuration source descriptors, and a
+  `configuration_revision` in its durable execution context. Later host/default/profile/target
+  edits MUST NOT affect active validation, review, publish, landing, or restart recovery.
+- The host MUST retain observed source revisions in private storage and provide readable history,
+  YAML export, and JSON backup. Credentials MUST remain unresolved references. Inline credential
+  values MUST be rejected. Source registry revision IDs and target run configuration revision IDs
+  identify different objects and MUST NOT be interchanged.
 
-### 5.2 Manifest Discovery and File Format
+The implemented fields, commands, and storage format are documented in
+[the host repository policy guide](elixir/README.md#host-repository-policy-and-revisions).
 
-Manifest path precedence:
+### 5.2 Legacy Manifest Discovery and Policy File Format
+
+The following discovery rules apply only to legacy single-run setup. Host registries MUST NOT
+apply these discovery rules. The field definitions remain the shared repository-policy schema.
+
+Legacy manifest path precedence:
 
 1. Explicit application/runtime setting, such as a CLI path argument or configured workflow path.
 2. Default manifest: `symphony.yml` in the current process working directory.
@@ -619,8 +643,8 @@ project style, setup, command syntax, domain language, product/design constraint
 
 
 An optional host target `repo.branch` overrides `vcs.default_branch` in the admitted target policy.
-Omission or `null` inherits the manifest value. The override MUST NOT modify the repository manifest,
-its source hash, or `delivery.pr_target`. The effective policy hash and compiled prompt/module
+Omission or `null` inherits the resolved host policy value. The override MUST NOT modify the source
+policy, its source hash, or `delivery.pr_target`. The effective policy hash and compiled prompt/module
 resolution MUST include the override. Explicit and absent target workspace hooks retain their
 existing behavior; this setting does not add or rewrite a target checkout hook.
 
@@ -714,11 +738,11 @@ Fields:
     link the pull request and move the issue to `Merging`, where a fresh landing worker performs final
     check/review polling and the merge.
 
-Changing the effective `auto_land` policy is itself authority-sensitive and forces human review.
-Changing another part of `symphony.yml` does not force human review when the host can prove that the
-effective `auto_land` policy is unchanged. Auto-land eligibility requires complete, host-verified
-changed-file evidence; missing or inconsistent evidence is blocked rather than treated as an empty
-change set.
+Host runs retain the admitted `auto_land` policy. Repository manifest edits MUST NOT change that
+policy or trigger policy reloading. Legacy single-run paths force human review when the effective
+`auto_land` policy changes and the host cannot prove authority unchanged. Auto-land eligibility
+requires complete, host-verified changed-file evidence; missing or inconsistent evidence is blocked
+rather than treated as an empty change set.
 
 Default required evidence:
 

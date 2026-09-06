@@ -487,35 +487,22 @@ defmodule SymphonyElixir.OperatorInterface do
   end
 
   defp inspect_host_repository(request, scheduler, config_root) do
-    with {:ok, registry_path} <- OperatorRepositorySources.registry_path(scheduler, config_root: config_root),
-         {:ok, manifest_opts} <- target_manifest_opts(request, registry_path) do
+    with target_id <- Map.get(request, "target_id"),
+         {:ok, host, configured, configured_targets, registry_path} <-
+           OperatorRepositorySources.registry_context(scheduler, target_id, config_root: config_root) do
       OperatorRepositoryInspection.inspect(
         request["path"],
-        [registry_path: registry_path, target_id: Map.get(request, "target_id")] ++ manifest_opts
+        host: host,
+        configured: configured,
+        configured_targets: configured_targets,
+        target_id: target_id,
+        registry_path: registry_path
       )
+    else
+      {:error, :configuration_required} -> {:error, :repository_configuration_required}
+      {:error, reason} -> {:error, reason}
     end
   end
-
-  defp target_manifest_opts(request, registry_path) do
-    case persisted_target_repo(registry_path, Map.get(request, "target_id")) do
-      nil ->
-        {:ok, []}
-
-      repo ->
-        manifest = Map.get(repo, "manifest", "symphony.yml")
-
-        if safe_manifest_name?(manifest),
-          do: {:ok, [manifest: manifest]},
-          else: {:error, :repository_manifest_invalid}
-    end
-  end
-
-  defp safe_manifest_name?(manifest) when is_binary(manifest) do
-    String.valid?(manifest) and String.trim(manifest) != "" and Path.type(manifest) == :relative and
-      Enum.all?(Path.split(manifest), &(&1 not in [".", ".."]))
-  end
-
-  defp safe_manifest_name?(_manifest), do: false
 
   defp repository_inspection_reply({:ok, result}), do: {:ok, result}
   defp repository_inspection_reply({:error, reason}), do: {:error, repository_error(reason)}

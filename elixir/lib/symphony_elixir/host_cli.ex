@@ -6,12 +6,16 @@ defmodule SymphonyElixir.HostCLI do
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
   alias SymphonyElixir.TargetRegistry.Preview
+  alias SymphonyElixir.TargetRegistry.Revisions
   alias SymphonyElixir.TargetRegistry.Yaml
   require Logger
 
   @host_usage """
   Usage:
     symphony host run [--registry <path>]
+    symphony host config export [--revision <sha256:hash>] [--registry <path>]
+    symphony host config history [--registry <path>]
+    symphony host config backup [--registry <path>]
     symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
     symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -143,6 +147,21 @@ defmodule SymphonyElixir.HostCLI do
     evaluate_run(args, deps)
   end
 
+  def evaluate(["config", action | args], _deps) when action in ["export", "history", "backup"] do
+    with :ok <- prevalidate_argv(args, [:registry, :revision]),
+         {opts, [], []} <- OptionParser.parse(args, strict: [registry: :keep, revision: :keep]),
+         true <- valid_singleton_counts?(opts, [:registry, :revision]),
+         true <- action == "export" or not Keyword.has_key?(opts, :revision),
+         {:ok, path} <- resolve_registry_path(registry_opt(opts)) do
+      case Application.ensure_all_started(:yaml_elixir) do
+        {:ok, _applications} -> configuration_output(action, path, Keyword.get(opts, :revision))
+        _ -> {:error, "configuration_dependency_failed"}
+      end
+    else
+      _ -> {:error, host_usage()}
+    end
+  end
+
   def evaluate(["target", "--help"], _deps) do
     {:ok, host_usage()}
   end
@@ -197,6 +216,26 @@ defmodule SymphonyElixir.HostCLI do
 
   def evaluate(_args, _deps) do
     {:error, host_usage()}
+  end
+
+  defp configuration_output("export", path, revision) do
+    case Revisions.export(path, revision) do
+      {:ok, output} -> {:ok, output}
+      {:error, _reason} -> {:error, "configuration_export_failed"}
+    end
+  end
+
+  defp configuration_output(action, path, _revision) do
+    result =
+      case action do
+        "history" -> Revisions.history(path)
+        "backup" -> Revisions.backup(path)
+      end
+
+    case result do
+      {:ok, records} -> Jason.encode(records, pretty: true)
+      {:error, _reason} -> {:error, "configuration_#{action}_failed"}
+    end
   end
 
   defp evaluate_run(args, deps) do

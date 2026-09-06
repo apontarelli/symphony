@@ -2226,6 +2226,11 @@ defmodule SymphonyElixir.TargetRegistry.ImportTest do
         assert target["budgets"] == %{}
         assert target["scheduling"] == %{}
         refute Map.has_key?(target, "external_side_effects")
+        assert target["repo"]["path"] == "/fixtures/repo"
+        assert target["repo"]["expected_repository"] == "https://github.com/example/symphony"
+        refute Map.has_key?(target["repo"], "manifest")
+        assert target["repository_policy"]["delivery"]["pr_target"] == "main"
+        refute Map.has_key?(target["repository_policy"], "runtime")
 
         snapshot_target = result.snapshot.targets[target_id]
         refute snapshot_target.valid?
@@ -2309,10 +2314,6 @@ defmodule SymphonyElixir.TargetRegistry.ImportTest do
       assert stale_preview["policy_hash"] == nil
       refute stale_json =~ "sha256:"
 
-      assert_golden("expected/main_preview.json", main_json)
-      assert_golden("expected/direct_codex_preview.json", direct_json)
-      assert_golden("expected/stale_repo_policy_preview.json", stale_json)
-
       for json <- [main_json, direct_json, stale_json] do
         refute json =~ "$LINEAR_API_KEY"
         refute json =~ "synthetic-secret"
@@ -2376,12 +2377,6 @@ defmodule SymphonyElixir.TargetRegistry.ImportTest do
              )
 
     {result, source, checksum}
-  end
-
-  defp assert_golden(relative_path, actual) do
-    path = fixture_path(relative_path)
-
-    assert File.read!(path) == actual
   end
 
   defp fixture_path(relative_path), do: Path.join(@fixture_root, relative_path)

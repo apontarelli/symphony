@@ -156,7 +156,8 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
         auto_land_policy_change_status(
           changed_files_from_manifest_check(manifest_check),
           workspace,
-          policy
+          policy,
+          context_field(routing_context, :configuration_revision, nil)
         )
     }
 
@@ -208,6 +209,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
           %{
             policy: context.policy,
             labels: issue.labels,
+            configuration_revision: context.target.repo_policy["configuration_revision"],
             workflow_module_resolution: get_in(context.target.repo_policy, ["workflow_module_resolution"])
           },
           issue
@@ -606,7 +608,11 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
 
   defp changed_files_status(_manifest_check, _publish_handoff), do: :unverified
 
-  defp auto_land_policy_change_status(changed_files, workspace, policy)
+  defp auto_land_policy_change_status(_changed_files, _workspace, _policy, revision)
+       when is_binary(revision),
+       do: :unchanged
+
+  defp auto_land_policy_change_status(changed_files, workspace, policy, nil)
        when is_list(changed_files) and is_binary(workspace) do
     if "symphony.yml" in changed_files do
       case WorkflowManifest.read(workspace) do
@@ -621,7 +627,7 @@ defmodule SymphonyElixir.HandoffRouteRecorder do
     end
   end
 
-  defp auto_land_policy_change_status(_changed_files, _workspace, _policy), do: :unverified
+  defp auto_land_policy_change_status(_changed_files, _workspace, _policy, _revision), do: :unverified
 
   defp classify_auto_land_policy_change(manifest, policy) do
     if Map.get(manifest, "auto_land") == pinned_auto_land(policy),

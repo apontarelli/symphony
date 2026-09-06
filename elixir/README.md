@@ -5,13 +5,11 @@ This directory contains the current Elixir/OTP implementation of Symphony in thi
 posture and prioritization; the root [`README.md`](../README.md) is the public fork overview. This
 file is the implementation setup and operation guide.
 
-> **Configuration cutover status:** The approved product model is one local host with host-owned
-> repository setup and explicit single-repository routing. Target repositories will not require
-> `symphony.yml`; Apply will save configuration without activation. This guide still documents
-> current pre-cutover commands and interfaces. See
-> [product ownership](../PRODUCT.md#configuration-ownership-and-domain-language) and
-> [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463) for the approved design.
-> Existing manifests remain necessary until reviewed migration ships; do not delete them now.
+> **Configuration cutover status:** Host-registry runs now use host-owned repository policy and
+> do not require `symphony.yml`. They retain immutable configuration revisions through recovery.
+> Legacy saved-run commands below still use their existing manifests. The complete terminal setup
+> flow and reviewed legacy migration remain separate work under
+> [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463).
 
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation in trusted environments. This fork
@@ -213,6 +211,9 @@ Operators can author and control local host target registry entries with these c
 
 ```text
 symphony host run [--registry <path>]
+symphony host config export [--revision <sha256:hash>] [--registry <path>]
+symphony host config history [--registry <path>]
+symphony host config backup [--registry <path>]
 symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
 symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
 symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -263,15 +264,16 @@ Plans use envelope version 2. Older plans cannot be confirmed; generate a new pr
 Repeated previews with the same identity reuse the existing valid plan without changing its bytes.
 
 Add and import always create paused targets with no dispatch mode. Import reads the source runtime
-and repository without modifying either; the current committed repository manifest remains
-authoritative. Patch input is a target-only recursive schema patch, not JSON Patch or JSON Merge
-Patch, and general patch operations cannot change lifecycle state or dispatch mode.
+and repository without modifying either and copies repository policy into the proposed host target.
+After admission, repository files are not live Symphony configuration authority. Patch input is a
+target-only recursive schema patch, not JSON Patch or JSON Merge Patch. General patch operations
+cannot change lifecycle state or dispatch mode.
 
-The optional target field `repo.branch` overrides the manifest's `vcs.default_branch` in the admitted
-runtime policy and compiled prompt. For example, a patch can contain `repo: {branch: release/2026}`.
-Omit the field to inherit the manifest value, or patch it to `null` to remove an existing override.
-The source manifest, its hash, and `delivery.pr_target` do not change. Target workspace hooks remain
-authoritative: this setting does not add a missing checkout hook or rewrite custom/imported hooks.
+The optional target field `repo.branch` overrides the resolved host policy's `vcs.default_branch`
+in the admitted runtime policy and compiled prompt. For example, a patch can contain
+`repo: {branch: release/2026}`. Omit the field to inherit the policy value, or patch it to `null`
+to remove an override. The source policy and `delivery.pr_target` do not change. Target workspace
+hooks remain authoritative: this setting does not add or rewrite checkout hooks.
 
 Activation requires `explicit` or `watch` dispatch mode and reuses an existing valid mode when
 `--mode` is omitted. The lifecycle graph is `paused -> active`, `active -> draining`,
@@ -284,6 +286,95 @@ immutable `TargetContext`, and starts one target orchestrator for every active o
 Only active targets receive new grants. The default registry is used when `--registry` is omitted.
 If a later reload fails, the daemon keeps the last verified generation visible but blocks new grants
 until it can verify the current file generation again.
+
+### Host repository policy and revisions
+
+The registry is the only Symphony configuration authority for host runs. `repo.manifest` is no
+longer a valid target field. Repository files named `symphony.yml` are ignored by host readiness,
+composition, and admission, including when those files are invalid.
+
+Repository policy resolves in this order:
+
+1. `host.repository_defaults`, an optional policy map.
+2. The optional flat profile selected by `targets.<id>.repository_profile` from
+   `host.repository_profiles`.
+3. `targets.<id>.repository_policy`, the explicit target overrides.
+
+Maps merge recursively. Lists replace inherited lists. Profiles cannot select or inherit another
+profile. Unknown profiles and invalid fields block composition. Partial defaults and profiles are
+validated as policy fragments; the merged policy must satisfy the complete workflow contract.
+Source descriptors identify the defaults, selected profile, and override revisions.
+
+Target patch commands support `repository_profile` and recursive `repository_policy` changes.
+Set an override to `null` to remove it and inherit the profile or defaults. Lists replace rather
+than append. The normal plan/confirm sequence still validates the complete resulting policy and
+rejects stale registry generations.
+
+For example, these repository-policy fields can be added to an otherwise configured registry:
+
+```yaml
+host:
+  repository_defaults:
+    delivery:
+      pr_target: main
+    docs:
+      entrypoints: [README.md]
+    validation:
+      required_files: [scripts/check.sh]
+      commands:
+        - name: repository-check
+          command: ./scripts/check.sh
+  repository_profiles:
+    reviewed:
+      auto_land:
+        posture: "off"
+        dry_run: true
+        force_human_review_paths: ["security/**"]
+targets:
+  application:
+    repo:
+      path: /srv/repos/application
+      expected_repository: https://github.com/example/application
+    repository_profile: reviewed
+    repository_policy:
+      project:
+        repository: https://github.com/example/application
+      vcs:
+        mode: git
+        default_branch: main
+```
+
+The existing required host runner/capacity fields and target tracker, worktree, budget, check, and
+external-side-effect fields still apply. `worktree.hooks` owns workspace preparation. Runner
+`turn_timeout_ms` and execution profiles must support the implementation and landing roles.
+Host and target ceilings and explicit side-effect gates remain enforced.
+
+Readiness reads Git or Jujutsu metadata and checks the origin identity against the host policy and
+`repo.expected_repository`. It checks that `docs.entrypoints` and `validation.required_files` are
+readable regular files confined to the repository. These fields reference existing docs, scripts,
+CI files, or check configuration; Symphony does not copy their contents into policy or run commands
+during inspection. State, registry, and workspace path isolation still applies.
+
+`capabilities.required` lists required capabilities. The operator declares available capabilities
+in `host.capabilities` or each selected host runner's `capabilities` list. A capability must be
+available on the host or on every selectable runner. These declarations do not replace runtime
+capability preflight. Missing files, identity mismatches, and missing capabilities are explicit
+readiness and admission blockers.
+
+Each admitted run pins the complete effective configuration, compiled modules, source descriptors,
+and `configuration_revision` inside its durable execution context. The revision hashes the complete
+resolved policy before adding the revision field. Target/default/profile edits affect later
+admissions, not active validation, review, publish, landing, or recovery. Editing a repository
+manifest cannot change an admitted host run's policy.
+
+Observed source configurations are archived in the private `<registry>.revisions/` directory.
+Replacement archives the previous configuration; registry loading archives the current one.
+`host config history` lists source revisions and first-recorded times. `host config export` writes
+readable YAML to stdout; `--revision` selects a source revision from history. `host config backup`
+writes all archived source configurations as readable JSON to stdout. Source revision IDs identify
+the complete registry document; run configuration revisions identify a target's resolved policy.
+Comments are not archived. Credentials remain references such as `$LINEAR_API_KEY` or
+`env:RUNNER_PASSWORD`; these commands never resolve them and reject inline credential values.
 
 ## Execution context isolation (Phase 2)
 
@@ -672,7 +763,9 @@ local sources and reads the filesystem again. Discovery paths remain in authenti
 responses, not the public host event feed.
 
 Inspect a selected candidate with `{"action":"inspect","path":"/absolute/repository"}`.
-An optional `target_id` uses that target's configured expected repository identity.
+An optional `target_id` uses that target's configured policy and expected repository identity.
+Without a target ID, complete `host.repository_defaults` supply provisional policy and identity.
+Missing host policy remains a blocker; inspection does not infer configuration from repository files.
 The selected host resolves its own registry path; client-supplied registry paths and
 configuration roots are rejected. Inspection returns HTTP `200` for both Ready and
 non-Ready candidates, with `host_id`, interface/schema versions, canonical `path`,
@@ -680,19 +773,19 @@ non-Ready candidates, with `host_id`, interface/schema versions, canonical `path
 `expected_repository` (normalized GitHub owner/repository), `warnings`, `reason`,
 and `apply_allowed`.
 
-The stable `state` values are `ready`, `needs_setup`, `invalid`, `unreadable`, and
-`identity_mismatch`. Only `ready` permits Apply. Non-Ready candidates remain visible
-with a reason; clients must not remove them from the candidate list. Inspection uses
-the manifest validators and the registry's canonical path, manifest confinement, and
-overlap checks. Repository roots may be shared by targets, but cannot overlap host
-state, the registry directory, or eligible targets' worktree roots. Quarantined targets
-are excluded, as in target-registry admission validation.
+The stable `state` values are `ready`, `configuration_required`, `needs_setup`, `invalid`,
+`unreadable`, and `identity_mismatch`. Only `ready` permits Apply. Non-Ready candidates remain visible
+with a reason; clients must not remove them from the candidate list. Inspection validates host-owned
+policy, confined documentation/check references, and canonical path overlap. Repository roots may
+be shared by targets, but cannot overlap host state, the registry directory, or eligible targets'
+worktree roots. The selected worktree must also remain separate from other targets' repositories
+and worktrees. Quarantined targets are excluded, as in target-registry admission validation.
 
 Inspection reads local Git/Jujutsu metadata and the repository-local Git `origin`
 fetch and push URLs. These URLs must identify the same repository. Git includes,
 worktree-specific configuration, and local URL rewrites return `invalid` with
 `repository_git_config_unsupported`; inspection does not guess their effective identity.
-Global and system Git configuration are not used. The manifest VCS mode must be
+Global and system Git configuration are not used. The host policy VCS mode must be
 available in the checkout; colocated Jujutsu repositories can use either Git or Jujutsu.
 Inspection does not contact a remote, run hooks or project commands, discover refs, or
 invoke `jj` (which can snapshot a working copy). Git config parsing has a one-second
@@ -706,7 +799,7 @@ Discover branch targets with
 `{"action":"branches","path":"/absolute/repository","target_id":"alpha","configured_target":"main"}`.
 `configured_target` and `target_id` are optional for discovery. Existing-target Apply requires the
 target ID. Without an explicit selection, discovery uses persisted `repo.branch`, then the target's
-manifest default. The target's configured manifest path is resolved on the selected host.
+resolved host policy default. Repository manifest paths are not consulted.
 This action requires Ready inspection, then runs read-only Git or Jujutsu commands there.
 It returns HTTP `202` and a `scan_id`; use the existing `poll` and `cancel` actions.
 Repeat `branches` to refresh. Only the latest branch job for the selected repository
@@ -716,7 +809,8 @@ older catalogs, including completed jobs.
 The terminal `result` contains `repository`, `vcs`, `status`, `reason`, `choices`,
 `selected`, `apply_allowed`, and `typed_fallback`. Choices have stable branch-name
 values and labels, deduplicated across local and remote refs, with `current`,
-`manifest_default`, `remote_default`, and `configured` markers. Remote names, refs,
+`manifest_default`, `remote_default`, and `configured` markers. The existing `manifest_default`
+marker identifies the resolved host policy default, not a repository manifest. Remote names, refs,
 upstream, and tracking state remain available as metadata. A configured target missing
 from a successful discovery remains visible as `stale` and sets `apply_allowed: false`.
 Git ref discovery supports detached HEAD and missing `origin`; the API still requires
@@ -733,11 +827,12 @@ Discovery never checks out, fetches, pushes, or updates bookmarks. Jujutsu runs 
 Repository-input command previews require top-level `branch_scan_id` when a repository branch is
 selected. Send the same field in the exact confirmation request. The catalog must be the latest
 completed, non-cancelled result and must match the proposed repository, branch, and existing target.
-Add/import can use a catalog without a target ID before the target exists. An unrelated mutation
-must omit `branch_scan_id`.
+A catalog without a target ID supports discovery before that target exists. The current operator
+mutation transport does not expose Add/Import actions; CLI Add/Import validates the proposed
+target independently. An unrelated mutation must omit `branch_scan_id`.
 
 The catalog flag alone does not authorize Apply. The saved plan binds the repository and branch;
-Apply repeats readiness and branch validation under the registry lock. Changing the manifest default
+Apply repeats readiness and branch validation under the registry lock. Changing the host policy default
 invalidates an inherited-branch plan. Syntax-only fallback requires an explicit valid `repo.branch`;
 it cannot authorize an inherited default. A missing branch in successful discovery blocks Apply.
 

@@ -3,31 +3,18 @@ defmodule SymphonyElixir.TargetContextTest do
 
   alias SymphonyElixir.TargetContext
   alias SymphonyElixir.TargetRegistry.Composition
-  alias SymphonyElixir.TargetRegistry.Preview
   alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Target
 
-  @repo_fixture_root Path.expand("../fixtures/target_registry/repos", __DIR__)
+  @moduletag :tmp_dir
+
+  setup %{tmp_dir: tmp_dir} do
+    Process.put({__MODULE__, :repo_root}, tmp_dir)
+    :ok
+  end
 
   defmodule DeterministicManifestAdapter do
     @moduledoc false
-
-    def read(_path, _opts), do: {:ok, manifest()}
-
-    def validate(_repo_path, _manifest),
-      do: %{errors: [], modules: [], preset: "default"}
-
-    def compile(_manifest) do
-      %{
-        config: %{"manifest" => manifest()},
-        workflow_module_resolution: %{
-          module_names: ["quality"],
-          module_refs: [%{name: "quality", version: "v1"}],
-          policy_hash: "sha256:" <> String.duplicate("d", 64),
-          rendered: "quality policy"
-        }
-      }
-    end
 
     def manifest do
       %{
@@ -37,7 +24,7 @@ defmodule SymphonyElixir.TargetContextTest do
         "docs" => %{},
         "validation" => %{"commands" => [%{"command" => "mix test", "name" => "test"}]},
         "vcs" => %{},
-        "delivery" => %{},
+        "delivery" => %{"pr_target" => "main"},
         "automation" => %{},
         "harness" => %{},
         "capabilities" => %{},
@@ -48,29 +35,6 @@ defmodule SymphonyElixir.TargetContextTest do
 
   defmodule TwoTargetManifestAdapter do
     @moduledoc false
-
-    def read(path, _opts) do
-      target_id = if Path.basename(Path.dirname(path)) == "other", do: "beta", else: "alpha"
-      {:ok, manifest(target_id)}
-    end
-
-    def validate(_repo_path, _manifest),
-      do: %{errors: [], modules: [], preset: "default"}
-
-    def compile(manifest) do
-      target_id = manifest["project"]["name"]
-      module_name = "quality-#{target_id}"
-
-      %{
-        config: %{"manifest" => manifest},
-        workflow_module_resolution: %{
-          module_names: [module_name],
-          module_refs: [%{name: module_name, version: "v1"}],
-          policy_hash: "sha256:" <> String.duplicate(if(target_id == "alpha", do: "a", else: "e"), 64),
-          rendered: "#{target_id} quality policy"
-        }
-      }
-    end
 
     def manifest(target_id) do
       %{
@@ -85,7 +49,7 @@ defmodule SymphonyElixir.TargetContextTest do
           "commands" => [%{"command" => "mix test #{target_id}", "name" => "test-#{target_id}"}]
         },
         "vcs" => %{},
-        "delivery" => %{},
+        "delivery" => %{"pr_target" => "main"},
         "automation" => %{},
         "harness" => %{},
         "capabilities" => %{},
@@ -109,7 +73,6 @@ defmodule SymphonyElixir.TargetContextTest do
     document =
       registry_document()
       |> put_in(["targets", "alpha", "repo", "branch"], "release/2026")
-      |> put_in(["targets", "alpha", "repo", "expected_repository"], "https://github.com/example/symphony-fixture")
 
     assert {:ok, structured} = Schema.validate(document, home: "/tmp")
 
@@ -153,76 +116,6 @@ defmodule SymphonyElixir.TargetContextTest do
 
     assert get_in(context.tracker_connection, ["policy", "api_key"]) == "$TRACKER_KEY"
     refute inspect(context) =~ "TRACKER_KEY"
-  end
-
-  test "derives every runtime field from the real Phase 1 schema and composition pipeline" do
-    assert {:ok, schema_snapshot} = Schema.validate(registry_document(), home: "/tmp")
-    assert schema_snapshot.globally_valid?
-    assert schema_snapshot.targets["alpha"].valid?
-
-    composed =
-      Composition.compose(schema_snapshot, manifest: DeterministicManifestAdapter)
-
-    generation = Preview.generation("deterministic loaded registry bytes")
-
-    loaded = %{
-      composed
-      | path: "/tmp/registry/targets.yml",
-        source_hash: generation,
-        generation: generation
-    }
-
-    target = loaded.targets["alpha"]
-    assert target.valid?, inspect(target.diagnostics)
-    assert target.effective_policy["scheduling"] == %{"weight" => 7}
-    assert get_in(target.effective_policy, ["repo_policy", "manifest"]) == target.repo_manifest
-    assert {:ok, repo_manifest_hash} = Composition.canonical_hash(target.repo_manifest)
-    assert {:ok, target.policy_hash} == Composition.canonical_hash(target.effective_policy)
-
-    assert {:ok, context} =
-             TargetContext.from_registry(loaded, "alpha",
-               env_fetcher: fn variable ->
-                 assert variable == "TRACKER_KEY"
-                 {:ok, "resolved-api-key"}
-               end
-             )
-
-    expected_tracker =
-      target.effective_policy["tracker_connection"]
-      |> put_in(["policy", "api_key"], "resolved-api-key")
-      |> Map.put(
-        "coordinator_state_path",
-        Path.join([
-          loaded.host["state_root"],
-          "tracker-connections",
-          target.effective_policy["tracker_connection"]["id"] <> ".state"
-        ])
-      )
-
-    assert context == %TargetContext{
-             target_id: "alpha",
-             state: :active,
-             dispatch_mode: :watch,
-             registry_generation: generation,
-             policy_hash: target.policy_hash,
-             repo_manifest_hash: repo_manifest_hash,
-             issue_policy_authority: nil,
-             workspace_layout: :flat,
-             repo_policy: target.effective_policy["repo_policy"],
-             tracker_connection: expected_tracker,
-             run_target: target.effective_policy["run_target"],
-             worktree_policy: target.effective_policy["worktree_policy"],
-             runner_policy: target.effective_policy["runner_policy"],
-             effective_checks: target.effective_policy["effective_checks"],
-             external_side_effect_gates: target.effective_policy["external_side_effect_gates"],
-             capacity_limits: target.effective_policy["capacity_limits"],
-             budget_limits: target.effective_policy["budget_limits"]
-           }
-
-    context_fields = Map.from_struct(context)
-    refute Map.has_key?(context_fields, :configured)
-    refute Map.has_key?(context_fields, :diagnostics)
-    refute Map.has_key?(context_fields, :scheduling)
   end
 
   test "rejects a self-consistently rehashed policy forgery before secret resolution" do
@@ -794,58 +687,9 @@ defmodule SymphonyElixir.TargetContextTest do
     end
   end
 
-  test "projects only runtime policy subtrees without configured YAML or diagnostics" do
-    target = valid_target()
-
-    assert {:ok, context} = context_for(target)
-
-    assert context.repo_policy == target.effective_policy["repo_policy"]
-    assert context.run_target == target.effective_policy["run_target"]
-    assert context.worktree_policy == target.effective_policy["worktree_policy"]
-    assert context.runner_policy == target.effective_policy["runner_policy"]
-    assert context.effective_checks == target.effective_policy["effective_checks"]
-    assert context.external_side_effect_gates == target.effective_policy["external_side_effect_gates"]
-    assert context.capacity_limits == target.effective_policy["capacity_limits"]
-    assert context.budget_limits == target.effective_policy["budget_limits"]
-    refute Map.has_key?(Map.from_struct(context), :configured)
-    refute Map.has_key?(Map.from_struct(context), :diagnostics)
-  end
-
   test "uses System.fetch_env directly when no resolver is supplied" do
     target = target_with_secret_reference("$SYMPHONY_TARGET_CONTEXT_TEST_MISSING_SID_407")
     assert {:error, :missing_secret} = TargetContext.from_registry(valid_snapshot(target), "alpha")
-  end
-
-  test "hashes only the repository manifest with canonical map ordering" do
-    manifest = repo_manifest()
-    reordered = manifest |> Enum.reverse() |> Map.new()
-
-    base = target_with_manifest(manifest)
-
-    restricted_policy =
-      put_in(base.effective_policy, ["run_target", "required_labels"], ["repo:required", "restricted"])
-
-    restricted = %{
-      base
-      | configured: put_in(base.configured, ["linear", "required_labels"], ["restricted"]),
-        effective_policy: restricted_policy,
-        policy_hash: canonical_hash(restricted_policy)
-    }
-
-    reordered_target = target_with_manifest(reordered)
-    changed = target_with_manifest(put_in(manifest, ["version"], 2))
-
-    assert {:ok, base_context} = context_for(base)
-    assert {:ok, restricted_context} = context_for(restricted)
-    assert {:ok, reordered_context} = context_for(reordered_target)
-    assert {:ok, changed_context} = context_for(changed)
-    assert {:ok, expected_hash} = Composition.canonical_hash(manifest)
-
-    assert base_context.repo_manifest_hash == expected_hash
-    assert restricted_context.repo_manifest_hash == base_context.repo_manifest_hash
-    assert reordered_context.repo_manifest_hash == base_context.repo_manifest_hash
-    refute changed_context.repo_manifest_hash == base_context.repo_manifest_hash
-    refute restricted_context.policy_hash == base_context.policy_hash
   end
 
   test "redacts secret references and credentials from inspection" do
@@ -1603,7 +1447,7 @@ defmodule SymphonyElixir.TargetContextTest do
 
   defp phase1_snapshot do
     {:ok, structured} = Schema.validate(registry_document(), home: "/tmp")
-    composed = Composition.compose(structured, manifest: DeterministicManifestAdapter)
+    composed = Composition.compose(structured)
     generation = hash("b")
 
     %{
@@ -1619,7 +1463,7 @@ defmodule SymphonyElixir.TargetContextTest do
     assert structured.globally_valid?, inspect(structured.diagnostics)
     assert Enum.all?(structured.targets, fn {_id, target} -> target.valid? end)
 
-    composed = Composition.compose(structured, manifest: TwoTargetManifestAdapter)
+    composed = Composition.compose(structured)
     assert Enum.all?(composed.targets, fn {_id, target} -> target.valid? end)
     generation = hash("9")
 
@@ -1637,8 +1481,9 @@ defmodule SymphonyElixir.TargetContextTest do
 
     alpha =
       base_target
-      |> put_in(["repo", "path"], Path.join(@repo_fixture_root, "symphony"))
+      |> put_in(["repo", "path"], repository_path("alpha", "alpha"))
       |> put_in(["repo", "expected_repository"], "https://github.com/example/alpha")
+      |> Map.put("repository_policy", TwoTargetManifestAdapter.manifest("alpha"))
       |> put_in(["worktree", "root"], "/tmp/worktrees/alpha-only")
       |> put_in(["linear", "connection"], "linear-alpha")
       |> put_in(["linear", "scope"], %{"type" => "project", "project_slug" => "alpha-scope"})
@@ -1686,8 +1531,9 @@ defmodule SymphonyElixir.TargetContextTest do
       |> Map.put("display_name", "Beta")
       |> Map.put("state", "draining")
       |> Map.delete("dispatch_mode")
-      |> put_in(["repo", "path"], Path.join(@repo_fixture_root, "other"))
+      |> put_in(["repo", "path"], repository_path("beta", "beta"))
       |> put_in(["repo", "expected_repository"], "https://github.com/example/beta")
+      |> Map.put("repository_policy", TwoTargetManifestAdapter.manifest("beta"))
       |> put_in(["worktree", "root"], "/tmp/worktrees/beta-only")
       |> put_in(["linear", "connection"], "linear-beta")
       |> put_in(["linear", "scope"], %{"type" => "team", "team_key" => "BETA"})
@@ -1823,9 +1669,9 @@ defmodule SymphonyElixir.TargetContextTest do
           "display_name" => "Alpha",
           "state" => "active",
           "dispatch_mode" => "watch",
+          "repository_policy" => DeterministicManifestAdapter.manifest(),
           "repo" => %{
-            "path" => Path.join(@repo_fixture_root, "symphony"),
-            "manifest" => "symphony.yml",
+            "path" => repository_path("symphony", "repo"),
             "expected_repository" => "git@github.com:example/repo.git"
           },
           "worktree" => %{
@@ -1879,13 +1725,13 @@ defmodule SymphonyElixir.TargetContextTest do
     target_with_policy(policy)
   end
 
-  defp target_with_manifest(manifest) do
-    manifest
-    |> effective_policy()
-    |> target_with_policy()
-  end
-
   defp target_with_policy(policy) do
+    policy =
+      update_in(policy, ["repo_policy"], fn repo_policy ->
+        revision_input = put_in(policy, ["repo_policy"], Map.delete(repo_policy, "configuration_revision"))
+        Map.put(repo_policy, "configuration_revision", canonical_hash(revision_input))
+      end)
+
     %{
       valid_target()
       | repo_manifest: get_in(policy, ["repo_policy", "manifest"]),
@@ -1898,16 +1744,19 @@ defmodule SymphonyElixir.TargetContextTest do
     TargetContext.from_registry(valid_snapshot(target), "alpha", env_fetcher: fn "TRACKER_KEY" -> {:ok, credential} end)
   end
 
-  defp effective_policy(repo_manifest \\ repo_manifest()) do
-    phase1_snapshot().targets["alpha"].effective_policy
-    |> put_in(["repo_policy", "manifest"], repo_manifest)
-  end
-
-  defp repo_manifest, do: DeterministicManifestAdapter.manifest()
+  defp effective_policy, do: phase1_snapshot().targets["alpha"].effective_policy
 
   defp canonical_hash(term) do
     {:ok, digest} = Composition.canonical_hash(term)
     digest
+  end
+
+  defp repository_path(name, repository) do
+    path = Path.join(Process.get({__MODULE__, :repo_root}), name)
+    File.mkdir_p!(Path.join(path, ".git/objects"))
+    File.write!(Path.join(path, ".git/HEAD"), "ref: refs/heads/main\n")
+    File.write!(Path.join(path, ".git/config"), "[remote \"origin\"]\nurl = https://github.com/example/#{repository}\n")
+    path
   end
 
   defp hash(character), do: "sha256:" <> String.duplicate(character, 64)

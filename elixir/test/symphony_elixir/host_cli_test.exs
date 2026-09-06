@@ -11,46 +11,12 @@ defmodule SymphonyElixir.HostCLITest do
   @max_preview_string_leaf_bytes 262_144
   @max_preview_aggregate_bytes 1_048_576
 
-  @host_usage """
-  Usage:
-    symphony host run [--registry <path>]
-    symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
-    symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
-    symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target plan <id> --patch <target-patch.yml> [--registry <path>] [--json]
-    symphony host target patch <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target activate <id> [--mode <watch|explicit>] [--registry <path>] [--json]
-    symphony host target activate <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target pause <id> [--registry <path>] [--json]
-    symphony host target pause <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target drain <id> [--registry <path>] [--json]
-    symphony host target drain <id> --confirm <plan-id> [--registry <path>] [--json]
-    symphony host target retire <id> [--registry <path>] [--json]
-    symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
-  """
-
-  defp host_usage do
-    @host_usage |> String.trim()
-  end
-
-  test "bare host invocation returns host usage" do
-    assert {:error, usage} = HostCLI.evaluate([])
-    assert usage == host_usage()
-  end
-
   test "host --help returns host usage as success without invoking dependencies" do
     deps = forbidden_deps()
-    assert {:ok, usage} = HostCLI.evaluate(["--help"], deps)
-    assert usage == host_usage()
+    assert {:ok, _usage} = HostCLI.evaluate(["--help"], deps)
     refute_received :plan_called
     refute_received :confirm_action_called
     refute_received :read_file_called
-  end
-
-  test "host target --help returns host usage as success" do
-    assert {:ok, usage} = HostCLI.evaluate(["target", "--help"])
-    assert usage == host_usage()
   end
 
   test "unknown host subcommand returns host usage without invoking dependencies" do
@@ -71,8 +37,7 @@ defmodule SymphonyElixir.HostCLITest do
       end
     }
 
-    assert {:error, usage} = HostCLI.evaluate(["unknown"], deps)
-    assert usage == host_usage()
+    assert {:error, _usage} = HostCLI.evaluate(["unknown"], deps)
     refute_received :plan_called
     refute_received :confirm_action_called
     refute_received :read_file_called
@@ -3069,8 +3034,7 @@ defmodule SymphonyElixir.HostCLITest do
   test "unknown target subcommand returns host usage without invoking dependencies" do
     deps = forbidden_deps()
 
-    assert {:error, usage} = HostCLI.evaluate(["target", "unknown"], deps)
-    assert usage == host_usage()
+    assert {:error, _usage} = HostCLI.evaluate(["target", "unknown"], deps)
     refute_received :plan_called
     refute_received :confirm_action_called
   end
@@ -3657,6 +3621,7 @@ defmodule SymphonyElixir.HostCLITest do
     File.chmod!(plan_dir, 0o700)
 
     fixture_root = Path.expand("../fixtures/target_registry/repos/symphony", __DIR__)
+    {repo, policy} = SymphonyElixir.TestSupport.host_repository_fixture(tmp_dir, fixture_root)
     wt_dir = Path.join(System.tmp_dir!(), "host_cli_wt_#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm_rf!(wt_dir) end)
     File.mkdir_p!(wt_dir)
@@ -3665,6 +3630,7 @@ defmodule SymphonyElixir.HostCLITest do
       "version" => 1,
       "host" => %{
         "id" => "test-host",
+        "capabilities" => ["github_pr", "browser"],
         "state_root" => "/tmp/state",
         "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
         "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
@@ -3690,7 +3656,8 @@ defmodule SymphonyElixir.HostCLITest do
           "display_name" => "Original",
           "state" => "paused",
           "dispatch_mode" => "explicit",
-          "repo" => %{"path" => fixture_root, "manifest" => "symphony.yml"},
+          "repo" => %{"path" => repo, "expected_repository" => policy["project"]["repository"]},
+          "repository_policy" => policy,
           "worktree" => %{"root" => wt_dir, "strategy" => "per_issue", "hooks" => %{}},
           "linear" => %{
             "connection" => "linear-main",

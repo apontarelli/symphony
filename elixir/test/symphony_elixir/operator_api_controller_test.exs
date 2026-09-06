@@ -442,6 +442,63 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     end
   end
 
+  test "repository profile selection repairs an unknown stored profile", context do
+    document =
+      catalog_document(%{"alpha" => Map.put(catalog_target(), "repository_profile", "removed")})
+      |> put_in(["host", "repository_defaults"], %{
+        "project" => %{"slug" => "catalog", "repository" => "https://github.com/example/catalog"},
+        "docs" => %{"entrypoints" => []},
+        "validation" => %{"commands" => [], "required_files" => []},
+        "vcs" => %{"mode" => "git", "default_branch" => "main"},
+        "delivery" => %{"pr_target" => "main"},
+        "workflow" => %{"modules" => ["workspace"]},
+        "capabilities" => %{"required" => []}
+      })
+      |> put_in(["host", "repository_profiles"], %{
+        "strict" => %{"workflow" => %{"modules" => ["workspace"]}}
+      })
+
+    path = install_catalog_registry!(context.scheduler, document)
+    on_exit(fn -> File.rm(path) end)
+
+    stored =
+      SymphonyElixir.OperatorSettings.build(context.scheduler, %{"target_id" => "alpha"}, [])
+
+    assert stored.fields["repository_profile"].selected == "removed"
+    refute stored.fields["repository_profile"].valid
+
+    assert Enum.any?(
+             stored.fields["repository_profile"].choices,
+             &(&1.value == "strict" and &1.status == "available")
+           )
+
+    repaired =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{"target_id" => "alpha", "selections" => %{"repository_profile" => "strict"}},
+        []
+      )
+
+    assert repaired.fields["repository_profile"].selected == "strict"
+    assert repaired.fields["repository_profile"].valid
+
+    assert %{selected: true, status: "current"} =
+             Enum.find(repaired.fields["repository_profile"].choices, &(&1.value == "strict"))
+
+    assert repaired.fields["repository_policy.workflow.modules"].status == "current"
+    assert repaired.fields["repository_policy.workflow.modules"].valid
+
+    invalid =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{"target_id" => "alpha", "selections" => %{"repository_profile" => "bogus"}},
+        []
+      )
+
+    assert invalid.apply_blocked
+    assert %{field: "repository_profile", reason: "selection_removed"} in invalid.errors
+  end
+
   defp linear_catalog_fixture(context, target \\ catalog_target(), overrides \\ []) do
     document = catalog_document(%{"alpha" => target})
     connection = document["host"]["tracker_connections"]["linear-main"]

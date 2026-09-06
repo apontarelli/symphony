@@ -29,9 +29,9 @@ This fork keeps the language-agnostic service contract in [`SPEC.md`](SPEC.md) a
 Elixir reference implementation under [`elixir/`](elixir/). Material changes since the upstream
 OpenAI project include:
 
-- Manifest-first setup: target repositories commit a thin [`symphony.yml`](symphony.yml) manifest
-  with project facts, docs entrypoints, validation commands, VCS mode, delivery target, and selected
-  workflow modules.
+- Host-owned repository policy: the target registry stores repository identity, docs and check
+  references, preparation hooks, execution policy, optional flat profiles, and target overrides.
+  Host readiness and admission do not require or read repository `symphony.yml`.
 - Self-contained workflow modules: the default workflow is compiled from bundled modules for
   Linear operation, implementation, pull sync, validation, quality gates, review, publish/handoff,
   landing, rework, requirement validation, project closeout, and run recovery.
@@ -62,18 +62,17 @@ Product posture and prioritization live in [`PRODUCT.md`](PRODUCT.md). The durab
 contract lives in [`SPEC.md`](SPEC.md). The current implementation is the Elixir/OTP service in
 [`elixir/`](elixir/), with local setup and commands documented in [`elixir/README.md`](elixir/README.md).
 
-The root [`symphony.yml`](symphony.yml) is this fork's dogfood repo setup manifest. It intentionally
-contains durable repository facts, validation, delivery policy, required capabilities, and selected
-workflow module configuration. Local run targets, workspace roots, runner commands, polling, and
-host runtime settings belong in local config or run setup instead of the checked-in manifest.
+The root [`symphony.yml`](symphony.yml) remains this fork's legacy single-run dogfood setup.
+Host-registry runs use only host-owned configuration. Existing repository docs, scripts, and CI
+remain the source of their own contents; host policy stores references to them.
 
 ## Run the Elixir implementation
 
-> **Approved direction, not yet shipped:** Symphony is moving to one local host with host-owned
-> repository/target configuration, no required repository `symphony.yml`, and separate Apply and
-> Activate actions. See [PRODUCT.md](PRODUCT.md#configuration-ownership-and-domain-language) and
-> [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463). The commands below describe the
-> current pre-cutover implementation; keep its manifests until reviewed migration is available.
+> **Configuration cutover status:** Host-registry configuration, manifest-free admission, revision
+> history, export, and backup are implemented. The complete terminal setup flow and reviewed legacy
+> migration remain separate work under [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463).
+> Legacy single-run commands below still use their existing manifests; do not delete those files
+> until the relevant setup has been migrated.
 
 ```bash
 git clone https://github.com/apontarelli/symphony
@@ -124,6 +123,12 @@ generation. It enforces weighted fairness, host/target/runner/poll/reviewer ceil
 budgets, and tracker-connection backoff. The dashboard and `GET /api/v1/state` expose those decisions
 without raw policy, credentials, secret references, prompts, or transition evidence. The registry
 defaults to `~/.config/symphony/targets.yml`.
+
+Configuration history and credential-reference-only exports are available through
+`symphony host config history`, `symphony host config export`, and `symphony host config backup`.
+See [host repository policy](elixir/README.md#host-repository-policy-and-revisions) for the schema
+and revision rules.
+
 The [multi-repository system contract](elixir/README.md#execution-context-isolation-phase-2)
 exercises two committed repository manifests, overlapping host activity, target-local recovery, and
 retained cleanup evidence.

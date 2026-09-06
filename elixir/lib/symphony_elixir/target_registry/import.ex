@@ -136,7 +136,11 @@ defmodule SymphonyElixir.TargetRegistry.Import do
       target =
         %{
           "state" => "paused",
-          "repo" => %{"path" => input.repo_path, "manifest" => "symphony.yml"},
+          "repo" => %{
+            "path" => input.repo_path,
+            "expected_repository" => get_in(input.current_repo_manifest, ["project", "repository"])
+          },
+          "repository_policy" => Map.drop(input.current_repo_manifest, ["runtime", "_field_sources", "_runtime_allowed?"]),
           "worktree" => worktree,
           "linear" => linear,
           "runners" => target_runners,

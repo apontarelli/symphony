@@ -11,7 +11,6 @@ defmodule SymphonyElixir.TargetRegistry.ValidationTest do
 
     File.mkdir_p!(registry_dir)
     File.mkdir_p!(repo)
-    File.write!(Path.join(repo, "symphony.yml"), "project:\n  name: test\n")
     File.write!(Path.join(repo, "issues.yml"), "issues: []\n")
     outside_file = Path.join(tmp_dir, "outside.yml")
     File.write!(outside_file, "outside: true\n")
@@ -503,10 +502,79 @@ defmodule SymphonyElixir.TargetRegistry.ValidationTest do
   end
 
   @tag :tmp_dir
-  test "rejects traversal and symlink escape for manifest and query paths", %{paths: paths} do
+  test "repository diagnostics compare the inspected repo against every configured target worktree", %{paths: paths} do
+    sibling_worktree = Path.join(Path.dirname(paths.worktree), "sibling")
+    nested_repo = Path.join(sibling_worktree, "nested-repo")
+    File.mkdir_p!(nested_repo)
+
+    diagnostics =
+      Validation.repository_diagnostics(
+        nested_repo,
+        valid_host(paths),
+        valid_target(paths),
+        paths.registry,
+        %{"sibling" => put_in(valid_target(paths), ["worktree", "root"], sibling_worktree)}
+      )
+
+    assert [diagnostic] = diagnostics
+    assert diagnostic.scope == :registry
+    assert diagnostic.path == "$.repo.path"
+    assert diagnostic.code == :path_overlap
+    assert diagnostic.message =~ "$.targets.sibling.worktree.root"
+  end
+
+  @tag :tmp_dir
+  test "repository diagnostics allow a shared repository root across targets", %{paths: paths} do
+    sibling_worktree = Path.join(Path.dirname(paths.worktree), "sibling")
+
+    diagnostics =
+      Validation.repository_diagnostics(
+        paths.repo,
+        valid_host(paths),
+        valid_target(paths),
+        paths.registry,
+        %{"sibling" => put_in(valid_target(paths), ["worktree", "root"], sibling_worktree)}
+      )
+
+    assert diagnostics == []
+  end
+
+  @tag :tmp_dir
+  test "repository diagnostics reject a selected worktree overlapping sibling roots", %{paths: paths} do
     cases = [
-      {["repo", "manifest"], "../outside.yml", "$.targets.main.repo.manifest"},
-      {["repo", "manifest"], "escape.yml", "$.targets.main.repo.manifest"},
+      {Path.dirname(paths.worktree), paths.repo, "$.targets.sibling.worktree.root"},
+      {
+        Path.join(Path.dirname(paths.repo), "other/selected"),
+        Path.join(Path.dirname(paths.repo), "other"),
+        "$.targets.sibling.repo.path"
+      }
+    ]
+
+    for {selected_root, sibling_repo, overlapped} <- cases do
+      sibling =
+        valid_target(paths)
+        |> put_in(["repo", "path"], sibling_repo)
+        |> put_in(["worktree", "root"], Path.join(Path.dirname(paths.worktree), "sibling"))
+
+      diagnostics =
+        Validation.repository_diagnostics(
+          paths.repo,
+          valid_host(paths),
+          put_in(valid_target(paths), ["worktree", "root"], selected_root),
+          paths.registry,
+          %{"sibling" => sibling}
+        )
+
+      assert [diagnostic] = diagnostics
+      assert diagnostic.path == "$.target.worktree.root"
+      assert diagnostic.code == :path_overlap
+      assert diagnostic.message =~ overlapped
+    end
+  end
+
+  @tag :tmp_dir
+  test "rejects traversal and symlink escape for query paths", %{paths: paths} do
+    cases = [
       {["linear", "scope"], %{"type" => "query", "query_file" => "../outside.yml"}, "$.targets.main.linear.scope.query_file"},
       {["linear", "scope"], %{"type" => "query", "query_file" => "escape.yml"}, "$.targets.main.linear.scope.query_file"}
     ]
@@ -531,10 +599,7 @@ defmodule SymphonyElixir.TargetRegistry.ValidationTest do
       {["repo", "path"], "relative/repo", "$.targets.main.repo.path"},
       {["repo", "path"], Path.join(Path.dirname(paths.repo), "missing"), "$.targets.main.repo.path"},
       {["repo", "path"], paths.loop, "$.targets.main.repo.path"},
-      {["worktree", "root"], "relative/worktree", "$.targets.main.worktree.root"},
-      {["repo", "manifest"], "missing.yml", "$.targets.main.repo.manifest"},
-      {["repo", "manifest"], paths.outside_file, "$.targets.main.repo.manifest"},
-      {["repo", "manifest"], "loop.yml", "$.targets.main.repo.manifest"}
+      {["worktree", "root"], "relative/worktree", "$.targets.main.worktree.root"}
     ]
 
     for {configured_path, value, diagnostic_path} <- cases do
@@ -785,7 +850,7 @@ defmodule SymphonyElixir.TargetRegistry.ValidationTest do
       "display_name" => "Main",
       "state" => "active",
       "dispatch_mode" => "explicit",
-      "repo" => %{"path" => paths.repo, "manifest" => "symphony.yml"},
+      "repo" => %{"path" => paths.repo, "expected_repository" => "https://github.com/example/validation"},
       "worktree" => %{"root" => paths.worktree, "strategy" => "per_issue", "hooks" => %{}},
       "linear" => %{
         "connection" => "linear-main",

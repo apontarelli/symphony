@@ -1841,7 +1841,7 @@ defmodule SymphonyElixir.HandoffRouteTest do
     end
   end
 
-  test "recorder compares changed auto-land policy against the pinned manifest" do
+  test "legacy manifest changes require review but cannot change pinned host authority" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -1951,6 +1951,31 @@ defmodule SymphonyElixir.HandoffRouteTest do
 
       assert unreadable_policy_change.route == :blocked
       assert Enum.any?(unreadable_policy_change.evidence, &(&1.kind == :authority_policy and &1.status == :missing))
+
+      host_context = Map.put(routing_context, :configuration_revision, "sha256:" <> String.duplicate("a", 64))
+
+      pinned_host =
+        HandoffRouteRecorder.classify_completion_for_test(completion, nil, workspace, nil, host_context)
+
+      assert pinned_host.route == :auto_land
+      assert pinned_host.target_state == "Merging"
+
+      File.rm!(manifest_path)
+
+      without_manifest =
+        HandoffRouteRecorder.classify_completion_for_test(completion, nil, workspace, nil, host_context)
+
+      assert without_manifest.route == :auto_land
+
+      protected_change =
+        completion
+        |> Map.put(:changed_files, ["lib/authority/policy.ex"])
+        |> put_in([:publish_handoff, :changed_files], ["lib/authority/policy.ex"])
+
+      protected_route =
+        HandoffRouteRecorder.classify_completion_for_test(protected_change, nil, workspace, nil, host_context)
+
+      assert protected_route.route == :human_review
     after
       File.rm_rf(test_root)
     end

@@ -1137,7 +1137,7 @@ defmodule SymphonyElixir.TargetRegistry.Preview do
     {secrets, remaining} =
       collect_secrets(head, sensitive?, depth - 1, remaining - 1, secrets)
 
-    collect_secrets(tail, sensitive?, depth - 1, remaining, secrets)
+    collect_secrets(tail, sensitive?, depth, remaining, secrets)
   end
 
   defp collect_secrets(_value, _sensitive?, _depth, remaining, secrets),
@@ -1212,7 +1212,7 @@ defmodule SymphonyElixir.TargetRegistry.Preview do
       redact_term(head, sensitive?, secrets, depth - 1, remaining - 1)
 
     {tail, remaining} =
-      redact_term(tail, sensitive?, secrets, depth - 1, remaining)
+      redact_term(tail, sensitive?, secrets, depth, remaining)
 
     {[head | tail], remaining}
   end

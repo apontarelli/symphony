@@ -27,7 +27,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.ln_s!(repo, alias_path)
     before = File.read!(Path.join(repo, ".git/config"))
 
-    result = OperatorRepositoryInspection.inspect(alias_path)
+    result = OperatorRepositoryInspection.inspect(alias_path, inspection_opts())
 
     assert result.state == "ready"
     assert result.apply_allowed
@@ -42,10 +42,10 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
 
   test "a Jujutsu repository is inspected without creating a working-copy snapshot", %{repo: repo} do
     jj_metadata!(repo, "../../../.git")
-    manifest!(repo, %{"vcs" => %{"mode" => "jj", "default_branch" => "trunk"}})
+    manifest!(repo, %{"vcs" => %{"mode" => "jj", "default_branch" => "main"}})
     operation = File.read!(Path.join(repo, ".jj/working_copy/checkout"))
 
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, jj_inspection_opts(%{"default_branch" => "trunk"}))
 
     assert result.state == "ready"
     assert result.vcs == "jj"
@@ -64,7 +64,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     manifest!(repo, %{"vcs" => %{"mode" => "jj", "default_branch" => "main"}})
     operation = File.read!(Path.join(repo, ".jj/working_copy/checkout"))
 
-    assert OperatorRepositoryInspection.inspect(repo).state == "ready"
+    assert OperatorRepositoryInspection.inspect(repo, jj_inspection_opts()).state == "ready"
     assert File.read!(Path.join(repo, ".jj/working_copy/checkout")) == operation
   end
 
@@ -74,7 +74,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.write!(Path.join(child, "README.md"), "Documentation\n")
     manifest!(child)
 
-    result = OperatorRepositoryInspection.inspect(child)
+    result = OperatorRepositoryInspection.inspect(child, inspection_opts())
 
     assert result.state == "needs_setup"
     refute result.apply_allowed
@@ -84,34 +84,33 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     path = Path.join(root, "plain")
     File.mkdir_p!(path)
     manifest!(path)
-    result = OperatorRepositoryInspection.inspect(path)
+    result = OperatorRepositoryInspection.inspect(path, inspection_opts())
     assert result.state == "needs_setup"
     assert result.path == canonical!(path)
     assert is_binary(result.reason)
     refute result.apply_allowed
   end
 
-  test "a missing manifest requires setup", %{repo: repo} do
+  test "a missing repository manifest does not block configured readiness", %{repo: repo} do
     File.rm!(Path.join(repo, "symphony.yml"))
-    result = OperatorRepositoryInspection.inspect(repo)
-    assert result.state == "needs_setup"
-    assert is_binary(result.reason)
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
   end
 
-  test "invalid manifest input cannot become Ready or expose its contents", %{repo: repo} do
+  test "invalid repository manifest is ignored by host readiness", %{repo: repo} do
     File.write!(Path.join(repo, "symphony.yml"), "project: [private-token-unclosed\n")
-    result = OperatorRepositoryInspection.inspect(repo)
-    assert result.state == "invalid"
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
     refute inspect(result) =~ "private-token-unclosed"
   end
 
-  test "semantic manifest errors block Apply", %{repo: repo} do
+  test "repository manifest module errors do not block host readiness", %{repo: repo} do
     manifest!(repo, %{"workflow" => %{"modules" => ["nonexistent-module"]}})
-    result = OperatorRepositoryInspection.inspect(repo)
-    assert result.state == "invalid"
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
   end
 
   test "missing and non-directory paths return Unreadable rather than raising", %{tmp_dir: root} do
@@ -119,7 +118,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.write!(file, "private-file-content")
 
     for path <- [Path.join(root, "missing"), file] do
-      result = OperatorRepositoryInspection.inspect(path)
+      result = OperatorRepositoryInspection.inspect(path, inspection_opts())
       assert result.state == "unreadable"
       assert is_binary(result.reason)
       refute result.apply_allowed
@@ -129,7 +128,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
 
   test "remote mismatch is distinct from invalid setup and does not expose credentials", %{repo: repo} do
     git!(repo, ["remote", "set-url", "origin", "https://user:private-token@github.com/other/repository.git"])
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "identity_mismatch"
     refute result.apply_allowed
     refute inspect(result) =~ "private-token"
@@ -137,29 +136,28 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
 
   test "equivalent SSH and HTTPS remote identities agree", %{repo: repo} do
     git!(repo, ["remote", "set-url", "origin", "git@github.com:example/inspection.git"])
-    assert OperatorRepositoryInspection.inspect(repo).state == "ready"
+    assert OperatorRepositoryInspection.inspect(repo, inspection_opts()).state == "ready"
   end
 
   test "a repository without directory read permission is Unreadable", %{repo: repo} do
     File.chmod!(repo, 0o000)
     on_exit(fn -> File.chmod(repo, 0o755) end)
 
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
 
     assert result.state == "unreadable"
     refute result.apply_allowed
   end
 
-  test "a manifest symlink outside the repository cannot be admitted", %{repo: repo, tmp_dir: root} do
+  test "a manifest symlink is ignored by host readiness", %{repo: repo, tmp_dir: root} do
     manifest = Path.join(repo, "symphony.yml")
     outside = Path.join(root, "outside.yml")
     File.rename!(manifest, outside)
     File.ln_s!(outside, manifest)
 
-    result = OperatorRepositoryInspection.inspect(repo)
-
-    assert result.state == "invalid"
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
   end
 
   test "registry directory overlap is rejected through canonical symlink paths", %{repo: repo, tmp_dir: root} do
@@ -169,7 +167,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     alias_path = Path.join(root, "repo-alias")
     File.ln_s!(repo, alias_path)
 
-    result = OperatorRepositoryInspection.inspect(alias_path, registry_path: registry)
+    result = OperatorRepositoryInspection.inspect(alias_path, inspection_opts(registry_path: registry))
 
     assert result.state == "invalid"
     assert is_binary(result.reason)
@@ -181,7 +179,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.mkdir_p!(config)
     registry = registry!(config, Path.join(root, "state"))
 
-    result = OperatorRepositoryInspection.inspect(repo, registry_path: registry)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts(registry_path: registry))
 
     assert result.state == "ready"
     assert result.apply_allowed
@@ -192,7 +190,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.write!(included, "[remote \"origin\"]\nurl = https://github.com/example/inspection.git\n")
     git!(repo, ["config", "include.path", included])
 
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
 
     assert result.state == "invalid"
     assert result.reason == "repository_git_config_unsupported"
@@ -203,17 +201,17 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     git!(repo, ["config", "extensions.worktreeConfig", "true"])
     git!(repo, ["config", "--worktree", "remote.origin.url", "https://github.com/other/repository.git"])
 
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
 
     assert result.state == "invalid"
     refute result.apply_allowed
   end
 
-  test "a Git checkout cannot declare a Jujutsu execution mode", %{repo: repo} do
+  test "a Git checkout ignores a repository manifest VCS mode", %{repo: repo} do
     manifest!(repo, %{"vcs" => %{"mode" => "jj", "default_branch" => "main"}})
-    result = OperatorRepositoryInspection.inspect(repo)
-    assert result.state == "invalid"
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
   end
 
   test "unreadable Git metadata is not reported as missing setup or an identity mismatch", %{repo: repo} do
@@ -222,7 +220,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
       File.chmod!(path, 0o000)
 
       try do
-        result = OperatorRepositoryInspection.inspect(repo)
+        result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
         assert result.state == "unreadable"
         refute result.apply_allowed
       after
@@ -237,18 +235,18 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     worktree = Path.join(root, "linked")
     git!(repo, ["worktree", "add", "-b", "linked", worktree])
 
-    result = OperatorRepositoryInspection.inspect(worktree)
+    result = OperatorRepositoryInspection.inspect(worktree, inspection_opts())
     assert result.state == "ready"
     assert result.project["repository"] == "example/inspection"
   end
 
   test "colocated Jujutsu can use Git but standalone Jujutsu cannot", %{repo: repo} do
     jj_metadata!(repo, "../../../.git")
-    assert OperatorRepositoryInspection.inspect(repo).state == "ready"
+    assert OperatorRepositoryInspection.inspect(repo, inspection_opts()).state == "ready"
     File.rename!(Path.join(repo, ".git"), Path.join(repo, "git-store"))
     File.write!(Path.join(repo, ".jj/repo/store/git_target"), "../../../git-store")
 
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "invalid"
     refute result.apply_allowed
   end
@@ -266,23 +264,23 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     refute result.apply_allowed
   end
 
-  test "an unreadable manifest requires permission repair rather than setup", %{repo: repo} do
+  test "an unreadable repository manifest does not block host readiness", %{repo: repo} do
     manifest = Path.join(repo, "symphony.yml")
     File.chmod!(manifest, 0o000)
     on_exit(fn -> File.chmod(manifest, 0o644) end)
-    result = OperatorRepositoryInspection.inspect(repo)
-    assert result.state == "unreadable"
-    refute result.apply_allowed
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
+    assert result.state == "ready"
+    assert result.apply_allowed
   end
 
   test "special-file repository pointers and oversized metadata cannot be read", %{repo: repo} do
     pointer = Path.join(repo, ".git")
     File.rename!(pointer, pointer <> "-saved")
     {_, 0} = System.cmd("mkfifo", [pointer])
-    assert OperatorRepositoryInspection.inspect(repo).state == "needs_setup"
+    assert OperatorRepositoryInspection.inspect(repo, inspection_opts()).state == "needs_setup"
     File.rm!(pointer)
     File.write!(pointer, String.duplicate("x", 1_048_577))
-    assert OperatorRepositoryInspection.inspect(repo).state == "needs_setup"
+    assert OperatorRepositoryInspection.inspect(repo, inspection_opts()).state == "needs_setup"
   end
 
   test "an unreadable shared Git directory pointer cannot become Ready", %{repo: repo} do
@@ -290,7 +288,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.write!(common, ".")
     File.chmod!(common, 0o000)
     on_exit(fn -> File.chmod(common, 0o644) end)
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "unreadable"
     refute result.apply_allowed
   end
@@ -303,47 +301,102 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     document = put_in(document, ["targets"], %{"broken" => %{"worktree" => %{"root" => repo}, "state" => "invalid"}})
     File.write!(registry, Yaml.encode(document))
 
-    result = OperatorRepositoryInspection.inspect(repo, registry_path: registry)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts(registry_path: registry))
 
     assert result.state == "ready"
     assert result.apply_allowed
   end
 
+  test "a repository inside another target's worktree is blocked before branch discovery", %{repo: repo, tmp_dir: root} do
+    b_worktree = Path.join(root, "b-worktree")
+    a_repo = Path.join(b_worktree, "a-repo")
+    File.mkdir_p!(a_repo)
+    git!(a_repo, ["init", "--initial-branch=main"])
+    git!(a_repo, ["remote", "add", "origin", "https://github.com/example/inspection.git"])
+    File.write!(Path.join(a_repo, "README.md"), "Repository documentation\n")
+    manifest!(a_repo)
+
+    opts =
+      inspection_opts(configured_targets: %{"b" => %{"repo" => %{"path" => repo}, "worktree" => %{"root" => b_worktree}}})
+
+    result = OperatorRepositoryInspection.inspect(a_repo, opts)
+
+    assert result.state == "invalid"
+    refute result.apply_allowed
+
+    assert Enum.any?(
+             result.blockers,
+             &(&1.path == "$.repo.path" and &1.message =~ "$.targets.b.worktree.root")
+           )
+  end
+
+  test "a shared repository root with another target stays ready", %{repo: repo, tmp_dir: root} do
+    opts =
+      inspection_opts(configured_targets: %{"b" => %{"repo" => %{"path" => repo}, "worktree" => %{"root" => Path.join(root, "b-worktree")}}})
+
+    result = OperatorRepositoryInspection.inspect(repo, opts)
+
+    assert result.state == "ready"
+    assert result.apply_allowed
+  end
+
+  test "a selected target's worktree inside another target's root is blocked", %{repo: repo, tmp_dir: root} do
+    b_worktree = Path.join(root, "b-worktree")
+
+    opts =
+      inspection_opts()
+      |> Keyword.put(:configured, %{
+        "repo" => %{"path" => repo, "expected_repository" => "https://github.com/example/inspection"},
+        "worktree" => %{"root" => Path.join(b_worktree, "selected")}
+      })
+      |> Keyword.put(:configured_targets, %{"b" => %{"worktree" => %{"root" => b_worktree}}})
+
+    result = OperatorRepositoryInspection.inspect(repo, opts)
+
+    assert result.state == "invalid"
+    refute result.apply_allowed
+
+    assert Enum.any?(
+             result.blockers,
+             &(&1.path == "$.target.worktree.root" and &1.message =~ "$.targets.b.worktree.root")
+           )
+  end
+
   test "all origin fetch and push URLs must identify the same repository", %{repo: repo} do
     git!(repo, ["config", "--add", "remote.origin.url", "https://github.com/other/repository.git"])
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "identity_mismatch"
     refute result.apply_allowed
 
     git!(repo, ["config", "--unset-all", "remote.origin.url"])
     git!(repo, ["config", "remote.origin.pushurl", "https://github.com/example/inspection.git"])
-    refute OperatorRepositoryInspection.inspect(repo).apply_allowed
+    refute OperatorRepositoryInspection.inspect(repo, inspection_opts()).apply_allowed
   end
 
   test "repository-local URL rewrites cannot redirect an apparently matching origin", %{repo: repo} do
     git!(repo, ["config", "url.https://github.com/other/.insteadOf", "https://github.com/example/"])
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "invalid"
     refute result.apply_allowed
   end
 
   test "an origin removed after setup cannot become Ready", %{repo: repo} do
     git!(repo, ["remote", "remove", "origin"])
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "identity_mismatch"
     refute result.apply_allowed
   end
 
   test "a missing Git object store requires setup", %{repo: repo} do
     File.rename!(Path.join(repo, ".git/objects"), Path.join(repo, ".git/objects-saved"))
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "needs_setup"
     refute result.apply_allowed
   end
 
   test "malformed Git configuration is invalid rather than an identity mismatch", %{repo: repo} do
     File.write!(Path.join(repo, ".git/config"), "[remote \"origin\"\nurl = private-token\n")
-    result = OperatorRepositoryInspection.inspect(repo)
+    result = OperatorRepositoryInspection.inspect(repo, inspection_opts())
     assert result.state == "invalid"
     refute result.apply_allowed
     refute inspect(result) =~ "private-token"
@@ -351,6 +404,102 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
 
   # These are the on-disk layouts produced by colocated and standalone `jj git init`.
   # Keep jj itself out of the test runtime: inspection must only read this metadata.
+  test "missing required check files block a manifest-free repository", %{repo: repo} do
+    opts =
+      inspection_opts()
+      |> Keyword.update!(:host, fn host ->
+        put_in(host, ["repository_defaults", "validation", "required_files"], ["CI.md"])
+      end)
+
+    result = OperatorRepositoryInspection.inspect(repo, opts)
+
+    assert result.state == "invalid"
+    assert Enum.any?(result.blockers, &(&1.path == "$.repository.validation.required_files[0]"))
+    refute result.apply_allowed
+  end
+
+  test "required capabilities must be provided by the host or every selected runner", %{repo: repo} do
+    opts =
+      inspection_opts()
+      |> Keyword.update!(:host, fn host ->
+        host
+        |> put_in(["repository_defaults", "capabilities", "required"], ["git_metadata"])
+        |> Map.put("runners", %{"codex" => %{"capabilities" => []}, "capable" => %{"capabilities" => ["git_metadata"]}})
+      end)
+      |> Keyword.update!(:configured, &put_in(&1, ["runners"], %{"allowed" => ["codex", "capable"], "default" => "capable"}))
+
+    result = OperatorRepositoryInspection.inspect(repo, opts)
+
+    # An incapable allowed runner blocks even when a capable runner is the default.
+    assert result.state == "invalid"
+    assert Enum.any?(result.blockers, &(&1.path == "$.repository.capabilities.required"))
+    refute result.apply_allowed
+
+    only_capable =
+      Keyword.update!(opts, :configured, &put_in(&1, ["runners"], %{"allowed" => ["capable"], "default" => "capable"}))
+
+    assert OperatorRepositoryInspection.inspect(repo, only_capable).state == "ready"
+
+    host_capable = Keyword.update!(opts, :host, &Map.put(&1, "capabilities", ["git_metadata"]))
+    assert OperatorRepositoryInspection.inspect(repo, host_capable).state == "ready"
+  end
+
+  # Pre-target Add/Import flow: a branch catalog is requested before the new
+  # target exists, so inspection resolves complete host defaults with no
+  # configured target. Identity, capability and file readiness still apply.
+  test "complete host defaults inspect ready without a target for pre-target discovery", %{repo: repo} do
+    result = OperatorRepositoryInspection.inspect(repo, pre_target_opts())
+
+    assert result.state == "ready"
+    assert result.apply_allowed
+    assert result.project["repository"] == "example/inspection"
+    assert result.default_branch == "main"
+    assert result.configuration_sources["defaults"]["present"] == true
+    assert result.configuration_sources["overrides"]["present"] == false
+  end
+
+  test "pre-target inspection still enforces remote identity and requested expectations", %{repo: repo} do
+    git!(repo, ["remote", "set-url", "origin", "https://github.com/example/other.git"])
+    assert OperatorRepositoryInspection.inspect(repo, pre_target_opts()).state == "identity_mismatch"
+
+    git!(repo, ["remote", "set-url", "origin", "https://github.com/example/inspection.git"])
+
+    mismatched =
+      OperatorRepositoryInspection.inspect(
+        repo,
+        pre_target_opts(expected_repository: "https://github.com/example/other")
+      )
+
+    assert mismatched.state == "invalid"
+    assert Enum.any?(mismatched.blockers, &(&1.path == "$.repository.expected_repository"))
+    refute mismatched.apply_allowed
+  end
+
+  test "incomplete host defaults keep target-less inspection blocked", %{repo: repo} do
+    identityless =
+      pre_target_opts()
+      |> Keyword.update!(:host, fn host ->
+        {_removed, host} = pop_in(host, ["repository_defaults", "project", "repository"])
+        host
+      end)
+
+    result = OperatorRepositoryInspection.inspect(repo, identityless)
+
+    assert result.state == "invalid"
+    assert Enum.any?(result.blockers, &String.ends_with?(&1.path, ".project.repository"))
+    refute result.apply_allowed
+
+    assert OperatorRepositoryInspection.inspect(repo, pre_target_opts(host: %{})).state == "invalid"
+  end
+
+  test "a named but unconfigured target is not treated as a pre-target request", %{repo: repo} do
+    result = OperatorRepositoryInspection.inspect(repo, pre_target_opts(target_id: "unconfigured"))
+
+    assert result.state == "configuration_required"
+    assert result.reason == "repository_configuration_required"
+    refute result.apply_allowed
+  end
+
   defp jj_metadata!(repo, git_target) do
     store = Path.join(repo, ".jj/repo/store")
     File.mkdir_p!(store)
@@ -400,10 +549,39 @@ defmodule SymphonyElixir.OperatorRepositoryInspectionTest do
     File.write!(Path.join(repo, "symphony.yml"), Renderer.to_yaml(Map.merge(document, overrides)))
   end
 
+  defp inspection_opts(registry_opts \\ []) do
+    [
+      host: %{
+        "repository_defaults" => %{
+          "project" => %{"slug" => "inspection", "repository" => "https://github.com/example/inspection"},
+          "docs" => %{"entrypoints" => ["README.md"]},
+          "validation" => %{"commands" => [], "required_files" => []},
+          "vcs" => %{"mode" => "git", "default_branch" => "main"},
+          "delivery" => %{"pr_target" => "main"},
+          "capabilities" => %{"required" => []}
+        }
+      },
+      configured: %{"repo" => %{"path" => "/tmp/inspection", "expected_repository" => "https://github.com/example/inspection"}}
+    ]
+    |> Keyword.merge(registry_opts)
+  end
+
+  defp pre_target_opts(registry_opts \\ []) do
+    inspection_opts()
+    |> Keyword.delete(:configured)
+    |> Keyword.merge(registry_opts)
+  end
+
   defp git!(repo, args) do
     {output, status} = System.cmd("git", args, cd: repo, stderr_to_stdout: true)
     assert status == 0, output
     output
+  end
+
+  defp jj_inspection_opts(vcs_overrides \\ %{"mode" => "jj"}) do
+    Keyword.update!(inspection_opts(), :host, fn host ->
+      update_in(host, ["repository_defaults", "vcs"], &Map.merge(&1, vcs_overrides))
+    end)
   end
 
   defp canonical!(path) do

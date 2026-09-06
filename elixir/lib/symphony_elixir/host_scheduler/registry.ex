@@ -3,7 +3,7 @@ defmodule SymphonyElixir.HostScheduler.Registry do
 
   alias SymphonyElixir.TargetContext
   alias SymphonyElixir.TargetRegistry
-  alias SymphonyElixir.TargetRegistry.{Composition, FileStore, Schema, Validation, Yaml}
+  alias SymphonyElixir.TargetRegistry.{Composition, FileStore, Revisions, Schema, Validation, Yaml}
 
   @type loaded :: %{
           snapshot: TargetRegistry.Snapshot.t(),
@@ -18,26 +18,15 @@ defmodule SymphonyElixir.HostScheduler.Registry do
 
     with {:ok, %{bytes: bytes, generation: generation}} <- FileStore.read(expanded_path),
          {:ok, document} <- Yaml.decode(bytes),
-         {:ok, snapshot} <- Schema.validate(document, home: Keyword.get(opts, :home, System.user_home!())) do
-      snapshot =
-        snapshot
-        |> Map.merge(%{
-          path: expanded_path,
-          source_hash: generation,
-          generation: generation
-        })
-        |> Validation.validate(registry_path: expanded_path)
-        |> Composition.compose()
-
-      if snapshot.globally_valid? do
-        {:ok,
-         %{
-           snapshot: snapshot,
-           contexts: build_contexts(snapshot, opts)
-         }}
-      else
-        {:error, {:invalid_registry, snapshot.diagnostics}}
-      end
+         {:ok, snapshot} <- Schema.validate(document, home: Keyword.get(opts, :home, System.user_home!())),
+         snapshot =
+           snapshot
+           |> Map.merge(%{path: expanded_path, source_hash: generation, generation: generation})
+           |> Validation.validate(registry_path: expanded_path)
+           |> Composition.compose(),
+         :ok <- if(snapshot.globally_valid?, do: :ok, else: {:error, {:invalid_registry, snapshot.diagnostics}}),
+         :ok <- Revisions.archive(expanded_path, bytes) do
+      {:ok, %{snapshot: snapshot, contexts: build_contexts(snapshot, opts)}}
     end
   rescue
     exception -> {:error, {:registry_load_failed, Exception.message(exception)}}

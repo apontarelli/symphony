@@ -5,20 +5,21 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   alias SymphonyElixir.Config.Schema.RunnerCatalogError
   alias SymphonyElixir.TargetRegistry.Diagnostic
   alias SymphonyElixir.TargetRegistry.Error
+  alias SymphonyElixir.TargetRegistry.RepositoryPolicy
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
 
   @id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
   @runner_validation_catalog_id "registry-runner-validation"
   @root_keys ~w(version host targets)
-  @host_keys ~w(id state_root polling capacity scheduling tracker_connections runners)
+  @host_keys ~w(id state_root polling capacity scheduling tracker_connections runners repository_defaults repository_profiles capabilities)
   @polling_keys ~w(interval_ms max_concurrent_target_polls)
   @capacity_keys ~w(max_concurrent_agents max_concurrent_startups max_concurrent_reviewers)
   @host_scheduling_keys ~w(algorithm max_credit_rounds)
   @connection_keys ~w(kind endpoint api_key)
-  @target_keys ~w(display_name state dispatch_mode repo worktree linear runners concurrency budgets checks external_side_effects scheduling)
+  @target_keys ~w(display_name state dispatch_mode repo repository_profile repository_policy worktree linear runners concurrency budgets checks external_side_effects scheduling)
   @target_map_keys ~w(repo worktree linear runners concurrency budgets checks external_side_effects scheduling)
-  @repo_keys ~w(path manifest branch expected_repository)
+  @repo_keys ~w(path branch expected_repository)
   @worktree_keys ~w(root strategy hooks)
   @hook_keys ~w(after_create before_run after_run before_remove timeout_ms)
   @linear_keys ~w(connection scope active_states terminal_states required_labels)
@@ -186,6 +187,8 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
         validate_target_state(configured, scope, path) ++
         validate_dispatch_mode(configured, scope, path) ++
         validate_repo(configured["repo"], scope, "#{path}.repo") ++
+        validate_repository_profile(configured, scope, "#{path}.repository_profile") ++
+        validate_repository_policy(configured, scope, "#{path}.repository_policy") ++
         validate_worktree(configured["worktree"], scope, "#{path}.worktree") ++
         validate_linear(configured["linear"], scope, "#{path}.linear") ++
         validate_target_runners(configured["runners"], scope, "#{path}.runners") ++
@@ -428,6 +431,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
     configured
     |> Map.take(@target_keys)
     |> normalize_repo()
+    |> normalize_repository_policy()
     |> normalize_worktree()
     |> normalize_linear()
     |> normalize_target_runners()
@@ -487,19 +491,47 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
 
   defp validate_repo(repo, scope, path) when is_map(repo) do
     unknown_key_diagnostics(repo, @repo_keys, scope, path) ++
-      required_field_diagnostics(repo, ["path"], scope, path) ++
+      required_field_diagnostics(repo, ["path", "expected_repository"], scope, path) ++
       validate_nonempty_string_field(repo, "path", scope, "#{path}.path") ++
       validate_optional_branch(repo, scope, "#{path}.branch") ++
-      validate_optional_nonempty_string_field(repo, "manifest", scope, "#{path}.manifest") ++
-      validate_optional_nonempty_string_field(
-        repo,
-        "expected_repository",
-        scope,
-        "#{path}.expected_repository"
-      )
+      validate_nonempty_string_field(repo, "expected_repository", scope, "#{path}.expected_repository")
   end
 
   defp validate_repo(_repo, _scope, _path), do: []
+
+  defp validate_repository_profile(configured, scope, path) do
+    case Map.fetch(configured, "repository_profile") do
+      :error ->
+        []
+
+      {:ok, profile} when is_binary(profile) ->
+        if RepositoryPolicy.valid_profile_name?(profile) do
+          []
+        else
+          [diagnostic(:error, scope, path, :invalid_value, "#{path} must be a valid profile name")]
+        end
+
+      {:ok, _invalid} ->
+        [diagnostic(:error, scope, path, :invalid_type, "#{path} must be a string")]
+    end
+  end
+
+  defp validate_repository_policy(configured, scope, path) do
+    case Map.fetch(configured, "repository_policy") do
+      :error ->
+        []
+
+      {:ok, policy} ->
+        RepositoryPolicy.validate_raw_policy(policy, path)
+        |> translate_repository_policy_diagnostics(scope)
+    end
+  end
+
+  defp translate_repository_policy_diagnostics(diagnostics, scope) do
+    Enum.map(diagnostics, fn %{path: path, code: code, message: message} ->
+      diagnostic(:error, scope, path, code, message)
+    end)
+  end
 
   defp validate_optional_branch(repo, scope, path) do
     case Map.fetch(repo, "branch") do
@@ -918,6 +950,25 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
     end
   end
 
+  defp validate_capabilities_field(map, field, scope, path) do
+    case Map.fetch(map, field) do
+      :error ->
+        []
+
+      {:ok, values} when is_list(values) ->
+        validate_string_list(%{field => values}, field, scope, path, false)
+
+      {:ok, values} when is_map(values) ->
+        unknown_key_diagnostics(values, ~w(provided capabilities), scope, path) ++
+          Enum.flat_map(~w(provided capabilities), fn key ->
+            validate_string_list(values, key, scope, "#{path}.#{key}", false)
+          end)
+
+      {:ok, _invalid} ->
+        [diagnostic(:error, scope, path, :invalid_type, "#{path} must be a list or map")]
+    end
+  end
+
   defp validate_nonempty_string_list(map, field, scope, path) do
     validate_string_list(map, field, scope, path, true)
   end
@@ -963,7 +1014,36 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   end
 
   defp normalize_repo(configured) do
-    normalize_nested_map(configured, "repo", @repo_keys, %{"manifest" => "symphony.yml"})
+    normalize_nested_map(configured, "repo", @repo_keys, %{})
+  end
+
+  defp normalize_repository_policy(configured) do
+    configured
+    |> update_present_field("repository_policy", &normalize_policy_map/1)
+    |> update_present_field("repository_profile", &normalize_policy_profile/1)
+  end
+
+  defp normalize_policy_map(policy) when is_map(policy), do: normalize_policy_value(policy)
+  defp normalize_policy_map(policy), do: policy
+
+  defp normalize_policy_value(value) when is_map(value) do
+    Map.new(value, fn {key, nested} -> {key, normalize_policy_value(nested)} end)
+  end
+
+  defp normalize_policy_value(value) when is_list(value), do: Enum.map(value, &normalize_policy_value/1)
+  defp normalize_policy_value(value), do: value
+
+  defp normalize_policy_profile(profile) when is_binary(profile), do: String.trim(profile)
+  defp normalize_policy_profile(profile), do: profile
+
+  defp normalize_repository_defaults(host) do
+    update_present_field(host, "repository_defaults", &normalize_policy_map/1)
+  end
+
+  defp normalize_repository_profiles(host) do
+    update_present_field(host, "repository_profiles", fn profiles when is_map(profiles) ->
+      Map.new(profiles, fn {name, policy} -> {name, normalize_policy_map(policy)} end)
+    end)
   end
 
   defp normalize_worktree(configured) do
@@ -1195,14 +1275,50 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
         validate_host_capacity(host["capacity"]) ++
         validate_host_scheduling(host["scheduling"]) ++
         validate_tracker_connections(host["tracker_connections"]) ++
-        validate_host_runners(host["runners"])
+        validate_host_runners(host["runners"]) ++
+        validate_capabilities_field(host, "capabilities", :host, "$.host.capabilities") ++
+        validate_repository_defaults(host) ++
+        validate_repository_profiles(host)
 
     normalized_host =
       host
       |> Map.take(@host_keys)
+      |> normalize_repository_defaults()
+      |> normalize_repository_profiles()
       |> expand_state_root(Keyword.get(opts, :home))
 
     {normalized_host, diagnostics}
+  end
+
+  defp validate_repository_defaults(host) do
+    case Map.fetch(host, "repository_defaults") do
+      {:ok, policy} ->
+        RepositoryPolicy.validate_raw_policy(policy, "$.host.repository_defaults")
+        |> translate_repository_policy_diagnostics(:host)
+
+      :error ->
+        []
+    end
+  end
+
+  defp validate_repository_profiles(host) do
+    case Map.fetch(host, "repository_profiles") do
+      :error ->
+        []
+
+      {:ok, profiles} when is_map(profiles) ->
+        profiles
+        |> ordered_map_entries()
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {{name, policy}, index} ->
+          path = dynamic_key_path("$.host.repository_profiles", name, index)
+          diagnostics = RepositoryPolicy.validate_raw_policy(policy, path)
+          validate_dynamic_id(name, :host, path) ++ translate_repository_policy_diagnostics(diagnostics, :host)
+        end)
+
+      {:ok, _invalid} ->
+        [diagnostic(:error, :host, "$.host.repository_profiles", :invalid_type, "$.host.repository_profiles must be a map")]
+    end
   end
 
   defp validate_host_capacity(capacity) when is_map(capacity) do
@@ -1279,6 +1395,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
       Enum.flat_map(@host_runner_limit_keys, fn field ->
         validate_positive_integer_field(runner, field, :host, "#{path}.#{field}")
       end) ++
+      validate_capabilities_field(runner, "capabilities", :host, "#{path}.capabilities") ++
       config_runner_diagnostics(id, runner, path)
   end
 
@@ -1294,7 +1411,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
         do: id,
         else: @runner_validation_catalog_id
 
-    config_runner = Map.drop(safe_runner, @host_runner_limit_keys)
+    config_runner = Map.drop(safe_runner, @host_runner_limit_keys ++ ["capabilities"])
 
     config_diagnostics =
       case ConfigSchema.validate_runner_catalog_detailed(%{catalog_id => config_runner}) do

@@ -29,7 +29,15 @@ defmodule SymphonyElixir.OperatorSettings do
          }}
       end)
       |> Map.merge(host_choices(registry, source_reason))
-      |> Map.merge(OperatorRepositoryChoices.build(repo, opts))
+      |> Map.merge(
+        OperatorRepositoryChoices.build(
+          repo,
+          opts
+          |> Keyword.put(:host, Map.get(configured, "host", %{}))
+          |> Keyword.put(:configured, configured)
+          |> Keyword.put(:selections, selections)
+        )
+      )
       |> Map.merge(linear.fields)
 
     fields =

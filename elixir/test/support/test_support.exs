@@ -1,5 +1,49 @@
 defmodule SymphonyElixir.TestSupport do
+  alias SymphonyElixir.TargetRegistry.Yaml
+
   @workflow_prompt "You are an agent for this repository."
+
+  def host_repository_fixture(root, fixture) do
+    repo = Path.join(Path.dirname(root), Path.basename(root) <> "-host-repository")
+
+    {:ok, policy} =
+      fixture
+      |> Path.join("symphony.yml")
+      |> File.read!()
+      |> Yaml.decode()
+
+    unless File.exists?(Path.join(repo, ".git/HEAD")) do
+      ExUnit.Callbacks.on_exit(fn -> File.rm_rf(repo) end)
+      {_, 0} = System.cmd("git", ["init", "-q", "--initial-branch=main", repo])
+      {_, 0} = System.cmd("git", ["-C", repo, "remote", "add", "origin", policy["project"]["repository"]])
+
+      {_, 0} =
+        System.cmd("git", [
+          "-C",
+          repo,
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "-c",
+          "commit.gpgsign=false",
+          "-c",
+          "core.hooksPath=/dev/null",
+          "commit",
+          "-q",
+          "--allow-empty",
+          "-m",
+          "Fixture"
+        ])
+    end
+
+    for reference <- policy["docs"]["entrypoints"] do
+      File.mkdir_p!(Path.dirname(Path.join(repo, reference)))
+      File.cp!(Path.join(fixture, reference), Path.join(repo, reference))
+    end
+
+    {repo, policy}
+  end
 
   defmacro __using__(_opts) do
     quote do

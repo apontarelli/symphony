@@ -5,7 +5,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
 
   alias Plug.Conn
   alias SymphonyElixir.{LocalConfig, OperatorInterface, PathSafety}
-  alias SymphonyElixir.TargetRegistry.Yaml
+  alias SymphonyElixir.TargetRegistry.{Preview, Yaml}
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -143,25 +143,10 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
   test "repository inspection returns readiness fields and keeps non-ready paths visible", context do
     File.write!(Path.join(context.manual, "README.md"), "Repository documentation\n")
 
-    File.write!(
-      Path.join(context.manual, "symphony.yml"),
-      """
-      version: 1
-      project:
-        slug: api-manual
-        repository: https://github.com/example/api-manual
-      docs:
-        entrypoints:
-          - README.md
-      vcs:
-        mode: git
-        default_branch: main
-      delivery:
-        pr_target: main
-      """
-    )
+    configure_repository!(context)
+    refute File.exists?(Path.join(context.manual, "symphony.yml"))
 
-    response = authorized_post(context, %{"action" => "inspect", "path" => context.manual})
+    response = authorized_post(context, %{"action" => "inspect", "path" => context.manual, "target_id" => "manual"})
     assert response.status == 200
     payload = json_response(response, 200)
 
@@ -399,10 +384,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
       "targets" => %{}
     }
 
-    File.write!(
-      LocalConfig.target_registry_path(config_root: context.config_root),
-      Yaml.encode(registry)
-    )
+    configure_repository!(context, registry)
 
     for args <- [
           ["init", "--initial-branch=main"],
@@ -416,22 +398,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
 
     File.write!(Path.join(repo, "README.md"), "Repository documentation\n")
 
-    File.write!(Path.join(repo, "symphony.yml"), """
-    version: 1
-    project:
-      slug: api-manual
-      repository: https://github.com/example/api-manual
-    docs:
-      entrypoints:
-        - README.md
-    vcs:
-      mode: git
-      default_branch: main
-    delivery:
-      pr_target: main
-    """)
-
-    request = %{"action" => "branches", "path" => repo, "configured_target" => "topic"}
+    request = %{"action" => "branches", "path" => repo, "target_id" => "manual", "configured_target" => "topic"}
     first = authorized_post(context, request) |> json_response(202) |> then(&await_scan(context, &1["scan_id"]))
     assert first["status"] == "completed"
     assert first["result"]["repository"] == canonical!(repo)
@@ -439,7 +406,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
     assert Enum.any?(first["result"]["choices"], &(&1["value"] == "topic" and &1["configured"]))
 
     inherited =
-      authorized_post(context, %{"action" => "branches", "path" => repo})
+      authorized_post(context, %{"action" => "branches", "path" => repo, "target_id" => "manual"})
       |> json_response(202)
       |> then(&await_scan(context, &1["scan_id"]))
 
@@ -447,7 +414,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
     assert inherited["result"]["apply_allowed"]
 
     changed =
-      authorized_post(context, %{"action" => "branches", "path" => context.repositories})
+      authorized_post(context, %{"action" => "branches", "path" => context.repositories, "target_id" => "manual"})
       |> json_response(202)
       |> then(&await_scan(context, &1["scan_id"]))
 
@@ -492,6 +459,218 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
     assert new["scan_id"] != old["scan_id"]
     authorized_post(context, %{"action" => "cancel", "scan_id" => new["scan_id"]}) |> json_response(200)
     :ok = GenServer.call(context.scheduler, :release)
+  end
+
+  test "a target-less branch catalog is usable before the target exists", context do
+    repo = context.manual
+
+    registry = %{
+      "version" => 1,
+      "host" => %{
+        "id" => "pretarget-host",
+        "state_root" => Path.join(context.root, "state"),
+        "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
+        "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
+        "scheduling" => %{"algorithm" => "weighted_deficit_round_robin", "max_credit_rounds" => 4},
+        "tracker_connections" => %{
+          "linear-main" => %{"kind" => "linear", "endpoint" => "https://api.linear.app/graphql", "api_key" => "$LINEAR_API_KEY"}
+        },
+        "runners" => %{
+          "codex" => %{"kind" => "codex_app_server", "command" => ["codex", "app-server"], "max_concurrent_agents" => 4, "max_concurrent_startups" => 2}
+        },
+        "repository_defaults" => %{
+          "project" => %{"slug" => "api-manual", "repository" => "https://github.com/example/api-manual"},
+          "docs" => %{"entrypoints" => ["README.md"]},
+          "vcs" => %{"mode" => "git", "default_branch" => "main"},
+          "delivery" => %{"pr_target" => "main"}
+        }
+      },
+      "targets" => %{}
+    }
+
+    write_repository_registry!(context, registry)
+
+    for args <- [
+          ["init", "--initial-branch=main"],
+          ["remote", "add", "origin", "https://github.com/example/api-manual.git"],
+          ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial"],
+          ["branch", "topic"]
+        ] do
+      {output, status} = System.cmd("git", args, cd: repo, stderr_to_stdout: true)
+      assert status == 0, output
+    end
+
+    File.write!(Path.join(repo, "README.md"), "Repository documentation\n")
+
+    selected =
+      authorized_post(context, %{"action" => "branches", "path" => repo, "configured_target" => "topic"})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    assert selected["status"] == "completed"
+    assert selected["result"]["repository"] == canonical!(repo)
+    assert selected["result"]["selected"] == "topic"
+    assert selected["result"]["apply_allowed"]
+    assert Enum.any?(selected["result"]["choices"], &(&1["value"] == "topic" and &1["configured"]))
+
+    inherited =
+      authorized_post(context, %{"action" => "branches", "path" => repo})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    assert inherited["status"] == "completed"
+    assert inherited["result"]["selected"] == "main"
+    assert inherited["result"]["apply_allowed"]
+
+    # Incomplete host defaults keep the pre-target catalog blocked; only the
+    # branch-selected Add/Import flow fails, not readiness of other requests.
+    incomplete = put_in(registry, ["host", "repository_defaults", "project"], %{"slug" => "api-manual"})
+    write_repository_registry!(context, incomplete)
+
+    blocked =
+      authorized_post(context, %{"action" => "branches", "path" => repo, "configured_target" => "topic"})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    assert blocked["status"] == "completed"
+    assert blocked["result"]["choices"] == []
+    refute blocked["result"]["apply_allowed"]
+  end
+
+  test "branch discovery is blocked when the repository sits inside another target's worktree", context do
+    other_repo = Path.join(context.root, "other-repo")
+    other_worktree = Path.join(context.root, "other-worktree")
+    nested_repo = Path.join(other_worktree, "nested")
+    File.mkdir_p!(other_repo)
+    File.mkdir_p!(nested_repo)
+
+    registry = %{
+      "version" => 1,
+      "host" => %{
+        "id" => "isolation-host",
+        "state_root" => Path.join(context.root, "state"),
+        "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
+        "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
+        "scheduling" => %{"algorithm" => "weighted_deficit_round_robin", "max_credit_rounds" => 4},
+        "tracker_connections" => %{
+          "linear-main" => %{"kind" => "linear", "endpoint" => "https://api.linear.app/graphql", "api_key" => "$LINEAR_API_KEY"}
+        },
+        "runners" => %{
+          "codex" => %{"kind" => "codex_app_server", "command" => ["codex", "app-server"], "max_concurrent_agents" => 4, "max_concurrent_startups" => 2}
+        },
+        "repository_defaults" => %{
+          "project" => %{"slug" => "api-manual", "repository" => "https://github.com/example/api-manual"},
+          "docs" => %{"entrypoints" => ["README.md"]},
+          "vcs" => %{"mode" => "git", "default_branch" => "main"},
+          "delivery" => %{"pr_target" => "main"}
+        }
+      },
+      "targets" => %{
+        "other" => valid_registry_target(other_repo, other_worktree),
+        "manual" => %{
+          "repo" => %{"path" => nested_repo, "expected_repository" => "https://github.com/example/api-manual"}
+        }
+      }
+    }
+
+    write_repository_registry!(context, registry)
+
+    for args <- [
+          ["init", "--initial-branch=main"],
+          ["remote", "add", "origin", "https://github.com/example/api-manual.git"],
+          ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial"]
+        ] do
+      {output, status} = System.cmd("git", args, cd: nested_repo, stderr_to_stdout: true)
+      assert status == 0, output
+    end
+
+    File.write!(Path.join(nested_repo, "README.md"), "Repository documentation\n")
+
+    blocked =
+      authorized_post(context, %{"action" => "branches", "path" => nested_repo, "target_id" => "manual"})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    assert blocked["status"] == "completed"
+    assert blocked["result"]["repository"] == canonical!(nested_repo)
+    assert blocked["result"]["status"] == "unavailable"
+    assert blocked["result"]["reason"] == "repository_policy_invalid"
+    assert blocked["result"]["choices"] == []
+    refute blocked["result"]["apply_allowed"]
+  end
+
+  defp valid_registry_target(repo, worktree) do
+    %{
+      "display_name" => "Other",
+      "state" => "active",
+      "dispatch_mode" => "explicit",
+      "repo" => %{"path" => repo, "expected_repository" => "https://github.com/example/api-manual"},
+      "worktree" => %{"root" => worktree, "strategy" => "per_issue", "hooks" => %{}},
+      "linear" => %{
+        "connection" => "linear-main",
+        "scope" => %{"type" => "project", "project_id" => "project-1"},
+        "active_states" => ["Todo", "In Progress"],
+        "terminal_states" => ["Done"],
+        "required_labels" => []
+      },
+      "runners" => %{"allowed" => ["codex"], "default" => "codex", "settings" => %{}},
+      "concurrency" => %{
+        "max_concurrent_agents" => 4,
+        "max_concurrent_startups" => 2,
+        "max_concurrent_reviewers" => 1,
+        "by_linear_state" => %{}
+      },
+      "budgets" => %{
+        "per_run" => %{"max_total_tokens" => 1_000},
+        "daily" => %{"max_total_tokens" => 10_000},
+        "weekly" => %{"max_total_tokens" => 50_000}
+      },
+      "checks" => %{},
+      "external_side_effects" => %{
+        "tracker_write" => "deny",
+        "vcs_publish" => "deny",
+        "pull_request_write" => "deny",
+        "merge" => "deny",
+        "deployment" => "deny",
+        "production_data" => "deny"
+      },
+      "scheduling" => %{"weight" => 10}
+    }
+  end
+
+  defp configure_repository!(context, registry \\ %{"version" => 1, "host" => %{}, "targets" => %{}}) do
+    repository = "https://github.com/example/api-manual"
+
+    policy = %{
+      "project" => %{"slug" => "api-manual", "repository" => repository},
+      "docs" => %{"entrypoints" => ["README.md"]},
+      "vcs" => %{"mode" => "git", "default_branch" => "main"},
+      "delivery" => %{"pr_target" => "main"}
+    }
+
+    configured = %{
+      "repo" => %{"path" => context.manual, "expected_repository" => repository},
+      "worktree" => %{"root" => Path.join(context.root, "worktrees")}
+    }
+
+    bytes =
+      registry
+      |> put_in(["host", "repository_defaults"], policy)
+      |> put_in(["targets", "manual"], configured)
+      |> Yaml.encode()
+
+    path = LocalConfig.target_registry_path(config_root: context.config_root)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+    :ok = GenServer.call(context.scheduler, {:registry, %{path: path, generation: Preview.generation(bytes), verified?: true}})
+  end
+
+  defp write_repository_registry!(context, registry) do
+    bytes = Yaml.encode(registry)
+    path = LocalConfig.target_registry_path(config_root: context.config_root)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+    :ok = GenServer.call(context.scheduler, {:registry, %{path: path, generation: Preview.generation(bytes), verified?: true}})
   end
 
   defp authorized_post(context, body) do

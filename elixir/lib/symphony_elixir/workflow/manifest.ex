@@ -33,6 +33,26 @@ defmodule SymphonyElixir.Workflow.Manifest do
     workspace
   )
 
+  # Closed repository policy sections whose normalizers silently drop unknown
+  # fields so repository policy shape validation can reject misspelled fields
+  # before normalization. `project.facts`, `workflow.config`, and
+  # `automation.review` accept arbitrary configuration keys;
+  # `automation.policy_ref` is rejected with a dedicated diagnostic during
+  # normalization; `capabilities` and `issue_markers` already reject unknown
+  # fields during normalization; `review_routing` is an open extension object.
+  @repo_policy_section_fields %{
+    "project" => ~w(app_kind criticality deployment_coupling facts kind name repository slug),
+    "docs" => ~w(entrypoints),
+    "vcs" => ~w(default_branch mode posture),
+    "delivery" => ~w(pr_target),
+    "validation" => ~w(commands required_files),
+    "validation.commands" => ~w(name command),
+    "automation" => ~w(completion_requirements policy_ref posture profile review),
+    "workflow" => ~w(config modules preset),
+    "auto_land" => ~w(blocked_state dry_run force_human_review_labels force_human_review_paths posture required_checks),
+    "harness" => ~w(codex_home)
+  }
+
   @type diagnostic :: %{
           required(:path) => String.t(),
           required(:message) => String.t(),
@@ -78,12 +98,21 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   @spec load_map(map(), keyword()) :: {:ok, Workflow.loaded_workflow()} | {:error, manifest_error()}
   def load_map(raw, opts \\ []) when is_map(raw) do
-    with {:ok, manifest} <- normalize_manifest(normalize_keys(raw), opts) do
+    with {:ok, manifest} <- normalize_map(raw, opts) do
       case compile_diagnostics(manifest) do
         [] -> {:ok, compile(manifest)}
         diagnostics -> {:error, {:invalid_manifest, diagnostics}}
       end
     end
+  end
+
+  @doc false
+  @spec repository_policy_section_fields() :: %{optional(String.t()) => [String.t()]}
+  def repository_policy_section_fields, do: @repo_policy_section_fields
+
+  @spec normalize_map(map(), keyword()) :: {:ok, map()} | {:error, manifest_error()}
+  def normalize_map(raw, opts \\ []) when is_map(raw) do
+    normalize_manifest(normalize_keys(raw), opts)
   end
 
   @spec read(Path.t(), keyword()) :: {:ok, map()} | {:error, manifest_error()}
@@ -434,7 +463,14 @@ defmodule SymphonyElixir.Workflow.Manifest do
 
   defp normalize_validation(raw) when is_map(raw) do
     {commands, errors} = commands_field(raw, "commands", "validation.commands")
-    {%{"commands" => commands}, errors}
+    {required_files, file_errors} = string_list_field(raw, "required_files", "validation.required_files", default: [])
+
+    validation =
+      if Map.has_key?(raw, "required_files"),
+        do: %{"commands" => commands, "required_files" => required_files},
+        else: %{"commands" => commands}
+
+    {validation, errors ++ file_errors}
   end
 
   defp normalize_validation(_raw), do: {%{"commands" => []}, [type_error("validation", "must be a map")]}

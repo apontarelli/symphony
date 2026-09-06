@@ -14,6 +14,7 @@ defmodule SymphonyElixir.HostScheduler.RegistryTest do
       "version" => 1,
       "host" => %{
         "id" => "test-host",
+        "capabilities" => ["github_pr", "browser"],
         "state_root" => state_root,
         "polling" => %{"interval_ms" => 25, "max_concurrent_target_polls" => 2},
         "capacity" => %{
@@ -59,11 +60,14 @@ defmodule SymphonyElixir.HostScheduler.RegistryTest do
   end
 
   defp target(tmp_dir) do
+    {repo, policy} = SymphonyElixir.TestSupport.host_repository_fixture(tmp_dir, @manifest_fixture_root)
+
     %{
       "display_name" => "Alpha",
       "state" => "active",
       "dispatch_mode" => "watch",
-      "repo" => %{"path" => @manifest_fixture_root, "manifest" => "symphony.yml"},
+      "repo" => %{"path" => repo, "expected_repository" => policy["project"]["repository"]},
+      "repository_policy" => policy,
       "worktree" => %{
         "root" => Path.join(Path.dirname(tmp_dir), "worktrees-" <> Path.basename(tmp_dir)),
         "strategy" => "per_issue",

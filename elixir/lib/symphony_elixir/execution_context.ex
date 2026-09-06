@@ -500,8 +500,7 @@ defmodule SymphonyElixir.ExecutionContext do
            "workflow_module_resolution" => module_resolution
          } = repo_policy
        ) do
-    Enum.sort(Map.keys(repo_policy)) ==
-      ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+    TargetContext.valid_repository_policy?(repo_policy) and
       is_map(manifest) and is_map(module_resolution) and is_binary(source_dir) and
       String.valid?(source_dir) and Path.type(source_dir) == :absolute
   end

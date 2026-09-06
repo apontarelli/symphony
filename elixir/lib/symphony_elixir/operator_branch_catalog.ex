@@ -30,8 +30,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
           required(:label) => String.t(),
           required(:status) => String.t(),
           required(:reason) => String.t() | nil,
-          required(:current) => boolean(),
-          required(:manifest_default) => boolean(),
+          required(:policy_default) => boolean(),
           required(:configured) => boolean(),
           optional(:remote) => String.t() | nil,
           optional(:remote_ref) => String.t() | nil,
@@ -61,7 +60,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
     repository = value(inspection, :path)
     vcs = value(inspection, :vcs)
     selected = configured_target(opts)
-    manifest_default = normalize_manifest_default(value(inspection, :default_branch))
+    policy_default = normalize_policy_default(value(inspection, :default_branch))
 
     base = %{
       repository: repository,
@@ -88,18 +87,18 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
         %{base | reason: "discovery_cancelled"}
 
       true ->
-        discover_ready(base, manifest_default, opts)
+        discover_ready(base, policy_default, opts)
     end
   end
 
   def discover(_inspection, _opts),
     do: unavailable(%{repository: nil, vcs: nil, selected: nil}, :invalid_inspection, false)
 
-  defp discover_ready(base, manifest_default, opts) do
+  defp discover_ready(base, policy_default, opts) do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms(opts)
 
     result =
-      discover_vcs(base.vcs, base.repository, base.selected, manifest_default, deadline_ms, command_runner(opts), opts)
+      discover_vcs(base.vcs, base.repository, base.selected, policy_default, deadline_ms, command_runner(opts), opts)
 
     if cancelled?(opts) do
       unavailable(base, :cancelled, false)
@@ -111,13 +110,13 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
   defp finish_discovery(base, {:ok, choices}), do: finish_current(base, choices, base.selected)
   defp finish_discovery(base, {:error, reason}), do: unavailable(base, reason, reason != :cancelled)
 
-  defp discover_vcs("git", repository, selected, manifest_default, deadline_ms, runner, opts),
-    do: discover_git(repository, selected, manifest_default, deadline_ms, runner, opts)
+  defp discover_vcs("git", repository, selected, policy_default, deadline_ms, runner, opts),
+    do: discover_git(repository, selected, policy_default, deadline_ms, runner, opts)
 
-  defp discover_vcs("jj", repository, selected, manifest_default, deadline_ms, runner, opts),
-    do: discover_jj(repository, selected, manifest_default, deadline_ms, runner, opts)
+  defp discover_vcs("jj", repository, selected, policy_default, deadline_ms, runner, opts),
+    do: discover_jj(repository, selected, policy_default, deadline_ms, runner, opts)
 
-  defp discover_git(repository, selected, manifest_default, deadline_ms, runner, opts) do
+  defp discover_git(repository, selected, policy_default, deadline_ms, runner, opts) do
     with :ok <- check_cancel(opts),
          {:ok, remote_output} <- run_command(runner, ["git", "remote"], repository, deadline_ms),
          {:ok, remotes} <- parse_git_remotes(remote_output),
@@ -133,11 +132,11 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
          :ok <- check_cancel(opts),
          {:ok, remote_default} <- git_remote_default(repository, deadline_ms, runner),
          :ok <- check_cancel(opts) do
-      {:ok, build_choices(rows, selected, manifest_default, remote_default)}
+      {:ok, build_choices(rows, selected, policy_default, remote_default)}
     end
   end
 
-  defp discover_jj(repository, selected, manifest_default, deadline_ms, runner, opts) do
+  defp discover_jj(repository, selected, policy_default, deadline_ms, runner, opts) do
     with :ok <- check_cancel(opts),
          {:ok, output} <-
            run_command(
@@ -161,7 +160,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
            ),
          {:ok, rows} <- parse_jj_rows(output),
          :ok <- check_cancel(opts) do
-      {:ok, build_choices(rows, selected, manifest_default, nil)}
+      {:ok, build_choices(rows, selected, policy_default, nil)}
     end
   end
 
@@ -350,7 +349,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
 
   defp parse_jj_row(_fields), do: :error
 
-  defp build_choices(rows, selected, manifest_default, remote_default) do
+  defp build_choices(rows, selected, policy_default, remote_default) do
     local_rows = Enum.filter(rows, &(&1.kind == :local and Map.get(&1, :present?, true)))
     remote_rows = Enum.filter(rows, &(&1.kind == :remote and Map.get(&1, :present?, true)))
     local_by_name = Map.new(local_rows, &{&1.name, &1})
@@ -382,7 +381,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
           status: "available",
           reason: nil,
           current: Map.get(local, :current, false),
-          manifest_default: name == manifest_default,
+          policy_default: name == policy_default,
           remote_default: name == remote_default,
           configured: name == selected,
           remote: remote,
@@ -395,21 +394,21 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
       end)
 
     if is_binary(selected) and valid_target?(selected) and not Enum.any?(choices, &(&1.value == selected)) do
-      choices ++ [stale_choice(selected, manifest_default, remote_default)]
+      choices ++ [stale_choice(selected, policy_default, remote_default)]
     else
       choices
     end
     |> Enum.sort_by(& &1.value)
   end
 
-  defp stale_choice(selected, manifest_default, remote_default) do
+  defp stale_choice(selected, policy_default, remote_default) do
     %{
       value: selected,
       label: selected,
       status: "stale",
       reason: "configured_target_unavailable",
       current: false,
-      manifest_default: selected == manifest_default,
+      policy_default: selected == policy_default,
       remote_default: selected == remote_default,
       configured: true,
       remote: nil,
@@ -537,7 +536,7 @@ defmodule SymphonyElixir.OperatorBranchCatalog do
     end
   end
 
-  defp normalize_manifest_default(branch) do
+  defp normalize_policy_default(branch) do
     if is_binary(branch) and valid_target?(branch), do: branch, else: nil
   end
 

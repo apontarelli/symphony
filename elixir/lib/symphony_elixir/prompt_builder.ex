@@ -170,9 +170,7 @@ defmodule SymphonyElixir.PromptBuilder do
            "workflow_module_resolution" => resolution
          } = repo_policy
        ) do
-    with true <-
-           Enum.sort(Map.keys(repo_policy)) ==
-             ["manifest", "manifest_source_dir", "workflow_module_resolution"],
+    with true <- TargetContext.valid_repository_policy?(repo_policy),
          true <- is_map(manifest) and not is_struct(manifest),
          true <- valid_prompt_source_dir?(source_dir),
          {:ok, _resolution} <- normalize_pinned_prompt_resolution(resolution) do

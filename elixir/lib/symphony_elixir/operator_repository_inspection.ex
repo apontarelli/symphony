@@ -2,8 +2,8 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
   @moduledoc false
 
   alias SymphonyElixir.{PathSafety, ProcessSupervisor}
-  alias SymphonyElixir.TargetRegistry.{FileStore, Schema, Validation, Yaml}
-  alias SymphonyElixir.Workflow.{Manifest, PublishTarget}
+  alias SymphonyElixir.TargetRegistry.{FileStore, RepositoryPolicy, Schema, Validation, Yaml}
+  alias SymphonyElixir.Workflow.PublishTarget
 
   @max_metadata_bytes 1_048_576
   @git_env [
@@ -23,6 +23,8 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
           default_branch: String.t() | nil,
           expected_repository: String.t() | nil,
           warnings: [map()],
+          blockers: [map()],
+          configuration_sources: map() | nil,
           apply_allowed: boolean()
         }
 
@@ -37,6 +39,8 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
       default_branch: nil,
       expected_repository: nil,
       warnings: [],
+      blockers: [],
+      configuration_sources: nil,
       apply_allowed: false
     }
 
@@ -55,59 +59,327 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
 
   defp inspect_repository(base, opts) do
     case vcs_metadata(base.path) do
-      {:ok, vcs, git_dir} -> inspect_manifest(%{base | vcs: vcs}, git_dir, opts)
-      {:error, reason} when reason in [:eacces, :eperm] -> base
-      _ -> fail(%{base | vcs: "unsupported"}, "needs_setup", "repository_vcs_required")
-    end
-  end
+      {:ok, vcs, git_dir} ->
+        case repository_policy(opts) do
+          {:ok, policy, sources, host, configured} ->
+            inspect_configured_repository(%{base | vcs: vcs}, git_dir, policy, sources, host, configured, opts)
 
-  defp inspect_manifest(base, git_dir, opts) do
-    manifest_name = Keyword.get(opts, :manifest, "symphony.yml")
-    manifest_path = Path.join(base.path, manifest_name)
+          {:error, :registry_unavailable} ->
+            fail(base, "invalid", "registry_unavailable")
 
-    with {:ok, _bytes} <- read_metadata(manifest_path),
-         {:ok, snapshot} <- registry(Keyword.get(opts, :registry_path)),
-         [] <- Validation.repository_diagnostics(base.path, manifest_name, snapshot),
-         {:ok, manifest} <- Manifest.read(manifest_path, repo_setup?: true) do
-      project = Map.take(manifest["project"], ~w(slug name repository))
-      repository = canonical_repository(project["repository"])
-      project = Map.put(project, "repository", repository)
-      expected = expected_repository(snapshot, opts) || repository
+          {:error, :configuration_required} ->
+            fail(base, "configuration_required", "repository_configuration_required")
 
-      base = %{
-        base
-        | project: project,
-          default_branch: manifest["vcs"]["default_branch"],
-          expected_repository: if(is_binary(expected), do: expected)
-      }
+          {:error, diagnostics} when is_list(diagnostics) ->
+            fail_with_blockers(base, "invalid", "repository_policy_invalid", diagnostics)
 
-      validate_manifest(base, manifest, git_dir, repository, expected)
-    else
-      {:error, :enoent} -> fail(base, "needs_setup", "repository_manifest_missing")
-      {:error, reason} when reason in [:eacces, :eperm] -> fail(base, "unreadable", "repository_manifest_unreadable")
-      {:error, :registry_unavailable} -> fail(base, "invalid", "registry_unavailable")
-      [_ | _] -> fail(base, "invalid", "repository_path_invalid")
-      _ -> fail(base, "invalid", "repository_manifest_invalid")
-    end
-  end
-
-  defp validate_manifest(base, manifest, git_dir, repository, expected) do
-    report = Manifest.validate(base.path, manifest)
-
-    case report.errors do
-      [] ->
-        warnings = Map.get(report, :warnings, [])
-        base = %{base | warnings: Enum.map(warnings, &Map.take(&1, [:path, :message, :remediation]))}
-
-        cond do
-          not vcs_mode_available?(base, manifest["vcs"]["mode"]) -> fail(base, "invalid", "repository_vcs_mode_mismatch")
-          not is_binary(repository) or not is_binary(expected) -> fail(base, "invalid", "repository_identity_invalid")
-          repository != expected -> fail(base, "identity_mismatch", "repository_identity_mismatch")
-          true -> validate_remote(base, git_dir, expected)
+          {:error, _reason} ->
+            fail(base, "invalid", "repository_policy_invalid")
         end
 
+      {:error, reason} when reason in [:eacces, :eperm] ->
+        base
+
       _ ->
-        fail(base, "invalid", "repository_manifest_invalid")
+        fail(base |> Map.put(:vcs, "unsupported"), "needs_setup", "repository_vcs_required")
+    end
+  end
+
+  defp inspect_configured_repository(base, git_dir, policy, sources, host, configured, opts) do
+    project =
+      case Map.get(policy, "project", %{}) do
+        project when is_map(project) -> Map.take(project, ~w(slug name repository))
+        _ -> %{}
+      end
+
+    repository = canonical_repository(project["repository"])
+    mode = get_in(policy, ["vcs", "mode"])
+    default_branch = get_in(policy, ["vcs", "default_branch"])
+    expected = repository
+
+    base = %{
+      base
+      | project: Map.put(project, "repository", repository),
+        default_branch: if(is_binary(default_branch), do: default_branch),
+        expected_repository: if(is_binary(expected), do: expected),
+        configuration_sources: sources
+    }
+
+    blockers =
+      policy_identity_blockers(repository, configured, opts) ++
+        policy_vcs_blockers(base, mode) ++
+        policy_file_blockers(base.path, policy) ++
+        runner_capability_blockers(policy, host, configured) ++
+        validation_blockers(base.path, host, configured, opts)
+
+    if blockers != [] do
+      fail_with_blockers(base, "invalid", blocker_reason(blockers), blockers)
+    else
+      validate_remote(base, git_dir, expected)
+    end
+  end
+
+  defp repository_policy(opts) do
+    case {Keyword.get(opts, :host), Keyword.get(opts, :configured), Keyword.get(opts, :target_id)} do
+      {host, configured, _target_id} when is_map(host) and is_map(configured) ->
+        resolve_policy(host, configured)
+
+      {host, nil, nil} when is_map(host) ->
+        # Before target creation, only host defaults provide policy. Admission
+        # repeats readiness with the configured target's identity and runners.
+        resolve_policy(host, %{})
+
+      {host, nil, _target_id} when is_map(host) ->
+        {:error, :configuration_required}
+
+      _ ->
+        with {:ok, snapshot} <- registry(Keyword.get(opts, :registry_path)),
+             host when is_map(host) <- snapshot.host,
+             target_id when is_binary(target_id) <- Keyword.get(opts, :target_id),
+             target when is_map(target) <- Map.get(snapshot.targets, target_id),
+             configured when is_map(configured) <- Map.get(target, :configured) do
+          resolve_policy(host, configured)
+        else
+          {:error, :registry_unavailable} -> {:error, :registry_unavailable}
+          nil -> {:error, :configuration_required}
+          _ -> {:error, :configuration_required}
+        end
+    end
+  end
+
+  defp resolve_policy(host, configured) do
+    case RepositoryPolicy.resolve(host, configured) do
+      {:ok, policy, sources} when is_map(policy) and is_map(sources) -> {:ok, policy, sources, host, configured}
+      {:error, diagnostics} when is_list(diagnostics) -> {:error, diagnostics}
+      _ -> {:error, [%{path: "$.target.repository_policy", message: "repository policy could not be resolved"}]}
+    end
+  rescue
+    _error -> {:error, [%{path: "$.target.repository_policy", message: "repository policy could not be resolved"}]}
+  catch
+    _kind, _reason -> {:error, [%{path: "$.target.repository_policy", message: "repository policy could not be resolved"}]}
+  end
+
+  defp policy_identity_blockers(repository, configured, opts) do
+    policy_blockers =
+      if is_binary(repository),
+        do: [],
+        else: [blocker("$.repository.project.repository", "repository identity is required")]
+
+    requested_expected = Keyword.get(opts, :expected_repository)
+
+    policy_blockers ++
+      target_expected_identity_blockers(repository, configured, opts) ++
+      identity_comparison_blocker(repository, requested_expected, "$.repository.expected_repository")
+  end
+
+  # Pre-target discovery still requires host policy and matching remote identity.
+  defp target_expected_identity_blockers(repository, configured, opts) do
+    if pre_target_request?(opts) do
+      []
+    else
+      configured_expected = get_in(configured, ["repo", "expected_repository"])
+
+      if is_nil(configured_expected),
+        do: [blocker("$.target.repo.expected_repository", "expected repository identity is required")],
+        else: identity_comparison_blocker(repository, configured_expected, "$.target.repo.expected_repository")
+    end
+  end
+
+  defp pre_target_request?(opts),
+    do: is_nil(Keyword.get(opts, :configured)) and is_nil(Keyword.get(opts, :target_id))
+
+  defp identity_comparison_blocker(_repository, nil, _path), do: []
+
+  defp identity_comparison_blocker(repository, expected, path) do
+    normalized = canonical_repository(expected)
+
+    cond do
+      not is_binary(normalized) ->
+        [blocker(path, "expected repository identity is invalid")]
+
+      normalized != repository ->
+        [blocker(path, "expected repository identity does not match the host policy")]
+
+      true ->
+        []
+    end
+  end
+
+  defp policy_vcs_blockers(base, mode) do
+    cond do
+      mode not in ["git", "jj"] ->
+        [blocker("$.repository.vcs.mode", "configured VCS mode must be git or jj")]
+
+      not vcs_mode_available?(base, mode) ->
+        [blocker("$.repository.vcs.mode", "configured VCS mode is unavailable in this checkout")]
+
+      true ->
+        []
+    end
+  end
+
+  defp policy_file_blockers(repo, policy) do
+    docs = get_in(policy, ["docs", "entrypoints"]) || []
+    required_files = get_in(policy, ["validation", "required_files"]) || []
+
+    doc_blockers =
+      if is_list(docs) do
+        docs
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {entrypoint, index} ->
+          validate_policy_file(repo, entrypoint, "$.repository.docs.entrypoints[#{index}]")
+        end)
+      else
+        [blocker("$.repository.docs.entrypoints", "required documentation references must be a list")]
+      end
+
+    check_blockers =
+      if is_list(required_files) do
+        required_files
+        |> Enum.with_index()
+        |> Enum.flat_map(fn {file, index} ->
+          validate_policy_file(repo, file, "$.repository.validation.required_files[#{index}]")
+        end)
+      else
+        [blocker("$.repository.validation.required_files", "required check file references must be a list")]
+      end
+
+    doc_blockers ++ check_blockers
+  end
+
+  defp validate_policy_file(repo, file, path) do
+    cond do
+      not is_binary(file) or not safe_relative_path?(file) ->
+        [blocker(path, "required file reference must stay inside the repository")]
+
+      not readable_repository_file?(repo, file) ->
+        [blocker(path, "required file is missing or unreadable")]
+
+      true ->
+        []
+    end
+  end
+
+  defp readable_repository_file?(repo, file) do
+    with {:ok, canonical_repo} <- PathSafety.canonicalize(repo),
+         {:ok, candidate} <- PathSafety.canonicalize(Path.join(repo, file)),
+         true <- strict_descendant?(candidate, canonical_repo),
+         {:ok, %File.Stat{type: :regular, access: access}} <- File.stat(candidate),
+         true <- access in [:read, :read_write] do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp strict_descendant?(path, root) do
+    path != root and path_prefix?(Path.split(path), Path.split(root))
+  end
+
+  defp path_prefix?(_segments, []), do: true
+  defp path_prefix?([segment | segments], [segment | prefix]), do: path_prefix?(segments, prefix)
+  defp path_prefix?(_segments, _prefix), do: false
+
+  defp runner_capability_blockers(_policy, host, _configured) when not is_map(host), do: []
+
+  defp runner_capability_blockers(policy, host, configured) do
+    required = capability_values(get_in(policy, ["capabilities", "required"]))
+    selected = selected_runner_ids(Map.get(configured, "runners"))
+
+    host_runners = if is_map(Map.get(host, "runners")), do: Map.get(host, "runners"), else: %{}
+    host_capabilities = capability_values(Map.get(host, "capabilities", %{}))
+
+    required
+    |> Enum.uniq()
+    |> Enum.reject(fn capability ->
+      capability in host_capabilities or
+        (selected != [] and
+           Enum.all?(selected, fn runner ->
+             runner
+             |> then(&Map.get(host_runners, &1, %{}))
+             |> capability_values()
+             |> Enum.member?(capability)
+           end))
+    end)
+    |> Enum.map(
+      &blocker(
+        "$.repository.capabilities.required",
+        "required runner capability #{Kernel.inspect(&1)} is unavailable on the selected host runners"
+      )
+    )
+  end
+
+  defp selected_runner_ids(%{"allowed" => [_ | _] = allowed}), do: Enum.filter(allowed, &is_binary/1)
+  defp selected_runner_ids(%{"default" => default}) when is_binary(default), do: [default]
+  defp selected_runner_ids(_runners), do: []
+
+  defp capability_values(values) when is_list(values), do: Enum.filter(values, &is_binary/1)
+
+  defp capability_values(%{"capabilities" => capabilities}), do: capability_values(capabilities)
+  defp capability_values(%{"provided" => provided}), do: capability_values(provided)
+
+  defp capability_values(values) when is_map(values) do
+    for {key, true} when is_binary(key) <- values, do: key
+  end
+
+  defp capability_values(_values), do: []
+
+  defp blocker(path, message), do: %{path: path, message: message}
+
+  defp blocker_reason(blockers) do
+    if Enum.any?(blockers, &String.ends_with?(&1.path, ".repository")) do
+      "repository_identity_invalid"
+    else
+      "repository_policy_invalid"
+    end
+  end
+
+  defp validation_blockers(repo, host, configured, opts) do
+    siblings =
+      opts
+      |> Keyword.get(:configured_targets)
+      |> sibling_targets(Keyword.get(opts, :target_id))
+
+    repo
+    |> then(
+      &Validation.repository_diagnostics(
+        &1,
+        host,
+        configured,
+        Keyword.get(opts, :registry_path),
+        siblings
+      )
+    )
+    |> Enum.map(fn diagnostic ->
+      %{path: diagnostic.path, message: diagnostic.message}
+    end)
+  rescue
+    _error -> [blocker("$.repository", "repository path policy is invalid")]
+  end
+
+  defp sibling_targets(configured_targets, target_id) when is_map(configured_targets) do
+    if is_binary(target_id), do: Map.drop(configured_targets, [target_id]), else: configured_targets
+  end
+
+  defp sibling_targets(_configured_targets, _target_id), do: nil
+
+  defp fail_with_blockers(base, state, reason, blockers),
+    do: %{fail(base, state, reason) | blockers: Enum.map(blockers, &public_blocker/1)}
+
+  defp public_blocker(%{path: path, message: message}), do: %{path: path, message: message}
+  defp public_blocker(_invalid), do: %{path: "$.repository", message: "repository policy is invalid"}
+
+  defp safe_relative_path?(path) do
+    Path.type(path) == :relative and path != "" and not Enum.any?(Path.split(path), &(&1 in [".", ".."]))
+  end
+
+  defp validate_remote(base, git_dir, expected) do
+    case remote_identity(git_dir) do
+      {:ok, ^expected} -> %{base | state: "ready", reason: nil, apply_allowed: true}
+      {:error, :unsupported_config} -> fail(base, "invalid", "repository_git_config_unsupported")
+      {:error, :invalid_metadata} -> fail(base, "invalid", "repository_git_config_invalid")
+      {:error, reason} when reason in [:eacces, :eperm] -> fail(base, "unreadable", "repository_metadata_unreadable")
+      _ -> fail(base, "identity_mismatch", "repository_remote_mismatch")
     end
   end
 
@@ -124,32 +396,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
 
   defp vcs_mode_available?(_base, _mode), do: false
 
-  defp validate_remote(base, git_dir, expected) do
-    case remote_identity(git_dir) do
-      {:ok, ^expected} -> %{base | state: "ready", reason: nil, apply_allowed: true}
-      {:error, :unsupported_config} -> fail(base, "invalid", "repository_git_config_unsupported")
-      {:error, :invalid_metadata} -> fail(base, "invalid", "repository_git_config_invalid")
-      {:error, reason} when reason in [:eacces, :eperm] -> fail(base, "unreadable", "repository_metadata_unreadable")
-      _ -> fail(base, "identity_mismatch", "repository_remote_mismatch")
-    end
-  end
-
-  defp expected_repository(snapshot, opts) do
-    configured =
-      if snapshot do
-        case Map.get(snapshot.targets, Keyword.get(opts, :target_id)) do
-          nil -> nil
-          target -> get_in(target.configured, ["repo", "expected_repository"])
-        end
-      end
-
-    case Keyword.get(opts, :expected_repository, configured) do
-      nil -> nil
-      value -> canonical_repository(value) || :invalid
-    end
-  end
-
-  defp registry(nil), do: {:ok, nil}
+  defp registry(nil), do: {:error, :configuration_required}
 
   defp registry(path) do
     with {:ok, %{bytes: bytes}} <- FileStore.read(path),
@@ -159,8 +406,7 @@ defmodule SymphonyElixir.OperatorRepositoryInspection do
          true <- snapshot.globally_valid? do
       {:ok, snapshot}
     else
-      _ ->
-        {:error, :registry_unavailable}
+      _ -> {:error, :registry_unavailable}
     end
   end
 

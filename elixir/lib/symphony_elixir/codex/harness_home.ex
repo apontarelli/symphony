@@ -152,16 +152,12 @@ defmodule SymphonyElixir.Codex.HarnessHome do
            "workflow_module_resolution" => resolution
          } = repo_policy
        ) do
-    expected_keys = ~w(manifest manifest_source_dir workflow_module_resolution)
-
-    if Enum.sort(Map.keys(repo_policy)) == expected_keys and
+    if TargetContext.valid_repository_policy?(repo_policy) and
          is_map(manifest) and not is_struct(manifest) and is_map(resolution) and
          safe_context_path?(source_dir),
        do: {:ok, manifest, source_dir},
        else: {:error, :invalid_harness_home_context}
   end
-
-  defp context_repo_policy(_repo_policy), do: {:error, :invalid_harness_home_context}
 
   defp context_codex_home(manifest, source_dir, workspace_path) do
     case get_in(manifest, ["harness", "codex_home"]) do

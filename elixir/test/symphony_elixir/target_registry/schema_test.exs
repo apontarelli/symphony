@@ -621,7 +621,7 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
   test "nested required fields report exact local paths" do
     cases = [
       {["repo", "path"], "$.targets.main.repo.path"},
-      {["worktree", "root"], "$.targets.main.worktree.root"},
+      {["repo", "expected_repository"], "$.targets.main.repo.expected_repository"},
       {["worktree", "strategy"], "$.targets.main.worktree.strategy"},
       {["linear", "connection"], "$.targets.main.linear.connection"},
       {["linear", "scope"], "$.targets.main.linear.scope"},
@@ -656,10 +656,51 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     )
   end
 
+  test "repository policy fields are optional, normalized, and reject runtime policy input" do
+    target =
+      valid_target()
+      |> Map.put("repository_profile", "release")
+      |> Map.put("repository_policy", %{"issue_markers" => %{"labels" => [" Repo:One "]}})
+
+    assert {:ok, %Snapshot{targets: %{"main" => %Target{valid?: true, configured: configured}}}} =
+             Schema.validate(target_document(target), home: "/tmp/schema-home")
+
+    assert configured["repository_profile"] == "release"
+    assert configured["repository_policy"] == %{"issue_markers" => %{"labels" => [" Repo:One "]}}
+
+    invalid = put_in(valid_target(), ["repository_policy"], %{"runtime" => %{"runner" => "unsafe"}})
+
+    assert_target_diagnostic(
+      target_document(invalid),
+      "$.targets.main.repository_policy.runtime",
+      :unknown_key
+    )
+  end
+
+  test "host repository defaults and profiles normalize with operator capabilities" do
+    host =
+      valid_host()
+      |> Map.put("capabilities", ["browser", "github_pr"])
+      |> put_in(["runners", "codex", "capabilities"], %{"provided" => ["browser"]})
+      |> put_in(["repository_profiles", "release"], %{"issue_markers" => %{"labels" => ["release"]}})
+
+    assert {:ok, %Snapshot{host: normalized}} =
+             Schema.validate(%{"version" => 1, "host" => host, "targets" => %{}}, home: "/tmp/schema-home")
+
+    assert normalized["repository_defaults"]["project"]["repository"] ==
+             "https://github.com/example/symphony-fixture"
+
+    assert normalized["repository_profiles"]["release"] == %{
+             "issue_markers" => %{"labels" => ["release"]}
+           }
+
+    assert normalized["capabilities"] == ["browser", "github_pr"]
+    assert normalized["runners"]["codex"]["capabilities"] == %{"provided" => ["browser"]}
+  end
+
   test "optional maps and list-like values normalize deterministically" do
     target =
       valid_target()
-      |> update_in(["repo"], &Map.delete(&1, "manifest"))
       |> update_in(["worktree"], &Map.delete(&1, "hooks"))
       |> put_in(["linear", "scope"], %{
         "type" => "issues",
@@ -680,7 +721,7 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     assert {:ok, %Snapshot{targets: %{"main" => %Target{valid?: true, configured: configured}}}} =
              Schema.validate(target_document(target), home: "/tmp/schema-home")
 
-    assert configured["repo"]["manifest"] == "symphony.yml"
+    refute Map.has_key?(configured["repo"], "manifest")
 
     assert configured["worktree"]["hooks"] == %{
              "after_create" => nil,
@@ -767,7 +808,7 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
   test "repository, worktree, Linear, and runner fields enforce local types and enums" do
     cases = [
       {["repo", "path"], 1, :invalid_type},
-      {["repo", "manifest"], "", :invalid_value},
+      {["repository_policy"], [], :invalid_type},
       {["repo", "expected_repository"], "", :invalid_value},
       {["worktree", "root"], false, :invalid_type},
       {["worktree", "strategy"], "shared", :invalid_value},
@@ -1306,7 +1347,10 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     %{
       "display_name" => "Main",
       "state" => "paused",
-      "repo" => %{"path" => "~/repo", "manifest" => "symphony.yml"},
+      "repo" => %{
+        "path" => "~/repo",
+        "expected_repository" => "https://github.com/example/symphony-fixture"
+      },
       "worktree" => %{"root" => "~/worktrees", "strategy" => "per_issue", "hooks" => %{}},
       "linear" => %{
         "connection" => "linear-main",
@@ -1349,6 +1393,10 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     %{
       "id" => "local-host",
       "state_root" => "~/state",
+      "repository_defaults" => %{
+        "project" => %{"repository" => "https://github.com/example/symphony-fixture"}
+      },
+      "repository_profiles" => %{},
       "polling" => %{"interval_ms" => 1_000, "max_concurrent_target_polls" => 2},
       "capacity" => %{
         "max_concurrent_agents" => 4,

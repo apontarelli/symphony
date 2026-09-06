@@ -47,32 +47,66 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
   end
 
   @doc false
-  @spec repository_diagnostics(Path.t(), String.t(), Snapshot.t() | nil) :: [Diagnostic.t()]
-  def repository_diagnostics(repo_path, manifest, snapshot) do
+  @spec repository_diagnostics(Path.t(), map(), map() | nil, Path.t() | nil, map() | nil) :: [Diagnostic.t()]
+  def repository_diagnostics(repo_path, host, configured, registry_path \\ nil, configured_targets \\ nil)
+      when (is_map(host) or is_nil(host)) and (is_map(configured_targets) or is_nil(configured_targets)) do
     repo = canonical_path(repo_path)
     scope = :registry
-    context = if snapshot, do: path_context(snapshot, snapshot.host, []), else: %{state_root: nil, registry_dir: nil}
+    context = path_context_values(host || %{}, registry_path)
 
-    worktrees =
-      if snapshot do
-        snapshot.targets
-        |> eligible_targets()
-        |> Enum.sort_by(&elem(&1, 0))
-        |> Enum.map(fn {id, target} ->
-          {"#{target_path(id)}.worktree.root", canonical_path(get_in(target.configured, ["worktree", "root"]))}
-        end)
-      else
-        []
+    selected_worktree =
+      case get_in(configured || %{}, ["worktree", "root"]) do
+        root when is_binary(root) -> [{"$.target.worktree.root", canonical_path(root)}]
+        _ -> []
       end
 
+    worktree_roots = configured_target_roots(configured_targets, "worktree", "root", "worktree.root")
+    repo_roots = configured_target_roots(configured_targets, "repo", "path", "repo.path")
+
     root_path_diagnostics(repo_path, repo, true, scope, "$.repo.path") ++
-      contained_file_diagnostics(repo_path, repo, manifest, scope, "$.repo.manifest") ++
       overlap_diagnostics(
         repo,
-        [{"host state root", context.state_root}, {"registry directory", context.registry_dir} | worktrees],
+        [
+          {"host state root", context.state_root},
+          {"registry directory", context.registry_dir} | selected_worktree ++ worktree_roots
+        ],
         scope,
         "$.repo.path"
-      )
+      ) ++
+      selected_worktree_overlap(selected_worktree, worktree_roots ++ repo_roots)
+  end
+
+  # The same pair rules admission applies in validate_cross_target_paths: the selected
+  # target's worktree and the inspected repo must stay clear of every other verified
+  # target's worktree, while a shared repository root remains legitimate.
+  defp configured_target_roots(configured_targets, section, field, label) when is_map(configured_targets) do
+    configured_targets
+    |> ordered_map_entries()
+    |> Enum.flat_map(fn
+      {id, target} when is_map(target) ->
+        case nested_field(target, section, field) do
+          root when is_binary(root) -> [{"#{target_path(id)}.#{label}", canonical_path(root)}]
+          _missing_or_invalid -> []
+        end
+
+      _invalid_entry ->
+        []
+    end)
+  end
+
+  defp configured_target_roots(_configured_targets, _section, _field, _label), do: []
+
+  defp nested_field(map, section, field) do
+    case Map.get(map, section) do
+      section_map when is_map(section_map) -> Map.get(section_map, field)
+      _missing_or_invalid -> nil
+    end
+  end
+
+  defp selected_worktree_overlap([], _sibling_roots), do: []
+
+  defp selected_worktree_overlap([{worktree_path, worktree} | _rest], sibling_roots) do
+    overlap_diagnostics(worktree, sibling_roots, :registry, worktree_path)
   end
 
   @spec effective_gate(Target.t() | map(), String.t()) :: String.t()
@@ -656,6 +690,15 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
     }
   end
 
+  defp path_context_values(host, registry_path) do
+    state_root = Map.get(host, "state_root")
+
+    %{
+      registry_dir: registry_path |> parent_path() |> canonical_path(),
+      state_root: canonical_path(state_root)
+    }
+  end
+
   defp parent_path(path) when is_binary(path), do: Path.dirname(Path.expand(path))
   defp parent_path(_path), do: nil
 
@@ -722,7 +765,6 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
        when is_map(configured) do
     repo_path = get_in(configured, ["repo", "path"])
     worktree_path = get_in(configured, ["worktree", "root"])
-    manifest = get_in(configured, ["repo", "manifest"])
     query_file = get_in(configured, ["linear", "scope", "query_file"])
     repo = canonical_path(repo_path)
     worktree = canonical_path(worktree_path)
@@ -736,13 +778,6 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
         false,
         scope,
         "#{root_path}.worktree.root"
-      ) ++
-      contained_file_diagnostics(
-        repo_path,
-        repo,
-        manifest,
-        scope,
-        "#{root_path}.repo.manifest"
       ) ++
       contained_file_diagnostics(
         repo_path,

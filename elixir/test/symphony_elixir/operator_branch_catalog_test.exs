@@ -27,7 +27,7 @@ defmodule SymphonyElixir.OperatorBranchCatalogTest do
     assert catalog.status == "current"
     assert Enum.count(catalog.choices, &(&1.value == "main")) == 1
     assert Enum.find(catalog.choices, &(&1.value == "main")).current
-    assert Enum.find(catalog.choices, &(&1.value == "main")).manifest_default
+    assert Enum.find(catalog.choices, &(&1.value == "main")).policy_default
     assert Enum.find(catalog.choices, &(&1.value == "main")).remote_default
     assert Enum.find(catalog.choices, &(&1.value == "feature")).configured
     assert Enum.find(catalog.choices, &(&1.value == "feature")).remote_tracking

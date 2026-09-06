@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.TargetRegistry.Composition do
   @moduledoc false
 
+  alias SymphonyElixir.OperatorRepositoryInspection
   alias SymphonyElixir.TargetRegistry.Diagnostic
+  alias SymphonyElixir.TargetRegistry.RepositoryPolicy
   alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
@@ -13,7 +15,9 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     :execution_profile_name_collision,
     :manifest_invalid,
     :manifest_not_found,
-    :repository_mismatch
+    :repository_mismatch,
+    :repository_not_ready,
+    :repository_policy_invalid
   ]
   @safe_runner_setting_keys ~w(model reasoning_effort max_turns)
   @safe_execution_profile_keys ~w(model reasoning_effort)
@@ -34,7 +38,7 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   @normalized_validation_command_fields ~w(command name)
 
   @spec compose(Snapshot.t()) :: Snapshot.t()
-  def compose(%Snapshot{} = snapshot), do: compose(snapshot, [])
+  def compose(snapshot), do: compose(snapshot, [])
 
   @spec compose(Snapshot.t(), keyword()) :: Snapshot.t()
   def compose(%Snapshot{globally_valid?: true, host: host, targets: targets} = snapshot, opts)
@@ -100,14 +104,21 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
          true <- selected_target_parity?(target, validated_target),
          true <- selected_diagnostics_coherent?(diagnostics, target_id, target.diagnostics),
          true <- global_diagnostics_coherent?(diagnostics, validated.diagnostics),
-         :ok <- validate_compiled_manifest(target.repo_manifest),
-         {:ok, resolution} <- selected_module_resolution(target.effective_policy),
-         {:ok, projected_resolution} <- project_module_resolution(resolution),
-         true <- projected_resolution == resolution,
-         {:ok, effective_manifest} <- effective_manifest(validated_target, target.repo_manifest),
-         :ok <- preserve_delivery_pr_target(target.repo_manifest, effective_manifest),
+         :ok <- repository_readiness(validated_target, host),
+         {:ok, expected_manifest, expected_sources} <-
+           RepositoryPolicy.resolve(host, validated_target.configured),
+         {:ok, expected_resolution} <- module_resolution(expected_manifest, Manifest),
+         {:ok, expected_effective_manifest, expected_effective_resolution} <-
+           effective_compiled_policy(validated_target, expected_manifest, expected_resolution, Manifest),
+         true <- target.repo_manifest == expected_manifest,
          {:ok, expected_policy} <-
-           effective_policy(validated_target, host, effective_manifest, projected_resolution),
+           effective_policy(
+             validated_target,
+             host,
+             expected_effective_manifest,
+             expected_effective_resolution,
+             expected_sources
+           ),
          true <- expected_policy == target.effective_policy,
          {:ok, expected_hash} <- policy_hash(expected_policy),
          true <- expected_hash == target.policy_hash do
@@ -118,53 +129,6 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   end
 
   defp verify_composed_target_authority(_snapshot, _target_id), do: :error
-
-  defp effective_manifest(%Target{configured: configured}, repo_manifest) do
-    case get_in(configured, ["repo", "branch"]) do
-      nil ->
-        {:ok, repo_manifest}
-
-      branch ->
-        if SymphonyElixir.OperatorBranchCatalog.valid_target?(branch) do
-          {:ok, put_in(repo_manifest, ["vcs", "default_branch"], branch)}
-        else
-          {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch is invalid"}
-        end
-    end
-  end
-
-  defp preserve_delivery_pr_target(original_manifest, effective_manifest) do
-    if get_in(original_manifest, ["delivery", "pr_target"]) ==
-         get_in(effective_manifest, ["delivery", "pr_target"]) do
-      :ok
-    else
-      {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch changed delivery.pr_target"}
-    end
-  end
-
-  defp effective_compiled_policy(target, manifest_adapter, source_manifest, repo_manifest, module_resolution) do
-    with {:ok, effective_source} <- effective_manifest(target, source_manifest),
-         {:ok, effective_manifest, effective_resolution} <-
-           recompile_effective_manifest(
-             manifest_adapter,
-             source_manifest,
-             effective_source,
-             repo_manifest,
-             module_resolution
-           ),
-         :ok <- preserve_delivery_pr_target(repo_manifest, effective_manifest) do
-      {:ok, effective_manifest, effective_resolution}
-    end
-  end
-
-  defp recompile_effective_manifest(_manifest_adapter, source, source, repo_manifest, module_resolution),
-    do: {:ok, repo_manifest, module_resolution}
-
-  defp recompile_effective_manifest(manifest_adapter, _source, effective_source, _repo_manifest, _module_resolution) do
-    with {:ok, compiled} <- compile_manifest(manifest_adapter, effective_source) do
-      compiled_policy(compiled)
-    end
-  end
 
   defp configured_targets(targets) do
     Enum.reduce_while(targets, {:ok, %{}}, fn
@@ -216,14 +180,6 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     global.(snapshot_diagnostics) == global.(validated_diagnostics)
   end
 
-  defp selected_module_resolution(%{
-         "repo_policy" => %{"workflow_module_resolution" => resolution}
-       })
-       when is_map(resolution),
-       do: {:ok, resolution}
-
-  defp selected_module_resolution(_policy), do: :error
-
   defp compose_target_entry({id, %Target{} = target}, host, manifest_adapter) do
     case prepare_target(target) do
       {:ok, prepared} -> {id, compose_target(prepared, host, manifest_adapter)}
@@ -234,20 +190,15 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   defp compose_target_entry(entry, _host, _manifest_adapter), do: entry
 
   defp compose_target(target, host, manifest_adapter) do
-    repo_path = get_in(target.configured, ["repo", "path"])
-    manifest_name = get_in(target.configured, ["repo", "manifest"])
-    manifest_path = Path.join(repo_path, manifest_name)
-
-    with {:ok, manifest} <- read_manifest(manifest_adapter, manifest_path),
-         :ok <- validate_manifest(manifest_adapter, repo_path, manifest),
-         {:ok, compiled} <- compile_manifest(manifest_adapter, manifest),
-         {:ok, repo_manifest, module_resolution} <- compiled_policy(compiled),
+    with :ok <- repository_readiness(target, host),
          :ok <- validate_target_policy_inputs(target),
+         {:ok, repo_manifest, sources} <- RepositoryPolicy.resolve(host, target.configured),
          :ok <- validate_repository_identity(target, repo_manifest),
+         {:ok, module_resolution} <- module_resolution(repo_manifest, manifest_adapter),
          {:ok, effective_manifest, effective_resolution} <-
-           effective_compiled_policy(target, manifest_adapter, manifest, repo_manifest, module_resolution),
+           effective_compiled_policy(target, repo_manifest, module_resolution, manifest_adapter),
          {:ok, effective_policy} <-
-           effective_policy(target, host, effective_manifest, effective_resolution),
+           effective_policy(target, host, effective_manifest, effective_resolution, sources),
          {:ok, policy_hash} <- policy_hash(effective_policy) do
       %{
         target
@@ -256,92 +207,70 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
           policy_hash: policy_hash
       }
     else
-      {:manifest_not_found, _path, _reason} ->
-        quarantine(target, [
-          manifest_diagnostic(
-            target,
-            :manifest_not_found,
-            "current repository manifest #{manifest_name} is missing"
-          )
-        ])
-
-      :manifest_parse_error ->
-        quarantine(target, [manifest_diagnostic(target, :manifest_invalid, "current repository manifest is invalid YAML")])
-
-      {:semantic_errors, stage, errors} ->
-        case manifest_diagnostics(target, errors) do
-          {:ok, diagnostics} ->
-            quarantine(target, diagnostics)
-
-          :error ->
-            quarantine(target, [
-              manifest_diagnostic(
-                target,
-                :manifest_invalid,
-                "current repository manifest #{stage} returned malformed semantic errors"
-              )
-            ])
-        end
-
-      {:manifest_invalid, message} ->
-        quarantine(target, [manifest_diagnostic(target, :manifest_invalid, message)])
-
       {:composition_error, path, code, message} ->
         quarantine(target, [target_diagnostic(target, path, code, message)])
 
+      {:error, diagnostics} when is_list(diagnostics) ->
+        quarantine(target, repository_policy_diagnostics(target, diagnostics))
+
       {:error, %Diagnostic{} = diagnostic} ->
         quarantine(target, [diagnostic])
+
+      {:manifest_invalid, message} ->
+        quarantine(target, [target_diagnostic(target, "repository_policy", :manifest_invalid, message)])
+
+      _invalid ->
+        quarantine(target, [
+          target_diagnostic(
+            target,
+            "repository_policy",
+            :manifest_invalid,
+            "host repository policy is invalid"
+          )
+        ])
     end
   end
 
-  defp read_manifest(manifest_adapter, manifest_path) do
-    case invoke_manifest(manifest_adapter, :read, [manifest_path, [repo_setup?: true]]) do
-      {:ok, {:ok, manifest}} when is_map(manifest) ->
-        if normalized_manifest?(manifest),
-          do: {:ok, manifest},
-          else: {:manifest_invalid, "current repository manifest read returned an invalid result"}
+  defp repository_readiness(target, host) do
+    repo_path = get_in(target.configured, ["repo", "path"])
 
-      {:ok, {:error, {:missing_manifest_file, path, reason}}} ->
-        {:manifest_not_found, path, reason}
+    case OperatorRepositoryInspection.inspect(repo_path, host: host, configured: target.configured) do
+      %{state: "ready", apply_allowed: true} ->
+        :ok
 
-      {:ok, {:error, {:manifest_parse_error, _reason}}} ->
-        :manifest_parse_error
+      %{blockers: blockers} when is_list(blockers) and blockers != [] ->
+        {:error, repository_policy_diagnostics(target, blockers)}
 
-      {:ok, {:error, {:invalid_manifest, errors}}} ->
-        {:semantic_errors, "read", errors}
+      %{reason: reason} when is_binary(reason) ->
+        {:error, [target_diagnostic(target, "repo.path", :repository_not_ready, reason)]}
 
-      {:ok, _unexpected} ->
-        {:manifest_invalid, "current repository manifest read returned an invalid result"}
-
-      :exception ->
-        {:manifest_invalid, "current repository manifest read failed"}
+      _invalid ->
+        {:error, [target_diagnostic(target, "repo.path", :repository_not_ready, "repository is not ready")]}
     end
+  rescue
+    _exception ->
+      {:error, [target_diagnostic(target, "repo.path", :repository_not_ready, "repository inspection failed")]}
   end
 
-  defp validate_manifest(manifest_adapter, repo_path, manifest) do
-    case invoke_manifest(manifest_adapter, :validate, [repo_path, manifest]) do
-      {:ok, %{errors: errors, modules: modules, preset: preset}}
-      when is_list(errors) and is_list(modules) and is_binary(preset) ->
-        if errors == [], do: :ok, else: {:semantic_errors, "validation", errors}
-
-      {:ok, _unexpected} ->
-        {:manifest_invalid, "current repository manifest validation returned an invalid result"}
-
-      :exception ->
-        {:manifest_invalid, "current repository manifest validation failed"}
+  defp module_resolution(repo_manifest, manifest_adapter) do
+    with {:ok, compiled} <- compile_manifest(manifest_adapter, repo_manifest),
+         {:ok, _manifest, resolution} <- compiled_policy(compiled) do
+      {:ok, resolution}
+    else
+      {:manifest_invalid, message} -> {:manifest_invalid, message}
+      _invalid -> {:manifest_invalid, "host repository policy compiled result has an invalid shape"}
     end
+  rescue
+    _exception -> {:manifest_invalid, "host repository policy compilation failed"}
   end
 
   defp compile_manifest(manifest_adapter, manifest) do
-    case invoke_manifest(manifest_adapter, :compile, [manifest]) do
-      {:ok, compiled} when is_map(compiled) ->
-        {:ok, compiled}
-
-      {:ok, _unexpected} ->
-        {:manifest_invalid, "current repository manifest compilation returned an invalid result"}
-
-      :exception ->
-        {:manifest_invalid, "current repository manifest compilation failed"}
+    with {:ok, normalized} <- Manifest.normalize_map(manifest, repo_setup?: true) do
+      case invoke_manifest(manifest_adapter, :compile, [normalized]) do
+        {:ok, compiled} when is_map(compiled) -> {:ok, compiled}
+        {:ok, _unexpected} -> {:manifest_invalid, "host repository policy compilation returned an invalid result"}
+        :exception -> {:manifest_invalid, "host repository policy compilation failed"}
+      end
     end
   end
 
@@ -367,10 +296,168 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   defp compiled_policy(_compiled), do: invalid_compiled_policy()
 
   defp invalid_compiled_policy do
-    {:manifest_invalid, "current repository manifest compiled result has an invalid shape"}
+    {:manifest_invalid, "host repository policy compiled result has an invalid shape"}
   end
 
-  defp normalized_manifest?(manifest), do: validate_compiled_manifest(manifest) == :ok
+  defp validate_target_policy_inputs(target) do
+    if string_list?(get_in(target.configured, ["linear", "required_labels"])) do
+      :ok
+    else
+      {:composition_error, "linear.required_labels", :manifest_invalid, "current target policy inputs have an invalid shape"}
+    end
+  end
+
+  defp validate_repository_identity(target, repo_manifest) do
+    expected = get_in(target.configured, ["repo", "expected_repository"])
+    actual = get_in(repo_manifest, ["project", "repository"])
+    expected_slug = PublishTarget.github_repository_slug(expected)
+    actual_slug = PublishTarget.github_repository_slug(actual)
+
+    if is_binary(expected_slug) and is_binary(actual_slug) and
+         String.downcase(expected_slug) == String.downcase(actual_slug) do
+      :ok
+    else
+      {:error,
+       target_diagnostic(
+         target,
+         "repo.expected_repository",
+         :repository_mismatch,
+         "expected repository #{expected_slug || "<unsupported>"} does not match host repository policy #{actual_slug || "<unsupported>"}"
+       )}
+    end
+  end
+
+  defp effective_compiled_policy(target, repo_manifest, module_resolution, manifest_adapter) do
+    case get_in(target.configured, ["repo", "branch"]) do
+      nil ->
+        {:ok, repo_manifest, module_resolution}
+
+      branch ->
+        with true <- SymphonyElixir.OperatorBranchCatalog.valid_target?(branch),
+             effective_manifest = put_in(repo_manifest, ["vcs", "default_branch"], branch),
+             {:ok, compiled} <- compile_manifest(manifest_adapter, effective_manifest),
+             {:ok, effective_manifest, effective_resolution} <- compiled_policy(compiled),
+             :ok <- preserve_delivery_pr_target(repo_manifest, effective_manifest) do
+          {:ok, effective_manifest, effective_resolution}
+        else
+          false -> {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch is invalid"}
+          error -> error
+        end
+    end
+  end
+
+  defp preserve_delivery_pr_target(original_manifest, effective_manifest) do
+    if get_in(original_manifest, ["delivery", "pr_target"]) ==
+         get_in(effective_manifest, ["delivery", "pr_target"]) do
+      :ok
+    else
+      {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch changed delivery.pr_target"}
+    end
+  end
+
+  defp effective_policy(target, host, repo_manifest, module_resolution, sources) do
+    configured = target.configured
+    linear = configured["linear"]
+    connection_id = linear["connection"]
+
+    with {:ok, runner_policy} <- runner_policy(configured["runners"], host["runners"]) do
+      base =
+        %{
+          "repo_policy" => %{
+            "manifest" => repo_manifest,
+            "manifest_source_dir" => manifest_source_dir(configured),
+            "workflow_module_resolution" => module_resolution,
+            "configuration_sources" => sources
+          },
+          "tracker_connection" => %{
+            "id" => connection_id,
+            "policy" => get_in(host, ["tracker_connections", connection_id])
+          },
+          "run_target" =>
+            Map.put(
+              linear,
+              "required_labels",
+              union_labels(get_in(repo_manifest, ["issue_markers", "labels"]), linear["required_labels"])
+            ),
+          "worktree_policy" => configured["worktree"],
+          "runner_policy" => runner_policy,
+          "effective_checks" => %{
+            "repository" => %{
+              "validation" => get_in(repo_manifest, ["validation", "commands"]),
+              "auto_land" => get_in(repo_manifest, ["auto_land", "required_checks"]) || []
+            },
+            "target" => configured["checks"]
+          },
+          "external_side_effect_gates" => configured["external_side_effects"],
+          "capacity_limits" => configured["concurrency"],
+          "budget_limits" => configured["budgets"],
+          "scheduling" => configured["scheduling"]
+        }
+
+      with {:ok, revision} <- configuration_revision(base) do
+        {:ok, update_in(base, ["repo_policy"], &Map.put(&1, "configuration_revision", revision))}
+      end
+    end
+  end
+
+  defp configuration_revision(policy) do
+    case canonical_hash(policy) do
+      {:ok, revision} -> {:ok, revision}
+      {:error, :not_json_safe} -> {:manifest_invalid, "composed configuration is not JSON-safe"}
+    end
+  end
+
+  defp manifest_source_dir(configured) do
+    configured
+    |> get_in(["repo", "path"])
+    |> Path.expand()
+  end
+
+  defp runner_policy(target_runners, host_runners) do
+    settings = target_runners["settings"]
+
+    with {:ok, runners} <- compose_runners(target_runners["allowed"], settings, host_runners) do
+      {:ok,
+       %{
+         "default" => target_runners["default"],
+         "allowed" => target_runners["allowed"],
+         "runners" => runners
+       }}
+    end
+  end
+
+  defp compose_runners(runner_ids, settings, host_runners) do
+    Enum.reduce_while(runner_ids, {:ok, %{}}, fn id, {:ok, runners} ->
+      target_settings = Map.get(settings, id, %{})
+
+      case overlay_runner_policy(host_runners[id], target_settings, id) do
+        {:ok, runner} -> {:cont, {:ok, Map.put(runners, id, runner)}}
+        {:composition_error, _path, _code, _message} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp overlay_runner_policy(host_runner, target_settings, runner_id)
+       when is_map(host_runner) and is_map(target_settings) do
+    runner = Map.merge(host_runner, safe_runner_tuning(target_settings))
+
+    if is_map(host_runner["execution_profiles"]) or is_map(target_settings["execution_profiles"]) do
+      with {:ok, profiles} <-
+             overlay_execution_profiles(
+               host_runner["execution_profiles"],
+               target_settings["execution_profiles"],
+               runner_id
+             ) do
+        {:ok, Map.put(runner, "execution_profiles", profiles)}
+      end
+    else
+      {:ok, runner}
+    end
+  end
+
+  defp overlay_runner_policy(_host_runner, _target_settings, runner_id) do
+    {:composition_error, "runners.settings.#{runner_id}", :manifest_invalid, "current runner policy inputs have an invalid shape"}
+  end
 
   defp validate_compiled_manifest(manifest) when is_map(manifest) do
     auto_land = Map.get(manifest, "auto_land")
@@ -473,133 +560,6 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   defp resolution_atom_key("rendered"), do: :rendered
   defp resolution_atom_key("name"), do: :name
   defp resolution_atom_key("version"), do: :version
-
-  defp validate_target_policy_inputs(target) do
-    if string_list?(get_in(target.configured, ["linear", "required_labels"])) do
-      :ok
-    else
-      {:composition_error, "linear.required_labels", :manifest_invalid, "current target policy inputs have an invalid shape"}
-    end
-  end
-
-  defp validate_repository_identity(target, repo_manifest) do
-    expected = get_in(target.configured, ["repo", "expected_repository"])
-
-    if is_nil(expected) do
-      :ok
-    else
-      actual = get_in(repo_manifest, ["project", "repository"])
-      expected_slug = PublishTarget.github_repository_slug(expected)
-      actual_slug = PublishTarget.github_repository_slug(actual)
-
-      if is_binary(expected_slug) and is_binary(actual_slug) and
-           String.downcase(expected_slug) == String.downcase(actual_slug) do
-        :ok
-      else
-        {:error,
-         target_diagnostic(
-           target,
-           "repo.expected_repository",
-           :repository_mismatch,
-           "expected repository #{expected_slug || "<unsupported>"} does not match current repository #{actual_slug || "<unsupported>"}"
-         )}
-      end
-    end
-  end
-
-  defp effective_policy(target, host, repo_manifest, module_resolution) do
-    configured = target.configured
-    linear = configured["linear"]
-    connection_id = linear["connection"]
-
-    with {:ok, runner_policy} <- runner_policy(configured["runners"], host["runners"]) do
-      {:ok,
-       %{
-         "repo_policy" => %{
-           "manifest" => repo_manifest,
-           "manifest_source_dir" => manifest_source_dir(configured),
-           "workflow_module_resolution" => module_resolution
-         },
-         "tracker_connection" => %{
-           "id" => connection_id,
-           "policy" => get_in(host, ["tracker_connections", connection_id])
-         },
-         "run_target" =>
-           Map.put(
-             linear,
-             "required_labels",
-             union_labels(get_in(repo_manifest, ["issue_markers", "labels"]), linear["required_labels"])
-           ),
-         "worktree_policy" => configured["worktree"],
-         "runner_policy" => runner_policy,
-         "effective_checks" => %{
-           "repository" => %{
-             "validation" => get_in(repo_manifest, ["validation", "commands"]),
-             "auto_land" => get_in(repo_manifest, ["auto_land", "required_checks"]) || []
-           },
-           "target" => configured["checks"]
-         },
-         "external_side_effect_gates" => configured["external_side_effects"],
-         "capacity_limits" => configured["concurrency"],
-         "budget_limits" => configured["budgets"],
-         "scheduling" => configured["scheduling"]
-       }}
-    end
-  end
-
-  defp manifest_source_dir(configured) do
-    configured
-    |> get_in(["repo", "path"])
-    |> Path.join(get_in(configured, ["repo", "manifest"]))
-    |> Path.expand()
-    |> Path.dirname()
-  end
-
-  defp runner_policy(target_runners, host_runners) do
-    settings = target_runners["settings"]
-
-    with {:ok, runners} <- compose_runners(target_runners["allowed"], settings, host_runners) do
-      {:ok,
-       %{
-         "default" => target_runners["default"],
-         "allowed" => target_runners["allowed"],
-         "runners" => runners
-       }}
-    end
-  end
-
-  defp compose_runners(runner_ids, settings, host_runners) do
-    Enum.reduce_while(runner_ids, {:ok, %{}}, fn id, {:ok, runners} ->
-      target_settings = Map.get(settings, id, %{})
-
-      case overlay_runner_policy(host_runners[id], target_settings, id) do
-        {:ok, runner} -> {:cont, {:ok, Map.put(runners, id, runner)}}
-        {:composition_error, _path, _code, _message} = error -> {:halt, error}
-      end
-    end)
-  end
-
-  defp overlay_runner_policy(host_runner, target_settings, runner_id)
-       when is_map(host_runner) and is_map(target_settings) do
-    runner = Map.merge(host_runner, safe_runner_tuning(target_settings))
-
-    if is_map(host_runner["execution_profiles"]) or is_map(target_settings["execution_profiles"]) do
-      with {:ok, profiles} <-
-             overlay_execution_profiles(
-               host_runner["execution_profiles"],
-               target_settings["execution_profiles"],
-               runner_id
-             ) do
-        {:ok, Map.put(runner, "execution_profiles", profiles)}
-      end
-    else
-      {:ok, runner}
-    end
-  end
-
-  defp overlay_runner_policy(_host_runner, _target_settings, runner_id) do
-    {:composition_error, "runners.settings.#{runner_id}", :manifest_invalid, "current runner policy inputs have an invalid shape"}
-  end
 
   defp safe_runner_tuning(settings) do
     settings
@@ -876,38 +836,36 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     }
   end
 
-  defp manifest_diagnostics(target, errors) when is_list(errors) and errors != [] do
-    errors
-    |> Enum.reduce_while({:ok, []}, &append_manifest_diagnostic(target, &1, &2))
-    |> case do
-      {:ok, diagnostics} -> {:ok, Enum.reverse(diagnostics)}
-      :error -> :error
-    end
+  defp repository_policy_diagnostics(target, diagnostics) when is_list(diagnostics) do
+    Enum.map(diagnostics, fn
+      %Diagnostic{} = diagnostic ->
+        diagnostic
+
+      %{path: path, code: code, message: message} when is_binary(path) ->
+        target_diagnostic(target, diagnostic_suffix(path), code, message)
+
+      %{"path" => path, "code" => code, "message" => message} when is_binary(path) ->
+        target_diagnostic(target, diagnostic_suffix(path), code, message)
+
+      %{path: path, message: message} when is_binary(path) and is_binary(message) ->
+        target_diagnostic(target, diagnostic_suffix(path), :repository_not_ready, message)
+
+      %{"path" => path, "message" => message} when is_binary(path) and is_binary(message) ->
+        target_diagnostic(target, diagnostic_suffix(path), :repository_not_ready, message)
+
+      _invalid ->
+        target_diagnostic(target, "repository_policy", :manifest_invalid, "host repository policy is invalid")
+    end)
   end
 
-  defp manifest_diagnostics(_target, _errors), do: :error
-
-  defp append_manifest_diagnostic(target, error, {:ok, diagnostics}) do
-    with {:ok, path} <- semantic_error_field(error, :path),
-         {:ok, message} <- semantic_error_field(error, :message) do
-      suffix = if path == "$", do: "repo.manifest", else: "repo.manifest.#{path}"
-      diagnostic = target_diagnostic(target, suffix, :manifest_invalid, "current repository manifest #{message}")
-      {:cont, {:ok, [diagnostic | diagnostics]}}
-    else
-      :error -> {:halt, :error}
-    end
+  defp repository_policy_diagnostics(target, _diagnostics) do
+    [target_diagnostic(target, "repository_policy", :manifest_invalid, "host repository policy is invalid")]
   end
 
-  defp semantic_error_field(error, field) when is_map(error) do
-    value = Map.get(error, field, Map.get(error, Atom.to_string(field)))
-    if is_binary(value), do: {:ok, value}, else: :error
-  end
-
-  defp semantic_error_field(_error, _field), do: :error
-
-  defp manifest_diagnostic(target, code, message) do
-    target_diagnostic(target, "repo.manifest", code, message)
-  end
+  defp diagnostic_suffix("$.target." <> suffix), do: suffix
+  defp diagnostic_suffix("$.repository." <> suffix), do: "repository_policy." <> suffix
+  defp diagnostic_suffix("$." <> suffix), do: suffix
+  defp diagnostic_suffix(suffix), do: suffix
 
   defp target_diagnostic(target, suffix, code, message) do
     %Diagnostic{

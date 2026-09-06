@@ -242,8 +242,7 @@ defmodule SymphonyElixir.TargetContext do
            } = repo_policy
        })
        when is_map(manifest) and is_map(module_resolution) do
-    if Enum.sort(Map.keys(repo_policy)) ==
-         ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+    if valid_repository_policy?(repo_policy) and
          valid_manifest_source_dir?(source_dir) do
       {:ok, manifest}
     else
@@ -1014,8 +1013,7 @@ defmodule SymphonyElixir.TargetContext do
     case Map.fetch(repo_policy, "manifest") do
       {:ok, effective_manifest} ->
         valid_shape? =
-          Enum.sort(Map.keys(repo_policy)) ==
-            ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+          valid_repository_policy?(repo_policy) and
             is_map(effective_manifest) and
             is_map(repo_policy["workflow_module_resolution"]) and
             valid_manifest_source_dir?(repo_policy["manifest_source_dir"])
@@ -1059,6 +1057,25 @@ defmodule SymphonyElixir.TargetContext do
       _missing_or_invalid -> manifest
     end
   end
+
+  @spec valid_repository_policy?(map()) :: boolean()
+  def valid_repository_policy?(policy) when is_map(policy) do
+    base_keys = ~w(manifest manifest_source_dir workflow_module_resolution)
+    host_keys = ~w(configuration_revision configuration_sources)
+
+    case Enum.sort(Map.keys(policy)) do
+      ^base_keys ->
+        true
+
+      keys ->
+        keys == Enum.sort(base_keys ++ host_keys) and
+          valid_hash?(policy["configuration_revision"]) and
+          is_map(policy["configuration_sources"]) and
+          json_safe_policy_value?(policy["configuration_sources"])
+    end
+  end
+
+  def valid_repository_policy?(_policy), do: false
 
   defp valid_manifest_source_dir?(source_dir) when is_binary(source_dir),
     do: String.valid?(source_dir) and Path.type(source_dir) == :absolute

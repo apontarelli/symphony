@@ -2,7 +2,7 @@ defmodule SymphonyElixir.OperatorRepositorySources do
   @moduledoc false
 
   alias SymphonyElixir.{DirectoryEntries, HostScheduler, LocalConfig, PathSafety}
-  alias SymphonyElixir.TargetRegistry.{FileStore, Yaml}
+  alias SymphonyElixir.TargetRegistry.{FileStore, Schema, Target, Validation, Yaml}
 
   @max_source_bytes 1_048_576
 
@@ -57,6 +57,51 @@ defmodule SymphonyElixir.OperatorRepositorySources do
     with {:ok, _document, path} <- registry(scheduler, opts), do: {:ok, path}
   catch
     :exit, _ -> {:error, :host_unavailable}
+  end
+
+  @doc false
+  @spec registry_context(GenServer.server(), String.t() | nil, keyword()) ::
+          {:ok, map(), map() | nil, map(), Path.t()} | {:error, atom()}
+  def registry_context(scheduler, target_id, opts \\ []) when is_binary(target_id) or is_nil(target_id) do
+    with {:ok, document, path} <- registry(scheduler, opts),
+         host when is_map(host) <- Map.get(document, "host"),
+         targets when is_map(targets) <- Map.get(document, "targets"),
+         configured <- if(is_binary(target_id), do: Map.get(targets, target_id), else: nil),
+         true <- is_nil(target_id) or is_map(configured),
+         {:ok, verified_targets} <- verified_targets(document, path) do
+      {:ok, host, configured, verified_targets, path}
+    else
+      false -> {:error, :target_not_found}
+      nil -> {:error, :configuration_required}
+      _ -> {:error, :registry_unavailable}
+    end
+  catch
+    :exit, _ -> {:error, :host_unavailable}
+  end
+
+  # Match admission's eligible targets on generation-verified bytes. Validation
+  # failures must not substitute a different workspace-isolation policy.
+  defp verified_targets(document, path) do
+    with {:ok, snapshot} <- Schema.validate(document, home: System.user_home!()),
+         snapshot <- Validation.validate(snapshot, registry_path: path) do
+      {:ok, valid_target_map(snapshot)}
+    else
+      _unvalidated -> {:error, :registry_unavailable}
+    end
+  rescue
+    _exception -> {:error, :registry_unavailable}
+  end
+
+  defp valid_target_map(snapshot) do
+    snapshot.targets
+    |> Enum.flat_map(fn
+      {id, %Target{valid?: true, configured: configured}} when is_map(configured) ->
+        [{id, configured}]
+
+      _quarantined_or_invalid ->
+        []
+    end)
+    |> Map.new()
   end
 
   defp local_config(opts) do
@@ -155,11 +200,7 @@ defmodule SymphonyElixir.OperatorRepositorySources do
   end
 
   defp repository_path(document) do
-    nested_path(document, "repo", "path") ||
-      case nested_path(document, "repo", "manifest") do
-        path when is_binary(path) -> Path.dirname(path)
-        _ -> nil
-      end
+    nested_path(document, "repo", "path")
   end
 
   defp nested_path(document, section, key) when is_map(document) do

@@ -1193,6 +1193,16 @@ defmodule SymphonyElixir.TargetRegistry.PreviewTest do
     assert malformed =~ "safe=visible"
   end
 
+  test "wide lists retain their final entries and scrub credentials found after the depth boundary" do
+    secret = "W7xK4pQ9rT2vN6m"
+    rows = [%{"message" => secret}] ++ List.duplicate(%{"plain" => "visible"}, 80) ++ [%{"credential" => secret}]
+    redacted = Preview.redact(rows)
+
+    assert {:ok, encoded} = Jason.encode(redacted)
+    refute encoded =~ secret
+    assert List.last(redacted) == %{"credential" => "[REDACTED]"}
+  end
+
   test "trusts only generated change and diagnostic paths" do
     secret = "fixture-token-UntrustedPath123"
     diagnostic_path = "$.targets.main.external_side_effects.api_key"

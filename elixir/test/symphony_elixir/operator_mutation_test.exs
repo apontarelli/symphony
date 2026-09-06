@@ -886,10 +886,13 @@ defmodule SymphonyElixir.OperatorMutationTest do
   end
 
   defp registry(root) do
+    {repo, policy} = SymphonyElixir.TestSupport.host_repository_fixture(root, @repo)
+
     %{
       "version" => 1,
       "host" => %{
         "id" => "operator-test",
+        "capabilities" => ["github_pr", "browser"],
         "state_root" => Path.join(root, "state"),
         "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
         "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
@@ -914,7 +917,8 @@ defmodule SymphonyElixir.OperatorMutationTest do
         "alpha" => %{
           "display_name" => "Alpha",
           "state" => "paused",
-          "repo" => %{"path" => @repo, "manifest" => "symphony.yml"},
+          "repo" => %{"path" => repo, "expected_repository" => policy["project"]["repository"]},
+          "repository_policy" => policy,
           "worktree" => %{"root" => Path.join(root, "worktrees"), "strategy" => "per_issue", "hooks" => %{}},
           "linear" => %{
             "connection" => "linear-main",

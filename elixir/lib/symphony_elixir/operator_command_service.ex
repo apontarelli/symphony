@@ -11,6 +11,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   alias SymphonyElixir.TargetRegistry.FileStore
   alias SymphonyElixir.TargetRegistry.Import, as: RegistryImport
   alias SymphonyElixir.TargetRegistry.Preview
+  alias SymphonyElixir.TargetRegistry.Revisions
   alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Validation
   alias SymphonyElixir.TargetRegistry.Yaml
@@ -18,10 +19,11 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   @patch_schema %{
     "display_name" => :value,
+    "repository_profile" => :value,
+    "repository_policy" => :repository_policy,
     "repo" => %{
       "path" => :value,
       "branch" => :value,
-      "manifest" => :value,
       "expected_repository" => :value
     },
     "worktree" => %{
@@ -101,6 +103,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   @required_patch_paths [
     ["repo"],
     ["repo", "path"],
+    ["repo", "expected_repository"],
     ["worktree"],
     ["worktree", "root"],
     ["worktree", "strategy"],
@@ -697,7 +700,8 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp default_replace_registry(path, expected_generation, _proposed_generation, rebuild, opts) do
     with {:ok, %{bytes: current_bytes}} <- FileStore.read(path),
-         {:ok, proposed_bytes} <- rebuild.(current_bytes) do
+         {:ok, proposed_bytes} <- rebuild.(current_bytes),
+         :ok <- Revisions.archive(path, current_bytes) do
       guarded_replace(path, proposed_bytes, expected_generation, rebuild, opts)
     end
   end
@@ -1081,9 +1085,8 @@ defmodule SymphonyElixir.OperatorCommandService do
       OperatorRepositoryInspection.inspect(
         path,
         registry_path: snapshot.path,
-        target_id: target_id,
-        manifest: Map.get(repo, "manifest"),
-        expected_repository: Map.get(repo, "expected_repository")
+        host: snapshot.host,
+        configured: snapshot.targets[target_id].configured
       )
 
     effective_branch = explicit_branch || inspection.default_branch
@@ -1768,6 +1771,12 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp merge_patch_value(_current, nil, _schema, _path), do: {:ok, :remove}
   defp merge_patch_value(_current, value, :value, _path), do: {:ok, value}
+
+  defp merge_patch_value(current, value, :repository_policy, path) when is_map(value) do
+    merge_named_patch(if(is_map(current), do: current, else: %{}), value, :repository_policy, path)
+  end
+
+  defp merge_patch_value(_current, value, :repository_policy, _path), do: {:ok, value}
 
   defp merge_patch_value(current, value, schema, path)
        when is_map(schema) and is_map(value) do

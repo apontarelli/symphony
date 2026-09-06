@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.OperatorCommandServiceTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.HostScheduler.Registry
   alias SymphonyElixir.OperatorCommandService
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
@@ -2449,7 +2450,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
-  test "add with a missing manifest produces a contained non-applicable proposal", %{tmp_dir: tmp_dir} do
+  test "add with a missing manifest remains applicable under host repository policy", %{tmp_dir: tmp_dir} do
     seed_dir = Path.join(tmp_dir, "seed")
     File.mkdir_p!(seed_dir)
     seed_registry = write_registry(seed_dir, %{})
@@ -2477,10 +2478,19 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
              )
 
     assert {:ok, imported_document} = seed_registry |> File.read!() |> Yaml.decode()
-    target = put_in(imported_document, ["targets", "seed", "repo", "manifest"], "missing.yml")
+    target = imported_document["targets"]["seed"]
+    assert target["repo"]["expected_repository"] == "https://github.com/example/symphony-fixture"
+    assert target["repository_policy"]["delivery"]["pr_target"] == "main"
+    refute Map.has_key?(target["repo"], "manifest")
+
+    {repo, _policy} = SymphonyElixir.TestSupport.host_repository_fixture(tmp_dir, @manifest_fixture_root)
+
+    # The fixture repository carries no manifest: host policy is the sole authority.
+    refute File.exists?(Path.join(repo, "symphony.yml"))
 
     target =
-      target["targets"]["seed"]
+      target
+      |> put_in(["repo", "path"], repo)
       |> Map.put("budgets", %{
         "per_run" => %{"max_total_tokens" => 1_000},
         "daily" => %{"max_total_tokens" => 10_000},
@@ -2506,14 +2516,9 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                registry_path: registry_path
              )
 
-    refute plan.applicable?
-    assert plan.id == nil
+    assert plan.applicable?
+    assert is_binary(plan.id)
     assert plan.target_id == "blocked"
-
-    assert Enum.any?(
-             plan.preview["registry"]["diagnostics"],
-             &(&1["code"] == "unsafe_path")
-           )
   end
 
   @tag :tmp_dir
@@ -2543,15 +2548,9 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   test "repository readiness is revalidated while applying a previously planned add", %{
     tmp_dir: tmp_dir
   } do
-    repo = Path.join(System.tmp_dir!(), "ready-repository-#{System.unique_integer([:positive])}")
-    on_exit(fn -> File.rm_rf!(repo) end)
-    File.mkdir_p!(repo)
-    File.cp!(Path.join(@manifest_fixture_root, "symphony.yml"), Path.join(repo, "symphony.yml"))
-    File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
-    git!(repo, ["init", "--initial-branch=main"])
-    git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
-    git!(repo, ["add", "."])
-    git!(repo, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", "fixture"])
+    repo = ready_repo(tmp_dir, "revalidate-readiness")
+    # The repository carries no manifest: host policy is the sole authority.
+    File.rm!(Path.join(repo, "symphony.yml"))
 
     registry_path = write_registry(tmp_dir, %{})
     target = put_in(patch_target(tmp_dir), ["repo", "path"], repo)
@@ -2563,7 +2562,8 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
              )
 
     assert plan.applicable?
-    File.rm!(Path.join(repo, "symphony.yml"))
+    # Deleting a required documentation entrypoint invalidates readiness at confirmation.
+    File.rm!(Path.join(repo, "README.md"))
 
     assert {:error, %OperatorCommandService.Error{code: :plan_not_applicable}} =
              OperatorCommandService.apply(
@@ -2716,7 +2716,47 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
-  test "manifest default branch changes invalidate an inherited branch plan", %{tmp_dir: tmp_dir} do
+  test "policy patches preserve repository identity and remove overrides to inherit a flat profile", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
+    {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+
+    document =
+      document
+      |> put_in(["host", "repository_profiles"], %{"strict" => %{"auto_land" => %{"force_human_review_paths" => ["profile/**"]}}})
+      |> put_in(["targets", "alpha", "repository_policy", "auto_land", "force_human_review_paths"], ["target/**"])
+
+    File.write!(registry_path, Yaml.encode(document))
+    assert {:ok, before} = Registry.load(registry_path)
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{
+                   "repository_profile" => "strict",
+                   "repository_policy" => %{"auto_land" => %{"force_human_review_paths" => nil}}
+                 }
+               },
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?
+
+    assert {:ok, _result} =
+             OperatorCommandService.apply(plan.id, plan.expected_generation, true, registry_path: registry_path)
+
+    assert {:ok, after_patch} = Registry.load(registry_path)
+    original = before.contexts["alpha"]
+    current = after_patch.contexts["alpha"]
+    repository = original.repo_policy["manifest"]["project"]["repository"]
+    assert original.repo_policy["manifest"]["auto_land"]["force_human_review_paths"] == ["target/**"]
+    assert current.repo_policy["manifest"]["auto_land"]["force_human_review_paths"] == ["profile/**"]
+    assert current.repo_policy["manifest"]["project"]["repository"] == repository
+    refute current.repo_policy["configuration_revision"] == original.repo_policy["configuration_revision"]
+  end
+
+  @tag :tmp_dir
+  test "manifest default branch edits do not invalidate an inherited branch plan", %{tmp_dir: tmp_dir} do
     repo = ready_repo(tmp_dir, "manifest-default")
     git!(repo, ["branch", "alternate"])
     registry_path = write_registry(tmp_dir, %{"alpha" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
@@ -2725,7 +2765,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
              OperatorCommandService.plan(
                %Command.Patch{
                  target_id: "alpha",
-                 changes: %{"repo" => %{"manifest" => "symphony.yml"}}
+                 changes: %{"repo" => %{"branch" => nil}}
                },
                registry_path: registry_path
              )
@@ -2737,13 +2777,49 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     assert {:ok, manifest} = manifest_path |> File.read!() |> Yaml.decode()
     manifest_path |> File.write!(put_in(manifest, ["vcs", "default_branch"], "alternate") |> Yaml.encode())
 
-    assert {:error, %OperatorCommandService.Error{code: :plan_mismatch}} =
+    # A repository manifest edit is not host authority and cannot change the branch plan.
+    assert {:ok, _result} =
              OperatorCommandService.apply(
                plan.id,
                plan.expected_generation,
                true,
                registry_path: registry_path
              )
+
+    assert {:ok, stale_plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{"repo" => %{"branch" => "alternate"}}
+               },
+               registry_path: registry_path
+             )
+
+    assert stale_plan.applicable?
+    assert stale_plan.preview["branch_selection"] == %{"repository" => Path.expand(repo), "branch" => "alternate"}
+
+    # A host policy edit changes the registry generation and invalidates the stale plan.
+    {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+
+    edited =
+      put_in(
+        document,
+        ["targets", "alpha", "repository_policy", "vcs", "default_branch"],
+        "alternate"
+      )
+
+    File.write!(registry_path, Yaml.encode(edited))
+
+    assert {:error, %OperatorCommandService.Error{code: :proposed_generation_mismatch}} =
+             OperatorCommandService.apply(
+               stale_plan.id,
+               stale_plan.expected_generation,
+               true,
+               registry_path: registry_path
+             )
+
+    assert {:ok, document_after} = registry_path |> File.read!() |> Yaml.decode()
+    refute Map.has_key?(document_after["targets"]["alpha"]["repo"], "branch")
   end
 
   @tag :tmp_dir
@@ -2986,10 +3062,13 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   defp canonical_identity_json(value), do: value
 
   defp patch_target(tmp_dir) do
+    {repo, policy} = SymphonyElixir.TestSupport.host_repository_fixture(tmp_dir, @manifest_fixture_root)
+
     %{
       "display_name" => "Alpha",
       "state" => "paused",
-      "repo" => %{"path" => @manifest_fixture_root, "manifest" => "symphony.yml"},
+      "repo" => %{"path" => repo, "expected_repository" => policy["project"]["repository"]},
+      "repository_policy" => policy,
       "worktree" => %{
         "root" => Path.join(Path.dirname(tmp_dir), "worktrees-" <> Path.basename(tmp_dir)),
         "strategy" => "per_issue",
@@ -3046,6 +3125,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
       "version" => 1,
       "host" => %{
         "id" => "test-host",
+        "capabilities" => ["github_pr", "browser"],
         "state_root" => Path.join(Path.dirname(tmp_dir), "state-" <> Path.basename(tmp_dir)),
         "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
         "capacity" => %{

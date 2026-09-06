@@ -2,7 +2,7 @@ defmodule SymphonyElixir.OperatorRepositorySourcesTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.{LocalConfig, OperatorRepositoryBrowser, OperatorRepositorySources, PathSafety}
-  alias SymphonyElixir.TargetRegistry.FileStore
+  alias SymphonyElixir.TargetRegistry.{FileStore, Yaml}
   alias SymphonyElixir.Workflow.Renderer
 
   defmodule Host do
@@ -149,12 +149,12 @@ defmodule SymphonyElixir.OperatorRepositorySourcesTest do
     assert {:error, :host_unavailable} = OperatorRepositorySources.load(host, config_root: config_root)
   end
 
-  test "workflow catalog accepts manifest references but fails closed on malformed documents", %{root: root, config_root: config_root} do
+  test "workflow catalog accepts repository paths without repository manifests", %{root: root, config_root: config_root} do
     repo = Path.join(root, "project")
     File.mkdir_p!(repo)
     runs = LocalConfig.runs_dir(config_root: config_root)
     File.mkdir_p!(runs)
-    File.write!(Path.join(runs, "valid.yml"), Renderer.to_yaml(%{"repo" => %{"manifest" => Path.join(repo, "symphony.yml")}}))
+    File.write!(Path.join(runs, "valid.yml"), Renderer.to_yaml(%{"repo" => %{"path" => repo}}))
     File.write!(Path.join(runs, "empty.yml"), "{}")
     File.write!(Path.join(runs, "invalid.yml"), "repo: [")
     File.write!(Path.join(runs, "notes.txt"), "not a workflow")
@@ -232,5 +232,120 @@ defmodule SymphonyElixir.OperatorRepositorySourcesTest do
   test "an unverified registry cannot omit its privacy exclusions", %{root: root, config_root: config_root} do
     host = start_supervised!({Host, %{registry: %{verified?: false, path: Path.join(root, "targets.yml")}}})
     assert {:error, :registry_unavailable} = OperatorRepositorySources.load(host, config_root: config_root)
+  end
+
+  test "registry context exposes only admission-valid targets for isolation checks", %{root: root} do
+    config = Path.join(root, "host-config")
+    File.mkdir_p!(config)
+    registry = Path.join(config, "targets.yml")
+    state = Path.join(root, "state")
+    repo = Path.join(root, "repos/main")
+    File.mkdir_p!(repo)
+
+    document = %{
+      "version" => 1,
+      "host" => registry_host(state),
+      "targets" => %{
+        "alpha" => registry_target(repo, Path.join(root, "worktrees/alpha")),
+        "broken" => registry_target(Path.join(root, "repos/missing"), Path.join(root, "worktrees/broken"))
+      }
+    }
+
+    File.write!(registry, Yaml.encode(document))
+    {:ok, %{generation: generation}} = FileStore.read(registry)
+    host = start_supervised!({Host, %{registry: %{verified?: true, path: registry, generation: generation}}})
+
+    assert {:ok, host_map, configured, verified_targets, ^registry} =
+             OperatorRepositorySources.registry_context(host, "alpha")
+
+    assert host_map == document["host"]
+    assert configured["repo"]["path"] == repo
+    assert Map.keys(verified_targets) == ["alpha"]
+    assert verified_targets["alpha"]["repo"]["path"] == repo
+    assert verified_targets["alpha"]["worktree"]["root"] == Path.join(root, "worktrees/alpha")
+
+    assert {:ok, ^host_map, nil, ^verified_targets, ^registry} =
+             OperatorRepositorySources.registry_context(host, nil)
+  end
+
+  test "registry context requires a configured registry before inspection", _context do
+    host = start_supervised!({Host, %{registry: %{}}})
+
+    assert {:error, :configuration_required} = OperatorRepositorySources.registry_context(host, "alpha")
+  end
+
+  test "registry context fails closed when a verified-marked registry cannot be revalidated", %{root: root} do
+    config = Path.join(root, "host-config")
+    File.mkdir_p!(config)
+    registry = Path.join(config, "targets.yml")
+
+    # Structurally decodable but admission-invalid: a registry that cannot run
+    # through the admission pipeline must not silently change eligibility.
+    File.write!(registry, Yaml.encode(%{"host" => registry_host(Path.join(root, "state")), "targets" => %{"alpha" => %{}}}))
+    {:ok, %{generation: generation}} = FileStore.read(registry)
+    host = start_supervised!({Host, %{registry: %{verified?: true, path: registry, generation: generation}}})
+
+    assert {:error, :registry_unavailable} = OperatorRepositorySources.registry_context(host, "alpha")
+    assert {:error, :registry_unavailable} = OperatorRepositorySources.registry_context(host, nil)
+  end
+
+  defp registry_host(state) do
+    %{
+      "id" => "sources-host",
+      "state_root" => state,
+      "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
+      "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
+      "scheduling" => %{"algorithm" => "weighted_deficit_round_robin", "max_credit_rounds" => 4},
+      "tracker_connections" => %{
+        "linear-main" => %{"kind" => "linear", "endpoint" => "https://api.linear.app/graphql", "api_key" => "$LINEAR_API_KEY"}
+      },
+      "runners" => %{
+        "codex" => %{
+          "kind" => "codex_app_server",
+          "command" => ["codex", "app-server"],
+          "max_concurrent_agents" => 4,
+          "max_concurrent_startups" => 2
+        }
+      }
+    }
+  end
+
+  defp registry_target(repo, worktree) do
+    %{
+      "display_name" => "Target",
+      "state" => "active",
+      "dispatch_mode" => "explicit",
+      "repo" => %{"path" => repo, "expected_repository" => "https://github.com/example/sources"},
+      "worktree" => %{"root" => worktree, "strategy" => "per_issue", "hooks" => %{}},
+      "linear" => %{
+        "connection" => "linear-main",
+        "scope" => %{"type" => "project", "project_id" => "project-1"},
+        "active_states" => ["Todo", "In Progress"],
+        "terminal_states" => ["Done"],
+        "required_labels" => []
+      },
+      "runners" => %{"allowed" => ["codex"], "default" => "codex", "settings" => %{}},
+      "concurrency" => %{
+        "max_concurrent_agents" => 4,
+        "max_concurrent_startups" => 2,
+        "max_concurrent_reviewers" => 1,
+        "by_linear_state" => %{}
+      },
+      "budgets" => %{
+        "per_run" => %{"max_total_tokens" => 1_000},
+        "daily" => %{"max_total_tokens" => 10_000},
+        "weekly" => %{"max_total_tokens" => 50_000}
+      },
+      "checks" => %{},
+      "external_side_effects" => %{
+        "tracker_write" => "deny",
+        "vcs_publish" => "deny",
+        "pull_request_write" => "deny",
+        "merge" => "deny",
+        "deployment" => "deny",
+        "production_data" => "deny"
+      },
+      "scheduling" => %{"weight" => 10}
+    }
   end
 end
