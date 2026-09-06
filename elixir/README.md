@@ -251,10 +251,19 @@ deterministic YAML; plan consumption happens afterward. If post-commit verificat
 consumption fails, confirmation can report an error after the registry has changed, so inspect the
 registry before retrying.
 
+Plans use envelope version 2. Older plans cannot be confirmed; generate a new preview after upgrading.
+Repeated previews with the same identity reuse the existing valid plan without changing its bytes.
+
 Add and import always create paused targets with no dispatch mode. Import reads the source runtime
 and repository without modifying either; the current committed repository manifest remains
 authoritative. Patch input is a target-only recursive schema patch, not JSON Patch or JSON Merge
 Patch, and general patch operations cannot change lifecycle state or dispatch mode.
+
+The optional target field `repo.branch` overrides the manifest's `vcs.default_branch` in the admitted
+runtime policy and compiled prompt. For example, a patch can contain `repo: {branch: release/2026}`.
+Omit the field to inherit the manifest value, or patch it to `null` to remove an existing override.
+The source manifest, its hash, and `delivery.pr_target` do not change. Target workspace hooks remain
+authoritative: this setting does not add a missing checkout hook or rewrite custom/imported hooks.
 
 Activation requires `explicit` or `watch` dispatch mode and reuses an existing valid mode when
 `--mode` is omitted. The lifecycle graph is `paused -> active`, `active -> draining`,
@@ -646,6 +655,48 @@ deadline. A missing or unavailable selected-host registry fails closed. Add/impo
 with a repository path and patches that change repository inputs require readiness;
 Apply checks it again under the registry lock. Drafts without a repository path and
 non-repository control edits retain their existing behavior.
+
+Discover branch targets with
+`{"action":"branches","path":"/absolute/repository","target_id":"alpha","configured_target":"main"}`.
+`configured_target` and `target_id` are optional for discovery. Existing-target Apply requires the
+target ID. Without an explicit selection, discovery uses persisted `repo.branch`, then the target's
+manifest default. The target's configured manifest path is resolved on the selected host.
+This action requires Ready inspection, then runs read-only Git or Jujutsu commands there.
+It returns HTTP `202` and a `scan_id`; use the existing `poll` and `cancel` actions.
+Repeat `branches` to refresh. Only the latest branch job for the selected repository
+can return `apply_allowed: true`; changing the path or starting a refresh invalidates
+older catalogs, including completed jobs.
+
+The terminal `result` contains `repository`, `vcs`, `status`, `reason`, `choices`,
+`selected`, `apply_allowed`, and `typed_fallback`. Choices have stable branch-name
+values and labels, deduplicated across local and remote refs, with `current`,
+`manifest_default`, `remote_default`, and `configured` markers. Remote names, refs,
+upstream, and tracking state remain available as metadata. A configured target missing
+from a successful discovery remains visible as `stale` and sets `apply_allowed: false`.
+Git ref discovery supports detached HEAD and missing `origin`; the API still requires
+the Ready inspection identity check, which requires a matching `origin`. Remote refs
+are local observations; discovery does not verify them against a server.
+
+Discovery failure or malformed output offers typed fallback: an explicitly supplied,
+syntactically valid `configured_target` can set the catalog's `apply_allowed` flag.
+Cancellation, non-Ready inspection, and obsolete jobs do not permit this fallback. Commands share a
+bounded deadline (at most 30 seconds); raw command errors are not returned.
+Discovery never checks out, fetches, pushes, or updates bookmarks. Jujutsu runs with
+`--ignore-working-copy --at-operation=@` to avoid snapshotting or reconciling operations.
+
+Repository-input command previews require top-level `branch_scan_id` when a repository branch is
+selected. Send the same field in the exact confirmation request. The catalog must be the latest
+completed, non-cancelled result and must match the proposed repository, branch, and existing target.
+Add/import can use a catalog without a target ID before the target exists. An unrelated mutation
+must omit `branch_scan_id`.
+
+The catalog flag alone does not authorize Apply. The saved plan binds the repository and branch;
+Apply repeats readiness and branch validation under the registry lock. Changing the manifest default
+invalidates an inherited-branch plan. Syntax-only fallback requires an explicit valid `repo.branch`;
+it cannot authorize an inherited default. A missing branch in successful discovery blocks Apply.
+
+The declared Mise toolchain pins Jujutsu 0.29.0 for real-repository discovery tests.
+Run `mise install` in `elixir` before validation.
 
 If workflow storage is unreadable or contains more entries than `max_entries`, discovery
 fails rather than scanning with an incomplete worktree exclusion list. Individual workflow

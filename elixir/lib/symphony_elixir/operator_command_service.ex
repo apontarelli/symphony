@@ -2,6 +2,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   @moduledoc false
   alias Jason.OrderedObject
   alias SymphonyElixir.LocalConfig
+  alias SymphonyElixir.OperatorBranchCatalog
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
   alias SymphonyElixir.OperatorRepositoryInspection
@@ -19,6 +20,7 @@ defmodule SymphonyElixir.OperatorCommandService do
     "display_name" => :value,
     "repo" => %{
       "path" => :value,
+      "branch" => :value,
       "manifest" => :value,
       "expected_repository" => :value
     },
@@ -131,8 +133,8 @@ defmodule SymphonyElixir.OperatorCommandService do
   @sensitive_patch_keys ~w(apikey authorization bearer bearertoken clientsecret connectionstring credential credentials password passwords passwd privatekey refreshtoken secret secrets token tokens accesstoken)
   @raw_secret_value_regex ~r/(?:-----BEGIN [^-]*PRIVATE KEY-----|\b(?:bearer|basic)\s+[A-Za-z0-9._~+\/=-]+|\b(?:sk-(?:proj-)?|gh[pousr]_)[A-Za-z0-9_-]{12,})/i
   @secret_reference_regex ~r/^\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})$/
-  @plan_envelope_keys ~w(envelope_version plan_id action target_id command registry_path expected_generation proposed_generation source_hashes created_at)
-  @plan_identity_keys ~w(action command envelope_version expected_generation proposed_generation registry_path source_hashes target_id)
+  @plan_envelope_keys ~w(envelope_version plan_id action target_id branch_selection command registry_path expected_generation proposed_generation source_hashes created_at)
+  @plan_identity_keys ~w(action target_id branch_selection command envelope_version expected_generation proposed_generation registry_path source_hashes)
   @lifecycle_actions [:activate, :pause, :drain, :retire]
   @actions [:add, :import, :patch | @lifecycle_actions]
   @action_names Enum.map(@actions, &Atom.to_string/1)
@@ -488,7 +490,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp validate_plan_envelope(envelope) do
     with true <- Enum.sort(Map.keys(envelope)) == Enum.sort(@plan_envelope_keys),
-         true <- envelope["envelope_version"] == 1,
+         true <- envelope["envelope_version"] == 2,
          :ok <- validate_plan_id(envelope["plan_id"]),
          :ok <- validate_generation(envelope["expected_generation"]),
          :ok <- validate_generation(envelope["proposed_generation"]),
@@ -497,6 +499,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          true <- valid_path?(envelope["registry_path"]),
          true <- strict_json_map?(envelope["command"]),
          true <- valid_source_hashes?(envelope["source_hashes"]),
+         true <- valid_branch_selection?(envelope["branch_selection"]),
          true <- valid_created_at?(envelope["created_at"]),
          true <- plan_identity(envelope) == envelope["plan_id"] do
       :ok
@@ -513,6 +516,15 @@ defmodule SymphonyElixir.OperatorCommandService do
   end
 
   defp valid_source_hashes?(_source_hashes), do: false
+
+  defp valid_branch_selection?(nil), do: true
+
+  defp valid_branch_selection?(%{"repository" => repository, "branch" => branch} = selection)
+       when map_size(selection) == 2 do
+    valid_path?(repository) and OperatorBranchCatalog.valid_target?(branch)
+  end
+
+  defp valid_branch_selection?(_selection), do: false
 
   defp valid_created_at?(value) when is_binary(value),
     do: String.ends_with?(value, "Z") and match?({:ok, _datetime, 0}, DateTime.from_iso8601(value))
@@ -739,6 +751,8 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  defp rebuild_envelope(envelope, current_bytes, opts)
+
   defp rebuild_envelope(%{"action" => action} = envelope, current_bytes, _opts)
        when action in ["activate", "pause", "drain", "retire"] do
     target_id = envelope["target_id"]
@@ -787,7 +801,13 @@ defmodule SymphonyElixir.OperatorCommandService do
          {:ok, proposed_snapshot} <-
            snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
          proposed_snapshot <- Composition.compose(proposed_snapshot),
-         :ok <- ensure_add_applicable(current_snapshot, proposed_snapshot, envelope["target_id"]),
+         :ok <-
+           ensure_add_applicable(
+             current_snapshot,
+             proposed_snapshot,
+             envelope["target_id"],
+             envelope["branch_selection"]
+           ),
          :ok <-
            verify_proposed_generation(
              proposed_bytes,
@@ -825,7 +845,13 @@ defmodule SymphonyElixir.OperatorCommandService do
          {:ok, proposed_snapshot} <-
            snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
          proposed_snapshot <- Composition.compose(proposed_snapshot),
-         :ok <- ensure_repository_ready_for_action(proposed_snapshot, target_id, {:patch, patch}),
+         :ok <-
+           ensure_repository_ready_for_action(
+             proposed_snapshot,
+             target_id,
+             {:patch, patch},
+             envelope["branch_selection"]
+           ),
          true <-
            current_snapshot.globally_valid? and
              patch_applicable?(proposed_snapshot, target_id, patch),
@@ -900,8 +926,8 @@ defmodule SymphonyElixir.OperatorCommandService do
 
       finish_import_rebuild(proposed_document, current_snapshot, import_result, envelope)
     else
-      true -> error(:duplicate_target_id, "target ID now exists", "$.targets.#{envelope["target_id"]}")
       false -> error(:plan_mismatch, "import source bindings are invalid", "$.plan.source_hashes")
+      true -> error(:duplicate_target_id, "target already exists", "$.target_id")
       {:error, %Error{}} = error -> error
       {:error, %TargetRegistry.Error{} = source} -> registry_error(source)
       _changed -> error(:import_source_changed, "import source changed while applying", command["workflow"])
@@ -913,11 +939,20 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     with {:ok, proposed_snapshot} <-
            snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
-         :ok <- ensure_repository_ready_for_action(proposed_snapshot, envelope["target_id"], :import) do
-      proposed_snapshot = Composition.compose(proposed_snapshot)
-
+         proposed_snapshot <- Composition.compose(proposed_snapshot),
+         :ok <-
+           ensure_repository_ready_for_action(
+             proposed_snapshot,
+             envelope["target_id"],
+             :import,
+             envelope["branch_selection"]
+           ) do
       if current_snapshot.globally_valid? and import_result.applicable? and
-           add_applicable?(proposed_snapshot, envelope["target_id"]) and
+           add_applicable?(
+             proposed_snapshot,
+             envelope["target_id"],
+             envelope["branch_selection"]
+           ) and
            Preview.generation(proposed_bytes) == envelope["proposed_generation"] do
         {:ok, proposed_bytes}
       else
@@ -926,57 +961,137 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
-  defp ensure_add_applicable(current_snapshot, proposed_snapshot, target_id) do
-    if current_snapshot.globally_valid? and add_applicable?(proposed_snapshot, target_id),
-      do: :ok,
-      else: error(:plan_not_applicable, "rebuilt add proposal is not applicable", "$.plan")
+  defp ensure_add_applicable(
+         current_snapshot,
+         proposed_snapshot,
+         target_id,
+         expected_branch_selection
+       ) do
+    if current_snapshot.globally_valid? and
+         add_applicable?(proposed_snapshot, target_id, expected_branch_selection),
+       do: :ok,
+       else: error(:plan_not_applicable, "rebuilt add proposal is not applicable", "$.plan")
   end
 
-  defp ensure_repository_ready_for_action(snapshot, target_id, {:patch, patch}) do
+  defp ensure_repository_ready_for_action(snapshot, target_id, {:patch, patch}, expected_branch_selection) do
     if repository_patch_input?(patch),
-      do: ensure_repository_ready_for_action(snapshot, target_id, :patch),
+      do:
+        ensure_repository_ready_for_action(
+          snapshot,
+          target_id,
+          :repository,
+          expected_branch_selection
+        ),
       else: :ok
   end
 
-  defp ensure_repository_ready_for_action(snapshot, target_id, _action) do
-    if ensure_repository_ready?(snapshot, target_id) do
-      :ok
-    else
-      error(:repository_not_ready, "repository is not ready for Apply", "$.targets.#{target_id}.repo.path")
+  defp ensure_repository_ready_for_action(
+         snapshot,
+         target_id,
+         _action,
+         expected_branch_selection
+       ) do
+    case repository_readiness(snapshot, target_id) do
+      {:ok, selection} ->
+        if expected_branch_selection in [:unbound, selection],
+          do: :ok,
+          else: error(:plan_mismatch, "repository branch selection changed since planning", "$.plan.branch_selection")
+
+      :error ->
+        error(:repository_not_ready, "repository is not ready for Apply", "$.targets.#{target_id}.repo.path")
     end
   end
 
   defp ensure_repository_ready?(snapshot, target_id) do
+    match?({:ok, _selection}, repository_readiness(snapshot, target_id))
+  end
+
+  defp repository_readiness(snapshot, target_id) do
+    case repository_context(snapshot, target_id) do
+      {:ok, nil} ->
+        {:ok, nil}
+
+      {:ok, %{inspection: inspection, effective_branch: branch, explicit?: explicit?}} ->
+        catalog =
+          OperatorBranchCatalog.discover(
+            inspection,
+            configured_target: branch
+          )
+
+        if inspection.state == "ready" and OperatorBranchCatalog.valid_target?(branch) and
+             catalog.apply_allowed and (catalog.status == "current" or explicit?) do
+          {:ok, %{"repository" => inspection.path, "branch" => branch}}
+        else
+          :error
+        end
+
+      :error ->
+        :error
+    end
+  rescue
+    _exception -> :error
+  catch
+    _kind, _reason -> :error
+  end
+
+  defp branch_selection_for_target(snapshot, target_id) do
+    case repository_context(snapshot, target_id) do
+      {:ok, %{inspection: %{state: "ready", path: path}, effective_branch: branch}}
+      when is_binary(path) and is_binary(branch) ->
+        if OperatorBranchCatalog.valid_target?(branch),
+          do: %{"repository" => path, "branch" => branch},
+          else: nil
+
+      _unavailable ->
+        nil
+    end
+  end
+
+  defp preview_with_branch_selection(preview, nil), do: preview
+
+  defp preview_with_branch_selection(preview, selection),
+    do: Map.put(preview, "branch_selection", selection)
+
+  defp repository_context(snapshot, target_id) do
     case Map.get(snapshot.targets, target_id) do
-      %TargetRegistry.Target{configured: configured} when is_map(configured) ->
+      %TargetRegistry.Target{configured: configured, effective_policy: policy} when is_map(configured) ->
         repo = Map.get(configured, "repo", %{})
         path = Map.get(repo, "path")
 
         if is_binary(path) and String.trim(path) != "" do
-          expected = Map.get(repo, "expected_repository")
-          manifest = Map.get(repo, "manifest")
-
-          inspection =
-            OperatorRepositoryInspection.inspect(
-              path,
-              registry_path: snapshot.path,
-              target_id: target_id,
-              manifest: manifest,
-              expected_repository: expected
-            )
-
-          inspection.apply_allowed
+          inspect_repository_context(path, snapshot, target_id, repo, policy)
         else
-          true
+          {:ok, nil}
         end
 
       _missing_or_invalid ->
-        false
+        :error
     end
   rescue
-    _exception -> false
+    _exception -> :error
   catch
-    _kind, _reason -> false
+    _kind, _reason -> :error
+  end
+
+  defp inspect_repository_context(path, snapshot, target_id, repo, policy) do
+    explicit_branch = Map.get(repo, "branch")
+
+    inspection =
+      OperatorRepositoryInspection.inspect(
+        path,
+        registry_path: snapshot.path,
+        target_id: target_id,
+        manifest: Map.get(repo, "manifest"),
+        expected_repository: Map.get(repo, "expected_repository")
+      )
+
+    effective_branch = explicit_branch || inspection.default_branch
+
+    if is_nil(policy) or get_in(policy, ["repo_policy", "manifest", "vcs", "default_branch"]) == effective_branch do
+      {:ok, %{inspection: inspection, effective_branch: effective_branch, explicit?: is_binary(explicit_branch)}}
+    else
+      :error
+    end
   end
 
   defp repository_patch_input?(patch) when is_map(patch) do
@@ -1362,7 +1477,6 @@ defmodule SymphonyElixir.OperatorCommandService do
          {:ok, envelope} <-
            build_envelope(
              Atom.to_string(action),
-             target_id,
              command_data,
              registry_path,
              current_file.generation,
@@ -1454,6 +1568,11 @@ defmodule SymphonyElixir.OperatorCommandService do
            snapshot_for(proposed_document, proposed_bytes, registry_path) do
       proposed_snapshot = Composition.compose(proposed_snapshot)
 
+      branch_selection =
+        if repository_patch_input?(command.changes),
+          do: branch_selection_for_target(proposed_snapshot, command.target_id),
+          else: nil
+
       registry_preview =
         current_snapshot
         |> Preview.preview(proposed_snapshot, proposed_bytes)
@@ -1467,6 +1586,7 @@ defmodule SymphonyElixir.OperatorCommandService do
         proposed_snapshot: proposed_snapshot,
         proposed_bytes: proposed_bytes,
         registry_preview: registry_preview,
+        branch_selection: branch_selection,
         opts: opts
       })
     end
@@ -1524,6 +1644,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          proposed_snapshot: proposed_snapshot,
          proposed_bytes: proposed_bytes,
          registry_preview: registry_preview,
+         branch_selection: branch_selection,
          opts: opts
        }) do
     if patch_applicable?(proposed_snapshot, command.target_id, command.changes) do
@@ -1535,13 +1656,13 @@ defmodule SymphonyElixir.OperatorCommandService do
       with {:ok, envelope} <-
              build_envelope(
                "patch",
-               command.target_id,
                command_data,
                registry_path,
                current_file.generation,
                source_hashes,
                created_at,
-               proposed_bytes
+               proposed_bytes,
+               branch_selection
              ),
            {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
         {:ok,
@@ -1551,7 +1672,7 @@ defmodule SymphonyElixir.OperatorCommandService do
            command.target_id,
            registry_path,
            true,
-           %{"registry" => json_value(registry_preview)}
+           preview_with_branch_selection(%{"registry" => json_value(registry_preview)}, branch_selection)
          )}
       end
     else
@@ -1564,7 +1685,11 @@ defmodule SymphonyElixir.OperatorCommandService do
          expected_generation: current_file.generation,
          proposed_generation: registry_preview.proposed_generation,
          applicable?: false,
-         preview: %{"registry" => json_value(registry_preview)},
+         preview:
+           preview_with_branch_selection(
+             %{"registry" => json_value(registry_preview)},
+             branch_selection
+           ),
          created_at: now(opts)
        }}
     end
@@ -1794,6 +1919,7 @@ defmodule SymphonyElixir.OperatorCommandService do
           |> Composition.compose()
 
         registry_preview = Preview.preview(current_snapshot, proposed_snapshot, proposed_bytes)
+        branch_selection = branch_selection_for_target(proposed_snapshot, command.target_id)
 
         import_result = %RegistryImport.Result{
           import_result
@@ -1815,6 +1941,7 @@ defmodule SymphonyElixir.OperatorCommandService do
           source_bytes: source_bytes,
           manifest_bytes: manifest_before,
           registry_preview: registry_preview,
+          branch_selection: branch_selection,
           import_result: import_result,
           opts: opts
         })
@@ -1836,6 +1963,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          source_bytes: source_bytes,
          manifest_bytes: manifest_bytes,
          registry_preview: registry_preview,
+         branch_selection: branch_selection,
          import_result: import_result,
          opts: opts
        }) do
@@ -1860,13 +1988,13 @@ defmodule SymphonyElixir.OperatorCommandService do
       with {:ok, envelope} <-
              build_envelope(
                "import",
-               command.target_id,
                command_data,
                registry_path,
                current_file.generation,
                source_hashes,
                created_at,
-               proposed_bytes
+               proposed_bytes,
+               branch_selection
              ),
            {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
         {:ok,
@@ -1876,10 +2004,13 @@ defmodule SymphonyElixir.OperatorCommandService do
            command.target_id,
            registry_path,
            true,
-           %{
-             "registry" => json_value(registry_preview),
-             "import" => public_import
-           }
+           preview_with_branch_selection(
+             %{
+               "registry" => json_value(registry_preview),
+               "import" => public_import
+             },
+             branch_selection
+           )
          )}
       end
     else
@@ -1889,7 +2020,8 @@ defmodule SymphonyElixir.OperatorCommandService do
         current_file,
         registry_preview,
         public_import,
-        opts
+        opts,
+        branch_selection
       )
     end
   end
@@ -1900,7 +2032,8 @@ defmodule SymphonyElixir.OperatorCommandService do
          current_file,
          registry_preview,
          import_preview,
-         opts
+         opts,
+         branch_selection \\ nil
        ) do
     {:ok,
      %Plan{
@@ -1911,10 +2044,14 @@ defmodule SymphonyElixir.OperatorCommandService do
        expected_generation: current_file.generation,
        proposed_generation: registry_preview.proposed_generation,
        applicable?: false,
-       preview: %{
-         "registry" => json_value(registry_preview),
-         "import" => import_preview
-       },
+       preview:
+         preview_with_branch_selection(
+           %{
+             "registry" => json_value(registry_preview),
+             "import" => import_preview
+           },
+           branch_selection
+         ),
        created_at: now(opts)
      }}
   end
@@ -2187,6 +2324,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          {:ok, proposed_snapshot} <-
            snapshot_for(proposed_document, proposed_bytes, registry_path) do
       proposed_snapshot = Composition.compose(proposed_snapshot)
+      branch_selection = branch_selection_for_target(proposed_snapshot, command.target_id)
       registry_preview = Preview.preview(current_snapshot, proposed_snapshot, proposed_bytes)
       normalization_preview = Preview.preview(requested_snapshot, proposed_snapshot, proposed_bytes)
 
@@ -2199,6 +2337,7 @@ defmodule SymphonyElixir.OperatorCommandService do
         proposed_bytes: proposed_bytes,
         registry_preview: registry_preview,
         normalization_preview: normalization_preview,
+        branch_selection: branch_selection,
         opts: opts
       })
     end
@@ -2213,6 +2352,7 @@ defmodule SymphonyElixir.OperatorCommandService do
          proposed_bytes: proposed_bytes,
          registry_preview: registry_preview,
          normalization_preview: normalization_preview,
+         branch_selection: branch_selection,
          opts: opts
        }) do
     if add_applicable?(proposed_snapshot, command.target_id) do
@@ -2221,13 +2361,13 @@ defmodule SymphonyElixir.OperatorCommandService do
       with {:ok, envelope} <-
              build_envelope(
                "add",
-               command.target_id,
                %{"target_id" => command.target_id, "target" => command.target},
                registry_path,
                current_file.generation,
                %{},
                created_at,
-               proposed_bytes
+               proposed_bytes,
+               branch_selection
              ),
            {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
         {:ok,
@@ -2237,10 +2377,13 @@ defmodule SymphonyElixir.OperatorCommandService do
            command.target_id,
            registry_path,
            true,
-           %{
-             "registry" => json_value(registry_preview),
-             "normalization" => json_value(normalization_preview)
-           }
+           preview_with_branch_selection(
+             %{
+               "registry" => json_value(registry_preview),
+               "normalization" => json_value(normalization_preview)
+             },
+             branch_selection
+           )
          )}
       end
     else
@@ -2253,7 +2396,14 @@ defmodule SymphonyElixir.OperatorCommandService do
          expected_generation: current_file.generation,
          proposed_generation: registry_preview.proposed_generation,
          applicable?: false,
-         preview: %{"registry" => json_value(registry_preview), "normalization" => json_value(normalization_preview)},
+         preview:
+           preview_with_branch_selection(
+             %{
+               "registry" => json_value(registry_preview),
+               "normalization" => json_value(normalization_preview)
+             },
+             branch_selection
+           ),
          created_at: now(opts)
        }}
     end
@@ -2276,7 +2426,7 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
-  defp add_applicable?(snapshot, target_id) do
+  defp add_applicable?(snapshot, target_id, expected_branch_selection \\ :unbound) do
     blocking_codes = [
       :execution_profile_name_collision,
       :manifest_invalid,
@@ -2291,7 +2441,15 @@ defmodule SymphonyElixir.OperatorCommandService do
     diagnostics = snapshot.diagnostics ++ target_diagnostics
 
     snapshot.globally_valid? and
-      ensure_repository_ready?(snapshot, target_id) and
+      match?(
+        :ok,
+        ensure_repository_ready_for_action(
+          snapshot,
+          target_id,
+          :add,
+          expected_branch_selection
+        )
+      ) and
       not Enum.any?(diagnostics, fn diagnostic ->
         diagnostic.scope == {:target, target_id} and diagnostic.code in blocking_codes
       end)
@@ -2299,23 +2457,24 @@ defmodule SymphonyElixir.OperatorCommandService do
 
   defp build_envelope(
          action,
-         target_id,
          command,
          registry_path,
          expected_generation,
          source_hashes,
          created_at,
-         proposed_bytes
+         proposed_bytes,
+         branch_selection \\ nil
        ) do
     fields = %{
       "action" => action,
+      "branch_selection" => branch_selection,
       "command" => command,
       "created_at" => created_at,
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "expected_generation" => expected_generation,
       "registry_path" => registry_path,
       "source_hashes" => source_hashes,
-      "target_id" => target_id
+      "target_id" => command["target_id"]
     }
 
     case PlanStore.build(fields, proposed_bytes) do
@@ -2328,10 +2487,23 @@ defmodule SymphonyElixir.OperatorCommandService do
     store = Keyword.get(opts, :store_plan, &PlanStore.store/2)
 
     case invoke(fn -> store.(plan_dir, envelope) end) do
-      {:ok, {:ok, stored}} when is_map(stored) -> {:ok, stored}
-      {:ok, {:error, %TargetRegistry.Error{} = source}} -> registry_error(source)
-      {:ok, {:error, %Error{}} = error} -> error
-      _failure -> error(:plan_store_failed, "plan envelope could not be stored", plan_dir)
+      {:ok, {:ok, stored}} when is_map(stored) ->
+        {:ok, stored}
+
+      {:ok, {:error, %TargetRegistry.Error{code: :plan_corrupt} = source}} ->
+        case read_envelope(plan_dir, envelope["plan_id"], opts) do
+          {:ok, stored} -> {:ok, stored}
+          _invalid -> registry_error(source)
+        end
+
+      {:ok, {:error, %TargetRegistry.Error{} = source}} ->
+        registry_error(source)
+
+      {:ok, {:error, %Error{}} = error} ->
+        error
+
+      _failure ->
+        error(:plan_store_failed, "plan envelope could not be stored", plan_dir)
     end
   end
 

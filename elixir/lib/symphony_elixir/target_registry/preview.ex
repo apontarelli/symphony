@@ -55,7 +55,7 @@ defmodule SymphonyElixir.TargetRegistry.Preview do
     max_concurrent_startups max_concurrent_reviewers algorithm max_credit_rounds
     kind endpoint api_key command args env cwd adapter
     display_name state dispatch_mode repo worktree linear concurrency budgets checks
-    external_side_effects path manifest expected_repository root strategy hooks
+    external_side_effects path manifest branch expected_repository root strategy hooks
     after_create before_run after_run before_remove timeout_ms connection scope
     active_states terminal_states required_labels type project_id project_slug team_key
     query_file issue_ids allowed default settings model reasoning_effort max_turns

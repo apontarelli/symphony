@@ -44,7 +44,7 @@ defmodule SymphonyElixirWeb.OperatorApiController do
 
   @spec repositories(Conn.t(), map()) :: Conn.t()
   def repositories(conn, params) do
-    status = if Map.get(params, "action") in ~w(recent browse scan manual), do: 202, else: 200
+    status = if Map.get(params, "action") in ~w(recent browse scan manual branches), do: 202, else: 200
 
     OperatorInterface.repositories(
       operator_interface(),

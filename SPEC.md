@@ -484,8 +484,8 @@ Manifest resolution rules:
 - Presets and modules resolve from the installed Symphony module registry.
 - The default preset installs the `repo.docs`, `validation.commands`, `tracker.linear`,
   `workspace`, `codex.harness`, and `delivery.github_pr` modules.
-- The default `workspace` module compiles `project.repository` into an `after_create` hook when the
-  repository field is present.
+- The default `workspace` module compiles `project.repository` and `vcs.default_branch` into an
+  `after_create` clone hook when the repository field is present.
 - The resolved runtime `config` includes daemon config plus manifest metadata, `checks`,
   `completion_requirements`, `capabilities`, `issue_markers`, `delivery`, `profiles`, and
   `policy_metadata`.
@@ -601,6 +601,13 @@ project style, setup, command syntax, domain language, product/design constraint
   - Default: `main`.
 - `posture` (string)
   - OPTIONAL implementation-defined VCS guidance.
+
+
+An optional host target `repo.branch` overrides `vcs.default_branch` in the admitted target policy.
+Omission or `null` inherits the manifest value. The override MUST NOT modify the repository manifest,
+its source hash, or `delivery.pr_target`. The effective policy hash and compiled prompt/module
+resolution MUST include the override. Explicit and absent target workspace hooks retain their
+existing behavior; this setting does not add or rewrite a target checkout hook.
 
 #### 5.3.4 `delivery`
 
@@ -2976,9 +2983,10 @@ Minimum endpoints:
 
 - `POST /api/v1/operator/repositories`
   - Requires loopback access and the per-host operator session credential before reading paths.
-    Discovery MUST NOT mutate repositories, run repository code, or inspect repository readiness.
+    Directory discovery MUST NOT mutate repositories, run repository code, or inspect readiness.
   - Supports recent repository directories, one-level browsing, bounded root scans, and manual
-    absolute-path entry. Results are canonical directory candidates, not validated repositories.
+    absolute-path entry. Directory results are candidates, not validated repositories. The separate
+    `inspect` action validates readiness on the selected host.
   - Local configuration owns scan roots, depth, result count, entry-work count, exclusions, and
     timeout. Known repository parents MAY seed roots; `$HOME` and `/` MUST NOT be implicit roots.
     Generated worktree roots, host state, registry/config storage, hidden directories, VCS
@@ -2989,6 +2997,13 @@ Minimum endpoints:
     and errors with a cursor, truncation count, and bounded terminal results. Cancellation,
     replacement, refresh, unreadable directories, work/result limits, and timeout are explicit.
     Discovery paths MUST NOT enter the unauthenticated host event feed.
+  - `branches` requires Ready inspection and runs bounded, read-only Git or Jujutsu discovery on the
+    selected host. Choices preserve local, remote, current, manifest-default, and tracking metadata.
+    Discovery MUST NOT fetch, check out, push, snapshot a working copy, or update refs/bookmarks.
+  - Only the latest completed branch catalog for the selected repository can permit Apply.
+    Refresh, cancellation, and repository changes invalidate previous catalogs. A missing selected
+    branch remains visible as stale. Discovery failure permits syntax-only fallback only for an
+    explicit, valid `repo.branch`; an inherited branch requires successful discovery.
 
 - `POST /api/v1/operator/commands/preview`
   - Requires loopback access and a restrictive per-host operator session credential.
@@ -2997,6 +3012,13 @@ Minimum endpoints:
     through `ControlPlane`.
   - Returns affected identity, current and proposed state, consequences, warnings, disabled reason,
     and a short-lived, single-use confirmation token. Disabled commands have no token.
+  - Repository-input mutations with a selected branch require `branch_scan_id`. Preview and
+    confirmation MUST bind the same completed, apply-allowed catalog to the repository and branch.
+    Existing-target patches also require a matching catalog target ID. Add/import catalogs MAY omit
+    the target ID before that target exists.
+  - Saved plans MUST bind the repository and selected branch in their immutable identity. Apply MUST
+    inspect the proposed repository inputs and revalidate the branch under the registry lock before
+    publication. A catalog flag alone does not authorize a write.
 - `POST /api/v1/operator/commands/confirm`
   - Requires the same authorization and the exact preview request plus its confirmation token.
   - Rejects host, version, generation, identity, action, or input mismatches, expiration, and replay.

@@ -13,6 +13,8 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     File.cp_r!(@manifest_fixture_source, @manifest_fixture_root)
     git!(@manifest_fixture_root, ["init", "--initial-branch=main"])
     git!(@manifest_fixture_root, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    git!(@manifest_fixture_root, ["add", "."])
+    git!(@manifest_fixture_root, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", "fixture"])
     on_exit(fn -> File.rm_rf!(@manifest_fixture_root) end)
     :ok
   end
@@ -2494,6 +2496,8 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
     git!(repo, ["init", "--initial-branch=main"])
     git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    git!(repo, ["add", "."])
+    git!(repo, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", "fixture"])
 
     registry_path = write_registry(tmp_dir, %{})
     target = put_in(patch_target(tmp_dir), ["repo", "path"], repo)
@@ -2530,6 +2534,8 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
     git!(repo, ["init", "--initial-branch=main"])
     git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    git!(repo, ["add", "."])
+    git!(repo, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", "fixture"])
 
     registry_path = write_registry(tmp_dir, %{"ready" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
 
@@ -2556,6 +2562,150 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
                true,
                registry_path: registry_path
              )
+  end
+
+  @tag :tmp_dir
+  test "repository branch override is previewed and persisted", %{tmp_dir: tmp_dir} do
+    repo = ready_repo(tmp_dir, "branch-override")
+    registry_path = write_registry(tmp_dir, %{"alpha" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{"repo" => %{"branch" => "main"}}
+               },
+               registry_path: registry_path,
+               now: fn -> "2026-08-16T12:00:00Z" end
+             )
+
+    assert plan.applicable?
+    assert plan.preview["branch_selection"] == %{"repository" => Path.expand(repo), "branch" => "main"}
+
+    plan_path = Path.join([tmp_dir, "target-plans", plan.id <> ".json"])
+    stored_bytes = File.read!(plan_path)
+
+    assert {:ok, repeated} =
+             OperatorCommandService.plan(
+               %Command.Patch{target_id: "alpha", changes: %{"repo" => %{"branch" => "main"}}},
+               registry_path: registry_path,
+               now: fn -> "2026-08-16T12:01:00Z" end
+             )
+
+    assert repeated.id == plan.id
+    assert File.read!(plan_path) == stored_bytes
+
+    assert {:ok, _result} =
+             OperatorCommandService.confirm("alpha", plan.id, true, registry_path: registry_path)
+
+    assert {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+    assert get_in(document, ["targets", "alpha", "repo", "branch"]) == "main"
+
+    assert {:ok, inherited} =
+             OperatorCommandService.plan(
+               %Command.Patch{target_id: "alpha", changes: %{"repo" => %{"branch" => nil}}},
+               registry_path: registry_path
+             )
+
+    assert inherited.preview["branch_selection"] == %{"repository" => Path.expand(repo), "branch" => "main"}
+
+    assert {:ok, _result} =
+             OperatorCommandService.confirm("alpha", inherited.id, true, registry_path: registry_path)
+
+    assert {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+    refute Map.has_key?(document["targets"]["alpha"]["repo"], "branch")
+  end
+
+  @tag :tmp_dir
+  test "missing repository branch keeps a patch non-applicable", %{tmp_dir: tmp_dir} do
+    repo = ready_repo(tmp_dir, "missing-branch")
+    registry_path = write_registry(tmp_dir, %{"alpha" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{"repo" => %{"branch" => "does-not-exist"}}
+               },
+               registry_path: registry_path
+             )
+
+    refute plan.applicable?
+    assert is_nil(plan.id)
+    assert plan.preview["branch_selection"] == %{"repository" => Path.expand(repo), "branch" => "does-not-exist"}
+  end
+
+  @tag :tmp_dir
+  test "deleting a planned repository branch blocks apply", %{tmp_dir: tmp_dir} do
+    repo = ready_repo(tmp_dir, "deleted-branch")
+    registry_path = write_registry(tmp_dir, %{"alpha" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{"repo" => %{"branch" => "main"}}
+               },
+               registry_path: registry_path
+             )
+
+    git!(repo, ["checkout", "-b", "temporary"])
+    git!(repo, ["branch", "-D", "main"])
+
+    assert {:error, %OperatorCommandService.Error{code: :repository_not_ready}} =
+             OperatorCommandService.apply(
+               plan.id,
+               plan.expected_generation,
+               true,
+               registry_path: registry_path
+             )
+  end
+
+  @tag :tmp_dir
+  test "manifest default branch changes invalidate an inherited branch plan", %{tmp_dir: tmp_dir} do
+    repo = ready_repo(tmp_dir, "manifest-default")
+    git!(repo, ["branch", "alternate"])
+    registry_path = write_registry(tmp_dir, %{"alpha" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{"repo" => %{"manifest" => "symphony.yml"}}
+               },
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?
+    assert plan.preview["branch_selection"] == %{"repository" => Path.expand(repo), "branch" => "main"}
+
+    manifest_path = Path.join(repo, "symphony.yml")
+    assert {:ok, manifest} = manifest_path |> File.read!() |> Yaml.decode()
+    manifest_path |> File.write!(put_in(manifest, ["vcs", "default_branch"], "alternate") |> Yaml.encode())
+
+    assert {:error, %OperatorCommandService.Error{code: :plan_mismatch}} =
+             OperatorCommandService.apply(
+               plan.id,
+               plan.expected_generation,
+               true,
+               registry_path: registry_path
+             )
+  end
+
+  @tag :tmp_dir
+  test "unrelated target patches do not acquire a branch selection", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{target_id: "alpha", changes: %{"display_name" => "Renamed"}},
+               registry_path: registry_path
+             )
+
+    refute Map.has_key?(plan.preview, "branch_selection")
+
+    assert {:ok, _result} =
+             OperatorCommandService.confirm("alpha", plan.id, true, registry_path: registry_path)
   end
 
   test "non-binary import paths are rejected at the typed boundary" do
@@ -2758,7 +2908,7 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
 
   defp rebind_plan_identity(envelope) do
     identity_keys =
-      ~w(action command envelope_version expected_generation proposed_generation registry_path source_hashes target_id)
+      ~w(action target_id branch_selection command envelope_version expected_generation proposed_generation registry_path source_hashes)
 
     plan_id =
       envelope
@@ -2886,6 +3036,17 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
 
     File.write!(path, Yaml.encode(document))
     path
+  end
+
+  defp ready_repo(tmp_dir, name) do
+    repo = Path.join(Path.dirname(tmp_dir), Path.basename(tmp_dir) <> "-" <> name)
+    on_exit(fn -> File.rm_rf!(repo) end)
+    File.cp_r!(@manifest_fixture_source, repo)
+    git!(repo, ["init", "--initial-branch=main"])
+    git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    git!(repo, ["add", "."])
+    git!(repo, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", "fixture"])
+    repo
   end
 
   defp git!(repo, args) do

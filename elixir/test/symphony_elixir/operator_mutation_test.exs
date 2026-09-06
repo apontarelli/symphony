@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OperatorMutationTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.{ControlPlane, ExecutionContext, HostScheduler, OperatorInterface, OperatorMutation}
+  alias SymphonyElixir.{ControlPlane, ExecutionContext, HostScheduler, OperatorInterface, OperatorMutation, PathSafety}
   alias SymphonyElixir.HostScheduler.Registry
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.TargetRegistry.Yaml
@@ -67,6 +67,131 @@ defmodule SymphonyElixir.OperatorMutationTest do
     assert Enum.any?(preview.consequences, &String.contains?(&1, "2 -> 1"))
     assert confirm!(context, request, preview).status == "completed"
     assert HostScheduler.snapshot(context.scheduler).targets["alpha"].limits.agents == 1
+  end
+
+  test "repository branch changes require the matching completed catalog", context do
+    {context, repo} = branch_context(context)
+    branch = "release/2026"
+    catalog = branch_scan!(context, repo, branch)
+
+    command = %{
+      "action" => "patch",
+      "target_id" => "alpha",
+      "inputs" => %{"changes" => %{"repo" => %{"branch" => branch}}}
+    }
+
+    request = mutation_request(context, command, catalog.scan_id)
+
+    assert {:ok, preview} =
+             OperatorInterface.preview(context.interface, context.credential, request, context.opts)
+
+    assert preview.proposed_state.preview["branch_selection"] == %{
+             "repository" => canonical!(repo),
+             "branch" => branch
+           }
+
+    assert confirm!(context, request, preview).status == "completed"
+    {:ok, document} = Yaml.decode(File.read!(context.path))
+    assert get_in(document, ["targets", "alpha", "repo", "branch"]) == branch
+  end
+
+  test "repository branch preview fails closed without a scan or with mismatched branch", context do
+    {context, repo} = branch_context(context)
+    branch = "release/2026"
+    command = %{"action" => "patch", "target_id" => "alpha", "inputs" => %{"changes" => %{"repo" => %{"branch" => "main"}}}}
+
+    missing_scan = mutation_request(context, command, nil)
+
+    assert {:error, missing} =
+             OperatorInterface.preview(context.interface, context.credential, missing_scan, context.opts)
+
+    assert missing.error.code == "branch_scan_required"
+
+    catalog = branch_scan!(context, repo, branch)
+    mismatched = mutation_request(context, command, catalog.scan_id)
+
+    assert {:error, stale} =
+             OperatorInterface.preview(context.interface, context.credential, mismatched, context.opts)
+
+    assert stale.error.code == "branch_catalog_stale"
+
+    matching = branch_scan!(context, repo, "main")
+    request = mutation_request(context, command, matching.scan_id)
+    assert {:ok, preview} = OperatorInterface.preview(context.interface, context.credential, request, context.opts)
+    assert confirm!(context, request, preview).status == "completed"
+  end
+
+  test "repository branch preview rejects a catalog from another repository", context do
+    {context, repo} = branch_context(context)
+    other_repo = Path.join(System.tmp_dir!(), "operator-branch-other-#{System.unique_integer([:positive])}")
+    File.cp_r!(repo, other_repo)
+    on_exit(fn -> File.rm_rf(other_repo) end)
+    catalog = branch_scan!(context, other_repo, "main")
+    command = %{"action" => "patch", "target_id" => "alpha", "inputs" => %{"changes" => %{"repo" => %{"branch" => "main"}}}}
+    request = mutation_request(context, command, catalog.scan_id)
+
+    assert {:error, stale} =
+             OperatorInterface.preview(context.interface, context.credential, request, context.opts)
+
+    assert stale.error.code == "branch_catalog_stale"
+  end
+
+  test "repository branch confirmation rejects a refreshed or cancelled catalog", context do
+    for stale_action <- [:refresh, :cancel] do
+      {context, repo} = branch_context(context)
+      catalog = branch_scan!(context, repo, "main")
+      command = %{"action" => "patch", "target_id" => "alpha", "inputs" => %{"changes" => %{"repo" => %{"branch" => "main"}}}}
+      request = mutation_request(context, command, catalog.scan_id)
+
+      assert {:ok, preview} =
+               OperatorInterface.preview(context.interface, context.credential, request, context.opts)
+
+      case stale_action do
+        :refresh ->
+          refreshed = branch_scan!(context, repo, "main")
+          refute refreshed.scan_id == catalog.scan_id
+
+        :cancel ->
+          assert {:ok, cancelled} =
+                   OperatorInterface.repositories(
+                     context.interface,
+                     context.credential,
+                     %{"action" => "cancel", "scan_id" => catalog.scan_id},
+                     context.scheduler
+                   )
+
+          assert cancelled.status == "cancelled"
+      end
+
+      assert {:error, stale} =
+               OperatorInterface.confirm(
+                 context.interface,
+                 context.credential,
+                 Map.put(request, "confirmation_token", preview.confirmation_token)
+               )
+
+      assert stale.error.code == "branch_catalog_stale"
+    end
+  end
+
+  test "repository branch confirmation tokens bind the catalog scan ID", context do
+    {context, repo} = branch_context(context)
+    catalog = branch_scan!(context, repo, "main")
+    command = %{"action" => "patch", "target_id" => "alpha", "inputs" => %{"changes" => %{"repo" => %{"branch" => "main"}}}}
+    request = mutation_request(context, command, catalog.scan_id)
+
+    assert {:ok, preview} =
+             OperatorInterface.preview(context.interface, context.credential, request, context.opts)
+
+    mismatched_request =
+      request
+      |> Map.put("branch_scan_id", "scan-not-the-previewed-catalog")
+      |> Map.put("confirmation_token", preview.confirmation_token)
+
+    assert {:error, mismatch} =
+             OperatorInterface.confirm(context.interface, context.credential, mismatched_request)
+
+    assert mismatch.error.code == "confirmation_mismatch"
   end
 
   test "target mutation requires a durable registry and run recovery requires an existing run", context do
@@ -606,6 +731,79 @@ defmodule SymphonyElixir.OperatorMutationTest do
     assert {:error, :shutdown_requested} = HostScheduler.refresh(context.scheduler)
     assert {:error, :capacity} = HostScheduler.reserve_reviewer(context.scheduler, "alpha", self())
     assert_receive :shutdown_requested, 1_000
+  end
+
+  defp branch_context(context) do
+    repo = Path.join(System.tmp_dir!(), "operator-branch-mutation-#{System.unique_integer([:positive])}")
+    File.cp_r!(@repo, repo)
+    on_exit(fn -> File.rm_rf(repo) end)
+
+    for args <- [
+          ["init", "--initial-branch=main"],
+          ["remote", "add", "origin", "https://github.com/example/symphony-fixture"],
+          ["add", "."],
+          ["-c", "user.name=Branch Tests", "-c", "user.email=branch@example.invalid", "commit", "-m", "fixture"],
+          ["branch", "release/2026"]
+        ] do
+      {output, status} = System.cmd("git", args, cd: repo, stderr_to_stdout: true)
+      assert status == 0, output
+    end
+
+    {:ok, document} = Yaml.decode(File.read!(context.path))
+    document = put_in(document, ["targets", "alpha", "repo", "path"], repo)
+    File.write!(context.path, Yaml.encode(document))
+    assert {:ok, _snapshot} = HostScheduler.reload(context.scheduler)
+    {context, repo}
+  end
+
+  defp branch_scan!(context, repo, configured_target) do
+    request =
+      %{"action" => "branches", "path" => repo, "target_id" => "alpha"}
+      |> Map.put("configured_target", configured_target)
+
+    assert {:ok, started} =
+             OperatorInterface.repositories(context.interface, context.credential, request, context.scheduler)
+
+    await_branch_scan(context, started.scan_id)
+  end
+
+  defp await_branch_scan(context, scan_id, after_cursor \\ 0, attempts \\ 200)
+
+  defp await_branch_scan(_context, _scan_id, _after, 0), do: flunk("branch scan did not finish")
+
+  defp await_branch_scan(context, scan_id, after_cursor, attempts) do
+    assert {:ok, response} =
+             OperatorInterface.repositories(
+               context.interface,
+               context.credential,
+               %{"action" => "poll", "scan_id" => scan_id, "after" => after_cursor},
+               context.scheduler
+             )
+
+    if response.status == "running" do
+      Process.sleep(10)
+      await_branch_scan(context, scan_id, response.next_cursor, attempts - 1)
+    else
+      response
+    end
+  end
+
+  defp mutation_request(context, command, scan_id) do
+    {:ok, marker} = OperatorInterface.marker(context.interface)
+
+    request = %{
+      "interface_version" => 1,
+      "host_id" => marker.host_id,
+      "registry_generation" => HostScheduler.snapshot(context.scheduler).registry.generation,
+      "command" => command
+    }
+
+    if is_binary(scan_id), do: Map.put(request, "branch_scan_id", scan_id), else: request
+  end
+
+  defp canonical!(path) do
+    {:ok, canonical} = PathSafety.canonicalize(path)
+    canonical
   end
 
   defp preview!(context, command) do

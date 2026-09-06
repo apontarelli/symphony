@@ -2,6 +2,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
   @moduledoc false
 
   alias Jason.OrderedObject
+  alias SymphonyElixir.OperatorBranchCatalog
   alias SymphonyElixir.TargetRegistry.Error
   alias SymphonyElixir.TargetRegistry.FileStore
   require Record
@@ -19,6 +20,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
 
   @build_keys [
     "action",
+    "branch_selection",
     "command",
     "created_at",
     "envelope_version",
@@ -30,6 +32,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
   @envelope_keys ["plan_id", "proposed_generation" | @build_keys]
   @identity_keys [
     "action",
+    "branch_selection",
     "command",
     "envelope_version",
     "expected_generation",
@@ -43,6 +46,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
     "plan_id",
     "action",
     "target_id",
+    "branch_selection",
     "command",
     "registry_path",
     "expected_generation",
@@ -693,7 +697,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
   end
 
   defp validate_fields(fields) do
-    with true <- fields["envelope_version"] == 1,
+    with true <- fields["envelope_version"] == 2,
          true <- fields["action"] in @actions,
          true <- valid_target_id?(fields["target_id"]),
          true <- is_map(fields["command"]),
@@ -701,6 +705,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
          true <- valid_path?(fields["registry_path"]),
          true <- valid_generation?(fields["expected_generation"]),
          true <- valid_source_hashes?(fields["source_hashes"]),
+         true <- valid_branch_selection?(fields["branch_selection"]),
          true <- valid_created_at?(fields["created_at"]) do
       :ok
     else
@@ -838,6 +843,15 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
   end
 
   defp valid_source_hashes?(_source_hashes), do: false
+
+  defp valid_branch_selection?(nil), do: true
+
+  defp valid_branch_selection?(%{"repository" => repository, "branch" => branch} = selection)
+       when map_size(selection) == 2 do
+    valid_path?(repository) and valid_string?(branch) and OperatorBranchCatalog.valid_target?(branch)
+  end
+
+  defp valid_branch_selection?(_selection), do: false
 
   defp valid_created_at?(value) when is_binary(value) do
     String.ends_with?(value, "Z") and match?({:ok, _date_time, 0}, DateTime.from_iso8601(value))

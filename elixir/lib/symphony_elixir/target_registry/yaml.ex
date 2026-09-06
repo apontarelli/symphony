@@ -498,7 +498,7 @@ defmodule SymphonyElixir.TargetRegistry.Yaml do
        "external_side_effects",
        "scheduling"
      ]},
-    {["targets", :dynamic, "repo"], ["path", "manifest", "expected_repository"]},
+    {["targets", :dynamic, "repo"], ["path", "manifest", "branch", "expected_repository"]},
     {["targets", :dynamic, "worktree"], ["root", "strategy", "hooks"]},
     {["targets", :dynamic, "worktree", "hooks"], ["after_create", "before_run", "after_run", "before_remove", "timeout_ms"]},
     {["targets", :dynamic, "linear"], ["connection", "scope", "active_states", "terminal_states", "required_labels"]},

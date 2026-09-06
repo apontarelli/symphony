@@ -123,6 +123,57 @@ defmodule SymphonyElixir.WorkflowModuleRegistryTest do
     assert get_in(config, ["workflow_modules", "product_visual_review", "route_policy"]) == "auto"
   end
 
+  test "workspace module clone hook checks out the selected branch" do
+    root = Path.join(System.tmp_dir!(), "symphony-generated-hook-#{System.unique_integer([:positive])}")
+    source = Path.join(root, "source")
+    destination = Path.join(root, "destination")
+    git_config = Path.join(root, "gitconfig")
+    File.mkdir_p!(source)
+    File.mkdir_p!(destination)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    {_, 0} = System.cmd("git", ["init", "-b", "main", source], stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["-C", source, "config", "user.name", "Symphony Test"], stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["-C", source, "config", "user.email", "symphony@example.test"], stderr_to_stdout: true)
+    File.write!(Path.join(source, "README.md"), "main\n")
+    {_, 0} = System.cmd("git", ["-C", source, "add", "README.md"], stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["-C", source, "commit", "-m", "main"], stderr_to_stdout: true)
+    main_head = git_revision!(source, ["main"])
+
+    {_, 0} = System.cmd("git", ["-C", source, "switch", "-c", "release/2026"], stderr_to_stdout: true)
+    File.write!(Path.join(source, "README.md"), "release\n")
+    {_, 0} = System.cmd("git", ["-C", source, "commit", "-am", "release"], stderr_to_stdout: true)
+    release_head = git_revision!(source, ["release/2026"])
+
+    manifest = %{
+      "project" => %{"repository" => "https://github.com/example/repo"},
+      "vcs" => %{"default_branch" => "release/2026"}
+    }
+
+    assert {:ok, config} = ModuleRegistry.module_config("workspace", 0, manifest)
+    hook = config["hooks"]["after_create"]
+    assert hook =~ "--branch 'release/2026'"
+
+    File.write!(git_config, "[url \"#{source}\"]\ninsteadOf = https://github.com/example/repo\n")
+
+    assert {_, 0} =
+             System.cmd(
+               "sh",
+               ["-lc", hook],
+               cd: destination,
+               env: [{"GIT_CONFIG_GLOBAL", git_config}, {"GIT_CONFIG_NOSYSTEM", "1"}],
+               stderr_to_stdout: true
+             )
+
+    assert git_revision!(destination, ["HEAD"]) == release_head
+    refute git_revision!(destination, ["HEAD"]) == main_head
+  end
+
+  defp git_revision!(directory, args) do
+    {output, 0} = System.cmd("git", ["-C", directory, "rev-parse" | args], stderr_to_stdout: true)
+    String.trim(output)
+  end
+
   test "loaded workflows carry registry-backed prompt metadata" do
     assert {:ok, workflow} = Workflow.current()
 

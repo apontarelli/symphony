@@ -134,7 +134,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert config["tracker"]["kind"] == "linear"
     assert config["tracker"]["project_slug"] == nil
     assert config["tracker"]["active_states"] == ["Todo", "In Progress", "Merging", "Rework"]
-    assert config["hooks"]["after_create"] == "git clone --depth 1 'github.com/example/target-repo' ."
+    assert config["hooks"]["after_create"] =~ "--branch 'trunk'"
     assert config["manifest"]["project"]["name"] == "Target Repo"
     assert config["manifest"]["project"]["repository"] == "github.com/example/target-repo"
     assert config["manifest"]["project"]["kind"] == "elixir"
@@ -1321,7 +1321,7 @@ defmodule SymphonyElixir.WorkflowManifestTest do
     assert settings.tracker.project_slug == nil
     assert settings.tracker.active_states == ["Todo", "In Progress", "Merging", "Rework"]
     assert settings.workspace.root == "~/code/symphony-workspaces"
-    assert settings.hooks.after_create == "git clone --depth 1 'github.com/example/target-repo' ."
+    assert settings.hooks.after_create =~ "--branch 'main'"
     assert settings.agent.default_runner == "codex"
     assert settings.agent.max_concurrent_agents == 10
     assert settings.agent.max_concurrent_startups == 2

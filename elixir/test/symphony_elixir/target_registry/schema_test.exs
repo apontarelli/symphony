@@ -736,6 +736,34 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
     assert configured["worktree"]["hooks"] == hooks
   end
 
+  test "optional repository branch persists and accepts valid Git refs" do
+    target = put_in(valid_target(), ["repo", "branch"], "release/2026")
+
+    assert {:ok, %Snapshot{targets: %{"main" => %Target{valid?: true, configured: configured}}}} =
+             Schema.validate(target_document(target), home: "/tmp/schema-home")
+
+    assert configured["repo"]["branch"] == "release/2026"
+  end
+
+  test "repository branch accepts nil or omission and rejects unsafe values" do
+    for branch <- [nil, "HEAD", "@", "-release", "release..next", "release\nnext", 42] do
+      target =
+        if is_nil(branch),
+          do: update_in(valid_target(), ["repo"], &Map.delete(&1, "branch")),
+          else: put_in(valid_target(), ["repo", "branch"], branch)
+
+      path = "$.targets.main.repo.branch"
+      code = if is_binary(branch), do: :invalid_value, else: :invalid_type
+
+      if is_nil(branch) do
+        assert {:ok, %Snapshot{targets: %{"main" => %Target{valid?: true}}}} =
+                 Schema.validate(target_document(target), home: "/tmp/schema-home")
+      else
+        assert_target_diagnostic(target_document(target), path, code)
+      end
+    end
+  end
+
   test "repository, worktree, Linear, and runner fields enforce local types and enums" do
     cases = [
       {["repo", "path"], 1, :invalid_type},

@@ -1608,6 +1608,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
       {["command", "display_name"], "Other"},
       {["registry_path"], "/tmp/other/targets.yml"},
       {["expected_generation"], generation("other original")},
+      {["branch_selection", "branch"], "release"},
       {["source_hashes", "/tmp/import.yml"], generation("other source")}
     ]
 
@@ -1823,8 +1824,8 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
     duplicate =
       String.replace(
         valid_bytes,
-        ~s({"envelope_version":1),
-        ~s({"envelope_version":1,"envelope_version":1),
+        ~s({"envelope_version":2),
+        ~s({"envelope_version":2,"envelope_version":2),
         global: false
       )
 
@@ -1899,6 +1900,8 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
       plan_fields() |> Map.delete("action") |> Map.put("planAction", "add"),
       Map.put(plan_fields(), "action", "unknown"),
       Map.put(plan_fields(), "target_id", "../main"),
+      Map.put(plan_fields(), "branch_selection", "main"),
+      Map.put(plan_fields(), "envelope_version", 1),
       Map.put(plan_fields(), "registry_path", "relative/targets.yml"),
       Map.put(plan_fields(), "expected_generation", String.duplicate("a", 64)),
       Map.put(plan_fields(), "source_hashes", []),
@@ -2697,9 +2700,10 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStoreTest do
 
   defp plan_fields do
     %{
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "action" => "add",
       "target_id" => "main",
+      "branch_selection" => %{"repository" => "/tmp/repo", "branch" => "main"},
       "command" => %{
         "checks" => [
           "mix test",

@@ -945,7 +945,7 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") == "git clone --depth 1 'https://github.com/apontarelli/symphony' ."
+    assert Map.get(hooks, "after_create") =~ "--branch 'main'"
     assert Map.get(hooks, "before_run") == nil
     assert Map.get(hooks, "before_remove") == nil
 

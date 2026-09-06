@@ -5,6 +5,7 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
 
   alias Plug.Conn
   alias SymphonyElixir.{LocalConfig, OperatorInterface, PathSafety}
+  alias SymphonyElixir.TargetRegistry.Yaml
 
   @endpoint SymphonyElixirWeb.Endpoint
 
@@ -300,6 +301,26 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
     assert :ok = GenServer.call(context.scheduler, :release)
   end
 
+  test "an expired queued inspection does not cancel the active branch scan", context do
+    :ok = GenServer.call(context.scheduler, :block)
+    started = authorized_post(context, %{"action" => "branches", "path" => context.manual}) |> json_response(202)
+    expires_at = System.monotonic_time(:millisecond) - 1
+
+    assert {:error, %{error: %{code: "operator_interface_unavailable"}}} =
+             GenServer.call(
+               context.interface,
+               {:repositories, context.credential, %{"action" => "inspect", "path" => context.manual}, context.scheduler, expires_at}
+             )
+
+    active =
+      authorized_post(context, %{"action" => "poll", "scan_id" => started["scan_id"]})
+      |> json_response(200)
+
+    assert active["status"] == "running"
+    authorized_post(context, %{"action" => "cancel", "scan_id" => started["scan_id"]}) |> json_response(200)
+    assert :ok = GenServer.call(context.scheduler, :release)
+  end
+
   test "a request that expires during authentication cannot cancel a scan", context do
     :ok = GenServer.call(context.scheduler, :block)
     started = authorized_post(context, %{"action" => "scan", "path" => context.repositories}) |> json_response(202)
@@ -355,6 +376,122 @@ defmodule SymphonyElixir.OperatorRepositoryApiTest do
 
     assert manual["status"] == "completed"
     assert manual["result"]["candidates"] == [%{"path" => canonical!(context.manual), "kind" => "directory"}]
+  end
+
+  test "branch catalogs refresh on the selected host and retain deleted targets", context do
+    repo = context.manual
+
+    registry = %{
+      "version" => 1,
+      "host" => %{
+        "id" => "branch-host",
+        "state_root" => Path.join(context.root, "state"),
+        "polling" => %{"interval_ms" => 30_000, "max_concurrent_target_polls" => 1},
+        "capacity" => %{"max_concurrent_agents" => 4, "max_concurrent_startups" => 2, "max_concurrent_reviewers" => 1},
+        "scheduling" => %{"algorithm" => "weighted_deficit_round_robin", "max_credit_rounds" => 4},
+        "tracker_connections" => %{
+          "linear-main" => %{"kind" => "linear", "endpoint" => "https://api.linear.app/graphql", "api_key" => "$LINEAR_API_KEY"}
+        },
+        "runners" => %{
+          "codex" => %{"kind" => "codex_app_server", "command" => ["codex", "app-server"], "max_concurrent_agents" => 4, "max_concurrent_startups" => 2}
+        }
+      },
+      "targets" => %{}
+    }
+
+    File.write!(
+      LocalConfig.target_registry_path(config_root: context.config_root),
+      Yaml.encode(registry)
+    )
+
+    for args <- [
+          ["init", "--initial-branch=main"],
+          ["remote", "add", "origin", "https://github.com/example/api-manual.git"],
+          ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial"],
+          ["branch", "topic"]
+        ] do
+      {output, status} = System.cmd("git", args, cd: repo, stderr_to_stdout: true)
+      assert status == 0, output
+    end
+
+    File.write!(Path.join(repo, "README.md"), "Repository documentation\n")
+
+    File.write!(Path.join(repo, "symphony.yml"), """
+    version: 1
+    project:
+      slug: api-manual
+      repository: https://github.com/example/api-manual
+    docs:
+      entrypoints:
+        - README.md
+    vcs:
+      mode: git
+      default_branch: main
+    delivery:
+      pr_target: main
+    """)
+
+    request = %{"action" => "branches", "path" => repo, "configured_target" => "topic"}
+    first = authorized_post(context, request) |> json_response(202) |> then(&await_scan(context, &1["scan_id"]))
+    assert first["status"] == "completed"
+    assert first["result"]["repository"] == canonical!(repo)
+    assert first["result"]["apply_allowed"]
+    assert Enum.any?(first["result"]["choices"], &(&1["value"] == "topic" and &1["configured"]))
+
+    inherited =
+      authorized_post(context, %{"action" => "branches", "path" => repo})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    assert inherited["result"]["selected"] == "main"
+    assert inherited["result"]["apply_allowed"]
+
+    changed =
+      authorized_post(context, %{"action" => "branches", "path" => context.repositories})
+      |> json_response(202)
+      |> then(&await_scan(context, &1["scan_id"]))
+
+    refute changed["result"]["apply_allowed"]
+
+    old_after_path_change =
+      authorized_post(context, %{"action" => "poll", "scan_id" => first["scan_id"]})
+      |> json_response(200)
+
+    assert old_after_path_change["result"]["reason"] == "repository_selection_changed"
+
+    {_, 0} = System.cmd("git", ["branch", "-D", "topic"], cd: repo)
+    second = authorized_post(context, request) |> json_response(202) |> then(&await_scan(context, &1["scan_id"]))
+    refute second["scan_id"] == first["scan_id"]
+    refute second["result"]["apply_allowed"]
+    assert Enum.find(second["result"]["choices"], &(&1["value"] == "topic"))["status"] == "stale"
+    old = authorized_post(context, %{"action" => "poll", "scan_id" => first["scan_id"]}) |> json_response(200)
+    refute old["result"]["apply_allowed"]
+
+    cancelled =
+      authorized_post(context, %{"action" => "cancel", "scan_id" => second["scan_id"]})
+      |> json_response(200)
+
+    assert cancelled["status"] == "cancelled"
+    refute cancelled["result"]["apply_allowed"]
+  end
+
+  test "branch discovery rejects client host authority and requires authentication", context do
+    request = %{"action" => "branches", "path" => context.manual}
+    assert post(build_conn(), "/api/v1/operator/repositories", request).status == 401
+    assert authorized_post(context, Map.put(request, "command_runner", "injected")).status == 400
+    assert authorized_post(context, Map.put(request, "path", "relative")).status == 400
+  end
+
+  test "changing repository cancels the previous branch discovery", context do
+    :ok = GenServer.call(context.scheduler, :block)
+    old = authorized_post(context, %{"action" => "branches", "path" => context.manual}) |> json_response(202)
+    new = authorized_post(context, %{"action" => "branches", "path" => context.repositories}) |> json_response(202)
+    previous = authorized_post(context, %{"action" => "poll", "scan_id" => old["scan_id"]}) |> json_response(200)
+    assert previous["status"] == "cancelled"
+    refute previous["result"]["apply_allowed"]
+    assert new["scan_id"] != old["scan_id"]
+    authorized_post(context, %{"action" => "cancel", "scan_id" => new["scan_id"]}) |> json_response(200)
+    :ok = GenServer.call(context.scheduler, :release)
   end
 
   defp authorized_post(context, body) do

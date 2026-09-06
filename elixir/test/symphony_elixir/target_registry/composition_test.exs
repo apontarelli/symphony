@@ -202,6 +202,12 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
       |> mutate_resolution(fault)
     end
 
+    defp inject_compile_fault(
+           %{config: %{"manifest" => %{"vcs" => %{"default_branch" => "release/2026"}}}} = compiled,
+           "branch_changes_delivery"
+         ),
+         do: put_in(compiled, [:config, "manifest", "delivery", "pr_target"], "release/2026")
+
     defp inject_compile_fault(compiled, _fault), do: compiled
 
     defp mutate_resolution(compiled, "resolution_metadata_a") do
@@ -321,6 +327,45 @@ defmodule SymphonyElixir.TargetRegistry.CompositionTest do
     assert get_in(composed.effective_policy, ["budget_limits", "per_run", "max_total_tokens"]) == 1_000
     assert get_in(composed.effective_policy, ["external_side_effect_gates", "merge"]) == "manual_approval"
     assert composed.policy_hash =~ ~r/^sha256:[0-9a-f]{64}$/
+  end
+
+  @tag :tmp_dir
+  test "overrides only effective manifest branch while preserving committed manifest and delivery target", %{paths: paths} do
+    configured =
+      target("alpha", paths.symphony, paths.worktree, %{
+        configured: %{"repo" => %{"branch" => "release/2026"}}
+      })
+
+    composed = Composition.compose(snapshot(%{"alpha" => configured})).targets["alpha"]
+
+    assert composed.valid?
+    assert get_in(composed.repo_manifest, ["vcs", "default_branch"]) == "main"
+    assert get_in(composed.repo_manifest, ["delivery", "pr_target"]) == "main"
+
+    effective_manifest = get_in(composed.effective_policy, ["repo_policy", "manifest"])
+    assert effective_manifest["vcs"]["default_branch"] == "release/2026"
+    assert effective_manifest["delivery"]["pr_target"] == "main"
+    refute effective_manifest == composed.repo_manifest
+    assert composed.policy_hash == elem(Composition.canonical_hash(composed.effective_policy), 1)
+  end
+
+  @tag :tmp_dir
+  test "rejects an invalid branch in a prebuilt target snapshot", %{paths: paths} do
+    configured = target("alpha", paths.symphony, paths.worktree, %{configured: %{"repo" => %{"branch" => "HEAD"}}})
+    composed = Composition.compose(snapshot(%{"alpha" => configured})).targets["alpha"]
+
+    assert %Target{valid?: false, effective_state: :paused, effective_policy: nil} = composed
+    assert Enum.any?(composed.diagnostics, &(&1.path == "$.targets.alpha.repo.branch"))
+  end
+
+  @tag :tmp_dir
+  test "quarantines branch compilation that changes the delivery target", %{paths: paths} do
+    write_fault_manifest!(paths.symphony, "branch_changes_delivery")
+    configured = target("alpha", paths.symphony, paths.worktree, %{configured: %{"repo" => %{"branch" => "release/2026"}}})
+    composed = Composition.compose(snapshot(%{"alpha" => configured}), manifest: LocalManifestAdapter).targets["alpha"]
+
+    assert %Target{valid?: false, effective_state: :paused, effective_policy: nil} = composed
+    assert Enum.any?(composed.diagnostics, &(&1.path == "$.targets.alpha.repo.branch"))
   end
 
   @tag :tmp_dir

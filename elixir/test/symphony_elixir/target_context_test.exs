@@ -105,6 +105,48 @@ defmodule SymphonyElixir.TargetContextTest do
     assert context.tracker_connection["policy"]["api_key"] == "credential"
   end
 
+  test "pins a persisted repository branch in the effective runtime policy only" do
+    document =
+      registry_document()
+      |> put_in(["targets", "alpha", "repo", "branch"], "release/2026")
+      |> put_in(["targets", "alpha", "repo", "expected_repository"], "https://github.com/example/symphony-fixture")
+
+    assert {:ok, structured} = Schema.validate(document, home: "/tmp")
+
+    composed = Composition.compose(structured)
+
+    snapshot = %{
+      composed
+      | path: "/tmp/registry/targets.yml",
+        source_hash: hash("c"),
+        generation: hash("c")
+    }
+
+    target = snapshot.targets["alpha"]
+    assert target.valid?
+    assert target.repo_manifest["vcs"]["default_branch"] == "main"
+    assert target.effective_policy["repo_policy"]["manifest"]["vcs"]["default_branch"] == "release/2026"
+
+    assert {:ok, context} = TargetContext.pin_from_registry(snapshot, "alpha")
+    assert context.repo_policy["manifest"]["vcs"]["default_branch"] == "release/2026"
+    assert context.repo_manifest_hash == canonical_hash(target.repo_manifest)
+  end
+
+  test "rejects an effective branch without a persisted target override" do
+    base = valid_target()
+
+    forged_policy =
+      put_in(
+        base.effective_policy,
+        ["repo_policy", "manifest", "vcs", "default_branch"],
+        "release/2026"
+      )
+
+    forged = %{base | effective_policy: forged_policy, policy_hash: canonical_hash(forged_policy)}
+
+    assert {:error, :repo_manifest_mismatch} = TargetContext.from_registry(valid_snapshot(forged), "alpha")
+  end
+
   test "pins validated tracker references without resolving credentials" do
     assert {:ok, %TargetContext{} = context} =
              TargetContext.pin_from_registry(valid_snapshot(), "alpha")

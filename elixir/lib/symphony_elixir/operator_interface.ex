@@ -13,15 +13,19 @@ defmodule SymphonyElixir.OperatorInterface do
   alias SymphonyElixir.{
     HostScheduler,
     LocalConfig,
+    OperatorBranchCatalog,
     OperatorMutation,
     OperatorRepositoryBrowser,
     OperatorRepositoryInspection,
     OperatorRepositorySources,
     OperatorSession,
-    OperatorSnapshot
+    OperatorSnapshot,
+    PathSafety,
+    ProcessSupervisor
   }
 
   alias SymphonyElixir.ReviewRecords.Redaction
+  alias SymphonyElixir.TargetRegistry.{FileStore, Yaml}
 
   @interface_version 1
   @schema_version 1
@@ -67,7 +71,9 @@ defmodule SymphonyElixir.OperatorInterface do
                   pending: nil,
                   repository_jobs: %{},
                   repository_order: [],
-                  repository_active: nil
+                  repository_active: nil,
+                  repository_selection: nil,
+                  repository_selection_scan_id: nil
                 ]
   end
 
@@ -314,7 +320,8 @@ defmodule SymphonyElixir.OperatorInterface do
          opts <- Keyword.merge(opts, host_id: state.host_id, config_root: state.config_root),
          :ok <- current_generation(%{request: request, opts: opts}),
          {:ok, prepared} <- safely_preview(request["command"], opts),
-         :ok <- same_generation(request["registry_generation"], prepared.registry_generation) do
+         :ok <- same_generation(request["registry_generation"], prepared.registry_generation),
+         :ok <- validate_branch_catalog(state, request, prepared) do
       issue_preview(state, request, prepared, opts)
     else
       {:error, reason} -> reject_reply(state, reason)
@@ -421,21 +428,25 @@ defmodule SymphonyElixir.OperatorInterface do
   end
 
   defp handle_repository_request(state, request, scheduler, deadline) do
-    case normalize_repository_request(request) do
-      {:ok, :inspect, normalized} ->
-        inspect_repository(state, normalized, scheduler, deadline)
+    if repository_request_expired?(deadline) do
+      {{:error, repository_error(:operator_interface_unavailable)}, state}
+    else
+      case normalize_repository_request(request) do
+        {:ok, :inspect, normalized} ->
+          inspect_repository(state, normalized, scheduler, deadline)
 
-      {:ok, :start, normalized} ->
-        start_repository_job(state, normalized, scheduler)
+        {:ok, :start, normalized} ->
+          start_repository_job(state, normalized, scheduler)
 
-      {:ok, :poll, scan_id, after_cursor} ->
-        {repository_poll(state, scan_id, after_cursor), state}
+        {:ok, :poll, scan_id, after_cursor} ->
+          {repository_poll(state, scan_id, after_cursor), state}
 
-      {:ok, :cancel, scan_id} ->
-        cancel_repository_request(state, scan_id)
+        {:ok, :cancel, scan_id} ->
+          cancel_repository_request(state, scan_id)
 
-      {:error, reason} ->
-        {{:error, repository_error(reason)}, state}
+        {:error, reason} ->
+          {{:error, repository_error(reason)}, state}
+      end
     end
   end
 
@@ -445,6 +456,9 @@ defmodule SymphonyElixir.OperatorInterface do
     if remaining == 0 do
       {{:error, repository_error(:operator_interface_unavailable)}, state}
     else
+      state = cancel_active_repository(state)
+      state = select_repository(state, request["path"])
+      state = %{state | repository_selection_scan_id: nil}
       task = Task.async(fn -> inspect_host_repository(request, scheduler, state.config_root) end)
 
       outcome =
@@ -473,21 +487,51 @@ defmodule SymphonyElixir.OperatorInterface do
   end
 
   defp inspect_host_repository(request, scheduler, config_root) do
-    with {:ok, registry_path} <- OperatorRepositorySources.registry_path(scheduler, config_root: config_root) do
+    with {:ok, registry_path} <- OperatorRepositorySources.registry_path(scheduler, config_root: config_root),
+         {:ok, manifest_opts} <- target_manifest_opts(request, registry_path) do
       OperatorRepositoryInspection.inspect(
         request["path"],
-        registry_path: registry_path,
-        target_id: Map.get(request, "target_id")
+        [registry_path: registry_path, target_id: Map.get(request, "target_id")] ++ manifest_opts
       )
     end
   end
+
+  defp target_manifest_opts(request, registry_path) do
+    case persisted_target_repo(registry_path, Map.get(request, "target_id")) do
+      nil ->
+        {:ok, []}
+
+      repo ->
+        manifest = Map.get(repo, "manifest", "symphony.yml")
+
+        if safe_manifest_name?(manifest),
+          do: {:ok, [manifest: manifest]},
+          else: {:error, :repository_manifest_invalid}
+    end
+  end
+
+  defp safe_manifest_name?(manifest) when is_binary(manifest) do
+    String.valid?(manifest) and String.trim(manifest) != "" and Path.type(manifest) == :relative and
+      Enum.all?(Path.split(manifest), &(&1 not in [".", ".."]))
+  end
+
+  defp safe_manifest_name?(_manifest), do: false
 
   defp repository_inspection_reply({:ok, result}), do: {:ok, result}
   defp repository_inspection_reply({:error, reason}), do: {:error, repository_error(reason)}
 
   defp start_repository_job(state, request, scheduler) do
     state = cancel_active_repository(state)
+    state = select_repository(state, Map.get(request, "path"))
     scan_id = random_id("scan-")
+
+    state =
+      if request["action"] == "branches" do
+        %{state | repository_selection_scan_id: scan_id}
+      else
+        %{state | repository_selection_scan_id: nil}
+      end
+
     parent = self()
 
     {pid, reference} =
@@ -502,6 +546,7 @@ defmodule SymphonyElixir.OperatorInterface do
 
     job = %{
       scan_id: scan_id,
+      request: request,
       action: request["action"],
       status: "running",
       pid: pid,
@@ -522,26 +567,30 @@ defmodule SymphonyElixir.OperatorInterface do
   defp run_repository_job(parent, scan_id, request, scheduler, config_root) do
     outcome =
       try do
-        case OperatorRepositorySources.load(scheduler, config_root: config_root) do
-          {:ok, context} ->
-            if is_integer(context[:timeout_ms]) and context[:timeout_ms] > 0 do
-              send(parent, {:repository_timeout_config, scan_id, context[:timeout_ms]})
-            end
-
-            emit = fn event ->
-              send(parent, {:repository_event, scan_id, event})
-
-              receive do
-                :cancel -> :cancel
-              after
-                0 -> :ok
+        if request["action"] == "branches" do
+          run_branch_catalog_job(parent, scan_id, request, scheduler, config_root)
+        else
+          case OperatorRepositorySources.load(scheduler, config_root: config_root) do
+            {:ok, context} ->
+              if is_integer(context[:timeout_ms]) and context[:timeout_ms] > 0 do
+                send(parent, {:repository_timeout_config, scan_id, context[:timeout_ms]})
               end
-            end
 
-            {:ok, OperatorRepositoryBrowser.run(request, context, emit)}
+              emit = fn event ->
+                send(parent, {:repository_event, scan_id, event})
 
-          {:error, reason} ->
-            {:error, reason}
+                receive do
+                  :cancel -> :cancel
+                after
+                  0 -> :ok
+                end
+              end
+
+              {:ok, OperatorRepositoryBrowser.run(request, context, emit)}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
         end
       rescue
         _exception -> {:error, :repository_discovery_failed}
@@ -552,9 +601,103 @@ defmodule SymphonyElixir.OperatorInterface do
     send(parent, {:repository_complete, scan_id, outcome})
   end
 
+  defp run_branch_catalog_job(_parent, _scan_id, request, scheduler, config_root) do
+    case inspect_host_repository(request, scheduler, config_root) do
+      %{state: "ready"} = inspection ->
+        cancelled? = fn ->
+          receive do
+            :cancel -> true
+          after
+            0 -> false
+          end
+        end
+
+        command_runner = fn argv, timeout_ms, opts ->
+          ProcessSupervisor.run(argv, timeout_ms, opts)
+        end
+
+        {configured_target, explicit?} =
+          branch_catalog_target(request, inspection, scheduler, config_root)
+
+        catalog =
+          OperatorBranchCatalog.discover(
+            inspection,
+            configured_target: configured_target,
+            allow_typed_fallback: explicit?,
+            timeout_ms: @repository_hard_timeout_ms,
+            command_runner: command_runner,
+            cancelled?: cancelled?
+          )
+
+        {:ok, if(explicit?, do: catalog, else: deny_implicit_typed_fallback(catalog))}
+
+      inspection when is_map(inspection) ->
+        {configured_target, _explicit?} =
+          branch_catalog_target(request, inspection, scheduler, config_root)
+
+        {:ok, unavailable_branch_catalog(inspection, configured_target, "repository_not_ready")}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp branch_catalog_target(request, inspection, scheduler, config_root) do
+    case Map.get(request, "configured_target") do
+      target when is_binary(target) ->
+        {target, true}
+
+      _missing ->
+        repo = persisted_target_repo_for(scheduler, config_root, Map.get(request, "target_id"))
+
+        value = repo && Map.get(repo, "branch")
+        branch = if OperatorBranchCatalog.valid_target?(value), do: value
+
+        {branch || map_value(inspection, :default_branch), false}
+    end
+  end
+
+  defp deny_implicit_typed_fallback(catalog) when is_map(catalog) do
+    if Map.get(catalog, :typed_fallback) == true do
+      %{catalog | apply_allowed: false}
+    else
+      catalog
+    end
+  end
+
+  defp persisted_target_repo_for(scheduler, config_root, target_id) do
+    with target_id when is_binary(target_id) <- target_id,
+         {:ok, registry_path} <- OperatorRepositorySources.registry_path(scheduler, config_root: config_root) do
+      persisted_target_repo(registry_path, target_id)
+    else
+      _missing -> nil
+    end
+  end
+
+  defp persisted_target_repo(registry_path, target_id) when is_binary(registry_path) and is_binary(target_id) do
+    with {:ok, %{bytes: bytes}} <- FileStore.read(registry_path),
+         {:ok, document} when is_map(document) <- Yaml.decode(bytes),
+         target when is_map(target) <- get_in(document, ["targets", target_id]),
+         repo when is_map(repo) <- Map.get(target, "repo") do
+      repo
+    else
+      _missing -> nil
+    end
+  end
+
+  defp persisted_target_repo(_registry_path, _target_id), do: nil
+
+  defp map_value(map, key) when is_map(map), do: Map.get(map, key, Map.get(map, Atom.to_string(key)))
+
   defp normalize_repository_request(%{"action" => "inspect"} = request) do
     if valid_inspect_request?(request),
       do: {:ok, :inspect, request},
+      else: {:error, :invalid_repository_request}
+  end
+
+  defp normalize_repository_request(%{"action" => "branches"} = request) do
+    if valid_branch_request?(request),
+      do: {:ok, :start, request},
       else: {:error, :invalid_repository_request}
   end
 
@@ -595,6 +738,20 @@ defmodule SymphonyElixir.OperatorInterface do
   end
 
   defp valid_start_request?(_request), do: false
+
+  defp valid_branch_request?(%{"action" => "branches"} = request) do
+    Enum.all?(Map.keys(request), &(&1 in ["action", "path", "target_id", "configured_target"])) and
+      valid_absolute_repository_path?(Map.get(request, "path")) and
+      valid_optional_target_id?(Map.get(request, "target_id")) and
+      valid_optional_configured_target?(Map.get(request, "configured_target"))
+  end
+
+  defp valid_branch_request?(_request), do: false
+
+  defp valid_optional_configured_target?(nil), do: true
+
+  defp valid_optional_configured_target?(value),
+    do: is_binary(value) and String.trim(value) != "" and OperatorBranchCatalog.valid_target?(value)
 
   defp normalize_repository_poll(request) do
     with true <- Enum.all?(Map.keys(request), &(&1 in ["action", "scan_id", "after"])),
@@ -664,18 +821,21 @@ defmodule SymphonyElixir.OperatorInterface do
 
   defp cancel_repository_job(state, scan_id, reason) do
     case Map.get(state.repository_jobs, scan_id) do
+      %{action: "branches", status: status, request: _request} = job when status != "running" ->
+        result = repository_cancel_result(job, reason)
+
+        put_repository_job(
+          %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)},
+          %{job | status: "cancelled", result: result}
+        )
+
       %{status: "running", pid: pid, timer: timer} = job ->
         send(pid, :cancel)
         Process.exit(pid, :kill)
         Process.cancel_timer(timer)
         Process.demonitor(job.reference, [:flush])
 
-        result = %{
-          status: "cancelled",
-          candidates: Enum.reverse(job.candidates),
-          errors: [%{code: Atom.to_string(reason)}],
-          visited: nil
-        }
+        result = repository_cancel_result(job, reason)
 
         put_repository_job(
           %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)},
@@ -732,11 +892,12 @@ defmodule SymphonyElixir.OperatorInterface do
       %{status: "running", reference: reference} = job ->
         Process.cancel_timer(job.timer)
         Process.demonitor(reference, [:flush])
-        result = repository_result(outcome)
+        result = repository_result(outcome, job)
+        job_status = if job.action == "branches", do: "completed", else: result.status
 
         put_repository_job(
           %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)},
-          %{job | status: result.status, pid: nil, reference: nil, timer: nil, result: result}
+          %{job | status: job_status, pid: nil, reference: nil, timer: nil, result: result}
         )
 
       _job ->
@@ -770,12 +931,7 @@ defmodule SymphonyElixir.OperatorInterface do
             pid: nil,
             reference: nil,
             timer: nil,
-            result: %{
-              status: "timeout",
-              candidates: Enum.reverse(job.candidates),
-              errors: [%{code: "timeout"}],
-              visited: nil
-            }
+            result: repository_timeout_result(job)
         }
 
         put_repository_job(state, timed_out)
@@ -843,6 +999,93 @@ defmodule SymphonyElixir.OperatorInterface do
   defp public_repository_error(error) when is_binary(error), do: %{code: error}
   defp public_repository_error(_error), do: %{code: "repository_discovery_failed"}
 
+  defp repository_cancel_result(%{action: "branches", request: request}, reason) do
+    unavailable_branch_catalog(
+      %{path: Map.get(request, "path")},
+      Map.get(request, "configured_target"),
+      Atom.to_string(reason)
+    )
+  end
+
+  defp repository_cancel_result(job, reason) do
+    %{
+      status: "cancelled",
+      candidates: Enum.reverse(job.candidates),
+      errors: [%{code: Atom.to_string(reason)}],
+      visited: nil
+    }
+  end
+
+  defp repository_timeout_result(%{action: "branches", request: request}) do
+    unavailable_branch_catalog(
+      %{path: Map.get(request, "path")},
+      Map.get(request, "configured_target"),
+      "timeout"
+    )
+  end
+
+  defp repository_timeout_result(job) do
+    %{
+      status: "timeout",
+      candidates: Enum.reverse(job.candidates),
+      errors: [%{code: "timeout"}],
+      visited: nil
+    }
+  end
+
+  defp repository_result({:ok, result}, %{action: "branches", request: request}) when is_map(result) do
+    branch_catalog_result(result, request)
+  end
+
+  defp repository_result({:error, reason}, %{action: "branches", request: request}) do
+    unavailable_branch_catalog(
+      %{path: Map.get(request, "path")},
+      Map.get(request, "configured_target"),
+      branch_failure_reason(reason)
+    )
+  end
+
+  defp repository_result(outcome, _job), do: repository_result(outcome)
+
+  defp branch_catalog_result(result, request) do
+    result = safe_projection(result)
+    repository = Map.get(result, :repository)
+    requested_path = Map.get(request, "path")
+
+    if is_binary(repository) and same_repository_path?(repository, requested_path) do
+      result
+    else
+      unavailable_branch_catalog(
+        %{path: requested_path, vcs: Map.get(result, :vcs)},
+        Map.get(request, "configured_target"),
+        "repository_selection_mismatch"
+      )
+    end
+  end
+
+  defp unavailable_branch_catalog(inspection, configured_target, fallback_reason) do
+    repository =
+      case Map.get(inspection, :path) do
+        path when is_binary(path) -> canonical_repository_path(path)
+        value -> value
+      end
+
+    %{
+      repository: repository,
+      vcs: Map.get(inspection, :vcs),
+      status: "unavailable",
+      reason: Map.get(inspection, :reason) || fallback_reason,
+      choices: [],
+      selected: configured_target,
+      apply_allowed: false,
+      typed_fallback: false
+    }
+  end
+
+  defp branch_failure_reason(reason) when is_binary(reason), do: reason
+  defp branch_failure_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp branch_failure_reason(_reason), do: "repository_discovery_failed"
+
   defp repository_result({:ok, result}) when is_map(result) do
     status = repository_status(Map.fetch!(result, :status))
     candidates = Map.fetch!(result, :candidates)
@@ -898,6 +1141,7 @@ defmodule SymphonyElixir.OperatorInterface do
       end
 
     terminal? = job.status != "running"
+    response_result = if(terminal?, do: repository_response_result(state, job), else: nil)
 
     %{
       interface_version: @interface_version,
@@ -910,8 +1154,49 @@ defmodule SymphonyElixir.OperatorInterface do
       next_cursor: next_cursor,
       latest_cursor: job.cursor,
       dropped_events: job.dropped_events,
-      result: if(terminal?, do: job.result, else: nil)
+      result: response_result
     }
+  end
+
+  defp repository_response_result(
+         state,
+         %{action: "branches", scan_id: scan_id, request: request, result: result}
+       )
+       when is_map(result) do
+    if state.repository_selection_scan_id == scan_id and
+         repository_selection_matches?(state.repository_selection, Map.get(request, "path")) do
+      result
+    else
+      unavailable_branch_catalog(
+        %{path: Map.get(request, "path"), vcs: Map.get(result, :vcs)},
+        Map.get(request, "configured_target"),
+        "repository_selection_changed"
+      )
+    end
+  end
+
+  defp repository_response_result(_state, %{result: result}), do: result
+
+  defp select_repository(state, path) when is_binary(path),
+    do: %{state | repository_selection: canonical_repository_path(path)}
+
+  defp select_repository(state, _path), do: %{state | repository_selection: nil}
+
+  defp repository_selection_matches?(selected, path) when is_binary(selected) and is_binary(path),
+    do: same_repository_path?(selected, path)
+
+  defp repository_selection_matches?(_selected, _path), do: false
+
+  defp same_repository_path?(left, right) when is_binary(left) and is_binary(right),
+    do: canonical_repository_path(left) == canonical_repository_path(right)
+
+  defp same_repository_path?(_left, _right), do: false
+
+  defp canonical_repository_path(path) do
+    case PathSafety.canonicalize(path) do
+      {:ok, canonical} -> canonical
+      {:error, _reason} -> Path.expand(path)
+    end
   end
 
   defp put_repository_job(state, job) do
@@ -1156,7 +1441,7 @@ defmodule SymphonyElixir.OperatorInterface do
     keys = if kind == :confirm, do: ["confirmation_token" | keys], else: keys
 
     cond do
-      Enum.sort(Map.keys(request)) != Enum.sort(keys) -> {:error, :invalid_command_request}
+      Enum.sort(Map.keys(request) -- ["branch_scan_id"]) != Enum.sort(keys) -> {:error, :invalid_command_request}
       request["interface_version"] != @interface_version -> {:error, :incompatible_interface}
       request["host_id"] != state.host_id -> {:error, :host_mismatch}
       not valid_request_payload?(request) -> {:error, :invalid_command_request}
@@ -1169,14 +1454,74 @@ defmodule SymphonyElixir.OperatorInterface do
 
   defp valid_request_payload?(request) do
     is_binary(request["registry_generation"]) and is_map(request["command"]) and
+      valid_branch_scan_field?(request) and
       :erlang.external_size(request) <= 65_536
   end
+
+  defp valid_branch_scan_field?(request) do
+    case Map.fetch(request, "branch_scan_id") do
+      :error -> true
+      {:ok, scan_id} -> valid_branch_scan_id?(scan_id)
+    end
+  end
+
+  defp valid_branch_scan_id?(value), do: is_binary(value) and value != "" and String.valid?(value)
 
   defp mutation_idle(%{pending: nil}), do: :ok
   defp mutation_idle(_state), do: {:error, :mutation_in_progress}
 
   defp same_generation(generation, generation), do: :ok
   defp same_generation(_expected, _observed), do: {:error, :stale_generation}
+
+  defp validate_branch_catalog(_state, request, %{binding: %{branch_selection: nil}}),
+    do: reject_unexpected_branch_scan(request)
+
+  defp validate_branch_catalog(_state, request, %{binding: binding})
+       when is_map(binding) and not is_map_key(binding, :branch_selection),
+       do: reject_unexpected_branch_scan(request)
+
+  defp validate_branch_catalog(state, request, %{binding: %{branch_selection: selection}} = prepared)
+       when is_map(selection) do
+    scan_id = Map.get(request, "branch_scan_id")
+
+    with true <- valid_branch_scan_id?(scan_id),
+         %{action: "branches", status: "completed", result: result} = job when is_map(result) <-
+           Map.get(state.repository_jobs, scan_id) do
+      if state.repository_selection_scan_id == scan_id and
+           branch_catalog_target_matches?(job, prepared) and
+           repository_selection_matches?(state.repository_selection, map_value(selection, :repository)) and
+           branch_catalog_matches?(result, selection),
+         do: :ok,
+         else: {:error, :branch_catalog_stale}
+    else
+      false -> {:error, :branch_scan_required}
+      _missing_or_incomplete -> {:error, :branch_catalog_stale}
+    end
+  end
+
+  defp validate_branch_catalog(_state, _request, _prepared), do: {:error, :branch_catalog_stale}
+
+  defp branch_catalog_target_matches?(%{request: request}, %{command: command}) do
+    case Map.get(request, "target_id") do
+      nil -> Map.get(command, "action") in ["add", "import"]
+      target_id -> target_id == Map.get(command, "target_id")
+    end
+  end
+
+  defp branch_catalog_target_matches?(_job, _prepared), do: false
+
+  defp reject_unexpected_branch_scan(request) do
+    if Map.has_key?(request, "branch_scan_id"), do: {:error, :branch_scan_unexpected}, else: :ok
+  end
+
+  defp branch_catalog_matches?(result, selection) do
+    branch = map_value(selection, :branch)
+
+    OperatorBranchCatalog.valid_target?(branch) and
+      map_value(result, :apply_allowed) == true and
+      same_repository_path?(map_value(result, :repository), map_value(selection, :repository)) and
+      map_value(result, :selected) == branch
+  end
 
   defp safely_preview(command, opts) do
     OperatorMutation.preview(command, opts)
@@ -1239,6 +1584,7 @@ defmodule SymphonyElixir.OperatorInterface do
     with %{deadline: deadline} <- entry,
          true <- deadline > state.clock.(),
          true <- entry.request == Map.delete(request, "confirmation_token"),
+         :ok <- validate_branch_catalog(state, request, entry.prepared),
          :ok <- mutation_idle(state),
          :ok <- current_generation(entry) do
       accept_confirmation(state, entry)
@@ -1341,6 +1687,9 @@ defmodule SymphonyElixir.OperatorInterface do
   defp error_message(:loopback_required), do: "Operator commands require a loopback connection."
   defp error_message(:confirmation_expired), do: "The command preview has expired."
   defp error_message(:stale_generation), do: "The registry generation changed after the snapshot or preview."
+  defp error_message(:branch_scan_required), do: "A current branch discovery scan is required for this repository change."
+  defp error_message(:branch_scan_unexpected), do: "branch_scan_id is only valid when selecting a discovered branch."
+  defp error_message(:branch_catalog_stale), do: "The branch discovery catalog is stale or does not match the selected change."
   defp error_message(:confirmation_mismatch), do: "The confirmation does not match the exact previewed command."
   defp error_message(:invalid_confirmation), do: "The confirmation token is unknown or has already been used."
   defp error_message(_code), do: "The host could not perform the requested operator command."

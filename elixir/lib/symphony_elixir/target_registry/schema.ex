@@ -18,7 +18,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   @connection_keys ~w(kind endpoint api_key)
   @target_keys ~w(display_name state dispatch_mode repo worktree linear runners concurrency budgets checks external_side_effects scheduling)
   @target_map_keys ~w(repo worktree linear runners concurrency budgets checks external_side_effects scheduling)
-  @repo_keys ~w(path manifest expected_repository)
+  @repo_keys ~w(path manifest branch expected_repository)
   @worktree_keys ~w(root strategy hooks)
   @hook_keys ~w(after_create before_run after_run before_remove timeout_ms)
   @linear_keys ~w(connection scope active_states terminal_states required_labels)
@@ -489,6 +489,7 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
     unknown_key_diagnostics(repo, @repo_keys, scope, path) ++
       required_field_diagnostics(repo, ["path"], scope, path) ++
       validate_nonempty_string_field(repo, "path", scope, "#{path}.path") ++
+      validate_optional_branch(repo, scope, "#{path}.branch") ++
       validate_optional_nonempty_string_field(repo, "manifest", scope, "#{path}.manifest") ++
       validate_optional_nonempty_string_field(
         repo,
@@ -499,6 +500,25 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   end
 
   defp validate_repo(_repo, _scope, _path), do: []
+
+  defp validate_optional_branch(repo, scope, path) do
+    case Map.fetch(repo, "branch") do
+      :error ->
+        []
+
+      {:ok, branch} ->
+        cond do
+          not is_binary(branch) ->
+            [diagnostic(:error, scope, path, :invalid_type, "#{path} must be a string")]
+
+          not SymphonyElixir.OperatorBranchCatalog.valid_target?(branch) ->
+            [diagnostic(:error, scope, path, :invalid_value, "#{path} must be a valid branch name")]
+
+          true ->
+            []
+        end
+    end
+  end
 
   defp validate_worktree(worktree, scope, path) when is_map(worktree) do
     unknown_key_diagnostics(worktree, @worktree_keys, scope, path) ++

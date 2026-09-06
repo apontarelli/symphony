@@ -3524,9 +3524,10 @@ defmodule SymphonyElixir.HostCLITest do
 
     fields = %{
       "action" => "import",
+      "branch_selection" => nil,
       "command" => %{},
       "created_at" => "2026-01-01T00:00:00Z",
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "expected_generation" => "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "registry_path" => registry_path,
       "source_hashes" => %{},
@@ -3563,9 +3564,10 @@ defmodule SymphonyElixir.HostCLITest do
 
     fields = %{
       "action" => "add",
+      "branch_selection" => nil,
       "command" => %{},
       "created_at" => "2026-01-01T00:00:00Z",
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "expected_generation" => "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "registry_path" => registry_path,
       "source_hashes" => %{},
@@ -3603,9 +3605,10 @@ defmodule SymphonyElixir.HostCLITest do
 
     fields = %{
       "action" => "add",
+      "branch_selection" => nil,
       "command" => %{},
       "created_at" => "2026-01-01T00:00:00Z",
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "expected_generation" => "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "registry_path" => other_registry_path,
       "source_hashes" => %{},
@@ -3963,9 +3966,10 @@ defmodule SymphonyElixir.HostCLITest do
 
     fields = %{
       "action" => "add",
+      "branch_selection" => nil,
       "command" => %{},
       "created_at" => "2026-01-01T00:00:00Z",
-      "envelope_version" => 1,
+      "envelope_version" => 2,
       "expected_generation" => "sha256:0000000000000000000000000000000000000000000000000000000000000000",
       "registry_path" => registry_path,
       "source_hashes" => %{},

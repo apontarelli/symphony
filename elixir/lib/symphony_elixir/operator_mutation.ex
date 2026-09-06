@@ -575,7 +575,7 @@ defmodule SymphonyElixir.OperatorMutation do
   defp run_action("abandon_run"), do: :abandon
 
   defp registry_binding(command, host_id, registry_path, plan) do
-    %{
+    binding = %{
       kind: :registry,
       action: command["action"],
       target_id: command["target_id"],
@@ -586,6 +586,11 @@ defmodule SymphonyElixir.OperatorMutation do
       proposed_generation: plan.proposed_generation,
       command: command
     }
+
+    case Map.get(plan.preview, "branch_selection") do
+      selection when is_map(selection) -> Map.put(binding, :branch_selection, selection)
+      _missing -> binding
+    end
   end
 
   defp disabled_binding(command, host_id, generation, reason) do

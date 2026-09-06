@@ -803,12 +803,13 @@ defmodule SymphonyElixir.TargetContext do
          :ok <- validate_dispatch_mode(target.effective_state, target.dispatch_mode),
          :ok <- validate_policy_hash(target.policy_hash),
          :ok <- validate_repo_manifest(target.repo_manifest),
-         :ok <- validate_policy_projection(target.effective_policy, target.repo_manifest),
+         :ok <- validate_policy_projection(target.effective_policy, target.repo_manifest, target.configured),
          {:ok, repo_manifest_hash} <- hash_repo_manifest(target.repo_manifest),
          :ok <- verify_policy_integrity(target.effective_policy, target.policy_hash),
          :ok <- validate_tracker_secret_reference(target.effective_policy),
          :ok <- Composition.verify_composed_target(snapshot, target_id),
-         {:ok, policy} <- policy_projection(target.effective_policy, target.repo_manifest),
+         {:ok, policy} <-
+           policy_projection(target.effective_policy, target.repo_manifest, target.configured),
          {:ok, tracker_connection} <-
            project_tracker_secret(policy.tracker_connection, credential_mode, opts),
          {:ok, tracker_connection} <-
@@ -966,7 +967,8 @@ defmodule SymphonyElixir.TargetContext do
            "budget_limits" => budget_limits,
            "scheduling" => scheduling
          } = policy,
-         repo_manifest
+         repo_manifest,
+         configured
        ) do
     values = [
       repo_policy,
@@ -982,17 +984,17 @@ defmodule SymphonyElixir.TargetContext do
 
     if Enum.sort(Map.keys(policy)) == @effective_policy_keys and
          Enum.all?(values, &is_map/1) and is_map(scheduling) and is_binary(api_key) do
-      validate_linked_policy(repo_policy, repo_manifest)
+      validate_linked_policy(repo_policy, repo_manifest, configured)
     else
       {:error, :invalid_policy_projection}
     end
   end
 
-  defp validate_policy_projection(_policy, _repo_manifest),
+  defp validate_policy_projection(_policy, _repo_manifest, _configured),
     do: {:error, :invalid_policy_projection}
 
-  defp policy_projection(policy, repo_manifest) do
-    with :ok <- validate_policy_projection(policy, repo_manifest) do
+  defp policy_projection(policy, repo_manifest, configured) do
+    with :ok <- validate_policy_projection(policy, repo_manifest, configured) do
       {:ok,
        %{
          repo_policy: policy["repo_policy"],
@@ -1008,23 +1010,53 @@ defmodule SymphonyElixir.TargetContext do
     end
   end
 
-  defp validate_linked_policy(repo_policy, repo_manifest) do
+  defp validate_linked_policy(repo_policy, repo_manifest, configured) do
     case Map.fetch(repo_policy, "manifest") do
-      {:ok, ^repo_manifest} ->
-        if Enum.sort(Map.keys(repo_policy)) ==
-             ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
-             is_map(repo_policy["workflow_module_resolution"]) and
-             valid_manifest_source_dir?(repo_policy["manifest_source_dir"]) do
-          :ok
-        else
-          {:error, :invalid_policy_projection}
-        end
+      {:ok, effective_manifest} ->
+        valid_shape? =
+          Enum.sort(Map.keys(repo_policy)) ==
+            ["manifest", "manifest_source_dir", "workflow_module_resolution"] and
+            is_map(effective_manifest) and
+            is_map(repo_policy["workflow_module_resolution"]) and
+            valid_manifest_source_dir?(repo_policy["manifest_source_dir"])
 
-      {:ok, _other_manifest} ->
-        {:error, :repo_manifest_mismatch}
+        cond do
+          not valid_shape? ->
+            {:error, :invalid_policy_projection}
+
+          effective_manifest_matches?(effective_manifest, repo_manifest, configured) ->
+            :ok
+
+          true ->
+            {:error, :repo_manifest_mismatch}
+        end
 
       :error ->
         {:error, :invalid_policy_projection}
+    end
+  end
+
+  defp effective_manifest_matches?(effective_manifest, repo_manifest, configured)
+       when is_map(effective_manifest) and is_map(repo_manifest) do
+    configured_branch = get_in(configured, ["repo", "branch"])
+
+    expected_branch =
+      case configured_branch do
+        nil -> get_in(repo_manifest, ["vcs", "default_branch"])
+        branch -> branch
+      end
+
+    (is_nil(configured_branch) or
+       SymphonyElixir.OperatorBranchCatalog.valid_target?(configured_branch)) and
+      get_in(effective_manifest, ["vcs", "default_branch"]) == expected_branch and
+      without_vcs_default_branch(effective_manifest) ==
+        without_vcs_default_branch(repo_manifest)
+  end
+
+  defp without_vcs_default_branch(manifest) do
+    case Map.fetch(manifest, "vcs") do
+      {:ok, vcs} when is_map(vcs) -> Map.put(manifest, "vcs", Map.delete(vcs, "default_branch"))
+      _missing_or_invalid -> manifest
     end
   end
 

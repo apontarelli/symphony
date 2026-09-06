@@ -104,8 +104,10 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
          {:ok, resolution} <- selected_module_resolution(target.effective_policy),
          {:ok, projected_resolution} <- project_module_resolution(resolution),
          true <- projected_resolution == resolution,
+         {:ok, effective_manifest} <- effective_manifest(validated_target, target.repo_manifest),
+         :ok <- preserve_delivery_pr_target(target.repo_manifest, effective_manifest),
          {:ok, expected_policy} <-
-           effective_policy(validated_target, host, target.repo_manifest, projected_resolution),
+           effective_policy(validated_target, host, effective_manifest, projected_resolution),
          true <- expected_policy == target.effective_policy,
          {:ok, expected_hash} <- policy_hash(expected_policy),
          true <- expected_hash == target.policy_hash do
@@ -116,6 +118,53 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
   end
 
   defp verify_composed_target_authority(_snapshot, _target_id), do: :error
+
+  defp effective_manifest(%Target{configured: configured}, repo_manifest) do
+    case get_in(configured, ["repo", "branch"]) do
+      nil ->
+        {:ok, repo_manifest}
+
+      branch ->
+        if SymphonyElixir.OperatorBranchCatalog.valid_target?(branch) do
+          {:ok, put_in(repo_manifest, ["vcs", "default_branch"], branch)}
+        else
+          {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch is invalid"}
+        end
+    end
+  end
+
+  defp preserve_delivery_pr_target(original_manifest, effective_manifest) do
+    if get_in(original_manifest, ["delivery", "pr_target"]) ==
+         get_in(effective_manifest, ["delivery", "pr_target"]) do
+      :ok
+    else
+      {:composition_error, "repo.branch", :manifest_invalid, "configured repository branch changed delivery.pr_target"}
+    end
+  end
+
+  defp effective_compiled_policy(target, manifest_adapter, source_manifest, repo_manifest, module_resolution) do
+    with {:ok, effective_source} <- effective_manifest(target, source_manifest),
+         {:ok, effective_manifest, effective_resolution} <-
+           recompile_effective_manifest(
+             manifest_adapter,
+             source_manifest,
+             effective_source,
+             repo_manifest,
+             module_resolution
+           ),
+         :ok <- preserve_delivery_pr_target(repo_manifest, effective_manifest) do
+      {:ok, effective_manifest, effective_resolution}
+    end
+  end
+
+  defp recompile_effective_manifest(_manifest_adapter, source, source, repo_manifest, module_resolution),
+    do: {:ok, repo_manifest, module_resolution}
+
+  defp recompile_effective_manifest(manifest_adapter, _source, effective_source, _repo_manifest, _module_resolution) do
+    with {:ok, compiled} <- compile_manifest(manifest_adapter, effective_source) do
+      compiled_policy(compiled)
+    end
+  end
 
   defp configured_targets(targets) do
     Enum.reduce_while(targets, {:ok, %{}}, fn
@@ -195,7 +244,10 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
          {:ok, repo_manifest, module_resolution} <- compiled_policy(compiled),
          :ok <- validate_target_policy_inputs(target),
          :ok <- validate_repository_identity(target, repo_manifest),
-         {:ok, effective_policy} <- effective_policy(target, host, repo_manifest, module_resolution),
+         {:ok, effective_manifest, effective_resolution} <-
+           effective_compiled_policy(target, manifest_adapter, manifest, repo_manifest, module_resolution),
+         {:ok, effective_policy} <-
+           effective_policy(target, host, effective_manifest, effective_resolution),
          {:ok, policy_hash} <- policy_hash(effective_policy) do
       %{
         target

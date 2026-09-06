@@ -635,6 +635,34 @@ defmodule SymphonyElixir.TargetRegistry.YamlTest do
              """
   end
 
+  test "encode orders repository branch between manifest and expected repository" do
+    registry = %{
+      "targets" => %{
+        "main" => %{
+          "repo" => %{
+            "expected_repository" => "org/repo",
+            "branch" => "release/2026",
+            "manifest" => "symphony.yml",
+            "path" => "/tmp/repo"
+          }
+        }
+      },
+      "version" => 1
+    }
+
+    assert Yaml.encode(registry) ==
+             """
+             version: 1
+             targets:
+               main:
+                 repo:
+                   path: "/tmp/repo"
+                   manifest: "symphony.yml"
+                   branch: "release/2026"
+                   expected_repository: "org/repo"
+             """
+  end
+
   test "encode round-trips empty maps at every structural position" do
     cases = [
       {"root", %{}},

@@ -1044,9 +1044,17 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   defp module_manifest_config("tracker.linear", _manifest), do: %{}
 
   defp module_manifest_config("workspace", manifest) do
-    case get_in(manifest, ["project", "repository"]) do
-      repository when is_binary(repository) -> %{"hooks" => %{"after_create" => "git clone --depth 1 #{shell_quote(repository)} ."}}
-      _repository -> %{}
+    repository = get_in(manifest, ["project", "repository"])
+    branch = get_in(manifest, ["vcs", "default_branch"]) || "main"
+
+    if is_binary(repository) do
+      %{
+        "hooks" => %{
+          "after_create" => "git clone --depth 1 --branch #{shell_quote(branch)} #{shell_quote(repository)} ."
+        }
+      }
+    else
+      %{}
     end
   end
 
