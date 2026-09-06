@@ -16,6 +16,9 @@
 # Generated browser assets.
 /priv/static/assets/
 
+# Compiled native helpers.
+/priv/native/directory_iterator
+
 # Local runtime logs.
 /log/
 /logs/

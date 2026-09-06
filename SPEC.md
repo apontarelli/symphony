@@ -2974,6 +2974,22 @@ Minimum endpoints:
     selections, and a stale registry generation block Apply. An unblocked catalog does not replace
     validated preview and exact confirmation.
 
+- `POST /api/v1/operator/repositories`
+  - Requires loopback access and the per-host operator session credential before reading paths.
+    Discovery MUST NOT mutate repositories, run repository code, or inspect repository readiness.
+  - Supports recent repository directories, one-level browsing, bounded root scans, and manual
+    absolute-path entry. Results are canonical directory candidates, not validated repositories.
+  - Local configuration owns scan roots, depth, result count, entry-work count, exclusions, and
+    timeout. Known repository parents MAY seed roots; `$HOME` and `/` MUST NOT be implicit roots.
+    Generated worktree roots, host state, registry/config storage, hidden directories, VCS
+    metadata, dependencies, and caches MUST be excluded, including physical symlink aliases.
+  - Scans MUST reject paths outside allowed roots and MUST NOT follow escaping symlinks.
+    Manual absolute-path entry remains available outside scan roots, subject to exclusions.
+  - Start returns a host-scoped job identity. Authenticated polling returns incremental candidates
+    and errors with a cursor, truncation count, and bounded terminal results. Cancellation,
+    replacement, refresh, unreadable directories, work/result limits, and timeout are explicit.
+    Discovery paths MUST NOT enter the unauthenticated host event feed.
+
 - `POST /api/v1/operator/commands/preview`
   - Requires loopback access and a restrictive per-host operator session credential.
   - Accepts interface version, host identity, registry generation, and a typed command with exact

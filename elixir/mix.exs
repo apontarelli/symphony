@@ -6,7 +6,8 @@ defmodule SymphonyElixir.MixProject do
       app: :symphony_elixir,
       version: "0.1.0",
       elixir: "~> 1.19",
-      compilers: [:phoenix_live_view] ++ Mix.compilers(),
+      compilers: [:phoenix_live_view, :elixir_make] ++ Mix.compilers(),
+      make_targets: ["native"],
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
@@ -105,14 +106,15 @@ defmodule SymphonyElixir.MixProject do
       {:ecto, "~> 3.14.2"},
       {:exqlite, "~> 0.40.0"},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
-      {:dialyxir, "~> 1.4", only: [:dev], runtime: false}
+      {:dialyxir, "~> 1.4", only: [:dev], runtime: false},
+      {:elixir_make, "~> 0.10", runtime: false}
     ]
   end
 
   defp aliases do
     [
       setup: ["deps.get"],
-      build: ["escript.build"],
+      build: ["compile", "escript.build"],
       lint: ["specs.check", "credo --strict"]
     ]
   end

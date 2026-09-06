@@ -11,7 +11,7 @@ defmodule SymphonyElixirWeb.OperatorApiController do
 
   @default_event_limit 200
 
-  plug(:require_local_session when action in [:preview, :confirm, :settings])
+  plug(:require_local_session when action in [:preview, :confirm, :settings, :repositories])
 
   @spec preview(Conn.t(), map()) :: Conn.t()
   def preview(conn, _params) do
@@ -40,6 +40,19 @@ defmodule SymphonyElixirWeb.OperatorApiController do
       host_scheduler()
     )
     |> command_response(conn, 200)
+  end
+
+  @spec repositories(Conn.t(), map()) :: Conn.t()
+  def repositories(conn, params) do
+    status = if Map.get(params, "action") in ~w(recent browse scan manual), do: 202, else: 200
+
+    OperatorInterface.repositories(
+      operator_interface(),
+      conn.assigns.operator_credential,
+      conn.body_params,
+      host_scheduler()
+    )
+    |> command_response(conn, status)
   end
 
   defp require_local_session(conn, _opts) do
@@ -92,6 +105,9 @@ defmodule SymphonyElixirWeb.OperatorApiController do
         "loopback_required" ->
           403
 
+        "scan_not_found" ->
+          404
+
         code
         when code in [
                "operator_interface_unavailable",
@@ -105,7 +121,17 @@ defmodule SymphonyElixirWeb.OperatorApiController do
              ] ->
           503
 
-        code when code in ["invalid_command_request", "invalid_command", "invalid_action", "invalid_inputs", "invalid_target_id", "invalid_run_id", "incompatible_interface"] ->
+        code
+        when code in [
+               "invalid_repository_request",
+               "invalid_command_request",
+               "invalid_command",
+               "invalid_action",
+               "invalid_inputs",
+               "invalid_target_id",
+               "invalid_run_id",
+               "incompatible_interface"
+             ] ->
           400
 
         _code ->

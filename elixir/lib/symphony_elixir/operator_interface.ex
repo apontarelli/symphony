@@ -10,7 +10,16 @@ defmodule SymphonyElixir.OperatorInterface do
 
   use GenServer
 
-  alias SymphonyElixir.{HostScheduler, LocalConfig, OperatorMutation, OperatorSession, OperatorSnapshot}
+  alias SymphonyElixir.{
+    HostScheduler,
+    LocalConfig,
+    OperatorMutation,
+    OperatorRepositoryBrowser,
+    OperatorRepositorySources,
+    OperatorSession,
+    OperatorSnapshot
+  }
+
   alias SymphonyElixir.ReviewRecords.Redaction
 
   @interface_version 1
@@ -24,6 +33,11 @@ defmodule SymphonyElixir.OperatorInterface do
   @confirmation_ttl_ms 60_000
   @max_previews 128
   @max_command_results 100
+  @repository_call_timeout_ms 5_000
+  @repository_hard_timeout_ms 30_000
+  @max_repository_events 200
+  @max_repository_jobs 16
+  @max_repository_errors 100
 
   defmodule State do
     @moduledoc false
@@ -42,7 +56,18 @@ defmodule SymphonyElixir.OperatorInterface do
       :log_handler_installed?
     ]
     defstruct @enforce_keys ++
-                [:session, :config_root, :clock, :confirmation_ttl_ms, previews: %{}, command_results: [], pending: nil]
+                [
+                  :session,
+                  :config_root,
+                  :clock,
+                  :confirmation_ttl_ms,
+                  previews: %{},
+                  command_results: [],
+                  pending: nil,
+                  repository_jobs: %{},
+                  repository_order: [],
+                  repository_active: nil
+                ]
   end
 
   @type marker :: %{
@@ -53,7 +78,6 @@ defmodule SymphonyElixir.OperatorInterface do
           schema_version: pos_integer(),
           command_results: [map()]
         }
-
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -117,6 +141,28 @@ defmodule SymphonyElixir.OperatorInterface do
         {:error, %{error: %{code: "invalid_inputs", message: "Settings inputs are invalid."}}}
       end
     end
+  end
+
+  @doc "Starts or polls an authenticated bounded repository discovery job."
+  @spec repositories(GenServer.server(), String.t(), map(), GenServer.server()) ::
+          {:ok, map()} | {:error, map()}
+  def repositories(server, credential, request, scheduler) do
+    deadline = System.monotonic_time(:millisecond) + @repository_call_timeout_ms
+
+    GenServer.call(
+      server,
+      {:repositories, credential, request, scheduler, deadline},
+      @repository_call_timeout_ms
+    )
+  catch
+    :exit, _reason ->
+      {:error,
+       %{
+         error: %{
+           code: "operator_interface_unavailable",
+           message: "Operator interface is unavailable."
+         }
+       }}
   end
 
   @spec events(String.t(), non_neg_integer()) ::
@@ -208,6 +254,7 @@ defmodule SymphonyElixir.OperatorInterface do
   @impl true
   def terminate(_reason, state) do
     if state.log_handler_installed?, do: :logger.remove_handler(@log_handler_id)
+    cancel_all_repository_jobs(state)
     if Process.alive?(state.session), do: GenServer.stop(state.session)
     :ok
   end
@@ -242,6 +289,21 @@ defmodule SymphonyElixir.OperatorInterface do
     end
   end
 
+  def handle_call({:repositories, credential, request, scheduler, deadline}, _from, state) do
+    with false <- repository_request_expired?(deadline),
+         :ok <- OperatorSession.authenticate(state.session, credential),
+         false <- repository_request_expired?(deadline) do
+      {reply, state} = handle_repository_request(state, request, scheduler)
+      {:reply, reply, state}
+    else
+      true ->
+        {:reply, {:error, repository_error(:operator_interface_unavailable)}, state}
+
+      {:error, code} ->
+        {:reply, {:error, repository_error(code)}, state}
+    end
+  end
+
   def handle_call({:reject, code}, _from, state), do: reject_reply(state, code)
 
   def handle_call({:preview, credential, request, opts}, _from, state) do
@@ -268,6 +330,30 @@ defmodule SymphonyElixir.OperatorInterface do
   end
 
   @impl true
+  def handle_info({:repository_event, scan_id, event}, state) do
+    {:noreply, record_repository_event(state, scan_id, event)}
+  end
+
+  def handle_info({:repository_timeout_config, scan_id, timeout_ms}, state) do
+    {:noreply, configure_repository_timeout(state, scan_id, timeout_ms)}
+  end
+
+  def handle_info({:repository_complete, scan_id, outcome}, state) do
+    {:noreply, complete_repository_job(state, scan_id, outcome)}
+  end
+
+  def handle_info({:repository_timeout, scan_id}, state) do
+    {:noreply, timeout_repository_job(state, scan_id)}
+  end
+
+  def handle_info({:DOWN, reference, :process, _pid, _reason}, state) do
+    if repository_reference?(state, reference) do
+      {:noreply, repository_worker_down(state, reference)}
+    else
+      handle_non_repository_down(reference, state)
+    end
+  end
+
   def handle_info({reference, result}, %{pending: %{reference: reference} = pending} = state) do
     Process.demonitor(reference, [:flush])
 
@@ -289,15 +375,6 @@ defmodule SymphonyElixir.OperatorInterface do
     else
       {:noreply, record_result(%{state | pending: nil}, outcome)}
     end
-  end
-
-  def handle_info({:DOWN, reference, :process, _pid, _reason}, %{pending: %{reference: reference} = pending} = state) do
-    outcome =
-      command_error(:mutation_failed, true)
-      |> Map.merge(Map.take(pending.result, [:id, :action, :identity]))
-      |> Map.put(:status, "failed")
-
-    {:noreply, record_result(%{state | pending: nil}, outcome)}
   end
 
   def handle_info({:EXIT, session, _reason}, %{session: session} = state),
@@ -341,6 +418,475 @@ defmodule SymphonyElixir.OperatorInterface do
   def handle_cast({:publish, kind, source, data}, state) do
     {:noreply, append_event(state, kind, source, data)}
   end
+
+  defp handle_repository_request(state, request, scheduler) do
+    case normalize_repository_request(request) do
+      {:ok, :start, normalized} ->
+        start_repository_job(state, normalized, scheduler)
+
+      {:ok, :poll, scan_id, after_cursor} ->
+        {repository_poll(state, scan_id, after_cursor), state}
+
+      {:ok, :cancel, scan_id} ->
+        cancel_repository_request(state, scan_id)
+
+      {:error, reason} ->
+        {{:error, repository_error(reason)}, state}
+    end
+  end
+
+  defp start_repository_job(state, request, scheduler) do
+    state = cancel_active_repository(state)
+    scan_id = random_id("scan-")
+    parent = self()
+
+    {pid, reference} =
+      :erlang.spawn_opt(
+        fn ->
+          run_repository_job(parent, scan_id, request, scheduler, state.config_root)
+        end,
+        [:link, :monitor]
+      )
+
+    timer = Process.send_after(self(), {:repository_timeout, scan_id}, @repository_hard_timeout_ms)
+
+    job = %{
+      scan_id: scan_id,
+      action: request["action"],
+      status: "running",
+      pid: pid,
+      reference: reference,
+      timer: timer,
+      events: :queue.new(),
+      event_count: 0,
+      dropped_events: 0,
+      cursor: 0,
+      candidates: [],
+      result: nil
+    }
+
+    state = put_repository_job(%{state | repository_active: scan_id}, job)
+    {{:ok, repository_response(state, job, 0)}, state}
+  end
+
+  defp run_repository_job(parent, scan_id, request, scheduler, config_root) do
+    outcome =
+      try do
+        case OperatorRepositorySources.load(scheduler, config_root: config_root) do
+          {:ok, context} ->
+            if is_integer(context[:timeout_ms]) and context[:timeout_ms] > 0 do
+              send(parent, {:repository_timeout_config, scan_id, context[:timeout_ms]})
+            end
+
+            emit = fn event ->
+              send(parent, {:repository_event, scan_id, event})
+
+              receive do
+                :cancel -> :cancel
+              after
+                0 -> :ok
+              end
+            end
+
+            {:ok, OperatorRepositoryBrowser.run(request, context, emit)}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      rescue
+        _exception -> {:error, :repository_discovery_failed}
+      catch
+        _kind, _reason -> {:error, :repository_discovery_failed}
+      end
+
+    send(parent, {:repository_complete, scan_id, outcome})
+  end
+
+  defp normalize_repository_request(request) when is_map(request) do
+    action = Map.get(request, "action")
+
+    cond do
+      action == "recent" and valid_recent_request?(request) ->
+        {:ok, :start, request}
+
+      action in ~w(browse scan manual) and valid_start_request?(request) ->
+        {:ok, :start, request}
+
+      action == "poll" ->
+        normalize_repository_poll(request)
+
+      action == "cancel" ->
+        normalize_repository_cancel(request)
+
+      true ->
+        {:error, :invalid_repository_request}
+    end
+  end
+
+  defp normalize_repository_request(_request), do: {:error, :invalid_repository_request}
+
+  defp valid_recent_request?(request), do: Map.keys(request) == ["action"]
+
+  defp valid_start_request?(%{"action" => action} = request) when action in ~w(browse manual) do
+    Enum.all?(Map.keys(request), &(&1 in ["action", "path"])) and
+      valid_absolute_repository_path?(Map.get(request, "path"))
+  end
+
+  defp valid_start_request?(%{"action" => "scan"} = request) do
+    Enum.all?(Map.keys(request), &(&1 in ["action", "path"])) and
+      (not Map.has_key?(request, "path") or is_nil(request["path"]) or
+         valid_absolute_repository_path?(request["path"]))
+  end
+
+  defp valid_start_request?(_request), do: false
+
+  defp normalize_repository_poll(request) do
+    with true <- Enum.all?(Map.keys(request), &(&1 in ["action", "scan_id", "after"])),
+         scan_id when is_binary(scan_id) <- Map.get(request, "scan_id"),
+         true <- scan_id != "",
+         after_cursor <- Map.get(request, "after", 0),
+         true <- is_integer(after_cursor) and after_cursor >= 0 do
+      {:ok, :poll, scan_id, after_cursor}
+    else
+      _invalid -> {:error, :invalid_repository_request}
+    end
+  end
+
+  defp normalize_repository_cancel(request) do
+    with true <- Enum.all?(Map.keys(request), &(&1 in ["action", "scan_id"])),
+         scan_id when is_binary(scan_id) <- Map.get(request, "scan_id"),
+         true <- scan_id != "" do
+      {:ok, :cancel, scan_id}
+    else
+      _invalid -> {:error, :invalid_repository_request}
+    end
+  end
+
+  defp valid_absolute_repository_path?(path),
+    do: is_binary(path) and path != "" and Path.type(path) == :absolute
+
+  defp repository_poll(state, scan_id, after_cursor) do
+    case Map.get(state.repository_jobs, scan_id) do
+      nil ->
+        {:error, repository_error(:scan_not_found)}
+
+      %{cursor: cursor} when after_cursor > cursor ->
+        {:error, repository_error(:invalid_repository_request)}
+
+      job ->
+        {:ok, repository_response(state, job, after_cursor)}
+    end
+  end
+
+  defp cancel_repository_request(state, scan_id) do
+    case Map.get(state.repository_jobs, scan_id) do
+      nil ->
+        {{:error, repository_error(:scan_not_found)}, state}
+
+      _job ->
+        state = cancel_repository_job(state, scan_id, :cancelled)
+        {:ok, cancelled_job} = repository_poll(state, scan_id, 0)
+        {{:ok, cancelled_job}, state}
+    end
+  end
+
+  defp cancel_active_repository(%{repository_active: nil} = state), do: state
+
+  defp cancel_active_repository(%{repository_active: scan_id} = state),
+    do: cancel_repository_job(state, scan_id, :replaced)
+
+  defp cancel_repository_job(state, scan_id, reason) do
+    case Map.get(state.repository_jobs, scan_id) do
+      %{status: "running", pid: pid, timer: timer} = job ->
+        send(pid, :cancel)
+        Process.exit(pid, :kill)
+        Process.cancel_timer(timer)
+        Process.demonitor(job.reference, [:flush])
+
+        result = %{
+          status: "cancelled",
+          candidates: Enum.reverse(job.candidates),
+          errors: [%{code: Atom.to_string(reason)}],
+          visited: nil
+        }
+
+        put_repository_job(
+          %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)},
+          %{job | status: "cancelled", pid: nil, reference: nil, timer: nil, result: result}
+        )
+
+      _job ->
+        %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)}
+    end
+  end
+
+  defp record_repository_event(state, scan_id, event) do
+    case Map.get(state.repository_jobs, scan_id) do
+      %{status: "running"} = job ->
+        public_event = public_repository_event(event)
+        cursor = job.cursor + 1
+        entry = %{cursor: cursor, event: public_event}
+
+        {events, count, dropped} =
+          :queue.in(entry, job.events)
+          |> trim_repository_events(job.event_count + 1, job.dropped_events)
+
+        candidates =
+          case public_event do
+            %{type: "candidate", candidate: candidate} -> [candidate | job.candidates]
+            _other -> job.candidates
+          end
+
+        put_repository_job(
+          state,
+          %{job | events: events, event_count: count, dropped_events: dropped, cursor: cursor, candidates: candidates}
+        )
+
+      _job ->
+        state
+    end
+  end
+
+  defp trim_repository_events(events, count, dropped)
+       when count > @max_repository_events do
+    case :queue.out(events) do
+      {{:value, _entry}, remaining} ->
+        trim_repository_events(remaining, count - 1, dropped + 1)
+
+      {:empty, _events} ->
+        {:queue.new(), 0, dropped}
+    end
+  end
+
+  defp trim_repository_events(events, count, dropped), do: {events, count, dropped}
+
+  defp complete_repository_job(state, scan_id, outcome) do
+    case Map.get(state.repository_jobs, scan_id) do
+      %{status: "running", reference: reference} = job ->
+        Process.cancel_timer(job.timer)
+        Process.demonitor(reference, [:flush])
+        result = repository_result(outcome)
+
+        put_repository_job(
+          %{state | repository_active: if(state.repository_active == scan_id, do: nil, else: state.repository_active)},
+          %{job | status: result.status, pid: nil, reference: nil, timer: nil, result: result}
+        )
+
+      _job ->
+        state
+    end
+  end
+
+  defp configure_repository_timeout(state, scan_id, timeout_ms)
+       when is_integer(timeout_ms) and timeout_ms > 0 do
+    case Map.get(state.repository_jobs, scan_id) do
+      %{status: "running", timer: timer} = job ->
+        Process.cancel_timer(timer)
+        timer = Process.send_after(self(), {:repository_timeout, scan_id}, min(timeout_ms, @repository_hard_timeout_ms))
+        put_repository_job(state, %{job | timer: timer})
+
+      _job ->
+        state
+    end
+  end
+
+  defp configure_repository_timeout(state, _scan_id, _timeout_ms), do: state
+
+  defp timeout_repository_job(state, scan_id) do
+    case Map.get(state.repository_jobs, scan_id) do
+      %{status: "running"} = job ->
+        state = cancel_repository_job(state, scan_id, :timeout)
+
+        timed_out = %{
+          job
+          | status: "timeout",
+            pid: nil,
+            reference: nil,
+            timer: nil,
+            result: %{
+              status: "timeout",
+              candidates: Enum.reverse(job.candidates),
+              errors: [%{code: "timeout"}],
+              visited: nil
+            }
+        }
+
+        put_repository_job(state, timed_out)
+
+      _job ->
+        state
+    end
+  end
+
+  defp repository_worker_down(state, reference) do
+    case Enum.find(state.repository_jobs, fn {_scan_id, job} -> job.reference == reference and job.status == "running" end) do
+      {scan_id, _job} ->
+        complete_repository_job(state, scan_id, {:error, :repository_discovery_failed})
+
+      nil ->
+        state
+    end
+  end
+
+  defp repository_reference?(state, reference) do
+    Enum.any?(state.repository_jobs, fn {_scan_id, job} -> job.reference == reference end)
+  end
+
+  defp handle_non_repository_down(reference, %{pending: %{reference: reference} = pending} = state) do
+    outcome =
+      command_error(:mutation_failed, true)
+      |> Map.merge(Map.take(pending.result, [:id, :action, :identity]))
+      |> Map.put(:status, "failed")
+
+    {:noreply, record_result(%{state | pending: nil}, outcome)}
+  end
+
+  defp handle_non_repository_down(_reference, state), do: {:noreply, state}
+
+  defp public_repository_event(event) when is_map(event) do
+    case Map.get(event, :type) do
+      "candidate" ->
+        %{type: "candidate", candidate: public_repository_candidate(Map.fetch!(event, :candidate))}
+
+      "error" ->
+        %{type: "error", error: public_repository_error(Map.fetch!(event, :error))}
+
+      value when is_binary(value) ->
+        %{type: value}
+
+      _value ->
+        %{type: "event"}
+    end
+  end
+
+  defp public_repository_event(_event), do: %{type: "event"}
+
+  defp public_repository_error(error) when is_map(error) do
+    error
+    |> Map.take([:path, :code, :message, :reason])
+    |> Map.reject(fn {_key, value} -> not is_binary(value) and not is_atom(value) end)
+    |> Map.new(fn {key, value} -> {key, if(is_atom(value), do: Atom.to_string(value), else: value)} end)
+    |> case do
+      empty when map_size(empty) == 0 -> %{code: "repository_discovery_failed"}
+      value -> value
+    end
+  end
+
+  defp public_repository_error(error) when is_atom(error), do: %{code: Atom.to_string(error)}
+  defp public_repository_error(error) when is_binary(error), do: %{code: error}
+  defp public_repository_error(_error), do: %{code: "repository_discovery_failed"}
+
+  defp repository_result({:ok, result}) when is_map(result) do
+    status = repository_status(Map.fetch!(result, :status))
+    candidates = Map.fetch!(result, :candidates)
+    errors = Map.fetch!(result, :errors)
+    visited = Map.fetch!(result, :visited)
+
+    %{
+      status: status,
+      candidates: Enum.map(candidates, &public_repository_candidate/1),
+      errors: errors |> Enum.take(@max_repository_errors) |> Enum.map(&public_repository_error/1),
+      visited: if(is_integer(visited) and visited >= 0, do: visited, else: nil)
+    }
+  end
+
+  defp repository_result({:ok, _result}), do: repository_result({:error, :repository_discovery_failed})
+
+  defp repository_result({:error, reason}) do
+    %{
+      status: "failed",
+      candidates: [],
+      errors: [public_repository_error(reason)],
+      visited: 0
+    }
+  end
+
+  defp public_repository_candidate(candidate) when is_map(candidate) do
+    %{path: Map.fetch!(candidate, :path), kind: "directory"}
+  end
+
+  defp public_repository_candidate(_candidate), do: %{path: "", kind: "directory"}
+
+  defp repository_status("ok"), do: "completed"
+  defp repository_status("error"), do: "failed"
+
+  defp repository_status(status)
+       when status in ["partial", "limit", "timeout", "cancelled", "completed", "failed"],
+       do: status
+
+  defp repository_status(_status), do: "failed"
+
+  defp repository_response(state, job, after_cursor) do
+    available =
+      job.events
+      |> :queue.to_list()
+      |> Enum.filter(&(&1.cursor > after_cursor))
+
+    selected = Enum.take(available, @max_repository_events)
+
+    next_cursor =
+      case List.last(selected) do
+        nil -> after_cursor
+        event -> event.cursor
+      end
+
+    terminal? = job.status != "running"
+
+    %{
+      interface_version: @interface_version,
+      schema_version: @schema_version,
+      host_id: state.host_id,
+      scan_id: job.scan_id,
+      action: job.action,
+      status: job.status,
+      events: Enum.map(selected, fn entry -> Map.put(entry.event, :cursor, entry.cursor) end),
+      next_cursor: next_cursor,
+      latest_cursor: job.cursor,
+      dropped_events: job.dropped_events,
+      result: if(terminal?, do: job.result, else: nil)
+    }
+  end
+
+  defp put_repository_job(state, job) do
+    order =
+      [job.scan_id | Enum.reject(state.repository_order, &(&1 == job.scan_id))]
+      |> Enum.take(@max_repository_jobs)
+
+    jobs = Map.put(state.repository_jobs, job.scan_id, job)
+    retained = Map.take(jobs, order)
+    %{state | repository_jobs: retained, repository_order: order}
+  end
+
+  defp cancel_all_repository_jobs(state) do
+    Enum.each(state.repository_jobs, fn {_scan_id, job} ->
+      if job.status == "running" and is_pid(job.pid) do
+        send(job.pid, :cancel)
+        Process.exit(job.pid, :kill)
+      end
+    end)
+  end
+
+  defp repository_error(:operator_interface_unavailable),
+    do: repository_error_payload("operator_interface_unavailable", "Operator interface is unavailable.")
+
+  defp repository_error(:unauthorized),
+    do: repository_error_payload("unauthorized", "A valid local operator session credential is required.")
+
+  defp repository_error(:invalid_repository_request),
+    do: repository_error_payload("invalid_repository_request", "Repository discovery request fields are invalid.")
+
+  defp repository_error(:scan_not_found),
+    do: repository_error_payload("scan_not_found", "The repository discovery scan was not found.")
+
+  defp repository_error(reason) when is_atom(reason),
+    do: repository_error_payload(Atom.to_string(reason), "Repository discovery could not be started.")
+
+  defp repository_error_payload(code, message), do: %{error: %{code: code, message: message}}
+
+  defp repository_request_expired?(deadline) when is_integer(deadline),
+    do: deadline <= System.monotonic_time(:millisecond)
+
+  defp repository_request_expired?(_deadline), do: true
 
   defp call_events(server, host_id, after_cursor, limit) do
     GenServer.call(server, {:events, host_id, after_cursor, limit})
