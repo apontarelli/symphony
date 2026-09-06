@@ -301,6 +301,41 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
+  test "connection changes replace scope only after obsolete selectors are explicitly cleared", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
+    {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+    connection = document["host"]["tracker_connections"]["linear-main"]
+    File.write!(registry_path, Yaml.encode(put_in(document, ["host", "tracker_connections", "another"], connection)))
+    before = File.read!(registry_path)
+
+    replacement = %{
+      "connection" => "another",
+      "scope" => %{"type" => "team", "team_key" => "ENG"},
+      "active_states" => ["Todo"],
+      "terminal_states" => ["Done"],
+      "required_labels" => []
+    }
+
+    for scope <- [replacement["scope"], %{"type" => "project"}, %{"type" => "unknown"}] do
+      command = %Command.Patch{target_id: "alpha", changes: %{"linear" => %{replacement | "scope" => scope}}}
+
+      assert {:error, %OperatorCommandService.Error{code: :invalid_patch}} =
+               OperatorCommandService.plan(command, registry_path: registry_path)
+
+      assert File.read!(registry_path) == before
+    end
+
+    replacement = put_in(replacement, ["scope", "project_id"], nil)
+    command = %Command.Patch{target_id: "alpha", changes: %{"linear" => replacement}}
+    assert {:ok, plan} = OperatorCommandService.plan(command, registry_path: registry_path)
+    assert plan.applicable?, inspect(plan.preview["registry"]["diagnostics"])
+    assert {:ok, _result} = OperatorCommandService.confirm("alpha", plan.id, true, registry_path: registry_path)
+    {:ok, saved} = registry_path |> File.read!() |> Yaml.decode()
+    assert saved["targets"]["alpha"]["linear"]["connection"] == "another"
+    assert saved["targets"]["alpha"]["linear"]["scope"] == %{"type" => "team", "team_key" => "ENG"}
+  end
+
+  @tag :tmp_dir
   test "patch merges and removes exact named-map entries", %{tmp_dir: tmp_dir} do
     registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
 
