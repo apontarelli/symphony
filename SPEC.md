@@ -2972,9 +2972,23 @@ Minimum endpoints:
 
 - `POST /api/v1/operator/settings/choices`
   - Requires loopback access and the per-host operator session credential. This is a read-only
-    catalog request; it MUST NOT create a mutation preview or contact Linear.
+    catalog request; it MUST NOT create a mutation preview or modify Linear.
   - Returns schema-owned finite choices, validated host runner and tracker identifiers, and local
     capacity profiles. A known repository enables compatible saved workflows, profiles, and modules.
+  - The selected Linear connection supplies paginated teams, projects, workflow states, and labels.
+    Project/team choices retain identity even when names are equal. State and label choices retain
+    team membership; project scope uses its teams and labels also include workspace labels.
+    Registry state/label values remain names, with all matching identities grouped in each choice.
+  - Project/team scopes are single-choice. Query-file and explicit-issue scopes remain distinct.
+    Active states, terminal states, and required labels are multi-select.
+  - Linear catalogs MUST expose loading, current, empty, authentication failure, rate limit, offline,
+    stale-cache, and unavailable states. Cache size, age, fetch concurrency, and pagination MUST be
+    bounded. Stale choices remain visible but cannot validate selections; authentication failure
+    discards cached data. Responses MUST NOT expose the API key or credential reference.
+  - The catalog exposes an opaque connection revision. A changed connection or mismatched draft
+    revision invalidates dependent selections before Apply. Clients MUST explicitly reselect the
+    scope and filters using the current revision. Connection-change patches MUST NOT inherit scope
+    or filters from the previous connection, including when replayed under the registry write lock.
   - Each field declares scalar or list cardinality. Choices retain current, available, unavailable,
     stale, or invalid status with stable reasons, including removed draft selections.
   - The default runner MUST belong to the allowed runner list. Invalid cardinality, incompatible

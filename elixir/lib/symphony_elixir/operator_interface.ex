@@ -140,8 +140,8 @@ defmodule SymphonyElixir.OperatorInterface do
   def settings(server, credential, request, scheduler) do
     with {:ok, context} <- command_call(server, {:settings_context, credential}, false) do
       if is_map(request) and is_map(Map.get(request, "selections", %{})) and
-           Enum.all?(Map.keys(request), &(&1 in ["target_id", "repository", "selections"])) and
-           Enum.all?(["target_id", "repository"], &(is_nil(request[&1]) or is_binary(request[&1]))) do
+           Enum.all?(Map.keys(request), &(&1 in ["target_id", "repository", "selections", "linear_revision"])) and
+           Enum.all?(["target_id", "repository", "linear_revision"], &(is_nil(request[&1]) or is_binary(request[&1]))) do
         catalog = SymphonyElixir.OperatorSettings.build(scheduler, request, config_root: context.config_root)
         {:ok, Map.merge(catalog, Map.drop(context, [:config_root]))}
       else

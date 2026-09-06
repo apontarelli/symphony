@@ -832,6 +832,7 @@ defmodule SymphonyElixir.OperatorCommandService do
            decode_registry(current_file, envelope["registry_path"]),
          %TargetRegistry.Target{} = current_target <- current_snapshot.targets[target_id],
          false <- current_target.configured_state == :retired,
+         true <- SymphonyElixir.OperatorLinearChoices.complete_connection_change?(current_target.configured, patch),
          {:ok, proposed_target} <-
            merge_patch(
              current_document["targets"][target_id],
@@ -1559,7 +1560,8 @@ defmodule SymphonyElixir.OperatorCommandService do
        ) do
     current_target = current_document["targets"][command.target_id]
 
-    with {:ok, proposed_target} <-
+    with :ok <- require_linear_reselection(current_target, command.changes),
+         {:ok, proposed_target} <-
            merge_patch(current_target, command.changes, @patch_schema, "$.command.changes"),
          proposed_document <-
            put_in(current_document, ["targets", command.target_id], proposed_target),
@@ -1590,6 +1592,12 @@ defmodule SymphonyElixir.OperatorCommandService do
         opts: opts
       })
     end
+  end
+
+  defp require_linear_reselection(current_target, patch) do
+    if SymphonyElixir.OperatorLinearChoices.complete_connection_change?(current_target, patch),
+      do: :ok,
+      else: error(:invalid_patch, "a connection change requires explicit scope, states, and labels", "$.command.changes.linear")
   end
 
   defp normalize_patch_preview(%Preview{impact: impact} = preview) do

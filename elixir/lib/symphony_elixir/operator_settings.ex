@@ -13,6 +13,7 @@ defmodule SymphonyElixir.OperatorSettings do
     repo = request["repository"] || configured_value(configured, "repo.path")
     repo = if is_binary(repo), do: repo
     selections = request["selections"] || %{}
+    linear = SymphonyElixir.OperatorLinearChoices.build(registry, configured, request, opts)
 
     definitions =
       Schema.settings_choices()
@@ -29,6 +30,7 @@ defmodule SymphonyElixir.OperatorSettings do
       end)
       |> Map.merge(host_choices(registry, source_reason))
       |> Map.merge(OperatorRepositoryChoices.build(repo, opts))
+      |> Map.merge(linear.fields)
 
     fields =
       Map.new(definitions, fn {path, field} ->
@@ -38,6 +40,7 @@ defmodule SymphonyElixir.OperatorSettings do
 
     allowed = fields["runners.allowed"].selected
     fields = Map.update!(fields, "runners.default", &constrain_default(&1, allowed))
+    fields = require_linear_scope(fields)
 
     errors = selection_errors(fields, selections)
     reason = source_reason || target_reason(target_id, target)
@@ -47,10 +50,18 @@ defmodule SymphonyElixir.OperatorSettings do
       status: if(reason, do: "unavailable", else: "current"),
       reason: reason,
       fields: fields,
+      linear: Map.drop(linear, [:fields]),
       apply_blocked: not is_nil(reason) or errors != [],
       errors: errors
     }
   end
+
+  defp require_linear_scope(%{"linear.connection" => %{selected: connection}, "linear.scope.type" => %{selected: nil} = scope} = fields)
+       when not is_nil(connection) do
+    Map.put(fields, "linear.scope.type", %{scope | valid: false, reason: "selection_required"})
+  end
+
+  defp require_linear_scope(fields), do: fields
 
   defp target_configured(registry, target) do
     configured = if target, do: target.configured, else: %{}
@@ -168,6 +179,7 @@ defmodule SymphonyElixir.OperatorSettings do
     reason =
       cond do
         not cardinality_valid -> "invalid_cardinality"
+        field[:validation_reason] -> field.validation_reason
         bad -> bad.reason
         true -> nil
       end

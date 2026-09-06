@@ -282,6 +282,25 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   end
 
   @tag :tmp_dir
+  test "connection patches cannot inherit scope and filters from the old connection", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
+    before = File.read!(registry_path)
+
+    for linear <- [
+          %{"connection" => "another"},
+          %{"connection" => "another", "scope" => %{"type" => "project", "project_id" => "new"}, "active_states" => ["Todo"], "terminal_states" => ["Done"]}
+        ] do
+      assert {:error, %OperatorCommandService.Error{code: :invalid_patch}} =
+               OperatorCommandService.plan(
+                 %Command.Patch{target_id: "alpha", changes: %{"linear" => linear}},
+                 registry_path: registry_path
+               )
+    end
+
+    assert File.read!(registry_path) == before
+  end
+
+  @tag :tmp_dir
   test "patch merges and removes exact named-map entries", %{tmp_dir: tmp_dir} do
     registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
 
