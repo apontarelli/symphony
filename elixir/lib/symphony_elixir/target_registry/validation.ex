@@ -46,6 +46,35 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
     %{snapshot | globally_valid?: globally_valid?, targets: targets, diagnostics: diagnostics}
   end
 
+  @doc false
+  @spec repository_diagnostics(Path.t(), String.t(), Snapshot.t() | nil) :: [Diagnostic.t()]
+  def repository_diagnostics(repo_path, manifest, snapshot) do
+    repo = canonical_path(repo_path)
+    scope = :registry
+    context = if snapshot, do: path_context(snapshot, snapshot.host, []), else: %{state_root: nil, registry_dir: nil}
+
+    worktrees =
+      if snapshot do
+        snapshot.targets
+        |> eligible_targets()
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Enum.map(fn {id, target} ->
+          {"#{target_path(id)}.worktree.root", canonical_path(get_in(target.configured, ["worktree", "root"]))}
+        end)
+      else
+        []
+      end
+
+    root_path_diagnostics(repo_path, repo, true, scope, "$.repo.path") ++
+      contained_file_diagnostics(repo_path, repo, manifest, scope, "$.repo.manifest") ++
+      overlap_diagnostics(
+        repo,
+        [{"host state root", context.state_root}, {"registry directory", context.registry_dir} | worktrees],
+        scope,
+        "$.repo.path"
+      )
+  end
+
   @spec effective_gate(Target.t() | map(), String.t()) :: String.t()
   def effective_gate(%Target{configured: configured}, operation),
     do: effective_gate(configured, operation)

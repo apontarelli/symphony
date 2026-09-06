@@ -6,7 +6,16 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
   alias SymphonyElixir.OperatorCommandService.PlanStore
   alias SymphonyElixir.TargetRegistry
   alias SymphonyElixir.TargetRegistry.{FileStore, Preview, Yaml}
-  @manifest_fixture_root Path.expand("../fixtures/target_registry/repos/symphony", __DIR__)
+  @manifest_fixture_source Path.expand("../fixtures/target_registry/repos/symphony", __DIR__)
+  @manifest_fixture_root Path.join(System.tmp_dir!(), "operator-service-repo-#{System.unique_integer([:positive])}")
+
+  setup_all do
+    File.cp_r!(@manifest_fixture_source, @manifest_fixture_root)
+    git!(@manifest_fixture_root, ["init", "--initial-branch=main"])
+    git!(@manifest_fixture_root, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    on_exit(fn -> File.rm_rf!(@manifest_fixture_root) end)
+    :ok
+  end
 
   test "rejects maps that masquerade as typed commands" do
     assert {:error, error} =
@@ -557,6 +566,29 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
              )
 
     assert plan.applicable?
+  end
+
+  @tag :tmp_dir
+  test "a paused-draft patch cannot advertise Apply for a repository without VCS", %{tmp_dir: tmp_dir} do
+    repo = Path.join(System.tmp_dir!(), "draft-repository-#{System.unique_integer([:positive])}")
+    File.cp_r!(@manifest_fixture_source, repo)
+    on_exit(fn -> File.rm_rf!(repo) end)
+    registry_path = write_registry(tmp_dir, %{"alpha" => patch_target(tmp_dir)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "alpha",
+                 changes: %{
+                   "repo" => %{"path" => repo},
+                   "budgets" => %{"weekly" => %{"max_total_tokens" => nil}}
+                 }
+               },
+               registry_path: registry_path
+             )
+
+    refute plan.applicable?
+    assert is_nil(plan.id)
   end
 
   @tag :tmp_dir
@@ -2428,6 +2460,104 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
            )
   end
 
+  @tag :tmp_dir
+  test "non-ready repository inputs remain visible but cannot produce an applicable add plan", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = Path.join(System.tmp_dir!(), "plain-repository-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(repo) end)
+    File.mkdir_p!(repo)
+    File.cp!(Path.join(@manifest_fixture_root, "symphony.yml"), Path.join(repo, "symphony.yml"))
+    File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
+
+    registry_path = write_registry(tmp_dir, %{})
+    target = put_in(patch_target(tmp_dir), ["repo", "path"], repo)
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Add{target_id: "plain", target: target},
+               registry_path: registry_path
+             )
+
+    refute plan.applicable?
+    assert is_nil(plan.id)
+  end
+
+  @tag :tmp_dir
+  test "repository readiness is revalidated while applying a previously planned add", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = Path.join(System.tmp_dir!(), "ready-repository-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(repo) end)
+    File.mkdir_p!(repo)
+    File.cp!(Path.join(@manifest_fixture_root, "symphony.yml"), Path.join(repo, "symphony.yml"))
+    File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
+    git!(repo, ["init", "--initial-branch=main"])
+    git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+
+    registry_path = write_registry(tmp_dir, %{})
+    target = put_in(patch_target(tmp_dir), ["repo", "path"], repo)
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Add{target_id: "ready", target: target},
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?
+    File.rm!(Path.join(repo, "symphony.yml"))
+
+    assert {:error, %OperatorCommandService.Error{code: :plan_not_applicable}} =
+             OperatorCommandService.apply(
+               plan.id,
+               plan.expected_generation,
+               true,
+               registry_path: registry_path
+             )
+
+    assert {:ok, document} = registry_path |> File.read!() |> Yaml.decode()
+    refute Map.has_key?(document["targets"], "ready")
+  end
+
+  @tag :tmp_dir
+  test "repository identity is revalidated for a repository-input patch before publication", %{
+    tmp_dir: tmp_dir
+  } do
+    repo = Path.join(System.tmp_dir!(), "patch-repository-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm_rf!(repo) end)
+    File.mkdir_p!(repo)
+    File.cp!(Path.join(@manifest_fixture_root, "symphony.yml"), Path.join(repo, "symphony.yml"))
+    File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
+    git!(repo, ["init", "--initial-branch=main"])
+    git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+
+    registry_path = write_registry(tmp_dir, %{"ready" => put_in(patch_target(tmp_dir), ["repo", "path"], repo)})
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Patch{
+                 target_id: "ready",
+                 changes: %{
+                   "repo" => %{
+                     "expected_repository" => "https://github.com/example/symphony-fixture"
+                   }
+                 }
+               },
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?
+    git!(repo, ["remote", "set-url", "origin", "https://github.com/example/other-fixture.git"])
+
+    assert {:error, %OperatorCommandService.Error{code: :repository_not_ready}} =
+             OperatorCommandService.apply(
+               plan.id,
+               plan.expected_generation,
+               true,
+               registry_path: registry_path
+             )
+  end
+
   test "non-binary import paths are rejected at the typed boundary" do
     assert {:error, %OperatorCommandService.Error{code: :invalid_command}} =
              OperatorCommandService.plan(
@@ -2756,5 +2886,10 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
 
     File.write!(path, Yaml.encode(document))
     path
+  end
+
+  defp git!(repo, args) do
+    {output, status} = System.cmd("git", args, cd: repo, stderr_to_stdout: true)
+    assert status == 0, output
   end
 end

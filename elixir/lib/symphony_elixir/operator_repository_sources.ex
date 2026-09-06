@@ -7,6 +7,7 @@ defmodule SymphonyElixir.OperatorRepositorySources do
   @max_source_bytes 1_048_576
 
   @spec load(GenServer.server(), keyword()) :: {:ok, map()} | {:error, atom()}
+
   def load(scheduler, opts) do
     with {:ok, config} <- local_config(opts),
          {:ok, settings} <- LocalConfig.repository_browser(config),
@@ -46,6 +47,14 @@ defmodule SymphonyElixir.OperatorRepositorySources do
          timeout_ms: settings["timeout_ms"]
        }}
     end
+  catch
+    :exit, _ -> {:error, :host_unavailable}
+  end
+
+  @doc false
+  @spec registry_path(GenServer.server(), keyword()) :: {:ok, Path.t()} | {:error, atom()}
+  def registry_path(scheduler, opts \\ []) do
+    with {:ok, _document, path} <- registry(scheduler, opts), do: {:ok, path}
   catch
     :exit, _ -> {:error, :host_unavailable}
   end
