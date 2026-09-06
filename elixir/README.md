@@ -601,6 +601,9 @@ labels and labels for those teams. Query and issue modes expose the accessible t
 and labels. Registry filters remain name-based: each name choice includes `members` with the
 matching Linear IDs, team IDs, and workflow state types. Selecting a shared name selects that
 name across all listed members; it does not select an arbitrary same-name entity.
+Label choice values are trimmed and lowercase, as in the registry; `name` and `members` retain
+the Linear display names. Case variants share one label choice. Label-group containers are
+excluded because they cannot be applied to issues.
 
 The response's `linear` object includes `status`, `reason`, and an opaque `connection_revision`.
 Poll the same read-only endpoint while the status is `loading`. Other statuses are `current`,

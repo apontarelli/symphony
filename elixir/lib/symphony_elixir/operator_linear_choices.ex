@@ -9,7 +9,7 @@ defmodule SymphonyElixir.OperatorLinearChoices do
   @spec build(map() | nil, map(), map(), keyword()) :: map()
   def build(registry, configured, request, opts) do
     selections = request["selections"] || %{}
-    selected = fn path -> Map.get(selections, path, get_in(configured, String.split(path, "."))) end
+    selected = fn path -> Map.get(selections, path, configured_value(configured, path)) end
     connection_id = selected.("linear.connection")
     connection = if registry, do: get_in(registry.host, ["tracker_connections", connection_id])
 
@@ -35,7 +35,7 @@ defmodule SymphonyElixir.OperatorLinearChoices do
       "linear.scope.issue_ids" => explicit_field("list", scope["issue_ids"]),
       "linear.active_states" => states,
       "linear.terminal_states" => states,
-      "linear.required_labels" => grouped_field(catalog.data.labels, team_ids, catalog)
+      "linear.required_labels" => grouped_field(catalog.data.labels, team_ids, catalog, true)
     }
 
     fields =
@@ -57,6 +57,12 @@ defmodule SymphonyElixir.OperatorLinearChoices do
       end)
 
     %{fields: fields, connection_revision: catalog.connection_revision, status: catalog.status, reason: catalog.reason}
+  end
+
+  defp configured_value(configured, path) do
+    Enum.reduce(String.split(path, "."), configured, fn key, value ->
+      if is_map(value), do: Map.get(value, key), else: nil
+    end)
   end
 
   defp connection_reason(true, _connection_id, _catalog), do: "connection_changed"
@@ -91,13 +97,15 @@ defmodule SymphonyElixir.OperatorLinearChoices do
   @spec complete_connection_change?(map(), map()) :: boolean()
   def complete_connection_change?(current, patch) do
     linear = patch["linear"]
+    current_scope = configured_value(current, "linear.scope")
+    current_scope_keys = if is_map(current_scope), do: Map.keys(current_scope), else: []
 
     if is_map(linear) and Map.has_key?(linear, "connection") and
-         linear["connection"] != get_in(current, ["linear", "connection"]) do
+         linear["connection"] != configured_value(current, "linear.connection") do
       Enum.all?(~w(scope active_states terminal_states required_labels), &Map.has_key?(linear, &1)) and
         is_map(linear["scope"]) and Map.has_key?(linear["scope"], "type") and
         complete_scope?(linear["scope"]) and
-        Enum.all?(Map.keys(get_in(current, ["linear", "scope"]) || %{}), &Map.has_key?(linear["scope"], &1))
+        Enum.all?(current_scope_keys, &Map.has_key?(linear["scope"], &1))
     else
       true
     end
@@ -114,7 +122,7 @@ defmodule SymphonyElixir.OperatorLinearChoices do
   defp connection_changed?(configured, request, revision, id) do
     previous = request["linear_revision"]
     selections = request["selections"] || %{}
-    changed = id != get_in(configured, ["linear", "connection"])
+    changed = id != configured_value(configured, "linear.connection")
     changed_revision = not is_nil(previous) and previous != revision
 
     explicit_scope =
@@ -165,14 +173,17 @@ defmodule SymphonyElixir.OperatorLinearChoices do
 
   # Registry filters match names across teams. Keep one selectable name with all
   # matching identities rather than silently choosing one of several equal names.
-  defp grouped_field(entries, team_ids, catalog) do
+  defp grouped_field(entries, team_ids, catalog, normalize_labels? \\ false) do
     choices =
       entries
       |> Enum.filter(&(is_nil(&1.team_id) or &1.team_id in team_ids))
-      |> Enum.group_by(& &1.name)
+      |> Enum.group_by(fn entry ->
+        if normalize_labels?, do: entry.name |> String.trim() |> String.downcase(), else: entry.name
+      end)
       |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map(fn {name, members} ->
-        %{value: name, name: name, members: Enum.sort_by(members, & &1.id), status: choice_status(catalog), reason: catalog.reason}
+      |> Enum.map(fn {value, members} ->
+        members = Enum.sort_by(members, & &1.id)
+        %{value: value, name: hd(members).name, members: members, status: choice_status(catalog), reason: catalog.reason}
       end)
 
     field("list", choices, catalog.status, catalog.reason)

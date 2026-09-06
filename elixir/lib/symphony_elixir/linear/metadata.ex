@@ -63,7 +63,7 @@ defmodule SymphonyElixir.Linear.Metadata do
   @labels_query """
   query SymphonyMetadataLabels($first: Int!, $after: String) {
     issueLabels(first: $first, after: $after) {
-      nodes { id name team { id } }
+      nodes { id name isGroup team { id } }
       pageInfo { hasNextPage endCursor }
     }
   }
@@ -425,7 +425,9 @@ defmodule SymphonyElixir.Linear.Metadata do
   end
 
   defp normalize_catalog({:ok, nodes}, :labels) do
-    deduplicate(nodes, &normalize_label/1)
+    nodes
+    |> Enum.reject(&(value(&1, "isGroup") == true))
+    |> deduplicate(&normalize_label/1)
   end
 
   defp deduplicate(nodes, normalizer) do
@@ -566,20 +568,24 @@ defmodule SymphonyElixir.Linear.Metadata do
     end
   end
 
-  defp classify_response(response) when is_map(response) do
-    status = value(response, "status")
-    body = value(response, "body")
+  defp classify_response(response) when is_map(response),
+    do: classify_status(value(response, "status"), value(response, "body"))
 
-    cond do
-      status in [401, 403] -> {:error, :authentication_failed}
-      status == 429 -> {:error, :rate_limited}
-      status == 408 or (is_integer(status) and status in 500..599) -> {:error, :offline}
-      not (is_integer(status) and status in 200..299) -> {:error, :invalid_response}
-      true -> classify_body(body)
+  defp classify_response(_response), do: {:error, :invalid_response}
+
+  defp classify_status(status, _body) when status in [401, 403], do: {:error, :authentication_failed}
+  defp classify_status(429, _body), do: {:error, :rate_limited}
+  defp classify_status(status, _body) when status == 408 or status in 500..599, do: {:error, :offline}
+
+  defp classify_status(400, body) do
+    case classify_body(body) do
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_response}
     end
   end
 
-  defp classify_response(_response), do: {:error, :invalid_response}
+  defp classify_status(status, body) when status in 200..299, do: classify_body(body)
+  defp classify_status(_status, _body), do: {:error, :invalid_response}
 
   defp classify_body(body) when is_map(body) do
     errors = value(body, "errors")
@@ -612,7 +618,7 @@ defmodule SymphonyElixir.Linear.Metadata do
       end)
 
     cond do
-      Enum.any?(codes, &(&1 in ~w(UNAUTHENTICATED UNAUTHORIZED FORBIDDEN AUTHENTICATION_FAILED INVALID_API_KEY))) ->
+      Enum.any?(codes, &(&1 in ~w(UNAUTHENTICATED UNAUTHORIZED FORBIDDEN AUTHENTICATION_ERROR AUTHENTICATION_FAILED INVALID_API_KEY))) ->
         :authentication_failed
 
       Enum.any?(codes, &(&1 in ~w(RATELIMITED RATE_LIMITED TOO_MANY_REQUESTS))) ->

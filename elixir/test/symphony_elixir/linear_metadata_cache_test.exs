@@ -239,6 +239,16 @@ defmodule SymphonyElixir.Linear.MetadataCacheTest do
     assert %{data: @metadata} = MetadataCache.get(connection, server: server)
   end
 
+  test "a nullable refresh option preserves the available catalog" do
+    opts = [name: nil, fetch_fun: fn _ -> {:ok, @metadata} end, env_fetcher: fn _ -> "fixture-key" end]
+    server = start_supervised!({MetadataCache, opts})
+    connection = connection("nullable-refresh", "$LINEAR_KEY")
+    assert eventually(fn -> MetadataCache.get(connection, server: server).status == "current" end)
+
+    assert %{status: "current", data: @metadata} = MetadataCache.get(connection, server: server, refresh: nil)
+    assert %{status: "current", data: @metadata} = MetadataCache.get(connection, server: server)
+  end
+
   defp connection(id, api_key) do
     %{
       "id" => id,

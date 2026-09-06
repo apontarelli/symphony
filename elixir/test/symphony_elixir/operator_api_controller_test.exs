@@ -300,7 +300,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
              catalog.fields["linear.active_states"].choices
              |> Enum.filter(&(&1.value == "Todo"))
 
-    assert Enum.map(catalog.fields["linear.required_labels"].choices, & &1.value) == ["Shared", "Team only"]
+    assert Enum.map(catalog.fields["linear.required_labels"].choices, & &1.value) == ["shared", "team only"]
     assert Enum.map(catalog.fields["linear.scope.project_id"].choices, & &1.value) == ["project-a", "project-b"]
 
     project =
@@ -309,7 +309,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
         "linear.scope.project_id" => "project-b",
         "linear.scope.team_key" => nil,
         "linear.active_states" => ["Removed"],
-        "linear.required_labels" => ["Team only"]
+        "linear.required_labels" => ["team only"]
       })
 
     blocked = SymphonyElixir.OperatorSettings.build(context.scheduler, project, opts)
@@ -320,12 +320,42 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
            end)
 
     assert Enum.any?(blocked.fields["linear.required_labels"].choices, fn choice ->
-             choice.value == "Team only" and choice.selected and choice.reason == "selection_removed"
+             choice.value == "team only" and choice.selected and choice.reason == "selection_removed"
            end)
 
     assert Enum.any?(blocked.fields["linear.active_states"].choices, fn choice ->
              choice.value == "Todo" and Enum.map(choice.members, & &1.team_id) == ["ops"]
            end)
+  end
+
+  test "saved required labels retain their case-insensitive catalog identity", context do
+    target = put_in(catalog_target(), ["linear", "required_labels"], ["Team only", "Shared"])
+    {opts, _revision} = linear_catalog_fixture(context, target)
+    request = %{"target_id" => "alpha", "repository" => "", "selections" => %{}}
+    catalog = SymphonyElixir.OperatorSettings.build(context.scheduler, request, opts)
+
+    refute catalog.apply_blocked
+    assert catalog.fields["linear.required_labels"].selected == ["team only", "shared"]
+
+    assert %{selected: true, status: "current", members: members} =
+             Enum.find(catalog.fields["linear.required_labels"].choices, &(&1.value == "shared"))
+
+    assert Enum.map(members, & &1.id) == ["global", "global-case"]
+  end
+
+  test "invalid stored Linear scope remains inspectable for correction", context do
+    target = put_in(catalog_target(), ["linear", "scope"], "invalid")
+    {opts, _revision} = linear_catalog_fixture(context, target)
+
+    catalog =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{"target_id" => "alpha", "repository" => ""},
+        opts
+      )
+
+    assert catalog.apply_blocked
+    assert catalog.fields["linear.scope.type"].reason == "selection_required"
   end
 
   test "connection changes require a current revision and explicit dependent selections", context do
@@ -393,8 +423,8 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     end
   end
 
-  defp linear_catalog_fixture(context) do
-    document = catalog_document(%{"alpha" => catalog_target()})
+  defp linear_catalog_fixture(context, target \\ catalog_target()) do
+    document = catalog_document(%{"alpha" => target})
     connection = document["host"]["tracker_connections"]["linear-main"]
     document = put_in(document, ["host", "tracker_connections", "linear-other"], connection)
     path = install_catalog_registry!(context.scheduler, document)
@@ -414,6 +444,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
       ],
       labels: [
         %{id: "global", name: "Shared", team_id: nil},
+        %{id: "global-case", name: "shared", team_id: nil},
         %{id: "team", name: "Team only", team_id: "eng"}
       ]
     }

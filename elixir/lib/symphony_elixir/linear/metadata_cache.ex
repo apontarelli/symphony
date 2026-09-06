@@ -147,7 +147,7 @@ defmodule SymphonyElixir.Linear.MetadataCache do
     entry = expire_entry(entry, now, state)
     state = if stored?, do: put_entry(state, identity.revision, entry), else: state
 
-    force_refresh? = Keyword.get(request_opts, :refresh, false)
+    force_refresh? = Keyword.get(request_opts, :refresh, false) == true
 
     cond do
       not stored? ->
