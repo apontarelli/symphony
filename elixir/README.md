@@ -549,7 +549,7 @@ root. Credentials and pruning policy use this same root; HTTP transport options 
 Settings clients use `POST /api/v1/operator/settings/choices` with the same loopback and
 bearer-token requirements. This is a read-only request; it does not create a preview or
 change configuration. Its optional inputs are `target_id`, an explicit `repository` path,
-and `selections`, a map from catalog field paths to draft values:
+`linear_revision`, and `selections`, a map from catalog field paths to draft values:
 
 ```json
 {
@@ -573,8 +573,9 @@ fields retain configured target values where available. Wildcard paths such as
 
 Catalogs come from schema-owned enums, validated host runner and tracker definitions,
 local capacity profiles, and repository-compatible saved workflows. Repository profiles
-and workflow modules require a known repository; the service does not discover repositories
-or query Linear. Runner entries include their kind, but not commands or credentials.
+and workflow modules require a known repository; the service does not discover repositories.
+Selecting a Linear connection loads read-only metadata from that connection.
+Runner entries include their kind, but not commands or credentials.
 OMP thinking and permission choices apply to `omp_acp` runners.
 Loopback hostname choices apply to `opencode_server` runners. Target runner settings expose
 their schema-owned reasoning-effort choices; provider-defined model names are not finite catalogs.
@@ -586,6 +587,40 @@ that differs from the scheduler generation reports `registry_stale` and blocks A
 `apply_blocked` and `errors` describe catalog constraints only: an unblocked catalog is not
 authorization to mutate. Apply still requires the existing validated preview and exact
 confirmation flow.
+
+Linear scope choices use `linear.scope.type`: `project`, `team`, `query`, or `issues`.
+For a project, select one `linear.scope.project_id` (preferred) or `linear.scope.project_slug`,
+not both. Teams use `linear.scope.team_key`. Project and team choices carry Linear IDs and names,
+so duplicate names do not identify the selection. Clear fields from the previous scope type
+with `null`. Query mode keeps an explicit `linear.scope.query_file`; issue mode keeps an explicit
+`linear.scope.issue_ids` list. Neither is converted into a project or team selection.
+
+`linear.active_states`, `linear.terminal_states`, and `linear.required_labels` are list fields.
+State choices are limited to the selected team or the project's teams. Labels include workspace
+labels and labels for those teams. Query and issue modes expose the accessible teams' states
+and labels. Registry filters remain name-based: each name choice includes `members` with the
+matching Linear IDs, team IDs, and workflow state types. Selecting a shared name selects that
+name across all listed members; it does not select an arbitrary same-name entity.
+
+The response's `linear` object includes `status`, `reason`, and an opaque `connection_revision`.
+Poll the same read-only endpoint while the status is `loading`. Other statuses are `current`,
+`empty`, `authentication_failed`, `rate_limited`, `offline`, `stale_cache`, and `unavailable`.
+Stale data remains visible but cannot validate a selection. Authentication failure removes
+cached data. A selected scope blocks Apply until required choices are current and valid.
+
+The host cache holds at most 64 connection revisions with four concurrent fetches and a
+30-second fetch deadline. Data is fresh for five minutes and may remain visible as stale for
+another 15 minutes. Failed fetches have a five-second retry cooldown. Cache identity includes
+the connection policy and resolved credential; changing the endpoint or rotating the key cannot
+reuse a previous catalog. Only the revision hash is exposed, never the key or its reference.
+Catalog pagination is bounded to 100 pages and 10,000 entries per collection.
+
+Keep the returned revision with the draft and send it as `linear_revision` on later requests.
+A changed connection or mismatched revision reports `connection_changed` for dependent fields.
+After selecting a new connection, use its current revision and explicitly select the scope type,
+scope value, active states, terminal states, and required labels (including an empty label list).
+Do not inherit those values silently. Connection-change patches also require explicit scope and
+filters at preview and again under the registry write lock; include `null` for obsolete scope keys.
 
 Repository discovery uses authenticated `POST /api/v1/operator/repositories` on the selected
 host. Discovery returns directory candidates only. It does not read repository manifests,

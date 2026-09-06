@@ -3,6 +3,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
 
   import Phoenix.ConnTest
 
+  alias SymphonyElixir.Linear.MetadataCache
   alias SymphonyElixir.OperatorInterface
   alias SymphonyElixir.TargetRegistry.{FileStore, Yaml}
 
@@ -190,7 +191,7 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
 
     assert remote["error"]["code"] == "loopback_required"
 
-    for request <- [%{"selections" => []}, %{"repository" => 42}, %{"unknown" => true}] do
+    for request <- [%{"selections" => []}, %{"repository" => 42}, %{"linear_revision" => []}, %{"unknown" => true}] do
       invalid =
         build_conn()
         |> Plug.Conn.put_req_header("authorization", "Bearer #{context.credential}")
@@ -274,7 +275,8 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
       |> post("/api/v1/operator/settings/choices", request)
       |> json_response(200)
 
-    refute catalog["apply_blocked"]
+    assert catalog["apply_blocked"]
+    refute catalog["fields"]["linear.active_states"]["valid"]
     assert catalog["status"] == "current"
     assert catalog["fields"]["state"]["selected"] == "active"
     assert catalog["fields"]["dispatch_mode"]["selected"] == "watch"
@@ -285,6 +287,160 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     assert catalog["fields"]["runners.default"]["selected"] == "codex"
     assert catalog["fields"]["checks.pre_dispatch"]["selected"] == ["repo_validation"]
     assert catalog["fields"]["external_side_effects.tracker_write"]["selected"] == "deny"
+  end
+
+  test "Linear settings scope choices by identity and retain removed filters", context do
+    {opts, revision} = linear_catalog_fixture(context)
+    request = %{"target_id" => "alpha", "repository" => "", "selections" => %{}}
+    catalog = SymphonyElixir.OperatorSettings.build(context.scheduler, request, opts)
+    refute catalog.apply_blocked
+    assert catalog.linear.connection_revision == revision
+
+    assert [%{value: "Todo", members: [%{id: "todo-eng", team_id: "eng"}]}] =
+             catalog.fields["linear.active_states"].choices
+             |> Enum.filter(&(&1.value == "Todo"))
+
+    assert Enum.map(catalog.fields["linear.required_labels"].choices, & &1.value) == ["Shared", "Team only"]
+    assert Enum.map(catalog.fields["linear.scope.project_id"].choices, & &1.value) == ["project-a", "project-b"]
+
+    project =
+      put_in(request, ["selections"], %{
+        "linear.scope.type" => "project",
+        "linear.scope.project_id" => "project-b",
+        "linear.scope.team_key" => nil,
+        "linear.active_states" => ["Removed"],
+        "linear.required_labels" => ["Team only"]
+      })
+
+    blocked = SymphonyElixir.OperatorSettings.build(context.scheduler, project, opts)
+    assert blocked.apply_blocked
+
+    assert Enum.any?(blocked.fields["linear.active_states"].choices, fn choice ->
+             choice.value == "Removed" and choice.selected and choice.reason == "selection_removed"
+           end)
+
+    assert Enum.any?(blocked.fields["linear.required_labels"].choices, fn choice ->
+             choice.value == "Team only" and choice.selected and choice.reason == "selection_removed"
+           end)
+
+    assert Enum.any?(blocked.fields["linear.active_states"].choices, fn choice ->
+             choice.value == "Todo" and Enum.map(choice.members, & &1.team_id) == ["ops"]
+           end)
+  end
+
+  test "connection changes require a current revision and explicit dependent selections", context do
+    {opts, _revision} = linear_catalog_fixture(context)
+    request = %{"target_id" => "alpha", "repository" => "", "selections" => %{"linear.connection" => "linear-other"}}
+    first = SymphonyElixir.OperatorSettings.build(context.scheduler, request, opts)
+    assert first.apply_blocked
+    assert first.fields["linear.active_states"].reason == "connection_changed"
+    await_linear_catalog(opts, "linear-other")
+    fresh = SymphonyElixir.OperatorSettings.build(context.scheduler, request, opts)
+
+    acknowledged = Map.put(request, "linear_revision", fresh.linear.connection_revision)
+    assert SymphonyElixir.OperatorSettings.build(context.scheduler, acknowledged, opts).apply_blocked
+
+    corrected =
+      Map.put(acknowledged, "selections", %{
+        "linear.connection" => "linear-other",
+        "linear.scope.type" => "team",
+        "linear.scope.team_key" => "ENG",
+        "linear.active_states" => ["Todo"],
+        "linear.terminal_states" => ["Done"],
+        "linear.required_labels" => []
+      })
+
+    refute SymphonyElixir.OperatorSettings.build(context.scheduler, corrected, opts).apply_blocked
+
+    inherited =
+      update_in(corrected, ["selections"], fn selections ->
+        selections |> Map.delete("linear.scope.team_key") |> Map.put("linear.scope.project_id", nil)
+      end)
+
+    assert SymphonyElixir.OperatorSettings.build(context.scheduler, inherited, opts).apply_blocked
+    no_scope = %{"repository" => "", "selections" => %{"linear.connection" => "linear-main"}}
+    assert SymphonyElixir.OperatorSettings.build(context.scheduler, no_scope, opts).apply_blocked
+    stale = Map.put(corrected, "linear_revision", "old-revision")
+    assert SymphonyElixir.OperatorSettings.build(context.scheduler, stale, opts).apply_blocked
+  end
+
+  test "query files and explicit issues remain distinct from catalog scope choices", context do
+    {opts, _revision} = linear_catalog_fixture(context)
+
+    for {type, path, value} <- [
+          {"query", "linear.scope.query_file", "/tmp/linear-query.json"},
+          {"issues", "linear.scope.issue_ids", ["SID-486", "SID-463"]}
+        ] do
+      request = %{
+        "target_id" => "alpha",
+        "repository" => "",
+        "selections" => %{
+          "linear.scope.type" => type,
+          "linear.scope.team_key" => nil,
+          path => value
+        }
+      }
+
+      catalog = SymphonyElixir.OperatorSettings.build(context.scheduler, request, opts)
+      refute catalog.apply_blocked
+      assert catalog.fields[path].selected == value
+      assert catalog.fields[path].input == "explicit"
+      refute catalog.fields["linear.scope.project_id"].applicable
+
+      assert Enum.any?(catalog.fields["linear.active_states"].choices, fn choice ->
+               choice.value == "Todo" and Enum.map(choice.members, & &1.team_id) == ["eng", "ops"]
+             end)
+    end
+  end
+
+  defp linear_catalog_fixture(context) do
+    document = catalog_document(%{"alpha" => catalog_target()})
+    connection = document["host"]["tracker_connections"]["linear-main"]
+    document = put_in(document, ["host", "tracker_connections", "linear-other"], connection)
+    path = install_catalog_registry!(context.scheduler, document)
+    on_exit(fn -> File.rm(path) end)
+
+    data = %{
+      teams: [%{id: "eng", key: "ENG", name: "Engineering"}, %{id: "ops", key: "OPS", name: "Engineering"}],
+      projects: [
+        %{id: "project-a", slug_id: "a", name: "Duplicate", team_ids: ["eng"]},
+        %{id: "project-b", slug_id: "b", name: "Duplicate", team_ids: ["ops"]}
+      ],
+      states: [
+        %{id: "todo-eng", name: "Todo", type: "unstarted", team_id: "eng"},
+        %{id: "done-eng", name: "Done", type: "completed", team_id: "eng"},
+        %{id: "todo-ops", name: "Todo", type: "unstarted", team_id: "ops"},
+        %{id: "done-ops", name: "Done", type: "completed", team_id: "ops"}
+      ],
+      labels: [
+        %{id: "global", name: "Shared", team_id: nil},
+        %{id: "team", name: "Team only", team_id: "eng"}
+      ]
+    }
+
+    cache_opts = [name: nil, fetch_fun: fn _ -> {:ok, data} end, env_fetcher: fn _ -> "fixture-key" end]
+    cache = start_supervised!({MetadataCache, cache_opts})
+    opts = [metadata_cache: [server: cache]]
+    result = await_linear_catalog(opts, "linear-main")
+    {opts, result.connection_revision}
+  end
+
+  defp await_linear_catalog(opts, id, attempts \\ 100)
+  defp await_linear_catalog(_opts, _id, 0), do: flunk("Linear catalog did not finish")
+
+  defp await_linear_catalog(opts, id, attempts) do
+    connection = %{"id" => id, "policy" => catalog_document()["host"]["tracker_connections"]["linear-main"]}
+    result = MetadataCache.get(connection, opts[:metadata_cache])
+
+    if result.status == "loading" do
+      receive do
+      after
+        1 -> await_linear_catalog(opts, id, attempts - 1)
+      end
+    else
+      assert result.status == "current"
+      result
+    end
   end
 
   test "settings choices block unknown targets and unknown draft fields", context do
