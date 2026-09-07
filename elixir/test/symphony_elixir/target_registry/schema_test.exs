@@ -445,7 +445,7 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
            ]
   end
 
-  test "host enums, IDs, endpoints, secret references, and non-empty catalogs are strict" do
+  test "host enums, IDs, endpoints, secret references, and catalog entries are strict" do
     invalid_values = [
       {["host", "id"], " Local-Host ", :invalid_id},
       {["host", "id"], "-host", :invalid_id},
@@ -463,11 +463,9 @@ defmodule SymphonyElixir.TargetRegistry.SchemaTest do
       assert_diagnostic(put_in(valid_document(), keys, value), :host, path_for(keys), code)
     end
 
-    for {catalog, path} <- [
-          {"tracker_connections", "$.host.tracker_connections"},
-          {"runners", "$.host.runners"}
-        ] do
-      assert_diagnostic(put_in(valid_document(), ["host", catalog], %{}), :host, path, :invalid_value)
+    for catalog <- ["tracker_connections", "runners"] do
+      assert {:ok, %Snapshot{globally_valid?: true, diagnostics: []}} =
+               Schema.validate(put_in(valid_document(), ["host", catalog], %{}), home: "/tmp/schema-home")
     end
 
     for {catalog, id} <- [{"tracker_connections", "Bad ID"}, {"runners", "-runner"}] do

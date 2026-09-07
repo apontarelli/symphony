@@ -19,15 +19,26 @@ defmodule SymphonyElixir.Application do
 
   use Application
 
+  alias SymphonyElixir.LocalHost.Ownership
+
   @impl true
   def start(_type, _args) do
-    :ok = SymphonyElixir.LogFile.configure()
     registry_path = Application.get_env(:symphony_elixir, :host_registry_path)
+
+    with :ok <- prepare_host_ownership(registry_path) do
+      start_runtime(registry_path)
+    end
+  end
+
+  defp start_runtime(registry_path) do
+    :ok = SymphonyElixir.LogFile.configure()
 
     validate_startup? =
       if is_binary(registry_path),
         do: false,
         else: Application.get_env(:symphony_elixir, :validate_startup, true)
+
+    :ok = maybe_default_server_port(registry_path)
 
     with {:ok, target_context} <- application_target_context(validate_startup?) do
       scheduler_options =
@@ -47,7 +58,8 @@ defmodule SymphonyElixir.Application do
         end
 
       children =
-        control_plane_children() ++
+        host_ownership_children(registry_path) ++
+          control_plane_children() ++
           [
             {Phoenix.PubSub, name: SymphonyElixir.PubSub},
             SymphonyElixir.Linear.MetadataCache,
@@ -68,6 +80,38 @@ defmodule SymphonyElixir.Application do
     end
   end
 
+  # Registry hosts must publish discovery, so they always serve a local
+  # endpoint; an unconfigured port binds ephemerally instead of silently
+  # leaving the host undiscoverable.
+  defp maybe_default_server_port(registry_path) when is_binary(registry_path) do
+    if Application.get_env(:symphony_elixir, :server_port_override) do
+      :ok
+    else
+      case SymphonyElixir.Config.server_port() do
+        nil -> Application.put_env(:symphony_elixir, :server_port_override, 0)
+        _configured -> :ok
+      end
+
+      :ok
+    end
+  rescue
+    _exception -> :ok
+  end
+
+  defp maybe_default_server_port(_registry_path), do: :ok
+
+  # The BEAM resource remains pinned while the preflight publisher is
+  # replaced by the supervised ownership process. There is no lock gap.
+  defp prepare_host_ownership(registry_path) when is_binary(registry_path) do
+    with {:ok, pid} <- Ownership.claim(), do: GenServer.stop(pid, :normal)
+  end
+
+  defp prepare_host_ownership(_registry_path), do: :ok
+
+  defp host_ownership_children(registry_path) when is_binary(registry_path), do: [Ownership]
+
+  defp host_ownership_children(_registry_path), do: []
+
   defp application_target_context(true) do
     with :ok <- SymphonyElixir.Config.validate!(),
          do: SymphonyElixir.TargetAdmission.build_target([])
@@ -79,6 +123,12 @@ defmodule SymphonyElixir.Application do
     if Application.get_env(:symphony_elixir, :start_control_plane, true),
       do: [SymphonyElixir.ControlPlane],
       else: []
+  end
+
+  @impl true
+  def prep_stop(state) do
+    Ownership.unpublish()
+    state
   end
 
   @impl true

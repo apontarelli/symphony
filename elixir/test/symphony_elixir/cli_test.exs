@@ -975,58 +975,6 @@ defmodule SymphonyElixir.CLITest do
     assert output =~ "--skip-validation"
   end
 
-  test "bare invocation in a configured repo opens the picker and can cancel" do
-    repo = tmp_repo!("symphony-elixir-picker")
-    write_cli_repo_manifest!(repo)
-    parent = self()
-
-    deps =
-      cli_deps(%{
-        cwd: fn -> repo end,
-        tty?: fn -> true end,
-        prompt: fn prompt ->
-          send(parent, {:picker_prompt, prompt})
-          "q"
-        end
-      })
-
-    assert {:ok, "Run cancelled."} = CLI.evaluate([], deps)
-    assert_received {:picker_prompt, prompt}
-    assert prompt =~ "Saved workflows:"
-    assert prompt =~ "Create new workflow"
-  end
-
-  test "launcher TTY marker admits the picker when ANSI terminal detection is unavailable" do
-    repo = tmp_repo!("symphony-elixir-picker-launcher-tty")
-    write_cli_repo_manifest!(repo)
-    previous_marker = System.get_env("SYMPHONY_INTERACTIVE_TTY")
-
-    on_exit(fn ->
-      if previous_marker do
-        System.put_env("SYMPHONY_INTERACTIVE_TTY", previous_marker)
-      else
-        System.delete_env("SYMPHONY_INTERACTIVE_TTY")
-      end
-    end)
-
-    System.put_env("SYMPHONY_INTERACTIVE_TTY", "1")
-    parent = self()
-
-    deps =
-      cli_deps(%{
-        cwd: fn -> repo end,
-        prompt: fn prompt ->
-          send(parent, {:picker_prompt, prompt})
-          "q"
-        end
-      })
-      |> Map.delete(:tty?)
-
-    assert {:ok, "Run cancelled."} = CLI.evaluate([], deps)
-    assert_received {:picker_prompt, prompt}
-    assert prompt =~ "Saved workflows:"
-  end
-
   test "picker orders default, main, other saved names, then current" do
     repo = tmp_repo!("symphony-elixir-picker-order")
     write_cli_repo_manifest!(repo)
@@ -1076,13 +1024,94 @@ defmodule SymphonyElixir.CLITest do
     assert invalid_name =~ "lowercase slug"
   end
 
-  test "bare invocation outside a repo setup directory prints help" do
-    cwd = tmp_repo!("symphony-elixir-no-setup")
+  test "bare invocation requires a terminal before creating host files" do
+    root = tmp_repo!("symphony-elixir-no-terminal")
+    previous_root = System.get_env("SYMPHONY_CONFIG_ROOT")
+    System.put_env("SYMPHONY_CONFIG_ROOT", Path.join(root, "host"))
 
-    assert {:ok, output} = CLI.evaluate([], cli_deps(%{cwd: fn -> cwd end}))
-    assert output =~ "Usage:"
-    assert output =~ "symphony setup"
-    assert output =~ "symphony run"
+    on_exit(fn ->
+      if previous_root,
+        do: System.put_env("SYMPHONY_CONFIG_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_CONFIG_ROOT")
+    end)
+
+    assert {:error, output} = CLI.evaluate([], cli_deps(%{tty?: fn -> false end}))
+    assert Jason.decode!(output)["code"] == "terminal_required"
+    refute File.exists?(Path.join(root, "host"))
+  end
+
+  test "bare invocation stays noninteractive when only color support is enabled" do
+    root = tmp_repo!("symphony-elixir-ansi-only")
+    previous_root = System.get_env("SYMPHONY_CONFIG_ROOT")
+    System.put_env("SYMPHONY_CONFIG_ROOT", Path.join(root, "host"))
+    previous_tty = System.get_env("SYMPHONY_INTERACTIVE_TTY")
+    System.delete_env("SYMPHONY_INTERACTIVE_TTY")
+    previous_ansi = Application.fetch_env(:elixir, :ansi_enabled)
+    Application.put_env(:elixir, :ansi_enabled, true)
+
+    on_exit(fn ->
+      if previous_tty,
+        do: System.put_env("SYMPHONY_INTERACTIVE_TTY", previous_tty),
+        else: System.delete_env("SYMPHONY_INTERACTIVE_TTY")
+
+      case previous_ansi do
+        {:ok, value} -> Application.put_env(:elixir, :ansi_enabled, value)
+        :error -> Application.delete_env(:elixir, :ansi_enabled)
+      end
+
+      if previous_root,
+        do: System.put_env("SYMPHONY_CONFIG_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_CONFIG_ROOT")
+    end)
+
+    assert {:error, output} = CLI.evaluate([], %{})
+    assert Jason.decode!(output)["code"] == "terminal_required"
+    refute File.exists?(Path.join(root, "host"))
+  end
+
+  test "explicit SYMPHONY_INTERACTIVE_TTY=0 keeps bare invocation noninteractive despite color" do
+    root = tmp_repo!("symphony-elixir-tty-override-off")
+    previous_root = System.get_env("SYMPHONY_CONFIG_ROOT")
+    System.put_env("SYMPHONY_CONFIG_ROOT", Path.join(root, "host"))
+    previous_tty = System.get_env("SYMPHONY_INTERACTIVE_TTY")
+    System.put_env("SYMPHONY_INTERACTIVE_TTY", "0")
+    previous_ansi = Application.fetch_env(:elixir, :ansi_enabled)
+    Application.put_env(:elixir, :ansi_enabled, true)
+
+    on_exit(fn ->
+      if previous_tty,
+        do: System.put_env("SYMPHONY_INTERACTIVE_TTY", previous_tty),
+        else: System.delete_env("SYMPHONY_INTERACTIVE_TTY")
+
+      case previous_ansi do
+        {:ok, value} -> Application.put_env(:elixir, :ansi_enabled, value)
+        :error -> Application.delete_env(:elixir, :ansi_enabled)
+      end
+
+      if previous_root,
+        do: System.put_env("SYMPHONY_CONFIG_ROOT", previous_root),
+        else: System.delete_env("SYMPHONY_CONFIG_ROOT")
+    end)
+
+    assert {:error, output} = CLI.evaluate([], %{})
+    assert Jason.decode!(output)["code"] == "terminal_required"
+    refute File.exists?(Path.join(root, "host"))
+  end
+
+  test "interactive_tty? honors the launcher's explicit terminal override" do
+    previous = System.get_env("SYMPHONY_INTERACTIVE_TTY")
+
+    on_exit(fn ->
+      if previous,
+        do: System.put_env("SYMPHONY_INTERACTIVE_TTY", previous),
+        else: System.delete_env("SYMPHONY_INTERACTIVE_TTY")
+    end)
+
+    System.put_env("SYMPHONY_INTERACTIVE_TTY", "1")
+    assert SymphonyElixir.HostTerminal.interactive_tty?()
+
+    System.put_env("SYMPHONY_INTERACTIVE_TTY", "0")
+    refute SymphonyElixir.HostTerminal.interactive_tty?()
   end
 
   test "workflow init creates a thin manifest from repo inspection" do

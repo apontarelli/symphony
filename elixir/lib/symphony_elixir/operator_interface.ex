@@ -98,6 +98,15 @@ defmodule SymphonyElixir.OperatorInterface do
     :exit, _reason -> {:error, :unavailable}
   end
 
+  @doc "Protocol versions advertised by this build of the operator interface."
+  @spec interface_versions() :: %{interface_version: pos_integer(), schema_version: pos_integer()}
+  def interface_versions,
+    do: %{interface_version: @interface_version, schema_version: @schema_version}
+
+  @doc "Returns the current host identity only after session authentication."
+  @spec readiness(GenServer.server(), String.t()) :: {:ok, map()} | {:error, map()}
+  def readiness(server, credential), do: command_call(server, {:readiness, credential}, false)
+
   @doc "Returns local launcher metadata, never the session credential itself."
   @spec credentials(GenServer.server()) :: {:ok, map()} | {:error, :unavailable}
   def credentials(server \\ __MODULE__) do
@@ -269,6 +278,17 @@ defmodule SymphonyElixir.OperatorInterface do
   @impl true
   def handle_call(:marker, _from, state) do
     {:reply, {:ok, marker_from_state(state)}, state}
+  end
+
+  def handle_call({:readiness, credential}, _from, state) do
+    case OperatorSession.authenticate(state.session, credential) do
+      :ok ->
+        marker = Map.take(marker_from_state(state), [:host_id, :started_at, :interface_version, :schema_version])
+        {:reply, {:ok, marker}, state}
+
+      {:error, code} ->
+        reject_reply(state, code)
+    end
   end
 
   def handle_call({:events, host_id, after_cursor, limit}, _from, state) do

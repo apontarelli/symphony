@@ -11,7 +11,14 @@ defmodule SymphonyElixirWeb.OperatorApiController do
 
   @default_event_limit 200
 
-  plug(:require_local_session when action in [:preview, :confirm, :settings, :repositories])
+  plug(:require_local_session when action in [:preview, :confirm, :settings, :repositories, :readiness])
+
+  @doc "Authenticated loopback readiness probe; the host marker is only returned after the bearer credential is verified."
+  @spec readiness(Conn.t(), map()) :: Conn.t()
+  def readiness(conn, _params) do
+    OperatorInterface.readiness(operator_interface(), conn.assigns.operator_credential)
+    |> command_response(conn, 200)
+  end
 
   @spec preview(Conn.t(), map()) :: Conn.t()
   def preview(conn, _params) do

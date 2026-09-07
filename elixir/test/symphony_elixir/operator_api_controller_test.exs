@@ -112,6 +112,26 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     }
   end
 
+  test "readiness does not disclose identity for a forged session credential", context do
+    rejected =
+      build_conn()
+      |> Plug.Conn.put_req_header("authorization", "Bearer forged-session")
+      |> get("/api/v1/operator/readiness")
+      |> json_response(401)
+
+    assert rejected["error"]["code"] == "unauthorized"
+    refute Map.has_key?(rejected, "host_id")
+
+    ready =
+      build_conn()
+      |> Plug.Conn.put_req_header("authorization", "Bearer " <> context.credential)
+      |> get("/api/v1/operator/readiness")
+      |> json_response(200)
+
+    assert ready["host_id"] == "host-http"
+    refute Jason.encode!(ready) =~ context.credential
+  end
+
   test "HTTP snapshot and cursor feed expose one versioned contract", %{interface: interface} do
     snapshot = build_conn() |> get("/api/v1/operator/snapshot") |> json_response(200)
 
@@ -133,6 +153,14 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     assert events["latest_cursor"] == 1
     assert [%{"cursor" => 1, "kind" => "snapshot_invalidated"}] = events["events"]
     assert events["snapshot_replacement"] == %{"required" => false, "reason" => nil}
+  end
+
+  test "unsupported snapshot methods report method_not_allowed" do
+    rejected = json_response(post(build_conn(), "/api/v1/operator/snapshot", %{}), 405)
+    assert rejected["error"]["code"] == "method_not_allowed"
+
+    snapshot = build_conn() |> get("/api/v1/operator/snapshot") |> json_response(200)
+    assert snapshot["interface_version"] == 1
   end
 
   test "HTTP cursor validation is explicit" do

@@ -1350,16 +1350,15 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   defp validate_host_scheduling(_scheduling), do: []
 
   defp validate_tracker_connections(connections) when is_map(connections) do
-    empty_map_diagnostics(connections, :host, "$.host.tracker_connections") ++
-      (connections
-       |> ordered_map_entries()
-       |> Enum.with_index()
-       |> Enum.flat_map(fn {{id, connection}, index} ->
-         path = dynamic_key_path("$.host.tracker_connections", id, index)
+    connections
+    |> ordered_map_entries()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{id, connection}, index} ->
+      path = dynamic_key_path("$.host.tracker_connections", id, index)
 
-         validate_dynamic_id(id, :host, path) ++
-           validate_tracker_connection(connection, path)
-       end))
+      validate_dynamic_id(id, :host, path) ++
+        validate_tracker_connection(connection, path)
+    end)
   end
 
   defp validate_tracker_connections(_connections), do: []
@@ -1377,15 +1376,14 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
   end
 
   defp validate_host_runners(runners) when is_map(runners) do
-    empty_map_diagnostics(runners, :host, "$.host.runners") ++
-      (runners
-       |> ordered_map_entries()
-       |> Enum.with_index()
-       |> Enum.flat_map(fn {{id, runner}, index} ->
-         path = dynamic_key_path("$.host.runners", id, index)
+    runners
+    |> ordered_map_entries()
+    |> Enum.with_index()
+    |> Enum.flat_map(fn {{id, runner}, index} ->
+      path = dynamic_key_path("$.host.runners", id, index)
 
-         validate_dynamic_id(id, :host, path) ++ validate_host_runner(id, runner, path)
-       end))
+      validate_dynamic_id(id, :host, path) ++ validate_host_runner(id, runner, path)
+    end)
   end
 
   defp validate_host_runners(_runners), do: []
@@ -1628,14 +1626,6 @@ defmodule SymphonyElixir.TargetRegistry.Schema do
       key_path = dynamic_key_path(path, key, index)
       diagnostic(:error, scope, key_path, :unknown_key, "#{key_path} is not supported")
     end)
-  end
-
-  defp empty_map_diagnostics(map, scope, path) do
-    if map_size(map) == 0 do
-      [diagnostic(:error, scope, path, :invalid_value, "#{path} must not be empty")]
-    else
-      []
-    end
   end
 
   defp invalid_id_diagnostic(scope, path) do

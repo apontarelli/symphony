@@ -2,6 +2,7 @@ defmodule SymphonyElixir.HostCLI do
   @moduledoc false
 
   alias SymphonyElixir.HostScheduler.Registry
+  alias SymphonyElixir.LocalHost.Ownership
   alias SymphonyElixir.OperatorCommandService
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
@@ -124,7 +125,7 @@ defmodule SymphonyElixir.HostCLI do
           optional(:yaml_decode) => (String.t() -> {:ok, map()} | {:error, term()}),
           optional(:json_encode) => (term() -> {:ok, String.t()} | {:error, term()}),
           optional(:load_registry) => (String.t() -> {:ok, map()} | {:error, term()}),
-          optional(:start_host) => (String.t(), map() -> :ok | {:error, term()})
+          optional(:claim_host_ownership) => (-> :ok | {:error, term()})
         }
 
   @spec evaluate([String.t()]) :: :ok | {:ok, String.t()} | {:error, String.t()}
@@ -243,18 +244,52 @@ defmodule SymphonyElixir.HostCLI do
          {opts, [], []} <- OptionParser.parse(args, strict: [registry: :keep]),
          true <- valid_singleton_counts?(opts, [:registry]),
          {:ok, registry_path} <- resolve_registry_path(registry_opt(opts)),
+         :ok <- claim_host_ownership(deps),
          {:ok, loaded} <- load_host_registry(registry_path, deps),
          :ok <- start_host_runtime(registry_path, loaded, deps) do
       :ok
     else
-      {:error, {:registry_load_failed, reason}} ->
-        {:error, "host_registry_load_failed: #{inspect(reason)}"}
+      {:error, {:host_ownership_claim_failed, :host_lock_held}} ->
+        host_run_error("host_already_running", "Use host discover to attach to the current owner; do not remove the ownership lock.")
+
+      {:error, {:host_ownership_claim_failed, {:host_lock_unavailable, _reason}}} ->
+        host_run_error("host_ownership_unavailable", "Check native runtime installation and config-directory permissions before retrying.")
+
+      {:error, {:host_ownership_claim_failed, _reason}} ->
+        host_run_error("host_ownership_failed", "Host ownership could not be established. Inspect the local host before retrying.")
+
+      {:error, {:registry_load_failed, _reason}} ->
+        host_run_error("host_registry_load_failed", "Run host bootstrap preview to inspect configuration. Existing files were not overwritten.")
 
       {:error, {:host_start_failed, reason}} ->
-        {:error, "host_start_failed: #{inspect(reason)}"}
+        if port_conflict?(reason),
+          do: host_run_error("host_port_conflict", "Select a free host server port or inspect the existing listener; no second host was started."),
+          else: host_run_error("host_start_failed", "Inspect the private host log and configuration before retrying startup.")
 
       _invalid ->
         {:error, run_usage()}
+    end
+  end
+
+  defp host_run_error(code, next_action), do: {:error, Jason.encode!(%{code: code, next_action: next_action})}
+
+  defp port_conflict?(:eaddrinuse), do: true
+  defp port_conflict?(reason) when is_tuple(reason), do: reason |> Tuple.to_list() |> Enum.any?(&port_conflict?/1)
+  defp port_conflict?(reason) when is_list(reason), do: Enum.any?(reason, &port_conflict?/1)
+  defp port_conflict?(_reason), do: false
+
+  # The per-user ownership lock is claimed before the registry loads so
+  # that registry archiving and every other startup side effect happen
+  # only under proven single-host ownership.
+  defp claim_host_ownership(deps) do
+    claim = Map.get(deps, :claim_host_ownership, &Ownership.claim/0)
+
+    case safe_invoke(fn -> claim.() end) do
+      {:ok, :ok} -> :ok
+      {:ok, {:ok, _pid}} -> :ok
+      {:ok, {:error, reason}} -> {:error, {:host_ownership_claim_failed, reason}}
+      {:ok, other} -> {:error, {:host_ownership_claim_failed, {:invalid_claim_result, other}}}
+      {:error, reason} -> {:error, {:host_ownership_claim_failed, reason}}
     end
   end
 

@@ -85,10 +85,14 @@ defmodule SymphonyElixir.CLI do
         System.halt(0)
 
       {:error, message} ->
-        IO.puts(:stderr, message)
+        device = if machine_host_command?(args), do: :stdio, else: :stderr
+        IO.puts(device, message)
         System.halt(1)
     end
   end
+
+  defp machine_host_command?(["host", action | _args]), do: action in ["bootstrap", "discover", "attach"]
+  defp machine_host_command?(_args), do: false
 
   @spec evaluate([String.t()]) :: :ok | {:ok, String.t()} | {:error, String.t()}
   def evaluate(args), do: evaluate(args, runtime_deps())
@@ -141,6 +145,10 @@ defmodule SymphonyElixir.CLI do
     _kind, _reason -> {:error, "control_plane_dependency_error"}
   end
 
+  def evaluate(["host", action | args], _deps) when action in ["bootstrap", "discover", "attach"] do
+    SymphonyElixir.HostTerminal.evaluate([action | args])
+  end
+
   def evaluate(["host" | host_args], deps) do
     host_evaluate = Map.get(deps, :host_evaluate, &SymphonyElixir.HostCLI.evaluate/1)
 
@@ -163,15 +171,7 @@ defmodule SymphonyElixir.CLI do
     _kind, _reason -> {:error, "host_dependency_error"}
   end
 
-  def evaluate([], deps) do
-    cwd = deps |> Map.get(:cwd, fn -> File.cwd!() end) |> apply([])
-
-    if RunSetup.repo_setup_valid?(cwd) do
-      evaluate_picker([repo: cwd], deps)
-    else
-      {:ok, usage_message()}
-    end
-  end
+  def evaluate([], deps), do: SymphonyElixir.HostTerminal.open(deps)
 
   def evaluate(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
@@ -329,6 +329,11 @@ defmodule SymphonyElixir.CLI do
   defp usage_message do
     """
     Usage:
+      symphony
+      symphony host bootstrap preview
+      symphony host bootstrap confirm --confirmation <token>
+      symphony host discover
+      symphony host attach
       symphony setup <init|check|preview> [options]
       symphony setup migrate --repo <path> [--name <lowercase-slug>] [--config-root <path>] [--apply]
       symphony list [--repo <path>] [--config-root <path>]
@@ -871,16 +876,7 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp default_tty? do
-    System.get_env("SYMPHONY_INTERACTIVE_TTY") == "1" or standard_io_terminal?()
-  end
-
-  defp standard_io_terminal? do
-    case :io.getopts(:standard_io) do
-      opts when is_list(opts) -> Keyword.get(opts, :terminal, false) == true
-      _ -> false
-    end
-  catch
-    _kind, _reason -> false
+    SymphonyElixir.HostTerminal.interactive_tty?()
   end
 
   defp default_confirm(preview) do

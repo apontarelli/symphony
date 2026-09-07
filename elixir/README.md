@@ -145,9 +145,13 @@ It keeps local shell glue in this repo instead of dotfiles, resolves local runti
 optionally loads `~/.config/symphony/.env` through `op run`, compiles the application, and launches
 the CLI through Mix so native dependencies remain loadable.
 
-For first-run local use, invoke bare `symphony` from a repository with a valid `symphony.yml`.
-The launcher opens a picker showing saved `default`, then `main`, then other saved workflows,
-followed by the recent unsaved `current` entry, plus “Create new workflow”.
+Bare `symphony` starts or attaches to the single local host from any directory. First use previews
+missing configuration files and requires explicit confirmation before creating them. See
+[local host setup and discovery](#local-host-setup-and-discovery) below.
+
+Legacy saved workflows remain available through `symphony run --picker --repo /path/to/repo`.
+The picker lists saved `default`, `main`, other saved workflows, and the recent unsaved `current`
+entry, plus “Create new workflow”.
 
 ```bash
 export LINEAR_API_KEY=...
@@ -193,17 +197,91 @@ export LINEAR_API_KEY=...
 ../bin/symphony run --no-env-file --workflow /path/to/local-symphony-runtime.yml
 ```
 
-Use the launcher env file when you want the 1Password CLI to resolve `op://` secret references:
+Legacy `run` and headless `host run` can load the launcher env file through the 1Password CLI.
+Bare host attachment inherits the current environment and does not resolve an env file itself.
+To provide resolved credentials to a new detached host, use an explicit `op run`:
 
 ```bash
 mkdir -p ~/.config/symphony
 cp ../symphony.env.example ~/.config/symphony/.env
-../bin/symphony
+op run --env-file ~/.config/symphony/.env -- ../bin/symphony
 ../bin/symphony run main
 ```
 
 To make `symphony` available as a shell command, put the repository `bin/` directory on `PATH` or
 symlink `../bin/symphony` into a directory already on `PATH`.
+
+## Local host setup and discovery
+
+Normal use does not select a registry. The default local root is `~/.config/symphony`;
+`SYMPHONY_CONFIG_ROOT` overrides it for explicit isolated environments. First-use setup creates
+only confirmed missing `config.yml` and `targets.yml` files, with mode `0600`. Newly created config
+directories have mode `0700`. Existing files are never replaced, including during concurrent
+confirmation. If creation fails partway through, files are retained for inspection rather than
+deleted.
+
+The new registry has empty target, tracker-connection, and runner catalogs. Setup reports configured
+connection IDs, credential availability, environment-variable names, and runner executable
+availability without returning resolved credentials. Empty hosts need no credentials. Adding or
+importing a target forces it to paused; starting the host does not activate it. Existing configured
+active or draining targets retain their normal restart and recovery behavior.
+
+The default durable state directory is a sibling of the config root: `<config-root>-state`.
+This keeps state separate from the registry directory and prevents different explicit config roots
+from sharing the default durable state. Existing configured `host.state_root` values are unchanged.
+
+The Elixir-owned bootstrap interface returns one JSON document on stdout, including failures.
+Exit status is zero on success and nonzero on failure; build diagnostics stay on stderr.
+
+```text
+symphony host bootstrap preview
+symphony host bootstrap confirm --confirmation <token-from-preview>
+symphony host discover
+symphony host attach
+```
+
+`preview` writes nothing. Its token binds the proposed bytes and observed existing-file state.
+`confirm` rejects stale or replayed tokens. `attach` never creates configuration: it starts a
+detached host only after the OS ownership probe proves no host holds the lock. A live compatible
+host is reused. `discover` is read-only and authenticates readiness before returning endpoint,
+host identity, interface/schema versions, and token-file path. It never returns the token.
+
+The lifetime lock is `<config-root>/host.lock`, held by a native resource inside the BEAM process.
+Interactive and headless registry hosts share it, regardless of registry aliases or `state_root`.
+The OS releases it when the BEAM exits. **Do not delete the lock file to resolve contention.**
+The native lock/probe/detach components are built by `mix compile`; detached startup uses the
+repository's `mise` runtime. Keep the built escript beside its project's `priv/native` artifacts.
+
+Discovery is `<config-root>/host/discovery.json` (`0600`) inside a private `host/` directory
+(`0700`). Readiness uses `GET /api/v1/operator/readiness` with the operator session bearer
+credential, a literal loopback endpoint, and matching host identity and protocol versions.
+Redirects are not followed. New hosts use an ephemeral port if no server port is configured.
+Detached boot output is retained in private `<config-root>/host/boot-*.log` files.
+
+Discovery follows the bound listener address, including bracketed IPv6 loopback endpoints.
+Wildcard listeners advertise their same-family loopback address; non-loopback-only listeners
+do not publish discovery. The host checks discovery metadata once per second and replaces the
+record only when identity, credentials, or endpoint changes. Attachment can briefly report a stale
+host during worker recovery; retry after discovery refreshes. The lifetime lock stays held.
+
+The terminal client supports `status`, `drain TARGET`, `shutdown`, and `q`. Drain and shutdown
+require a host-generated preview and explicit confirmation. Shutdown is disabled until targets
+and tracked work are drained. `q`, EOF, or a client crash only detaches. A confirmed shutdown
+removes discovery before the host stops. Full OpenTUI integration remains owned by SID-463.
+
+Common stable errors and safe actions:
+
+| Code | Safe action |
+| --- | --- |
+| `setup_required`, `host_configuration_missing`, `host_registry_missing` | Preview and confirm the missing files. |
+| `confirmation_mismatch` | Read a new preview and confirm it. Existing files are unchanged. |
+| `invalid_config`, `invalid_registry`, `host_registry_load_failed` | Correct the existing configuration; bootstrap will not overwrite it. |
+| `host_already_running` | Use discovery to inspect the current owner. Do not remove its lock. |
+| `host_stale` | Retry attachment. Restart occurs only after ownership is proven absent. |
+| `host_uncertain`, `host_insecure`, `host_incompatible` | Inspect the record, permissions, and running host version before restarting. |
+| `host_ownership_unknown`, `host_ownership_unavailable`, `host_ownership_failed` | Check native installation and directory access. No unverified second host starts. |
+| `host_port_conflict` | Select a free configured server port or inspect the existing listener. |
+| `host_start_failed`, `host_start_timeout`, `host_launch_unavailable` | Check the private boot log, native artifacts, `mise`, and configuration. |
 
 ## Target registry authoring and lifecycle
 

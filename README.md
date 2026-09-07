@@ -55,6 +55,8 @@ OpenAI project include:
   projection.
 - Product visual review routing: the optional `product_visual_review` workflow module can require
   or recommend visual QA evidence for UI-facing diffs.
+- Safe local host startup: confirmed empty configuration, one per-user process owner,
+  private authenticated discovery, and terminal detach without host shutdown.
 
 ## Current architecture
 
@@ -91,11 +93,18 @@ mise exec -- ./bin/symphony setup check --repo /path/to/target-repo
 mise exec -- ./bin/symphony setup preview --repo /path/to/target-repo --compiled
 ```
 
-For local solo runs, bare `symphony` in a directory with a valid `symphony.yml` opens the saved
-workflow picker. It lists `default`, then `main`, then other saved workflows, followed by the
-recent unsaved `current` entry, and offers “Create new workflow”. First-time creation writes
-`~/.config/symphony/config.yml` with operator defaults such as workspace root, capacity profiles,
-deployment ceilings, polling, and runner settings. Saved workflows live under
+Bare `symphony` works from any directory. It attaches to the local host or previews missing
+`~/.config/symphony/config.yml` and `targets.yml` files and asks for explicit confirmation before
+creating them. Existing files are never replaced. The new host has no targets and needs no tracker
+credentials. New targets start paused; existing active targets keep their restart recovery behavior.
+
+The terminal client supports `status`, `drain TARGET`, `shutdown`, and `q`. Drain and shutdown use
+host-generated previews and exact confirmation. Quitting or crashing the client leaves the host
+running. See [local host setup](elixir/README.md#local-host-setup-and-discovery) for the JSON interface,
+ownership rules, and error recovery.
+
+Legacy saved workflows remain available through `symphony run --picker --repo /path/to/repo`
+and `symphony run <saved-name>`. Saved workflows live under
 `~/.config/symphony/runs/<lowercase-slug>.yml`; an existing name is never overwritten.
 
 `symphony list` is the read-only catalog for scripts and inspection.
@@ -108,7 +117,7 @@ and requires confirmation unless `--yes` is passed.
 
 ```bash
 export LINEAR_API_KEY=...
-../bin/symphony                                                   # interactive picker
+../bin/symphony                                                   # local host setup or attachment
 ../bin/symphony list --repo /path/to/target-repo --no-env-file
 ../bin/symphony run main --preview --no-env-file
 ../bin/symphony run main --no-env-file                            # preview, confirm, start

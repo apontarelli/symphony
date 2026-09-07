@@ -64,16 +64,33 @@ defmodule SymphonyElixir.HttpServer do
   defp maybe_put_orchestrator(endpoint_opts, orchestrator),
     do: Keyword.put(endpoint_opts, :orchestrator, orchestrator)
 
-  @spec bound_port(term()) :: non_neg_integer() | nil
-  def bound_port(_server \\ __MODULE__) do
+  @doc """
+  Returns the actual bound address and port of the HTTP listener.
+
+  `nil` when no listener is running. For an ephemeral `port: 0` bind
+  the returned port is the one the kernel assigned.
+  """
+  @spec bound_address(term()) :: {:ok, {:inet.ip_address(), :inet.port_number()}} | nil
+  def bound_address(_server \\ __MODULE__) do
     case Bandit.PhoenixAdapter.server_info(Endpoint, :http) do
-      {:ok, {_ip, port}} when is_integer(port) -> port
-      _ -> nil
+      {:ok, {ip, port}} when is_integer(port) -> {:ok, {ip, port}}
+      _other -> nil
     end
   rescue
     _error -> nil
   catch
     :exit, _reason -> nil
+  end
+
+  @doc """
+  Returns the actual bound port of the HTTP listener, or `nil`.
+  """
+  @spec bound_port(term()) :: non_neg_integer() | nil
+  def bound_port(_server \\ __MODULE__) do
+    case bound_address() do
+      {:ok, {_ip, port}} -> port
+      nil -> nil
+    end
   end
 
   defp parse_host({_, _, _, _} = ip), do: {:ok, ip}

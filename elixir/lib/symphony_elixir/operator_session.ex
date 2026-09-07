@@ -244,7 +244,9 @@ defmodule SymphonyElixir.OperatorSession do
        when is_integer(uid) and is_integer(current_uid),
        do: uid == current_uid
 
-  defp current_uid do
+  @doc "Current numeric user id, or an error when the local identity is unavailable."
+  @spec current_uid() :: {:ok, non_neg_integer()} | {:error, :credential_store_unavailable}
+  def current_uid do
     case System.cmd("id", ["-u"], stderr_to_stdout: true) do
       {output, 0} ->
         case Integer.parse(String.trim(output)) do

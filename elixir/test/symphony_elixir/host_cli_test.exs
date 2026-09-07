@@ -43,12 +43,16 @@ defmodule SymphonyElixir.HostCLITest do
     refute_received :read_file_called
   end
 
-  test "host run loads one registry snapshot and starts the daemon" do
+  test "host run loads one registry snapshot and starts the daemon under claimed ownership" do
     parent = self()
     registry_path = Path.expand("runtime-registry.yml")
     loaded = %{snapshot: %{host: %{"state_root" => "/runtime-state"}}, contexts: %{}}
 
     deps = %{
+      claim_host_ownership: fn ->
+        send(parent, :ownership_claimed)
+        {:ok, :ok}
+      end,
       load_registry: fn path ->
         send(parent, {:registry_loaded, path})
         {:ok, loaded}
@@ -60,12 +64,48 @@ defmodule SymphonyElixir.HostCLITest do
     }
 
     assert :ok = HostCLI.evaluate(["run", "--registry", registry_path], deps)
+    assert_received :ownership_claimed
     assert_received {:registry_loaded, ^registry_path}
     assert_received {:host_started, ^registry_path, ^loaded}
   end
 
+  test "host run claim precedes registry loading and reports held ownership safely" do
+    parent = self()
+
+    deps = %{
+      claim_host_ownership: fn ->
+        send(parent, :ownership_claimed)
+        {:error, :host_lock_held}
+      end,
+      load_registry: fn _path -> flunk("registry must not load when ownership is held") end,
+      start_host: fn _path, _loaded -> flunk("host must not start when ownership is held") end
+    }
+
+    assert {:error, output} =
+             HostCLI.evaluate(["run", "--registry", "/held-registry.yml"], deps)
+
+    assert Jason.decode!(output)["code"] == "host_already_running"
+
+    assert_received :ownership_claimed
+  end
+
+  test "host run registry load failure returns a stable code without the reason" do
+    deps = %{
+      claim_host_ownership: fn -> {:ok, :ok} end,
+      load_registry: fn _path -> {:error, {:registry_load_failed, "LINEAR_API_KEY=super-secret"}} end,
+      start_host: fn _path, _loaded -> flunk("host must not start after a failed registry load") end
+    }
+
+    assert {:error, output} =
+             HostCLI.evaluate(["run", "--registry", "/invalid-registry.yml"], deps)
+
+    assert Jason.decode!(output)["code"] == "host_registry_load_failed"
+    refute output =~ "super-secret"
+  end
+
   test "host run help and invalid repeated registry are side-effect free" do
     deps = %{
+      claim_host_ownership: fn -> flunk("ownership must not be claimed for usage output") end,
       load_registry: fn _path -> flunk("registry must not load") end,
       start_host: fn _path, _loaded -> flunk("host must not start") end
     }

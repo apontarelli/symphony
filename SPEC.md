@@ -1448,11 +1448,33 @@ CLI commands:
   and source provenance without starting the daemon.
 - `symphony run` prints the same preview and requires interactive TTY confirmation before side
   effects. Noninteractive preview mode MUST NOT start the daemon.
-- Bare `symphony` MAY enter the run path only when the current directory contains a valid
-  `symphony.yml`; outside a repo setup directory it prints help.
+- Bare interactive `symphony` MUST attach to the single local host or guide confirmed first-use
+  setup from any directory. It MUST NOT require a repository manifest or normal registry selection.
+  Noninteractive invocation MUST direct callers to the machine-readable host interface.
 
 CLI validation failures MUST exit nonzero and point to the manifest field or missing repo/harness
 evidence with concise remediation.
+
+#### Local Host Bootstrap and Discovery
+
+- Bootstrap preview MUST be machine-readable and read-only. Confirmation MUST bind the proposed
+  file contents and observed existing-file state. Creation MUST NOT replace existing configuration,
+  including during concurrent confirmation; interrupted creation MUST fail safely without deleting
+  files another caller may already use.
+- An empty host configuration and registry MUST be valid before tracker connections, runners, or
+  targets are configured. Setup guidance MUST NOT disclose resolved credentials.
+- Interactive and headless registry-host launches MUST share lifetime process exclusion independent
+  of registry aliases. Ownership MUST remain held while the host can dispatch work; client exit and
+  ownership-worker restart MUST NOT release it.
+- Discovery metadata MUST be private and include endpoint, host identity, compatible interface and
+  schema versions, and a token-file location. Clients MUST authenticate loopback readiness and verify
+  identity and versions before trusting the record. Stale, partial, insecure, or incompatible records
+  MUST fail safely. Restart over stale metadata requires proof that no live owner holds the lock.
+- Host startup MUST NOT activate new targets. Existing active or draining targets retain their
+  configured restart and recovery behavior. Client exit or crash MUST leave the detached host
+  running; host shutdown remains a separate, confirmed action after drain.
+- Configuration, credential, startup, port-conflict, and uncertain-ownership failures MUST provide
+  stable codes and safe next actions without printing credentials.
 
 ### 6.9 Dynamic Runtime Configuration
 
@@ -3711,8 +3733,11 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - CLI supports `setup init/check/preview` as the primary repo setup command family
 - CLI keeps `workflow init/check/print` as a deprecated one-release setup alias
 - CLI supports `run --preview` without starting the daemon
-- CLI uses bare `symphony` for interactive run setup only when `./symphony.yml` is a valid repo setup
-- CLI prints help outside a repo setup directory when no run setup is selected
+- Bare interactive `symphony` supports local-host setup and attachment from any directory
+- First-use file creation requires explicit confirmation and never overwrites existing configuration
+- Concurrent interactive/headless launches and registry aliases cannot create duplicate host ownership
+- Discovery verifies private metadata, bearer authentication, host identity, and protocol compatibility
+- Client detach/crash leaves the host running; host shutdown requires a separate confirmed action
 - CLI or host config accepts or derives the harness root
 - CLI can initialize a target repo `symphony.yml` without overwriting an existing manifest unless
   explicitly forced

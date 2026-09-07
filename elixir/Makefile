@@ -8,14 +8,21 @@ CPPFLAGS ?=
 CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Wpedantic
 LDFLAGS ?=
 
-NATIVE_SOURCE := c_src/directory_iterator.c
-NATIVE_OUTPUT := priv/native/directory_iterator
+ERTS_INCLUDE ?= $(shell elixir --eval 'IO.puts(:filename.join(:code.root_dir(), "erts-" <> to_string(:erlang.system_info(:version)) <> "/include"))' 2>/dev/null)
+UNDEF_FLAGS := $(shell uname -s 2>/dev/null | grep -q Darwin && echo "-undefined dynamic_lookup")
 
-native: $(NATIVE_OUTPUT)
+NATIVE_OUTPUTS := priv/native/directory_iterator priv/native/host_lock priv/native/host_lock_nif.so
 
-$(NATIVE_OUTPUT): $(NATIVE_SOURCE) Makefile
+native: $(NATIVE_OUTPUTS)
+
+priv/native/%: c_src/%.c Makefile
 	@mkdir -p priv/native
 	$(CC) $(CPPFLAGS) $(CFLAGS) -o "$@" "$<" $(LDFLAGS)
+
+priv/native/host_lock_nif.so: c_src/host_lock_nif.c Makefile
+	@mkdir -p priv/native
+	$(CC) $(CPPFLAGS) -I$(ERTS_INCLUDE) -fPIC $(CFLAGS) -shared $(UNDEF_FLAGS) -o "$@" "$<" $(LDFLAGS)
+
 
 help:
 	@echo "Targets: setup, deps, audit, build, native, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, omp-live, ci"
