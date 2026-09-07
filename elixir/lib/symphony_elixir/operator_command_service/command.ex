@@ -19,6 +19,15 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
     @type t :: %__MODULE__{target_id: String.t(), changes: map()}
   end
 
+  defmodule HostPatch do
+    @moduledoc false
+
+    @enforce_keys [:changes]
+    defstruct [:changes]
+
+    @type t :: %__MODULE__{changes: map()}
+  end
+
   defmodule Import do
     @moduledoc false
 
@@ -77,6 +86,7 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
           Add.t()
           | Import.t()
           | Patch.t()
+          | HostPatch.t()
           | Activate.t()
           | Pause.t()
           | Drain.t()

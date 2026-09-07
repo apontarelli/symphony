@@ -840,6 +840,232 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute updated.poll_check_in_progress
   end
 
+  describe "finite batch dispatch recovery" do
+    test "a restart after every batch issue dispatched ends polling once settled" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      config_root = batch_config_root!("full-restart")
+      server = batch_control_plane!(config_root)
+      first = batch_admission_context!(config_root, "SID-900")
+      second = batch_admission_context!(config_root, "SID-901")
+      {:ok, first_run} = SymphonyElixir.ControlPlane.admit_run(server, first)
+      {:ok, second_run} = SymphonyElixir.ControlPlane.admit_run(server, second)
+      complete_batch_admission!(server, first_run)
+      complete_batch_admission!(server, second_run)
+
+      assert {:ok, 1} = SymphonyElixir.ControlPlane.count_admitted_issues(server, "alpha", ["uuid-SID-900", "SID-900"])
+      assert {:ok, 0} = SymphonyElixir.ControlPlane.count_admitted_issues(server, "other-target", ["SID-900"])
+
+      assert {:ok, state} =
+               Orchestrator.init(
+                 target_context: batch_target_context("alpha", ["SID-900", "SID-901"]),
+                 control_plane: server
+               )
+
+      assert state.dispatched_issue_count == 2
+      assert state.issue_batch_limit == 2
+
+      assert {:noreply, updated} = Orchestrator.handle_info(:run_poll_cycle, state)
+      refute is_reference(updated.tick_timer_ref)
+      assert updated.next_poll_due_at_ms == nil
+      refute updated.poll_check_in_progress
+    end
+
+    test "a restart after part of the batch dispatched keeps only the remaining budget" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      config_root = batch_config_root!("partial-restart")
+      server = batch_control_plane!(config_root)
+      {:ok, completed} = SymphonyElixir.ControlPlane.admit_run(server, batch_admission_context!(config_root, "SID-900"))
+      complete_batch_admission!(server, completed)
+
+      assert {:ok, state} =
+               Orchestrator.init(
+                 target_context: batch_target_context("alpha", ["SID-900", "SID-901"]),
+                 control_plane: server
+               )
+
+      assert state.dispatched_issue_count == 1
+      assert state.issue_batch_limit == 2
+
+      assert {:noreply, updated} = Orchestrator.handle_info(:run_poll_cycle, state)
+      assert is_reference(updated.tick_timer_ref)
+    end
+
+    test "a replaced batch reseeds dispatch progress from the new membership" do
+      write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory")
+      Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+      config_root = batch_config_root!("replacement")
+      server = batch_control_plane!(config_root)
+      {:ok, first} = SymphonyElixir.ControlPlane.admit_run(server, batch_admission_context!(config_root, "SID-900"))
+      {:ok, second} = SymphonyElixir.ControlPlane.admit_run(server, batch_admission_context!(config_root, "SID-901"))
+      complete_batch_admission!(server, first)
+      complete_batch_admission!(server, second)
+
+      assert {:ok, state} =
+               Orchestrator.init(
+                 target_context: batch_target_context("alpha", ["SID-900", "SID-901"]),
+                 control_plane: server
+               )
+
+      assert state.dispatched_issue_count == 2
+
+      assert {:noreply, replaced} =
+               Orchestrator.handle_cast(
+                 {:apply_target_context, batch_target_context("alpha", ["SID-901", "SID-902"])},
+                 state
+               )
+
+      assert replaced.dispatched_issue_count == 1
+      assert replaced.issue_batch_limit == 2
+      assert {:noreply, polling} = Orchestrator.handle_info(:run_poll_cycle, replaced)
+      assert is_reference(polling.tick_timer_ref)
+
+      assert {:noreply, settled} =
+               Orchestrator.handle_cast(
+                 {:apply_target_context, batch_target_context("alpha", ["SID-901"])},
+                 polling
+               )
+
+      assert {:noreply, stopped} = Orchestrator.handle_info(:run_poll_cycle, settled)
+      assert stopped.next_poll_due_at_ms == nil
+    end
+  end
+
+  defp batch_config_root!(prefix) do
+    root = Path.join(System.tmp_dir!(), "symphony-batch-#{prefix}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    on_exit(fn -> File.rm_rf(root) end)
+    root
+  end
+
+  defp batch_control_plane!(config_root) do
+    start_supervised!(
+      {SymphonyElixir.ControlPlane, config_root: config_root, name: {:global, {__MODULE__, make_ref()}}},
+      restart: :temporary
+    )
+  end
+
+  defp batch_admission_context!(config_root, issue_identifier) do
+    workspace_root = Path.join(config_root, "worktrees")
+    File.mkdir_p!(workspace_root)
+
+    target =
+      %SymphonyElixir.TargetContext{
+        target_id: "alpha",
+        state: :active,
+        dispatch_mode: :explicit,
+        registry_generation: batch_hash("generation-alpha"),
+        policy_hash: batch_hash("policy-alpha"),
+        repo_manifest_hash: batch_hash("manifest-alpha"),
+        repo_policy: %{"manifest" => %{"version" => 1}, "manifest_source_dir" => config_root, "workflow_module_resolution" => %{}},
+        tracker_connection: %{
+          "id" => "linear",
+          "policy" => %{
+            "kind" => "linear",
+            "endpoint" => "https://tracker.example.invalid/graphql",
+            "api_key" => "$TRACKER_KEY"
+          }
+        },
+        run_target: %{},
+        worktree_policy: %{
+          "root" => workspace_root,
+          "strategy" => "per_issue",
+          "hooks" => %{
+            "after_create" => nil,
+            "after_run" => nil,
+            "before_remove" => nil,
+            "before_run" => nil,
+            "timeout_ms" => 5_000
+          }
+        },
+        runner_policy: %{
+          "default" => "runner",
+          "allowed" => ["runner"],
+          "runners" => %{
+            "runner" => %{
+              "kind" => "codex_app_server",
+              "command" => ["codex", "app-server"],
+              "turn_timeout_ms" => 30_000,
+              "execution_profiles" => %{
+                "implementation" => %{
+                  "model" => "model-alpha",
+                  "reasoning_effort" => "high",
+                  "budget" => "standard",
+                  "timeout_ms" => 30_000,
+                  "max_retries" => 1
+                }
+              }
+            }
+          }
+        },
+        effective_checks: %{"pre_handoff" => ["mix test"]},
+        external_side_effect_gates: %{"tracker_write" => "allow", "vcs_publish" => "deny"},
+        capacity_limits: %{"max_concurrent_agents" => 2},
+        budget_limits: %{}
+      }
+
+    issue = %Issue{id: "uuid-#{issue_identifier}", identifier: issue_identifier, title: "Batch fixture", state: "In Progress"}
+
+    assert {:ok, context} =
+             SymphonyElixir.ExecutionContext.new(target, issue, policy: %{"delivery" => %{"pr_target" => "main"}, "target" => "alpha"})
+
+    context
+  end
+
+  defp complete_batch_admission!(server, admission) do
+    {:ok, lease} =
+      SymphonyElixir.ControlPlane.acquire_lease(server, admission.admitted_run_id, "restart-owner")
+
+    assert {:ok, _lifecycle} =
+             SymphonyElixir.ControlPlane.transition_run(
+               server,
+               lease,
+               1,
+               :admitted,
+               :completed,
+               %{"disposition" => "completed_before_restart"}
+             )
+  end
+
+  defp batch_target_context(target_id, issue_ids) do
+    %SymphonyElixir.TargetContext{
+      target_id: target_id,
+      state: :active,
+      dispatch_mode: :explicit,
+      registry_generation: batch_hash("generation-#{target_id}"),
+      policy_hash: batch_hash("policy-#{target_id}"),
+      repo_manifest_hash: batch_hash("manifest-#{target_id}"),
+      repo_policy: %{"manifest" => %{"version" => 1}},
+      tracker_connection: %{
+        "id" => "memory",
+        "policy" => %{"kind" => "memory", "endpoint" => nil, "api_key" => nil}
+      },
+      run_target: %{
+        "scope" => %{"type" => "issues", "issue_ids" => issue_ids},
+        "active_states" => ["Todo", "In Progress"],
+        "required_labels" => []
+      },
+      worktree_policy: %{"root" => System.tmp_dir!(), "strategy" => "per_issue", "hooks" => %{}},
+      runner_policy: %{"default" => "runner", "allowed" => ["runner"], "runners" => %{}},
+      effective_checks: %{},
+      external_side_effect_gates: %{"tracker_write" => "deny", "vcs_publish" => "deny"},
+      capacity_limits: %{
+        "max_concurrent_agents" => 2,
+        "max_concurrent_startups" => 2,
+        "issue_batch_limit" => length(issue_ids)
+      },
+      budget_limits: %{}
+    }
+  end
+
+  defp batch_hash(value) do
+    "sha256:" <> (:crypto.hash(:sha256, value) |> Base.encode16(case: :lower))
+  end
+
   test "issue ticket kind is derived from generic Symphony labels" do
     assert Issue.ticket_kind(%Issue{labels: [" Requirement "]}) == :requirement
     assert Issue.requirement?(%Issue{labels: ["requirement"]})

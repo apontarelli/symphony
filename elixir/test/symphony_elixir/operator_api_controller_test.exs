@@ -527,6 +527,141 @@ defmodule SymphonyElixir.OperatorApiControllerTest do
     assert %{field: "repository_profile", reason: "selection_removed"} in invalid.errors
   end
 
+  test "runner tuning metadata reports composed host and override provenance", context do
+    document =
+      catalog_document(%{"alpha" => catalog_target()})
+      |> put_in(["host", "runners", "codex", "model"], "host-model")
+
+    path = install_catalog_registry!(context.scheduler, document)
+    on_exit(fn -> File.rm(path) end)
+
+    catalog = SymphonyElixir.OperatorSettings.build(context.scheduler, %{"target_id" => "alpha"}, [])
+
+    model = catalog.fields["runners.settings.codex.model"]
+    assert model.current == nil
+    assert model.inherited == "host-model"
+    assert model.effective == "host-model"
+    assert model.source == "host"
+
+    effort = catalog.fields["runners.settings.codex.reasoning_effort"]
+    assert effort.current == "high"
+    assert effort.inherited == nil
+    assert effort.effective == "high"
+    assert effort.source == "target"
+
+    cleared =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{"target_id" => "alpha", "selections" => %{"runners.settings.codex.reasoning_effort" => nil}},
+        []
+      )
+
+    cleared_effort = cleared.fields["runners.settings.codex.reasoning_effort"]
+    assert cleared_effort.current == "high"
+    assert cleared_effort.effective == nil
+    assert cleared_effort.source == "selection"
+  end
+
+  test "host scope is explicit and a target named host stays addressable", context do
+    path = install_catalog_registry!(context.scheduler, catalog_document(%{"host" => catalog_target()}))
+    on_exit(fn -> File.rm(path) end)
+
+    host_scoped = SymphonyElixir.OperatorSettings.build(context.scheduler, %{"scope" => "host"}, [])
+
+    assert host_scoped.fields["host.repository_defaults.auto_land.posture"].scope == "host"
+    refute Map.has_key?(host_scoped.fields, "display_name")
+
+    target_named_host = SymphonyElixir.OperatorSettings.build(context.scheduler, %{"target_id" => "host"}, [])
+
+    assert target_named_host.status == "current"
+    assert target_named_host.fields["display_name"].current == "Catalog target"
+    assert target_named_host.fields["display_name"].scope == "target"
+    refute Map.has_key?(target_named_host.fields, "host.repository_defaults.auto_land.posture")
+
+    explicit_target =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{"target_id" => "host", "scope" => "target"},
+        []
+      )
+
+    assert explicit_target.fields["display_name"].current == "Catalog target"
+
+    rejected =
+      build_conn()
+      |> Plug.Conn.put_req_header("authorization", "Bearer " <> context.credential)
+      |> post("/api/v1/operator/settings/choices", %{"scope" => "bogus", "selections" => %{}})
+      |> json_response(400)
+
+    assert rejected["error"]["code"] == "invalid_inputs"
+  end
+
+  test "workflow preset and module fields carry registry-derived finite choices", context do
+    alias SymphonyElixir.Workflow.ModuleRegistry
+
+    document =
+      catalog_document(%{"alpha" => catalog_target()})
+      |> put_in(["host", "repository_defaults"], %{
+        "project" => %{"slug" => "catalog", "repository" => "https://github.com/example/catalog"},
+        "docs" => %{"entrypoints" => []},
+        "validation" => %{"commands" => [], "required_files" => []},
+        "vcs" => %{"mode" => "git", "default_branch" => "main"},
+        "delivery" => %{"pr_target" => "main"},
+        "workflow" => %{"preset" => "default", "modules" => ["removed.module"]},
+        "capabilities" => %{"required" => []}
+      })
+      |> put_in(["host", "repository_profiles"], %{
+        "release" => %{"workflow" => %{"modules" => ["workspace"]}}
+      })
+
+    path = install_catalog_registry!(context.scheduler, document)
+    on_exit(fn -> File.rm(path) end)
+
+    target =
+      SymphonyElixir.OperatorSettings.build(
+        context.scheduler,
+        %{
+          "target_id" => "alpha",
+          "selections" => %{"repository_policy.workflow.preset" => "bogus-preset"}
+        },
+        []
+      )
+
+    preset = target.fields["repository_policy.workflow.preset"]
+    assert preset.type == "choice"
+    assert Enum.map(preset.choices, & &1.value) == ModuleRegistry.preset_names() ++ ["bogus-preset"]
+    assert preset.selected == "bogus-preset"
+    refute preset.valid
+
+    assert Enum.any?(preset.choices, fn choice ->
+             choice.value == "bogus-preset" and choice.selected and choice.reason == "selection_removed"
+           end)
+
+    host = SymphonyElixir.OperatorSettings.build(context.scheduler, %{"scope" => "host"}, [])
+
+    host_preset = host.fields["host.repository_defaults.workflow.preset"]
+    assert host_preset.type == "choice"
+    assert Enum.map(host_preset.choices, & &1.value) == ModuleRegistry.preset_names()
+    assert host_preset.selected == "default"
+    assert host_preset.valid
+
+    host_modules = host.fields["host.repository_defaults.workflow.modules"]
+    assert host_modules.type == "choice"
+    assert host_modules.cardinality == "list"
+    assert Enum.map(host_modules.choices, & &1.value) == ModuleRegistry.module_names() ++ ["removed.module"]
+    assert host_modules.selected == ["removed.module"]
+    refute host_modules.valid
+
+    release_modules = host.fields["host.repository_profiles.release.workflow.modules"]
+    assert release_modules.valid
+
+    assert %{selected: true, status: "current"} =
+             Enum.find(release_modules.choices, &(&1.value == "workspace"))
+
+    assert [%{field: "host.repository_defaults.workflow.modules", reason: "selection_removed"}] =
+             host.errors
+  end
+
   defp linear_catalog_fixture(context, target \\ catalog_target(), overrides \\ []) do
     document = catalog_document(%{"alpha" => target})
     connection = document["host"]["tracker_connections"]["linear-main"]

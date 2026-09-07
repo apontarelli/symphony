@@ -11,6 +11,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   alias SymphonyElixir.TargetRegistry.FileStore
   alias SymphonyElixir.TargetRegistry.Import, as: RegistryImport
   alias SymphonyElixir.TargetRegistry.Preview
+  alias SymphonyElixir.TargetRegistry.RepositoryPolicy
   alias SymphonyElixir.TargetRegistry.Revisions
   alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Validation
@@ -139,7 +140,14 @@ defmodule SymphonyElixir.OperatorCommandService do
   @plan_envelope_keys ~w(envelope_version plan_id action target_id branch_selection command registry_path expected_generation proposed_generation source_hashes created_at)
   @plan_identity_keys ~w(action target_id branch_selection command envelope_version expected_generation proposed_generation registry_path source_hashes)
   @lifecycle_actions [:activate, :pause, :drain, :retire]
-  @actions [:add, :import, :patch | @lifecycle_actions]
+  @actions [:add, :import, :patch, :host_patch | @lifecycle_actions]
+  @host_patch_schema %{
+    "repository_defaults" => :repository_policy,
+    "repository_profiles" => {:named, :repository_policy}
+  }
+  # Envelope sentinel: a host settings Apply edits shared host sections, not a
+  # registry target, so previews and confirmations bind to this stable ID.
+  @host_target_id "host"
   @action_names Enum.map(@actions, &Atom.to_string/1)
 
   defmodule Error do
@@ -207,7 +215,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             id: String.t() | nil,
-            action: :add | :import | :patch | :activate | :pause | :drain | :retire,
+            action: :add | :import | :patch | :host_patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             expected_generation: String.t(),
@@ -255,7 +263,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             plan_id: String.t(),
-            action: :add | :import | :patch | :activate | :pause | :drain | :retire,
+            action: :add | :import | :patch | :host_patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             old_generation: String.t(),
@@ -334,6 +342,17 @@ defmodule SymphonyElixir.OperatorCommandService do
         current_snapshot,
         opts
       )
+    end
+  end
+
+  def plan(%Command.HostPatch{} = command, opts) do
+    with :ok <- validate_host_patch(command),
+         {:ok, registry_path} <- registry_path(opts),
+         plan_dir <- plan_dir(opts, registry_path),
+         {:ok, current_file} <- read_registry(registry_path),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, registry_path) do
+      plan_host_patch(command, registry_path, plan_dir, current_file, current_document, current_snapshot, opts)
     end
   end
 
@@ -596,6 +615,13 @@ defmodule SymphonyElixir.OperatorCommandService do
       valid_patch_map?(elem(decode_patch_input(patch_input), 1))
   end
 
+  defp valid_envelope_command?("host_patch", target_id, %{"target_id" => target_id, "changes" => patch_input} = command)
+       when map_size(command) == 2 and is_binary(patch_input) do
+    match?({:ok, patch} when is_map(patch), decode_patch_input(patch_input)) and
+      patch_input == canonical_patch_input(elem(decode_patch_input(patch_input), 1)) and
+      valid_patch_map?(elem(decode_patch_input(patch_input), 1))
+  end
+
   defp valid_envelope_command?(
          "activate",
          target_id,
@@ -613,6 +639,21 @@ defmodule SymphonyElixir.OperatorCommandService do
        do: true
 
   defp valid_envelope_command?(_action, _target_id, _command), do: false
+
+  defp validate_envelope_sources(%{
+         "action" => "host_patch",
+         "registry_path" => registry_path,
+         "command" => %{"changes" => patch_input},
+         "source_hashes" => source_hashes
+       }) do
+    with {:ok, patch} <- decode_patch_input(patch_input),
+         true <- patch_input == canonical_patch_input(patch),
+         true <- source_hashes == %{registry_path => Preview.generation(patch_input)} do
+      :ok
+    else
+      _changed -> error(:patch_source_changed, "host patch source checksum changed", "$.plan.source_hashes")
+    end
+  end
 
   defp validate_envelope_sources(%{
          "action" => "patch",
@@ -871,6 +912,38 @@ defmodule SymphonyElixir.OperatorCommandService do
       nil -> error(:target_not_found, "target ID no longer exists", "$.targets.#{target_id}")
       true -> error(:target_retired, "retired target cannot be patched", "$.targets.#{target_id}")
       false -> error(:plan_not_applicable, "rebuilt patch proposal is not applicable", "$.plan")
+      {:error, %Error{}} = error -> error
+    end
+  end
+
+  # A host settings Apply edits only the shared repository policy layers;
+  # every other host section stays authoritative and untouched.
+  defp rebuild_envelope(%{"action" => "host_patch"} = envelope, current_bytes, _opts) do
+    command = envelope["command"]
+
+    with :ok <- validate_envelope_sources(envelope),
+         {:ok, patch} <- decode_patch_input(command["changes"]),
+         {:ok, current_file} <- current_file(current_bytes),
+         {:ok, current_document, current_snapshot} <-
+           decode_registry(current_file, envelope["registry_path"]),
+         {:ok, proposed_host} <-
+           merge_patch(current_document["host"] || %{}, patch, @host_patch_schema, "$.command.changes"),
+         :ok <- valid_host_policy_layers?(proposed_host),
+         proposed_document <- Map.put(current_document, "host", proposed_host),
+         proposed_bytes <- Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <-
+           snapshot_for(proposed_document, proposed_bytes, envelope["registry_path"]),
+         proposed_snapshot <- Composition.compose(proposed_snapshot),
+         true <- current_snapshot.globally_valid? and host_patch_applicable?(current_snapshot, proposed_snapshot),
+         :ok <-
+           verify_proposed_generation(
+             proposed_bytes,
+             envelope["proposed_generation"],
+             envelope["registry_path"]
+           ) do
+      {:ok, proposed_bytes}
+    else
+      false -> error(:plan_not_applicable, "rebuilt host patch proposal is not applicable", "$.plan")
       {:error, %Error{}} = error -> error
     end
   end
@@ -1703,6 +1776,93 @@ defmodule SymphonyElixir.OperatorCommandService do
            ),
          created_at: now(opts)
        }}
+    end
+  end
+
+  defp host_patch_applicable?(current_snapshot, proposed_snapshot) do
+    proposed_snapshot.globally_valid? and
+      Enum.all?(current_snapshot.targets, fn {id, current} ->
+        case proposed_snapshot.targets[id] do
+          %TargetRegistry.Target{valid?: proposed_valid?} ->
+            proposed_valid? or not current.valid?
+
+          _missing ->
+            false
+        end
+      end)
+  end
+
+  defp valid_host_policy_layers?(host) do
+    defaults = RepositoryPolicy.validate_raw_policy(Map.get(host, "repository_defaults", %{}), "$.host.repository_defaults")
+
+    profile_diagnostics =
+      host
+      |> Map.get("repository_profiles", %{})
+      |> Enum.flat_map(fn {name, policy} ->
+        RepositoryPolicy.validate_raw_policy(policy, "$.host.repository_profiles.#{name}")
+      end)
+
+    if defaults == [] and profile_diagnostics == [],
+      do: :ok,
+      else: error(:invalid_patch, "shared repository policy layers are invalid", "$.host")
+  end
+
+  defp validate_host_patch(command) do
+    if Map.keys(command) |> Enum.sort() == [:__struct__, :changes] and
+         strict_json_map?(command.changes) and patch_source_safe?(command.changes) and
+         reject_unreachable_patch_keys(command.changes, "$.command.changes") == :ok and
+         Map.keys(command.changes) |> Enum.all?(&(&1 in ["repository_defaults", "repository_profiles"])) do
+      :ok
+    else
+      error(:invalid_command, "host patch command is invalid", "$.command")
+    end
+  end
+
+  defp plan_host_patch(_command, _path, _dir, _file, _document, %{globally_valid?: false}, _opts),
+    do: error(:plan_not_applicable, "host patch requires a globally valid registry", "$.registry")
+
+  defp plan_host_patch(command, registry_path, plan_dir, current_file, current_document, current_snapshot, opts) do
+    with {:ok, proposed_host} <-
+           merge_patch(current_document["host"] || %{}, command.changes, @host_patch_schema, "$.command.changes"),
+         :ok <- valid_host_policy_layers?(proposed_host),
+         proposed_document = Map.put(current_document, "host", proposed_host),
+         proposed_bytes = Yaml.encode(proposed_document),
+         {:ok, proposed_snapshot} <- snapshot_for(proposed_document, proposed_bytes, registry_path) do
+      proposed_snapshot = Composition.compose(proposed_snapshot)
+      registry_preview = Preview.preview(current_snapshot, proposed_snapshot, proposed_bytes)
+
+      plan = %Plan{
+        id: nil,
+        action: :host_patch,
+        target_id: @host_target_id,
+        registry_path: registry_path,
+        expected_generation: current_file.generation,
+        proposed_generation: registry_preview.proposed_generation,
+        applicable?: host_patch_applicable?(current_snapshot, proposed_snapshot),
+        preview: %{"registry" => json_value(registry_preview)},
+        created_at: now(opts)
+      }
+
+      if plan.applicable?,
+        do: persist_host_patch_plan(plan, canonical_patch_input(command.changes), proposed_bytes, plan_dir, opts),
+        else: {:ok, plan}
+    end
+  end
+
+  defp persist_host_patch_plan(plan, patch_input, proposed_bytes, plan_dir, opts) do
+    with {:ok, envelope} <-
+           build_envelope(
+             "host_patch",
+             %{"target_id" => plan.target_id, "changes" => patch_input},
+             plan.registry_path,
+             plan.expected_generation,
+             %{plan.registry_path => Preview.generation(patch_input)},
+             plan.created_at,
+             proposed_bytes,
+             nil
+           ),
+         {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
+      {:ok, public_plan(stored, plan.action, plan.target_id, plan.registry_path, true, plan.preview)}
     end
   end
 

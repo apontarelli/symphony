@@ -5,6 +5,7 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
   alias SymphonyElixir.TargetRegistry.Diagnostic
   alias SymphonyElixir.TargetRegistry.Snapshot
   alias SymphonyElixir.TargetRegistry.Target
+  alias SymphonyElixir.TargetRouting
 
   @gate_operations ~w(tracker_write vcs_publish pull_request_write merge deployment production_data)
   @gate_values ~w(deny manual_approval allow)
@@ -28,6 +29,7 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
       end)
 
     targets = validate_cross_target_paths(targets)
+    targets = validate_cross_target_routing(targets)
 
     global_diagnostics =
       target_container_diagnostics ++
@@ -925,6 +927,80 @@ defmodule SymphonyElixir.TargetRegistry.Validation do
       diagnostics = Map.get(diagnostics_by_target, id, [])
       {id, add_target_diagnostics(target, diagnostics)}
     end)
+  end
+
+  # Static overlaps warn; the host resolves actual issues before admission.
+  defp validate_cross_target_routing(targets) do
+    entries =
+      targets
+      |> Enum.filter(fn {_id, target} -> is_struct(target, Target) and target.valid? and is_map(target.configured) end)
+      |> Enum.map(fn {id, target} ->
+        %{
+          id: id,
+          connection: get_in(target.configured, ["linear", "connection"]),
+          scope: get_in(target.configured, ["linear", "scope"])
+        }
+      end)
+      |> Enum.sort_by(& &1.id)
+
+    warnings = routing_pair_diagnostics(entries, %{})
+
+    Map.new(targets, fn {id, target} ->
+      {id, append_target_diagnostics(target, Map.get(warnings, id, []))}
+    end)
+  end
+
+  defp routing_pair_diagnostics([], acc), do: acc
+
+  defp routing_pair_diagnostics([left | rest], acc) do
+    acc =
+      Enum.reduce(rest, acc, fn right, acc ->
+        routing_pair_diagnostic(left, right, acc)
+      end)
+
+    routing_pair_diagnostics(rest, acc)
+  end
+
+  defp routing_pair_diagnostic(%{connection: connection} = left, %{connection: connection} = right, acc)
+       when is_binary(connection) do
+    cond do
+      TargetRouting.scopes_exactly_overlap?(left.scope, right.scope) ->
+        acc
+        |> put_routing_diagnostic(left, right, :routing_overlap)
+        |> put_routing_diagnostic(right, left, :routing_overlap)
+
+      TargetRouting.scopes_potentially_overlap?(left.scope, right.scope) ->
+        acc
+        |> put_routing_diagnostic(left, right, :routing_overlap_possible)
+        |> put_routing_diagnostic(right, left, :routing_overlap_possible)
+
+      true ->
+        acc
+    end
+  end
+
+  defp routing_pair_diagnostic(_left, _right, acc), do: acc
+
+  defp put_routing_diagnostic(warnings, target, other, code) do
+    diagnostic = %Diagnostic{
+      severity: :warning,
+      scope: {:target, target.id},
+      path: target_path(target.id) <> ".linear.scope",
+      code: code,
+      message:
+        "target #{scope_type_name(target.scope)} scope may overlap target #{other.id} on connection #{target.connection}; narrow scopes or configure repository issue markers so each admitted issue resolves to one repository"
+    }
+
+    Map.update(warnings, target.id, [diagnostic], &[diagnostic | &1])
+  end
+
+  defp scope_type_name(%{"type" => type}) when is_binary(type), do: type
+  defp scope_type_name(_scope), do: "unknown"
+
+  defp append_target_diagnostics(target, []), do: target
+
+  defp append_target_diagnostics(%Target{} = target, diagnostics) do
+    %{target | diagnostics: sort_diagnostics(diagnostic_list(target.diagnostics) ++ diagnostics)}
   end
 
   defp cross_target_diagnostics([], diagnostics), do: diagnostics

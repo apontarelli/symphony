@@ -623,7 +623,8 @@ defmodule SymphonyElixir.Linear.Client do
          opts
        ) do
     graphql_fun = fn query, variables -> graphql(context, query, variables, opts) end
-    markers = %RunTarget.RepoMarkers{labels: required_labels}
+    markers = RunTarget.repo_markers(get_in(context.repo_policy || %{}, ["manifest", "issue_markers"]))
+    markers = %{markers | labels: required_labels}
 
     with :ok <- validate_linear_target(target),
          :ok <- RunTarget.validate_marker_safety(target, markers),

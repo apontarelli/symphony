@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
   alias SymphonyElixir.HandoffRoute.Decision
 
   @secret_key ~r/(api[_-]?key|authorization|credential|password|secret|token)/i
+  @budget_key ~r/^(?:budgets\.(?:per_run|daily|weekly)\.)?max_total_tokens$/
   @authorization_bearer ~r{(?i)(authorization\s*:\s*bearer\s+)[^\s,"')\]\}]+}
   @bare_bearer ~r{(?i)(bearer\s+)[^\s,"')\]\}]+}
   @secret_assignment ~r{(?is)((?:["']?[A-Za-z0-9_-]*(?:api[_-]?key|authorization|credential|password|secret|token)[A-Za-z0-9_-]*["']?)\s*(?:=>|[=:])\s*)(?:"(?:\\.|[^"\\])*"?|'(?:\\.|[^'\\])*'?|[^\s,"')\]\}]+)}
@@ -45,7 +46,7 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
 
   def redact_secrets(map, exact_values) when is_map(map) and is_list(exact_values) do
     Map.new(map, fn {key, value} ->
-      if Regex.match?(@secret_key, key_name(key)) do
+      if Regex.match?(@secret_key, key_name(key)) and not budget_value?(key, value) do
         {key, "<redacted:secret>"}
       else
         {key, redact_secrets(value, exact_values)}
@@ -73,6 +74,13 @@ defmodule SymphonyElixir.ReviewRecords.Redaction do
   end
 
   def redact_secrets(value, _exact_values), do: value
+
+  # Token budgets are numeric limits, not authentication tokens. Metadata for
+  # those exact fields is traversed normally so nested secrets stay redacted.
+  defp budget_value?(key, value) do
+    Regex.match?(@budget_key, key_name(key)) and
+      (is_number(value) or is_nil(value) or is_map(value))
+  end
 
   @spec redact_string(term()) :: String.t()
   def redact_string(value) when is_binary(value) do

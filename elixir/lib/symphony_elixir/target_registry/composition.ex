@@ -76,6 +76,34 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     _kind, _reason -> {:error, :invalid_composed_target}
   end
 
+  @doc """
+  Composes host runner configuration with safe target overrides.
+  Runtime policy and settings metadata use the same composition rules.
+  """
+  @spec compose_runner(term(), term(), String.t()) ::
+          {:ok, map()} | {:composition_error, String.t(), atom(), String.t()}
+  def compose_runner(host_runner, target_settings, runner_id)
+      when is_map(host_runner) and is_map(target_settings) do
+    runner = Map.merge(host_runner, safe_runner_tuning(target_settings))
+
+    if is_map(host_runner["execution_profiles"]) or is_map(target_settings["execution_profiles"]) do
+      with {:ok, profiles} <-
+             overlay_execution_profiles(
+               host_runner["execution_profiles"],
+               target_settings["execution_profiles"],
+               runner_id
+             ) do
+        {:ok, Map.put(runner, "execution_profiles", profiles)}
+      end
+    else
+      {:ok, runner}
+    end
+  end
+
+  def compose_runner(_host_runner, _target_settings, runner_id) do
+    {:composition_error, "runners.settings.#{runner_id}", :manifest_invalid, "current runner policy inputs have an invalid shape"}
+  end
+
   defp verify_composed_target_authority(
          %Snapshot{
            version: 1,
@@ -389,7 +417,7 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
             "target" => configured["checks"]
           },
           "external_side_effect_gates" => configured["external_side_effects"],
-          "capacity_limits" => configured["concurrency"],
+          "capacity_limits" => batch_limited_capacity(configured["concurrency"], linear),
           "budget_limits" => configured["budgets"],
           "scheduling" => configured["scheduling"]
         }
@@ -397,6 +425,26 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
       with {:ok, revision} <- configuration_revision(base) do
         {:ok, update_in(base, ["repo_policy"], &Map.put(&1, "configuration_revision", revision))}
       end
+    end
+  end
+
+  # An explicit target's dispatch budget is its batch: every issue in an
+  # issues scope dispatches exactly once, bounded by the batch size itself.
+  defp batch_limited_capacity(concurrency, linear) do
+    concurrency = if is_map(concurrency), do: concurrency, else: %{}
+
+    case get_in(linear, ["scope", "type"]) do
+      "issues" ->
+        issue_ids = get_in(linear, ["scope", "issue_ids"])
+
+        if is_list(issue_ids) and issue_ids != [] do
+          Map.put(concurrency, "issue_batch_limit", length(issue_ids))
+        else
+          concurrency
+        end
+
+      _other_scope ->
+        concurrency
     end
   end
 
@@ -430,33 +478,11 @@ defmodule SymphonyElixir.TargetRegistry.Composition do
     Enum.reduce_while(runner_ids, {:ok, %{}}, fn id, {:ok, runners} ->
       target_settings = Map.get(settings, id, %{})
 
-      case overlay_runner_policy(host_runners[id], target_settings, id) do
+      case compose_runner(host_runners[id], target_settings, id) do
         {:ok, runner} -> {:cont, {:ok, Map.put(runners, id, runner)}}
         {:composition_error, _path, _code, _message} = error -> {:halt, error}
       end
     end)
-  end
-
-  defp overlay_runner_policy(host_runner, target_settings, runner_id)
-       when is_map(host_runner) and is_map(target_settings) do
-    runner = Map.merge(host_runner, safe_runner_tuning(target_settings))
-
-    if is_map(host_runner["execution_profiles"]) or is_map(target_settings["execution_profiles"]) do
-      with {:ok, profiles} <-
-             overlay_execution_profiles(
-               host_runner["execution_profiles"],
-               target_settings["execution_profiles"],
-               runner_id
-             ) do
-        {:ok, Map.put(runner, "execution_profiles", profiles)}
-      end
-    else
-      {:ok, runner}
-    end
-  end
-
-  defp overlay_runner_policy(_host_runner, _target_settings, runner_id) do
-    {:composition_error, "runners.settings.#{runner_id}", :manifest_invalid, "current runner policy inputs have an invalid shape"}
   end
 
   defp validate_compiled_manifest(manifest) when is_map(manifest) do

@@ -54,7 +54,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
     "source_hashes",
     "created_at"
   ]
-  @actions ~w(add import patch activate dispatch_mode pause drain retire remove dispatch)
+  @actions ~w(add import patch host_patch activate dispatch_mode pause drain retire remove dispatch)
   @forbidden_key_families ~w(authorization bearer private_key connection_string access_token client_secret credential credentials password passwords secret secrets token tokens api_key api_keys)
   @forbidden_exact_keys MapSet.new(~w(audit audit_claim audit_claims env environment prompt prompts provider_error raw_error))
   @target_id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/

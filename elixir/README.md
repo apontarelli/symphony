@@ -732,7 +732,6 @@ change configuration. Its optional inputs are `target_id`, an explicit `reposito
 {
   "target_id": "alpha",
   "selections": {
-    "state": "paused",
     "runners.allowed": ["codex"],
     "runners.default": "codex",
     "checks.pre_dispatch": ["capability_preflight", "repo_validation"]
@@ -741,21 +740,20 @@ change configuration. Its optional inputs are `target_id`, an explicit `reposito
 ```
 
 The response includes interface and schema versions, host identity, registry generation,
-and `fields`. Each field declares `cardinality` (`scalar` or `list`), its `selected` value,
+and `fields`. Each field declares its type and `cardinality` (`scalar`, `list`, or `map`), its `selected` value,
 `valid`, and choices with `value`, `selected`, `status`, and a stable `reason` code.
 Choice status is `available`, `current` (selected and available), `unavailable`, `stale`,
 or `invalid`. Scalar fields accept one value; list fields accept an array. Omitted draft
-fields retain configured target values where available. Wildcard paths such as
-`runners.*.kind` describe schema choices, not a particular configured runner.
+fields retain configured target values where available. Wildcard paths are read-only
+references; only fields with `editable: true` can be sent to settings Apply.
 
 Catalogs come from schema-owned enums, validated host runner and tracker definitions,
 local capacity profiles, and repository-compatible saved workflows. Repository profiles
 and workflow modules require a known repository; the service does not discover repositories.
 Selecting a Linear connection loads read-only metadata from that connection.
-Runner entries include their kind, but not commands or credentials.
-OMP thinking and permission choices apply to `omp_acp` runners.
-Loopback hostname choices apply to `opencode_server` runners. Target runner settings expose
-their schema-owned reasoning-effort choices; provider-defined model names are not finite catalogs.
+Runner entries include their kind, but not commands or credentials. Concrete target
+runner settings expose schema-owned reasoning-effort choices and validated open model
+names and turn limits.
 
 Clients must keep their draft selections when they request fresh choices. Removed selections
 remain visible with `selection_removed`; incompatible definitions carry explicit reason codes.
@@ -764,6 +762,78 @@ that differs from the scheduler generation reports `registry_stale` and blocks A
 `apply_blocked` and `errors` describe catalog constraints only: an unblocked catalog is not
 authorization to mutate. Apply still requires the existing validated preview and exact
 confirmation flow.
+
+Every catalog field also carries provenance and editability: `scope`
+(`target`, `host`, or `reference`), `editable` with a stable
+`disabled_reason`, and `current`, `inherited`, and `effective` values with
+their `source` (`selection`, `target`, `profile`, or `host`). Repository
+policy fields (`repository_policy.*`) resolve through the host
+`repository_defaults`, the selected `repository_profile`, and the target
+override, in that order; the effective value is what the runtime composes and
+the inherited value is what a cleared override would fall back to. Fields the
+merged catalogs describe but the registry cannot write carry
+`unsupported_field` and are never editable; `state` and `dispatch_mode` are
+lifecycle-owned and rejected in every settings selection, including creation.
+Runner tuning fields are derived from the host runner catalog itself, so they
+exist for runners no target has configured yet. Their `current` value is the
+stored target override; `inherited` comes from the host runner; `effective`
+uses the same composition rules as runtime policy. Clearing an override previews
+and reads back the inherited value.
+
+Workflow presets use authoritative single-choice metadata. Workflow modules use
+multi-choice metadata, including in shared host layers. Both catalogs derive their
+values from the module registry. Unknown or removed selections stay visible as
+`stale` with reason `selection_removed` and block Apply.
+
+Passing `scope: "host"` requests the shared repository policy catalog:
+`host.repository_defaults.*` and `host.repository_profiles.<name>.*`.
+Omitting `scope`, or passing `scope: "target"`, requests target settings.
+Target IDs are opaque: `target_id: "host"` alone addresses an ordinary target
+named `host`. Shared layers carry their own `current` values and registry revision;
+a draft selection may name a profile that does not exist yet, and invalid profile
+names report `invalid_profile_name`.
+
+A `settings_apply` preview converts selections into a paused Add (creation), a
+settings-only Patch (update), or a HostPatch for the shared layers (`host`).
+Shared Apply commands must use `inputs.scope: "host"` with the command envelope's
+`target_id: "host"`. Target Apply commands omit `inputs.scope` or set it to `"target"`;
+this includes commands that create or edit an ordinary target named `host`.
+The host derives repository identity itself: a request-level `repository` and
+a `repo.path` selection must agree (otherwise Apply rejects the input), and
+every new or changed repository path is inspected and pinned as
+`repo.path` plus `repo.expected_repository` before confirmation re-checks it
+under the registry lock. Shared edits preview every affected target with the
+old and new effective value of each changed policy leaf, where the new value
+comes from, the policy revision before and after, and the target state; the
+preview also states that admitted runs keep their pinned admission policy. A
+successful Apply returns authoritative post-Apply values and revisions; a
+failed one reports `committed?` when the commit outcome is known. Stale registry,
+catalog, or connection state fails closed at confirmation rather than display time.
+Creation defaults external side effects to deny. It never activates work.
+
+An explicit `batch` previews its exact issues, repository, proposed policy hash,
+configuration revision, and limits, then replaces the issue scope of an existing
+explicit-dispatch target on the same host. The preview's policy and limits describe
+the composed proposal that confirmation commits, not the previous target policy.
+A paused target remains paused. An active target can admit the batch after
+confirmation. Issue identity or routing changes reject confirmation without a commit.
+Batch progress is reconstructed from durable admission membership on restart and
+batch replacement. Already-admitted issues are not implicitly resubmitted, and a
+settled batch stops polling. This operation creates no daemon or separate
+saved-workflow format.
+
+Dedicated project bindings need no labels. Team and query scopes also require
+repository issue markers from host-owned policy. Admission compares active targets
+on the same tracker connection and blocks missing or ambiguous routing. Selecting an
+explicit issue batch does not bypass competing repository bindings. Existing admitted
+runs retain their pinned policy and routing on retry.
+Routing preview reports a potential conflict when different targets select issues
+by unresolved UUID and identifier aliases. Distinct UUID-only or identifier-only
+selections remain non-overlapping when their values are disjoint.
+
+For a new or changed Linear connection, first request choices, then send its
+`revisions.linear` as `linear_revision` with explicit scope and filters. Apply
+checks that revision again at confirmation.
 
 Linear scope choices use `linear.scope.type`: `project`, `team`, `query`, or `issues`.
 For a project, select one `linear.scope.project_id` (preferred) or `linear.scope.project_slug`,
@@ -979,6 +1049,8 @@ Supported commands:
 | `activate` | `target_id` | `{"dispatch_mode":"explicit"}` or `{"dispatch_mode":"watch"}` |
 | `pause`, `drain`, `retire` | `target_id` | `{}` |
 | `patch` | `target_id` | `{"changes":{...}}`, using `OperatorCommandService` patch fields |
+| `settings_apply` | `target_id` | `{"selections":{...}}` plus optional `repository`, `linear_revision`, and `scope` (`target` by default; shared edits require `host` with `target_id: "host"`) |
+| `batch` | `target_id` | `{"issue_ids":[...]}`, explicit issues on an explicit-dispatch target |
 | `resume_run`, `abandon_run` | `run_id` | `{}` |
 | `refresh`, `shutdown`, `prune` | none | `{}` |
 

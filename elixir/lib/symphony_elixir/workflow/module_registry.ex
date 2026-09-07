@@ -575,6 +575,13 @@ defmodule SymphonyElixir.Workflow.ModuleRegistry do
   @spec module_names() :: [String.t()]
   def module_names, do: Enum.sort(Map.keys(@module_by_id))
 
+  @doc """
+  Authoritative workflow preset names; settings catalogs derive their finite
+  preset choices from this list instead of copying the registry vocabulary.
+  """
+  @spec preset_names() :: [String.t()]
+  def preset_names, do: Enum.sort(Map.keys(@presets))
+
   @spec preset(String.t()) :: {:ok, preset_defaults()} | {:error, diagnostic()}
   def preset(name) when is_binary(name) do
     case Map.fetch(@presets, name) do

@@ -149,8 +149,12 @@ defmodule SymphonyElixir.OperatorInterface do
   def settings(server, credential, request, scheduler) do
     with {:ok, context} <- command_call(server, {:settings_context, credential}, false) do
       if is_map(request) and is_map(Map.get(request, "selections", %{})) and
-           Enum.all?(Map.keys(request), &(&1 in ["target_id", "repository", "selections", "linear_revision"])) and
-           Enum.all?(["target_id", "repository", "linear_revision"], &(is_nil(request[&1]) or is_binary(request[&1]))) do
+           Enum.all?(
+             Map.keys(request),
+             &(&1 in ["target_id", "repository", "selections", "linear_revision", "scope"])
+           ) and
+           Enum.all?(["target_id", "repository", "linear_revision"], &(is_nil(request[&1]) or is_binary(request[&1]))) and
+           valid_settings_scope?(request) do
         catalog = SymphonyElixir.OperatorSettings.build(scheduler, request, config_root: context.config_root)
         {:ok, Map.merge(catalog, Map.drop(context, [:config_root]))}
       else
@@ -158,6 +162,12 @@ defmodule SymphonyElixir.OperatorInterface do
       end
     end
   end
+
+  # The settings scope is explicit and never inferred from a target ID:
+  # "host" reads the shared repository policy layers; "target" (the default)
+  # reads one ordinary target, whatever it is named.
+  defp valid_settings_scope?(%{"scope" => scope}), do: scope in ["host", "target"]
+  defp valid_settings_scope?(_request), do: true
 
   @doc "Starts or polls an authenticated bounded repository discovery job."
   @spec repositories(GenServer.server(), String.t(), map(), GenServer.server()) ::
@@ -1480,6 +1490,9 @@ defmodule SymphonyElixir.OperatorInterface do
   defp same_generation(generation, generation), do: :ok
   defp same_generation(_expected, _observed), do: {:error, :stale_generation}
 
+  defp validate_branch_catalog(_state, request, %{binding: %{kind: :settings}}),
+    do: reject_unexpected_branch_scan(request)
+
   defp validate_branch_catalog(_state, request, %{binding: %{branch_selection: nil}}),
     do: reject_unexpected_branch_scan(request)
 
@@ -1683,12 +1696,19 @@ defmodule SymphonyElixir.OperatorInterface do
 
     %{
       status: "rejected",
-      error: %{code: safe_string(to_string(code)), message: error_message(code)},
+      error: %{code: safe_string(to_string(code)), message: error_message(code)} |> Map.merge(settings_error_fields(reason)),
       state_may_have_changed: changed?,
+      committed?: if(is_map(reason), do: Map.get(reason, :committed?, if(changed?, do: nil, else: false)), else: nil),
       snapshot_required: true,
       next_safe_action: "Fetch a complete snapshot. Inspect the result. Request a new preview."
     }
   end
+
+  defp settings_error_fields(%{errors: errors}) when is_list(errors) do
+    %{fields: Enum.map(errors, &%{field: safe_string(&1[:field]), reason: safe_token(&1[:reason])})}
+  end
+
+  defp settings_error_fields(_reason), do: %{}
 
   defp error_message(:unauthorized), do: "A valid local operator session credential is required."
   defp error_message(:loopback_required), do: "Operator commands require a loopback connection."
@@ -1697,6 +1717,49 @@ defmodule SymphonyElixir.OperatorInterface do
   defp error_message(:branch_scan_required), do: "A current branch discovery scan is required for this repository change."
   defp error_message(:branch_scan_unexpected), do: "branch_scan_id is only valid when selecting a discovered branch."
   defp error_message(:branch_catalog_stale), do: "The branch discovery catalog is stale or does not match the selected change."
+
+  defp error_message(:settings_apply_blocked),
+    do: "One or more settings selections are invalid; resolve the listed fields before Apply."
+
+  defp error_message(:settings_field_not_editable),
+    do: "A selected settings field is not editable here; use its dedicated command."
+
+  defp error_message(:settings_apply_changed),
+    do: "Host state changed since the preview; request a new settings preview."
+
+  defp error_message(:settings_catalog_stale),
+    do: "The Linear settings catalog changed since the preview; reselect from current choices."
+
+  defp error_message(:repository_not_ready),
+    do: "The selected repository is not ready; inspect the repository before Apply."
+
+  defp error_message(:routing_ambiguous),
+    do: "Repository routing is ambiguous; narrow the overlapping target scopes."
+
+  defp error_message(:routing_missing),
+    do: "No repository binding matches this issue; select its project or configure repository issue markers."
+
+  defp error_message(:routing_missing_repository),
+    do: "The selected target has no repository identity; select and inspect its repository before admission."
+
+  defp error_message(:routing_owner),
+    do: "The issue belongs to another target's repository binding; use that target or correct the routing rules."
+
+  defp error_message(:routing_unavailable),
+    do: "The host cannot verify repository routing; refresh the host before requesting admission."
+
+  defp error_message(:duplicate_batch_issue),
+    do: "Select each issue once; its ID and identifier refer to the same issue."
+
+  defp error_message(:issues_not_found),
+    do: "One or more requested issues could not be resolved by the tracker."
+
+  defp error_message(:batch_issues_changed),
+    do: "The batch issues changed identity after the preview; request a new batch preview."
+
+  defp error_message(:tracker_unavailable),
+    do: "The tracker is unavailable for issue resolution."
+
   defp error_message(:confirmation_mismatch), do: "The confirmation does not match the exact previewed command."
   defp error_message(:invalid_confirmation), do: "The confirmation token is unknown or has already been used."
   defp error_message(_code), do: "The host could not perform the requested operator command."

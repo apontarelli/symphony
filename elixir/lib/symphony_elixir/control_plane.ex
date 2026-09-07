@@ -520,6 +520,16 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   @doc """
+  Counts durable admissions in a target's issue selection, including terminal runs.
+  UUID and identifier aliases count as one admission; display redaction is not applied.
+  """
+  @spec count_admitted_issues(GenServer.server(), String.t(), [String.t()]) ::
+          {:ok, non_neg_integer()} | {:error, Error.t()}
+  def count_admitted_issues(server \\ __MODULE__, target_id, issue_ids) do
+    GenServer.call(server, {:count_admitted_issues, target_id, issue_ids}, @call_timeout_ms)
+  end
+
+  @doc """
   Returns host-owned availability for durable operator run actions.
   """
   @spec operator_action_availability(map()) :: [
@@ -1063,6 +1073,11 @@ defmodule SymphonyElixir.ControlPlane do
     {:reply, result, state}
   end
 
+  def handle_call({:count_admitted_issues, target_id, issue_ids}, _from, state) do
+    result = count_target_admissions(state.connection, state.path, target_id, issue_ids)
+    {:reply, result, state}
+  end
+
   def handle_call(:inspect_target_budgets, _from, state) do
     result =
       load_target_budget_snapshots(
@@ -1410,6 +1425,22 @@ defmodule SymphonyElixir.ControlPlane do
   end
 
   def terminate(_reason, _state), do: :ok
+
+  defp count_target_admissions(connection, database_path, target_id, issue_ids) do
+    sql = "SELECT tracker_issue_id, issue_identifier FROM run_admissions WHERE target_id = ?"
+
+    with {:ok, rows} <-
+           domain_query(connection, sql, [target_id], database_path, "cannot recover batch admission progress") do
+      selectors = MapSet.new(issue_ids, &String.trim/1)
+
+      count =
+        Enum.count(rows, fn [tracker_issue_id, issue_identifier] ->
+          MapSet.member?(selectors, tracker_issue_id) or MapSet.member?(selectors, issue_identifier)
+        end)
+
+      {:ok, count}
+    end
+  end
 
   defp load_operator_snapshots(connection, database_path) do
     sql = """

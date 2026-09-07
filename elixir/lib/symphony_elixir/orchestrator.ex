@@ -191,6 +191,7 @@ defmodule SymphonyElixir.Orchestrator do
         state =
           state
           |> recover_durable_runs()
+          |> recover_batch_dispatch_progress()
           |> resume_target_paused_admissions()
           |> schedule_durable_lease_renewal()
 
@@ -255,12 +256,19 @@ defmodule SymphonyElixir.Orchestrator do
         {:apply_target_context, %TargetContext{target_id: target_id} = context},
         %State{target_context: %TargetContext{target_id: target_id}} = state
       ) do
+    batch_changed? =
+      get_in(state.target_context.run_target, ["scope", "issue_ids"]) !=
+        get_in(context.run_target, ["scope", "issue_ids"])
+
     state =
       state
       |> release_pending_target_grant()
       |> cancel_target_polling()
       |> Map.put(:target_context, context)
       |> Map.put(:run_mode, target_run_mode(context))
+      |> Map.put(:issue_batch_limit, Map.get(context.capacity_limits, "issue_batch_limit"))
+      |> Map.update!(:dispatched_issue_count, fn count -> if batch_changed?, do: 0, else: count end)
+      |> reset_batch_dispatch_progress(batch_changed?)
       |> apply_target_lifecycle()
       |> activate_scheduler_target()
 
@@ -2447,6 +2455,19 @@ defmodule SymphonyElixir.Orchestrator do
          pinned_context \\ nil,
          durable_authority \\ nil
        ) do
+    case admission_routing(state, issue, pinned_context) do
+      :ok ->
+        dispatch_routed_issue(state, issue, attempt, preferred_worker_host, pinned_context, durable_authority)
+
+      {:error, %{code: code} = detail} ->
+        Logger.warning("Skipping dispatch; admission routing blocked #{issue_context(issue)} reason=#{code} detail=#{inspect(Map.delete(detail, :code))}")
+
+        publish_admission_blocked(state, issue, code)
+        state
+    end
+  end
+
+  defp dispatch_routed_issue(state, issue, attempt, preferred_worker_host, pinned_context, durable_authority) do
     case execution_context_for_dispatch(
            state,
            issue,
@@ -2488,6 +2509,26 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
     end
+  end
+
+  # Existing admissions retain their pinned routing and policy on retry.
+  defp admission_routing(_state, _issue, %ExecutionContext{}), do: :ok
+
+  defp admission_routing(%State{host_scheduler: %{server: scheduler}} = state, %Issue{} = issue, nil)
+       when not is_nil(scheduler) do
+    HostScheduler.resolve_issue_routing(scheduler, state.target_context.target_id, issue)
+  end
+
+  defp admission_routing(_state, _issue, _pinned_context), do: :ok
+
+  defp publish_admission_blocked(%State{} = state, issue, _code) do
+    OperatorInterface.publish_runtime_event(%{
+      target_id: state.target_context.target_id,
+      issue_id: issue.id,
+      issue_identifier: issue.identifier,
+      event: "admission_routing_blocked",
+      timestamp: DateTime.utc_now()
+    })
   end
 
   defp execution_context_for_dispatch(
@@ -3206,6 +3247,49 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  # Finite batch progress is durable: an issue's first dispatch creates its
+  # admission, and admission identity is unique per target and tracker issue.
+  # Reconstruct the batch's dispatched membership from the control plane so a
+  # restart or a batch replacement cannot reset progress and re-open polling
+  # for issues that already dispatched. The durable admission remains the
+  # authority: when the count cannot be read, the counter keeps its previous
+  # value and re-dispatch still fails closed at admission time.
+  defp recover_batch_dispatch_progress(%State{run_mode: :issue_batch, control_plane: server} = state)
+       when not is_nil(server) do
+    case batch_scope_issue_ids(state.target_context) do
+      nil ->
+        state
+
+      issue_ids ->
+        case ControlPlane.count_admitted_issues(server, state.target_context.target_id, issue_ids) do
+          {:ok, count} ->
+            %{state | dispatched_issue_count: count}
+
+          {:error, reason} ->
+            Logger.error("Batch dispatch progress recovery failed: #{inspect(reason)}")
+            state
+        end
+    end
+  end
+
+  defp recover_batch_dispatch_progress(%State{} = state), do: state
+
+  # A replaced batch starts from the new membership's durable progress, not
+  # from an empty counter.
+  defp reset_batch_dispatch_progress(%State{} = state, true),
+    do: recover_batch_dispatch_progress(state)
+
+  defp reset_batch_dispatch_progress(%State{} = state, false), do: state
+
+  defp batch_scope_issue_ids(%TargetContext{run_target: run_target}) do
+    case get_in(run_target || %{}, ["scope"]) do
+      %{"type" => "issues", "issue_ids" => issue_ids} when is_list(issue_ids) -> issue_ids
+      _other_scope -> nil
+    end
+  end
+
+  defp batch_scope_issue_ids(_missing_target), do: nil
 
   defp integrate_durable_recovery(
          %{

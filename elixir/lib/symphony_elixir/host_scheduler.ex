@@ -205,6 +205,20 @@ defmodule SymphonyElixir.HostScheduler do
   @spec begin_shutdown(GenServer.server(), String.t()) :: :ok | {:error, term()}
   def begin_shutdown(server, expected_generation), do: GenServer.call(server, {:begin_shutdown, expected_generation})
 
+  @doc """
+  Resolves single-repository routing for one issue just before admission.
+
+  The host rules are explicit: exactly one active target may match an issue.
+  Any other outcome blocks this admission with an actionable reason.
+  """
+  @spec resolve_issue_routing(GenServer.server(), String.t(), SymphonyElixir.Linear.Issue.t()) ::
+          :ok | {:error, map()}
+  def resolve_issue_routing(server, target_id, issue) when is_binary(target_id) do
+    GenServer.call(server, {:resolve_issue_routing, target_id, issue})
+  catch
+    :exit, _reason -> {:error, %{code: :routing_unavailable}}
+  end
+
   @impl true
   def init(opts) do
     registry_path = Keyword.get(opts, :registry_path)
@@ -364,6 +378,38 @@ defmodule SymphonyElixir.HostScheduler do
 
   def handle_call(:snapshot, _from, state) do
     {:reply, scheduler_snapshot(state), state}
+  end
+
+  def handle_call({:resolve_issue_routing, target_id, issue}, _from, state) do
+    entries =
+      state.targets
+      |> Enum.sort_by(fn {id, _target} -> id end)
+      |> Enum.flat_map(fn {_id, target} ->
+        case SymphonyElixir.TargetRouting.context_entry(target.context) do
+          nil -> []
+          entry -> [entry]
+        end
+      end)
+
+    result =
+      case SymphonyElixir.TargetRouting.resolve_issue_for(entries, target_id, issue) do
+        :ok ->
+          :ok
+
+        {:error, {:routing_ambiguous, matches}} ->
+          {:error, %{code: :routing_ambiguous, targets: Enum.map(matches, & &1.target_id)}}
+
+        {:error, {:routing_owner, entry}} ->
+          {:error, %{code: :routing_owner, target_id: entry.target_id}}
+
+        {:error, {:routing_missing_repository, entry}} ->
+          {:error, %{code: :routing_missing_repository, target_id: entry.target_id}}
+
+        {:error, code} when is_atom(code) ->
+          {:error, %{code: code}}
+      end
+
+    {:reply, result, state}
   end
 
   def handle_call({operation, _generation}, _from, %State{shutdown_requested?: true} = state)

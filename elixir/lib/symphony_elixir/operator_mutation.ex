@@ -13,11 +13,22 @@ defmodule SymphonyElixir.OperatorMutation do
   alias SymphonyElixir.LocalConfig
   alias SymphonyElixir.OperatorCommandService
   alias SymphonyElixir.OperatorCommandService.Command
+  alias SymphonyElixir.OperatorSettingsApply
+  alias SymphonyElixir.TargetContext
+  alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.FileStore
+  alias SymphonyElixir.TargetRegistry.Schema
+  alias SymphonyElixir.TargetRegistry.Snapshot
+  alias SymphonyElixir.TargetRegistry.Validation
+  alias SymphonyElixir.TargetRegistry.Yaml
+  alias SymphonyElixir.TargetRouting
+  alias SymphonyElixir.Tracker
 
-  @target_actions ~w(activate pause drain retire patch)
+  @target_actions ~w(activate pause drain retire patch settings_apply batch)
   @run_actions ~w(resume_run abandon_run)
   @actions @target_actions ++ @run_actions ++ ~w(refresh shutdown prune)
+  @settings_input_keys ~w(selections repository linear_revision scope)
+  @max_batch_issues 100
   @disabled_target_codes [
     :invalid_transition,
     :plan_not_applicable,
@@ -103,8 +114,29 @@ defmodule SymphonyElixir.OperatorMutation do
   defp validate_inputs("patch", %{"changes" => changes} = inputs)
        when map_size(inputs) == 1 and is_map(changes), do: :ok
 
+  defp validate_inputs("settings_apply", inputs) do
+    if Enum.all?(Map.keys(inputs), &(&1 in @settings_input_keys)) and
+         optional_selections?(inputs, "selections") and optional_binary?(inputs, "repository") and
+         optional_binary?(inputs, "linear_revision") and Map.get(inputs, "scope") in [nil, "host", "target"] do
+      :ok
+    else
+      {:error, :invalid_inputs}
+    end
+  end
+
+  defp validate_inputs("batch", %{"issue_ids" => issue_ids} = inputs)
+       when map_size(inputs) == 1 and is_list(issue_ids) and issue_ids != [] and
+              length(issue_ids) <= @max_batch_issues do
+    if Enum.all?(issue_ids, &(is_binary(&1) and String.valid?(&1) and String.trim(&1) != "")) do
+      :ok
+    else
+      {:error, :invalid_inputs}
+    end
+  end
+
   defp validate_inputs(action, inputs)
-       when action not in ["activate", "patch"] and map_size(inputs) == 0, do: :ok
+       when action not in ["activate", "patch", "settings_apply", "batch"] and map_size(inputs) == 0,
+       do: :ok
 
   defp validate_inputs(_action, _inputs), do: {:error, :invalid_inputs}
 
@@ -117,11 +149,38 @@ defmodule SymphonyElixir.OperatorMutation do
   defp exact_command_keys?(command, _action),
     do: Map.keys(command) |> Enum.sort() == ["action", "inputs"]
 
+  defp optional_selections?(inputs, key) do
+    case Map.fetch(inputs, key) do
+      :error -> true
+      {:ok, nil} -> true
+      {:ok, selections} when is_map(selections) -> json_safe?(selections)
+      {:ok, _invalid} -> false
+    end
+  end
+
+  defp optional_binary?(inputs, key) do
+    case Map.fetch(inputs, key) do
+      :error -> true
+      {:ok, nil} -> true
+      {:ok, value} -> is_binary(value) and String.valid?(value)
+    end
+  end
+
+  defp json_safe?(value) do
+    match?({:ok, _encoded}, Jason.encode(value))
+  end
+
   defp do_preview(command, opts, %{scheduler: scheduler, control_plane: control_plane, host_id: host_id}) do
     snapshot = HostScheduler.snapshot(scheduler)
     generation = registry_generation(snapshot)
 
     case command["action"] do
+      "settings_apply" ->
+        preview_settings_apply(command, opts, snapshot, generation, host_id, scheduler)
+
+      "batch" ->
+        preview_batch(command, opts, snapshot, generation, host_id)
+
       action when action in @target_actions ->
         preview_target(command, opts, snapshot, generation, host_id)
 
@@ -226,6 +285,463 @@ defmodule SymphonyElixir.OperatorMutation do
       binding: binding,
       command: command
     }
+  end
+
+  # Settings Apply: host-owned conversion of field selections into a paused
+  # Add (creation) or a settings-only Patch (update). Lifecycle fields never
+  # pass through; activation stays a separate preview and confirm.
+  defp preview_settings_apply(command, opts, snapshot, generation, host_id, scheduler) do
+    with {:ok, registry_path} <- registry_path(snapshot),
+         {:ok, applied} <-
+           OperatorSettingsApply.build(scheduler, command["target_id"], command["inputs"], opts),
+         {:ok, plan} <- OperatorCommandService.plan(applied.command, registry_path: registry_path),
+         true <- plan.expected_generation == generation do
+      registry_preview = safe_term(Map.get(plan.preview, "registry", %{}))
+      applicable? = plan.applicable?
+      disabled_reason = if(applicable?, do: nil, else: "plan_not_applicable")
+
+      binding =
+        if applicable? do
+          # Settings keeps its own repository verification: the host derives
+          # identity and the command envelope re-checks readiness under the
+          # registry lock, so no client branch-discovery scan is required.
+          command
+          |> registry_binding(host_id, registry_path, plan)
+          |> Map.drop([:branch_selection])
+          |> Map.put(:kind, :settings)
+          |> Map.put(:settings, applied)
+        else
+          disabled_binding(command, host_id, generation, disabled_reason)
+        end
+
+      {current_state, proposed_state} = settings_states(applied, command, snapshot, registry_preview, generation)
+
+      {:ok,
+       %{
+         identity: %{
+           action: command["action"],
+           target_id: command["target_id"],
+           host_id: host_id,
+           mode: mode_name(applied.mode)
+         },
+         current_state: current_state,
+         proposed_state: proposed_state,
+         consequences: settings_consequences(applied, registry_preview),
+         warnings: target_warnings(registry_preview, applicable?),
+         disabled_reason: disabled_reason,
+         registry_generation: generation,
+         binding: binding,
+         command: command
+       }}
+    else
+      false ->
+        {:error, :stale_generation}
+
+      {:error, %OperatorCommandService.Error{} = error} ->
+        target_disabled_or_error(command, snapshot, generation, host_id, error)
+
+      {:error, %{} = error} ->
+        {:error, error}
+
+      {:error, reason} ->
+        {:error, public_code(reason)}
+    end
+  end
+
+  # A host-scope Apply shares policy across every target; there is no single
+  # current or proposed target, so the preview describes the shared edit and
+  # the affected-target projection instead.
+  defp settings_states(%{mode: :host} = applied, _command, _snapshot, registry_preview, generation) do
+    {
+      %{registry: %{generation: generation}},
+      %{
+        registry: registry_preview,
+        settings: %{mode: "host", values: applied.values, affected_targets: applied.affected}
+      }
+    }
+  end
+
+  defp settings_states(applied, command, snapshot, registry_preview, generation) do
+    current_target = current_target_state(snapshot, command["target_id"])
+    proposed_target = proposed_target_state(registry_preview, current_target)
+
+    {
+      %{target: current_target, registry: %{generation: generation}},
+      %{
+        target: proposed_target,
+        registry: registry_preview,
+        settings: %{
+          mode: mode_name(applied.mode),
+          values: applied.values,
+          affected_targets: affected_targets(registry_preview)
+        }
+      }
+    }
+  end
+
+  # Explicit issue batch: previews the exact issues, repository, pinned
+  # policy, and limits, then confirms as a scope patch on the existing target.
+  # No second daemon and no new saved-workflow format are involved.
+  defp preview_batch(command, opts, snapshot, generation, host_id) do
+    with {:ok, registry_path} <- registry_path(snapshot),
+         {:ok, registry_snapshot} <- registry_snapshot(registry_path) do
+      issue_ids = command["inputs"]["issue_ids"]
+
+      case batch_context(registry_snapshot, command["target_id"]) do
+        {:ok, context} ->
+          preview_admissible_batch(
+            command,
+            opts,
+            context,
+            registry_snapshot,
+            registry_path,
+            issue_ids,
+            generation,
+            host_id
+          )
+
+        {:error, reason} ->
+          {:ok,
+           %{
+             identity: %{action: command["action"], target_id: command["target_id"], host_id: host_id},
+             current_state: %{target: current_target_state(snapshot, command["target_id"])},
+             proposed_state: %{},
+             consequences: [],
+             warnings: [error_message(reason)],
+             disabled_reason: Atom.to_string(reason),
+             registry_generation: generation,
+             binding: disabled_binding(command, host_id, generation, Atom.to_string(reason)),
+             command: command
+           }}
+      end
+    end
+  end
+
+  defp preview_admissible_batch(
+         command,
+         opts,
+         context,
+         registry_snapshot,
+         registry_path,
+         issue_ids,
+         generation,
+         host_id
+       ) do
+    with {:ok, issues} <- fetch_batch_issues(context, issue_ids, opts),
+         :ok <- require_known_issues(issue_ids, issues),
+         entries = TargetRouting.snapshot_entries(registry_snapshot),
+         draft = batch_draft_entry(registry_snapshot, context, issue_ids),
+         :ok <- validate_batch_routing(entries, draft, issues),
+         patch = %Command.Patch{target_id: command["target_id"], changes: batch_scope_patch(issue_ids)},
+         {:ok, plan} <- OperatorCommandService.plan(patch, registry_path: registry_path),
+         true <- plan.expected_generation == generation,
+         {:ok, proposed} <-
+           proposed_batch_context(registry_snapshot, patch, plan.proposed_generation) do
+      batch = batch_projection(proposed, issues, draft)
+      registry_preview = safe_term(Map.get(plan.preview, "registry", %{}))
+      proposed_target = proposed_target_state(registry_preview, batch_current_target(context))
+      applicable? = plan.applicable?
+      disabled_reason = if(applicable?, do: nil, else: "plan_not_applicable")
+
+      binding =
+        if applicable? do
+          command
+          |> registry_binding(host_id, registry_path, plan)
+          |> Map.put(:kind, :batch)
+          |> Map.put(:batch, %{
+            issue_ids: issue_ids,
+            issues: Enum.map(issues, &batch_issue_identity/1),
+            fingerprint: batch_fingerprint(issues)
+          })
+        else
+          disabled_binding(command, host_id, generation, disabled_reason)
+        end
+
+      {:ok,
+       %{
+         identity: %{action: command["action"], target_id: command["target_id"], host_id: host_id},
+         current_state: %{
+           target: batch_current_target(context),
+           registry: %{generation: generation}
+         },
+         proposed_state: %{
+           target: proposed_target,
+           registry: registry_preview,
+           batch: batch
+         },
+         consequences: [
+           "queue #{length(issue_ids)} issues on target #{command["target_id"]} in repository #{batch.repository}"
+           | batch_consequences(context, command["target_id"])
+         ],
+         warnings: batch_warnings(context, issues),
+         disabled_reason: disabled_reason,
+         registry_generation: generation,
+         binding: binding,
+         command: command
+       }}
+    else
+      false -> {:error, :stale_generation}
+      {:error, %OperatorCommandService.Error{} = error} -> {:error, public_backend_error(error)}
+      {:error, %{} = error} -> {:error, error}
+      {:error, reason} -> {:error, public_code(reason)}
+    end
+  end
+
+  defp batch_context(registry_snapshot, target_id) do
+    with {:ok, context} <- TargetContext.pin_from_registry(registry_snapshot, target_id) do
+      cond do
+        context.dispatch_mode != :explicit -> {:error, :explicit_target_required}
+        context.state in [:retired, :draining] -> {:error, :invalid_lifecycle_target}
+        true -> {:ok, context}
+      end
+    end
+  end
+
+  defp fetch_batch_issues(context, issue_ids, opts) do
+    fetcher = Keyword.get(opts, :fetch_issues, &Tracker.fetch_issue_states_by_ids/2)
+
+    case invoke_fetch(fetcher, context, issue_ids) do
+      {:ok, issues} when is_list(issues) -> {:ok, issues}
+      {:error, reason} -> {:error, %{code: public_code(reason), state_may_have_changed: false}}
+      _failed -> {:error, %{code: :tracker_unavailable, state_may_have_changed: false}}
+    end
+  end
+
+  defp invoke_fetch(fetcher, context, issue_ids) when is_function(fetcher, 2),
+    do: fetcher.(context, issue_ids)
+
+  defp invoke_fetch(_fetcher, _context, _issue_ids), do: {:error, :tracker_unavailable}
+
+  # Every requested identifier must resolve; unknown issues fail the batch.
+  defp require_known_issues(issue_ids, issues) do
+    resolved = MapSet.new(Enum.flat_map(issues, &[normalize_batch_identifier(&1.identifier), &1.id]))
+
+    unknown =
+      issue_ids
+      |> Enum.reject(&MapSet.member?(resolved, normalize_batch_identifier(&1)))
+
+    cond do
+      unknown != [] ->
+        {:error, %{code: :issues_not_found, detail: Enum.sort(unknown), state_may_have_changed: false}}
+
+      length(issue_ids) != length(issues) or MapSet.size(MapSet.new(issues, & &1.id)) != length(issues) ->
+        {:error, %{code: :duplicate_batch_issue, state_may_have_changed: false}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp normalize_batch_identifier(value) when is_binary(value), do: String.trim(value)
+  defp normalize_batch_identifier(_value), do: nil
+
+  defp validate_batch_routing(entries, draft, issues) do
+    entries = TargetRouting.with_draft(entries, %{draft | active?: true})
+
+    Enum.reduce_while(issues, :ok, fn issue, :ok ->
+      case TargetRouting.resolve_issue_for(entries, draft.target_id, issue) do
+        :ok ->
+          {:cont, :ok}
+
+        {:error, {code, _detail}} ->
+          {:halt, {:error, %{code: code, issue_identifier: issue.identifier, state_may_have_changed: false}}}
+
+        {:error, code} ->
+          {:halt, {:error, %{code: code, issue_identifier: issue.identifier, state_may_have_changed: false}}}
+      end
+    end)
+  end
+
+  defp batch_draft_entry(registry_snapshot, context, issue_ids) do
+    scope = get_in(context.run_target || %{}, ["scope"]) || %{}
+
+    TargetRouting.configured_entry(
+      context.target_id,
+      %{
+        "linear" => %{
+          "connection" => get_in(context.tracker_connection || %{}, ["id"]),
+          "scope" => Map.merge(scope, %{"type" => "issues", "issue_ids" => issue_ids})
+        },
+        "repo" => %{
+          "path" => batch_repository_path(registry_snapshot, context),
+          "expected_repository" => batch_repository_identity(registry_snapshot, context)
+        }
+      },
+      context.state == :active
+    )
+  end
+
+  defp batch_repository_path(registry_snapshot, context) do
+    get_in(registry_snapshot.targets, [context.target_id, Access.key!(:configured), "repo", "path"])
+  rescue
+    _error -> nil
+  end
+
+  defp batch_repository_identity(registry_snapshot, context) do
+    get_in(registry_snapshot.targets, [context.target_id, Access.key!(:configured), "repo", "expected_repository"])
+  rescue
+    _error -> nil
+  end
+
+  defp batch_current_target(context) do
+    context
+    |> Map.take([:target_id, :state, :dispatch_mode, :policy_hash])
+    |> safe_term()
+  end
+
+  defp batch_projection(context, issues, draft) do
+    %{
+      issues:
+        Enum.map(issues, fn issue ->
+          %{
+            id: issue.id,
+            identifier: issue.identifier,
+            title: issue.title,
+            state: issue.state,
+            team_key: issue.team_key,
+            project_id: issue.project_id,
+            labels: issue.labels
+          }
+        end),
+      repository: draft.repository,
+      policy: %{
+        policy_hash: context.policy_hash,
+        configuration_revision: get_in(context.repo_policy || %{}, ["configuration_revision"]),
+        repository_profile: get_in(context.repo_policy || %{}, ["configuration_sources", "profile", "name"])
+      },
+      limits: %{
+        capacity_limits: context.capacity_limits,
+        budget_limits: context.budget_limits,
+        issue_batch_limit: length(Map.get(draft.scope || %{}, "issue_ids") || [])
+      }
+    }
+  end
+
+  defp batch_consequences(context, target_id) do
+    [
+      "the batch runs on this host under target #{target_id}'s newly composed policy; each dispatched run pins it at admission",
+      "issue_batch_limit equals the batch size; each issue dispatches once",
+      "state #{context.state} target: #{if(context.state == :active, do: "admission starts on confirm", else: "admission starts when the target is activated")}"
+    ]
+  end
+
+  defp batch_warnings(%TargetContext{state: :paused}, _issues),
+    do: ["target is paused; the batch is admitted only after activation"]
+
+  defp batch_warnings(_context, _issues), do: []
+
+  defp batch_issue_identity(issue),
+    do: %{id: issue.id, identifier: issue.identifier, state: issue.state}
+
+  defp batch_fingerprint(issues) do
+    issues
+    |> Enum.map(&{&1.id, &1.identifier, &1.project_id, &1.team_key, &1.labels})
+    |> Enum.sort()
+    |> :erlang.term_to_binary()
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
+
+  # The scope patch replaces every selector explicitly; leaving a stale
+  # team or project selector behind would make the composed scope invalid.
+  defp batch_scope_patch(issue_ids) do
+    %{
+      "linear" => %{
+        "scope" => %{
+          "type" => "issues",
+          "issue_ids" => issue_ids,
+          "project_id" => nil,
+          "project_slug" => nil,
+          "team_key" => nil,
+          "query_file" => nil
+        }
+      }
+    }
+  end
+
+  # Revalidate the scope replacement so overlap diagnostics and policy authority
+  # describe the proposal rather than the previous registry target.
+  defp proposed_batch_context(
+         %Snapshot{} = snapshot,
+         %Command.Patch{target_id: target_id, changes: %{"linear" => %{"scope" => scope}}},
+         generation
+       ) do
+    scope = Map.reject(scope, fn {_key, value} -> is_nil(value) end)
+
+    targets =
+      snapshot.targets
+      |> Map.new(fn {id, target} -> {id, target.configured} end)
+      |> Map.update!(target_id, &put_in(&1, ["linear", "scope"], scope))
+
+    document = %{"version" => snapshot.version, "host" => snapshot.host, "targets" => targets}
+
+    with {:ok, proposed} <- Schema.validate(document, registry_path: snapshot.path) do
+      proposed =
+        proposed
+        |> Map.merge(%{path: snapshot.path, source_hash: generation, generation: generation})
+        |> Validation.validate(registry_path: snapshot.path)
+        |> Composition.compose()
+
+      TargetContext.pin_from_registry(proposed, target_id)
+    end
+  end
+
+  defp settings_consequences(applied, registry_preview) do
+    mode_line =
+      case applied.mode do
+        :create ->
+          "create target #{applied.target_id} as paused; activation is a separate preview and confirm"
+
+        :update ->
+          "save settings for target #{applied.target_id}; the lifecycle state does not change"
+
+        :host ->
+          "save shared host repository policy layers; lifecycle states never change"
+      end
+
+    diff_lines =
+      registry_preview
+      |> Map.get("diff", [])
+      |> Enum.map(&format_change/1)
+
+    [mode_line, "admitted runs keep their pinned admission policy"] ++
+      host_affected_lines(applied.affected) ++ diff_lines
+  end
+
+  defp host_affected_lines([]), do: []
+
+  defp host_affected_lines(affected) do
+    Enum.flat_map(affected, fn target ->
+      profile = target.repository_profile || "none"
+
+      [
+        "target #{target.target_id} (profile #{profile}, #{target.state}): #{length(target.changes)} repository policy field(s) change effective value from shared layers on its next admission"
+      ]
+    end)
+  end
+
+  defp affected_targets(registry_preview) do
+    registry_preview
+    |> Map.get("diff", [])
+    |> Enum.flat_map(fn change ->
+      case Regex.run(~r{^\$\.targets\.([a-z0-9-]+)\.}, Map.get(change, "path", "")) do
+        [_, target_id] -> [target_id]
+        _other -> []
+      end
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp mode_name(:create), do: "create"
+  defp mode_name(:update), do: "update"
+  defp mode_name(:host), do: "host"
+
+  defp registry_snapshot(registry_path) do
+    case SymphonyElixir.HostScheduler.Registry.load(registry_path) do
+      {:ok, %{snapshot: snapshot}} -> {:ok, snapshot}
+      _invalid -> {:error, :registry_unavailable}
+    end
   end
 
   defp preview_run(_command, _snapshot, _generation, nil, _host_id),
@@ -376,23 +892,111 @@ defmodule SymphonyElixir.OperatorMutation do
      }}
   end
 
+  defp do_confirm(%{binding: %{kind: :disabled}} = prepared, _opts, _authorities),
+    do: {:error, disabled_error(prepared.disabled_reason)}
+
   defp do_confirm(prepared, opts, %{scheduler: scheduler, control_plane: control_plane}) do
     binding = prepared.binding
 
     with :ok <- revalidate_generation(scheduler, prepared.registry_generation) do
       case binding.kind do
         :registry -> confirm_registry(prepared, opts, scheduler, binding)
+        :settings -> confirm_settings(prepared, opts, scheduler, binding)
+        :batch -> confirm_batch(prepared, opts, scheduler, binding)
         :run -> confirm_run(prepared, control_plane, binding)
         :refresh -> confirm_refresh(scheduler, binding.registry_generation)
         :prune -> confirm_prune(control_plane, binding)
         :shutdown -> confirm_shutdown(scheduler, prepared.registry_generation)
-        :disabled -> {:error, disabled_error(prepared.disabled_reason)}
         _ -> {:error, :invalid_confirmation}
       end
     end
   end
 
-  defp confirm_registry(prepared, _opts, scheduler, binding) do
+  defp confirm_registry(prepared, _opts, scheduler, binding),
+    do: apply_registry_binding(prepared, scheduler, binding)
+
+  # Settings Apply confirms only after the rebuilt catalog reproduces the
+  # previewed command exactly; stale catalogs fail closed with nothing
+  # committed, and the result carries authoritative post-Apply values.
+  defp confirm_settings(prepared, opts, scheduler, binding) do
+    with :ok <- OperatorSettingsApply.verify(scheduler, binding.settings, opts),
+         {:ok, result} <- apply_registry_binding(prepared, scheduler, binding) do
+      case OperatorSettingsApply.readback(scheduler, binding.settings, opts) do
+        {:ok, settings} ->
+          {:ok, result |> Map.put(:mode, mode_name(binding.settings.mode)) |> Map.put(:settings, settings)}
+
+        {:error, %{code: code, reason: reason}} ->
+          # The registry commit stands; only the readback is unavailable, and
+          # the result says so instead of implying failure.
+          {:ok,
+           result
+           |> Map.put(:mode, mode_name(binding.settings.mode))
+           |> Map.put(:settings, %{status: "unavailable", code: code, reason: reason})}
+      end
+    end
+  end
+
+  # Batch confirmation re-resolves every issue identity and re-runs the
+  # single-repository routing rules before the scope patch commits.
+  defp confirm_batch(prepared, opts, scheduler, binding) do
+    with :ok <- verify_batch(prepared, scheduler, binding, opts),
+         {:ok, result} <- apply_registry_binding(prepared, scheduler, binding) do
+      {:ok, Map.put(result, :batch, batch_readback(scheduler, binding))}
+    end
+  end
+
+  defp verify_batch(_prepared, scheduler, binding, opts) do
+    snapshot = HostScheduler.snapshot(scheduler)
+
+    with %{registry: %{verified?: true, path: path}} <- snapshot,
+         {:ok, registry_snapshot} <- registry_snapshot(path),
+         {:ok, context} <- batch_context(registry_snapshot, binding.target_id),
+         {:ok, issues} <- fetch_batch_issues(context, binding.batch.issue_ids, opts),
+         :ok <- require_known_issues(binding.batch.issue_ids, issues),
+         :ok <- require_pinned_issues(binding.batch, issues),
+         entries = TargetRouting.snapshot_entries(registry_snapshot),
+         draft = batch_draft_entry(registry_snapshot, context, binding.batch.issue_ids),
+         :ok <- validate_batch_routing(entries, draft, issues) do
+      :ok
+    else
+      {:error, %{} = error} ->
+        {:error, error}
+
+      {:error, reason} ->
+        {:error, %{code: public_code(reason), state_may_have_changed: false}}
+
+      _unavailable ->
+        {:error, %{code: :registry_unverified, state_may_have_changed: false}}
+    end
+  end
+
+  # Identity, not state, is pinned: an issue may move between preview and
+  # confirm, but it may not become a different issue.
+  defp require_pinned_issues(%{fingerprint: fingerprint}, issues) do
+    if batch_fingerprint(issues) == fingerprint,
+      do: :ok,
+      else: {:error, %{code: :batch_issues_changed, state_may_have_changed: false}}
+  end
+
+  defp batch_readback(scheduler, binding) do
+    snapshot = HostScheduler.snapshot(scheduler)
+
+    with %{registry: %{verified?: true, path: path}} <- snapshot,
+         {:ok, %{bytes: bytes}} <- FileStore.read(path),
+         {:ok, document} <- Yaml.decode(bytes),
+         {:ok, validated} <- Schema.validate(document, registry_path: path),
+         {:ok, target} <- Map.fetch(validated.targets, binding.target_id),
+         configured <- target.configured do
+      %{
+        issue_ids: get_in(configured, ["linear", "scope", "issue_ids"]),
+        repository: get_in(configured, ["repo", "expected_repository"]) || get_in(configured, ["repo", "path"])
+      }
+    else
+      _unavailable -> %{status: "unavailable", reason: "batch_readback_unavailable"}
+    end
+  end
+
+  defp apply_registry_binding(prepared, scheduler, binding) do
     result =
       OperatorCommandService.confirm(
         binding.target_id,
@@ -416,7 +1020,7 @@ defmodule SymphonyElixir.OperatorMutation do
              }}
 
           {:error, _reason} ->
-            {:error, %{code: :scheduler_reload_failed, state_may_have_changed: true}}
+            {:error, %{code: :scheduler_reload_failed, committed?: true, state_may_have_changed: true}}
         end
 
       {:error, %OperatorCommandService.Error{} = error} ->
@@ -702,7 +1306,7 @@ defmodule SymphonyElixir.OperatorMutation do
 
   defp refresh_state_may_have_changed?(reason), do: public_code(reason) != :stale_generation
 
-  defp public_backend_error(error), do: %{code: error.code, state_may_have_changed: error.committed?}
+  defp public_backend_error(error), do: %{code: error.code, committed?: error.committed?, state_may_have_changed: error.committed?}
   defp public_code(%{code: code}) when is_atom(code), do: code
   defp public_code(code) when is_atom(code), do: code
   defp public_code(_code), do: :backend_failed

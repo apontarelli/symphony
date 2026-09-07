@@ -235,6 +235,7 @@ defmodule SymphonyElixir.OperatorMutationTest do
     assert result.status == "failed"
     assert result.error.code == "scheduler_reload_failed"
     assert result.state_may_have_changed
+    assert result.committed?
     {:ok, document} = Yaml.decode(File.read!(context.path))
     assert document["targets"]["alpha"]["state"] == "retired"
   end
