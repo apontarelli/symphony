@@ -10,6 +10,8 @@ defmodule SymphonyElixir.OperatorCommandService do
   alias SymphonyElixir.TargetRegistry.Composition
   alias SymphonyElixir.TargetRegistry.FileStore
   alias SymphonyElixir.TargetRegistry.Import, as: RegistryImport
+  alias SymphonyElixir.TargetRegistry.LegacyImport, as: RegistryLegacyImport
+  alias SymphonyElixir.TargetRegistry.PolicyParity
   alias SymphonyElixir.TargetRegistry.Preview
   alias SymphonyElixir.TargetRegistry.RepositoryPolicy
   alias SymphonyElixir.TargetRegistry.Revisions
@@ -140,7 +142,7 @@ defmodule SymphonyElixir.OperatorCommandService do
   @plan_envelope_keys ~w(envelope_version plan_id action target_id branch_selection command registry_path expected_generation proposed_generation source_hashes created_at)
   @plan_identity_keys ~w(action target_id branch_selection command envelope_version expected_generation proposed_generation registry_path source_hashes)
   @lifecycle_actions [:activate, :pause, :drain, :retire]
-  @actions [:add, :import, :patch, :host_patch | @lifecycle_actions]
+  @actions [:add, :import, :legacy_import, :patch, :host_patch | @lifecycle_actions]
   @host_patch_schema %{
     "repository_defaults" => :repository_policy,
     "repository_profiles" => {:named, :repository_policy}
@@ -215,7 +217,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             id: String.t() | nil,
-            action: :add | :import | :patch | :host_patch | :activate | :pause | :drain | :retire,
+            action: :add | :import | :legacy_import | :patch | :host_patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             expected_generation: String.t(),
@@ -263,7 +265,7 @@ defmodule SymphonyElixir.OperatorCommandService do
 
     @type t :: %__MODULE__{
             plan_id: String.t(),
-            action: :add | :import | :patch | :host_patch | :activate | :pause | :drain | :retire,
+            action: :add | :import | :legacy_import | :patch | :host_patch | :activate | :pause | :drain | :retire,
             target_id: String.t(),
             registry_path: Path.t(),
             old_generation: String.t(),
@@ -277,9 +279,12 @@ defmodule SymphonyElixir.OperatorCommandService do
     :config_root,
     :consume_plan,
     :encode_import_preview,
+    :home,
+    :load_legacy_manifest,
     :load_manifest,
     :now,
     :preview_import,
+    :preview_legacy_import,
     :read_file,
     :read_plan,
     :registry_path,
@@ -323,6 +328,15 @@ defmodule SymphonyElixir.OperatorCommandService do
         current_snapshot,
         opts
       )
+    end
+  end
+
+  def plan(%Command.LegacyImport{} = command, opts) do
+    with {:ok, normalized_command} <- validate_legacy_import(command),
+         {:ok, registry_path} <- registry_path(opts),
+         plan_dir <- plan_dir(opts, registry_path),
+         {:ok, current_file} <- read_registry(registry_path) do
+      plan_legacy_import(normalized_command, registry_path, plan_dir, current_file, opts)
     end
   end
 
@@ -441,6 +455,28 @@ defmodule SymphonyElixir.OperatorCommandService do
       finish_replacement(envelope, replace_from_envelope(envelope, opts), plan_dir, plan_id, opts)
     end
   end
+
+  defp archive_import(%{"action" => action} = envelope, proposed_bytes) when action in ["import", "legacy_import"] do
+    record = %{
+      "kind" => action,
+      "action" => action,
+      "plan_id" => envelope["plan_id"],
+      "recorded_at" => envelope["created_at"],
+      "source_hashes" => envelope["source_hashes"],
+      "old_generation" => envelope["expected_generation"],
+      "new_generation" => envelope["proposed_generation"]
+    }
+
+    with :ok <- Revisions.archive(envelope["registry_path"], proposed_bytes),
+         :ok <- Revisions.record_import(envelope["registry_path"], record) do
+      :ok
+    else
+      {:error, %SymphonyElixir.TargetRegistry.Error{message: message}} ->
+        {:error, %Error{code: :provenance_record_failed, message: message}}
+    end
+  end
+
+  defp archive_import(_envelope, _proposed_bytes), do: :ok
 
   defp finish_replacement(envelope, {:ok, replacement}, plan_dir, plan_id, opts) do
     apply_result(envelope, replacement, consume_envelope(plan_dir, plan_id, opts))
@@ -638,6 +674,21 @@ defmodule SymphonyElixir.OperatorCommandService do
        when action in ["pause", "drain", "retire"] and map_size(command) == 1,
        do: true
 
+  defp valid_envelope_command?(
+         "legacy_import",
+         "host",
+         %{
+           "target_id" => "host",
+           "local_config" => local_config,
+           "legacy_registry" => legacy_registry,
+           "connection_id" => connection_id
+         } = command
+       )
+       when map_size(command) == 4 do
+    optional_envelope_path?(local_config) and optional_envelope_path?(legacy_registry) and
+      valid_id?(connection_id) and not (is_nil(local_config) and is_nil(legacy_registry))
+  end
+
   defp valid_envelope_command?(_action, _target_id, _command), do: false
 
   defp validate_envelope_sources(%{
@@ -685,13 +736,20 @@ defmodule SymphonyElixir.OperatorCommandService do
       else: error(:plan_mismatch, "lifecycle source bindings are invalid", "$.plan.source_hashes")
   end
 
+  defp validate_envelope_sources(%{"action" => "legacy_import"}), do: :ok
+
   defp replace_from_envelope(envelope, opts) do
     replacer =
       Keyword.get(opts, :replace_registry, fn path, expected, proposed, rebuild ->
         default_replace_registry(path, expected, proposed, rebuild, opts)
       end)
 
-    rebuild = fn bytes -> rebuild_envelope(envelope, bytes, opts) end
+    rebuild = fn bytes ->
+      with {:ok, proposed_bytes} <- rebuild_envelope(envelope, bytes, opts),
+           :ok <- archive_import(envelope, proposed_bytes) do
+        {:ok, proposed_bytes}
+      end
+    end
 
     case invoke(fn ->
            replacer.(
@@ -948,6 +1006,28 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  defp rebuild_envelope(%{"action" => "legacy_import"} = envelope, current_bytes, opts) do
+    with {:ok, current_file} <- current_file(current_bytes),
+         {:ok, current_document} <- tolerant_current_document(current_bytes),
+         {:ok, result, sources} <-
+           legacy_import_pipeline(envelope["command"], current_document, current_file, envelope["registry_path"], opts),
+         :ok <- verify_envelope_source_hashes(envelope, sources),
+         # Sources read early in the pipeline could change while later
+         # manifests load; the confirmation commits only if every bound
+         # source is byte-identical at the end, exactly like planning.
+         :ok <- verify_sources_unchanged(sources, opts) do
+      if result.applicable? and Preview.generation(result.proposed_bytes) == envelope["proposed_generation"] do
+        {:ok, result.proposed_bytes}
+      else
+        error(:proposed_generation_mismatch, "rebuilt legacy import proposal changed", "$.plan")
+      end
+    else
+      {:error, %Error{}} = error -> error
+      {:error, %TargetRegistry.Error{} = source} -> registry_error(source)
+      _changed -> error(:import_source_changed, "legacy import source changed while applying", "$.command")
+    end
+  end
+
   defp rebuild_envelope(%{"action" => "import"} = envelope, current_bytes, opts) do
     command = envelope["command"]
     manifest_path = Manifest.manifest_path(command["repo"])
@@ -1001,6 +1081,8 @@ defmodule SymphonyElixir.OperatorCommandService do
             import_result.proposal["targets"][command["target_id"]]
           )
       }
+
+      import_result = apply_import_parity(import_result, manifest_bytes, source_bytes, command["target_id"])
 
       finish_import_rebuild(proposed_document, current_snapshot, import_result, envelope)
     else
@@ -1508,14 +1590,20 @@ defmodule SymphonyElixir.OperatorCommandService do
       {key, value} when key in [:config_root, :registry_path] ->
         is_binary(value)
 
+      {:home, value} ->
+        is_binary(value) or is_nil(value)
+
       {:now, value} ->
         is_function(value, 0)
 
-      {key, value} when key in [:encode_import_preview, :load_manifest, :read_file] ->
+      {key, value} when key in [:encode_import_preview, :load_legacy_manifest, :load_manifest, :read_file] ->
         is_function(value, 1)
 
       {:preview_import, value} ->
         is_function(value, 2)
+
+      {:preview_legacy_import, value} ->
+        is_function(value, 1)
 
       {key, value} when key in [:consume_plan, :read_plan, :store_plan] ->
         is_function(value, 2)
@@ -2098,12 +2186,16 @@ defmodule SymphonyElixir.OperatorCommandService do
         registry_preview = Preview.preview(current_snapshot, proposed_snapshot, proposed_bytes)
         branch_selection = branch_selection_for_target(proposed_snapshot, command.target_id)
 
+        import_result =
+          import_result
+          |> Map.put(:proposal, proposed_document)
+          |> Map.put(:snapshot, proposed_snapshot)
+          |> Map.put(:registry_preview, registry_preview)
+          |> apply_import_parity(manifest_before, source_bytes, command.target_id)
+
         import_result = %RegistryImport.Result{
           import_result
-          | proposal: proposed_document,
-            snapshot: proposed_snapshot,
-            registry_preview: registry_preview,
-            applicable?:
+          | applicable?:
               import_result.applicable? and proposed_snapshot.globally_valid? and
                 add_applicable?(proposed_snapshot, command.target_id)
         }
@@ -2308,6 +2400,108 @@ defmodule SymphonyElixir.OperatorCommandService do
     end
   end
 
+  # A workflow import proves restriction parity between the raw repository
+  # manifest and the inlined repository policy before it can be confirmed.
+  # The raw policy is also validated directly: Manifest.read normalization
+  # silently drops unknown closed-section fields, so an invalid raw manifest
+  # blocks instead of importing its weakened normalization.
+  defp apply_import_parity(%RegistryImport.Result{} = result, manifest_bytes, source_bytes, target_id) do
+    inlined = get_in(result.proposal, ["targets", target_id, "repository_policy"])
+
+    findings =
+      case raw_manifest_document(manifest_bytes) do
+        {:ok, raw} ->
+          raw_diagnostics =
+            raw
+            |> RepositoryPolicy.validate_raw_policy("$.targets.#{target_id}.repository_policy")
+            |> Enum.map(&raw_policy_finding(&1, target_id))
+
+          case PolicyParity.compare(%{"manifest" => raw}, %{"manifest" => inlined}, target_id) do
+            :ok -> raw_diagnostics
+            {:weakened, findings} -> findings ++ raw_diagnostics
+          end
+
+        _undecodable_raw ->
+          []
+      end
+
+    findings =
+      findings ++
+        saved_policy_findings(source_bytes, inlined, target_id) ++
+        Enum.flat_map(result.field_dispositions, fn disposition ->
+          if disposition.action in [:not_mapped, :ignored_host_only] do
+            [
+              raw_policy_finding(
+                %{path: disposition.source_path, code: :unsupported_import_field, message: "saved workflow field has no host-owned mapping"},
+                target_id
+              )
+            ]
+          else
+            []
+          end
+        end)
+
+    if findings == [] do
+      result
+    else
+      %RegistryImport.Result{
+        result
+        | import_diagnostics:
+            result.import_diagnostics
+            |> Kernel.++(findings)
+            |> Enum.uniq()
+            |> Enum.sort_by(&{&1.path, &1.code, &1.message}),
+          applicable?: false
+      }
+    end
+  end
+
+  defp saved_policy_findings(source_bytes, inlined, target_id) do
+    case raw_manifest_document(source_bytes) do
+      {:ok, document} ->
+        raw = Map.drop(document, ["runtime", "version"])
+
+        diagnostics =
+          raw
+          |> RepositoryPolicy.validate_raw_policy("$.saved_workflow")
+          |> Enum.map(&raw_policy_finding(&1, target_id))
+
+        # A saved workflow can contain only a policy fragment. Missing fields
+        # do not declare restrictions; explicit fields must survive cutover.
+        before = LocalConfig.deep_merge(inlined, raw)
+
+        case PolicyParity.compare(%{"manifest" => before}, %{"manifest" => inlined}, target_id) do
+          :ok -> diagnostics
+          {:weakened, findings} -> diagnostics ++ findings
+        end
+
+      _invalid ->
+        [
+          raw_policy_finding(
+            %{path: "$.saved_workflow", code: :invalid_legacy_source, message: "saved workflow policy cannot be decoded"},
+            target_id
+          )
+        ]
+    end
+  end
+
+  defp raw_policy_finding(%{path: path, code: code, message: message}, target_id) do
+    %SymphonyElixir.TargetRegistry.Diagnostic{
+      severity: :error,
+      scope: {:target, target_id},
+      path: path,
+      code: code,
+      message: message
+    }
+  end
+
+  defp raw_manifest_document(bytes) do
+    case Yaml.decode(bytes) do
+      {:ok, document} when is_map(document) -> {:ok, document}
+      _invalid -> :error
+    end
+  end
+
   defp read_exact(path, opts) do
     reader = Keyword.get(opts, :read_file, &File.read/1)
 
@@ -2368,6 +2562,317 @@ defmodule SymphonyElixir.OperatorCommandService do
   end
 
   defp valid_runner_ids?(_runner_ids), do: false
+
+  # ------------------------------------------------------------------
+  # Legacy cutover import (SID-497)
+  # ------------------------------------------------------------------
+
+  defp validate_legacy_import(%Command.LegacyImport{} = command) do
+    valid_keys =
+      Map.keys(command) |> Enum.sort() ==
+        [:__struct__, :connection_id, :legacy_registry, :local_config]
+
+    connection_id = command.connection_id || "linear"
+
+    if valid_keys and valid_id?(connection_id) and optional_valid_path?(command.local_config) and
+         optional_valid_path?(command.legacy_registry) and
+         not (is_nil(command.local_config) and is_nil(command.legacy_registry)) do
+      {:ok,
+       %Command.LegacyImport{
+         command
+         | local_config: expand_optional_path(command.local_config),
+           legacy_registry: expand_optional_path(command.legacy_registry),
+           connection_id: connection_id
+       }}
+    else
+      error(:invalid_command, "legacy import command is invalid", "$.command")
+    end
+  end
+
+  defp optional_valid_path?(nil), do: true
+  defp optional_valid_path?(path), do: valid_path?(path)
+
+  defp optional_envelope_path?(nil), do: true
+  defp optional_envelope_path?(path) when is_binary(path), do: valid_path?(path)
+  defp optional_envelope_path?(_invalid), do: false
+
+  defp expand_optional_path(nil), do: nil
+  defp expand_optional_path(path), do: Path.expand(path)
+
+  defp plan_legacy_import(command, registry_path, plan_dir, current_file, opts) do
+    with {:ok, current_document} <- tolerant_current_document(current_file.bytes),
+         {:ok, result, sources} <-
+           legacy_import_pipeline(command, current_document, current_file, registry_path, opts),
+         :ok <- verify_sources_unchanged(sources, opts) do
+      persist_legacy_import_plan(command, result, sources, registry_path, plan_dir, current_file, opts)
+    else
+      {:error, %Error{}} = error -> error
+      {:error, %TargetRegistry.Error{} = source} -> registry_error(source)
+      _changed -> error(:import_source_changed, "legacy import source changed while planning", "$.command")
+    end
+  end
+
+  defp validate_legacy_registry_source(nil), do: :ok
+
+  defp validate_legacy_registry_source(source) do
+    case tolerant_current_document(source.bytes) do
+      {:ok, _document} -> :ok
+      {:error, _error} = error -> error
+    end
+  end
+
+  defp legacy_import_pipeline(command, current_document, current_file, registry_path, opts) do
+    data = legacy_command_data(command)
+
+    with {:ok, local_config} <- read_legacy_source(data["local_config"], opts),
+         {:ok, legacy_registry} <- read_legacy_source(data["legacy_registry"], opts),
+         :ok <- validate_legacy_registry_source(legacy_registry),
+         legacy_document <- legacy_document_of(legacy_registry),
+         bindings <- RegistryLegacyImport.manifest_bindings(current_document, legacy_document),
+         {:ok, manifests, manifest_sources} <- load_legacy_manifests(bindings, opts),
+         {:ok, %RegistryLegacyImport.Result{} = result} <-
+           preview_legacy_import(
+             [
+               current_document: current_document,
+               current_bytes: current_file.bytes,
+               local_config: local_config,
+               legacy_registry: legacy_registry,
+               manifests: manifests,
+               connection_id: data["connection_id"],
+               registry_path: registry_path,
+               home: Keyword.get(opts, :home)
+             ],
+             opts
+           ) do
+      {:ok, result, source_map(local_config, legacy_registry, manifest_sources)}
+    end
+  end
+
+  defp legacy_command_data(%Command.LegacyImport{} = command),
+    do: %{
+      "local_config" => command.local_config,
+      "legacy_registry" => command.legacy_registry,
+      "connection_id" => command.connection_id
+    }
+
+  defp legacy_command_data(command) when is_map(command),
+    do: %{
+      "local_config" => command["local_config"],
+      "legacy_registry" => command["legacy_registry"],
+      "connection_id" => command["connection_id"]
+    }
+
+  defp read_legacy_source(nil, _opts), do: {:ok, nil}
+
+  defp read_legacy_source(path, opts) do
+    with {:ok, bytes} <- read_exact(path, opts),
+         {:ok, document} <- decode_legacy_document(bytes, path) do
+      {:ok, %{path: path, document: document, bytes: bytes}}
+    end
+  end
+
+  defp decode_legacy_document(bytes, path) do
+    case Yaml.decode(bytes) do
+      {:ok, document} when is_map(document) -> {:ok, document}
+      {:ok, _other} -> error(:invalid_legacy_source, "legacy source must be a YAML map", path)
+      {:error, source} -> error(source.code, source.message, path)
+    end
+  end
+
+  defp legacy_document_of(nil), do: nil
+  defp legacy_document_of(source), do: source.document
+
+  defp load_legacy_manifests(bindings, opts) do
+    Enum.reduce_while(bindings, {:ok, %{}, %{}}, fn binding, {:ok, manifests, sources} ->
+      with {:ok, bytes} <- read_exact(binding.manifest_path, opts),
+           {:ok, compiled} <- load_legacy_manifest(binding.manifest_path, opts),
+           {:ok, ^bytes} <- read_exact(binding.manifest_path, opts),
+           {:ok, raw} <- decode_legacy_document(bytes, binding.manifest_path) do
+        {:cont, {:ok, Map.put(manifests, binding.manifest_path, %{raw: raw, compiled: compiled}), Map.put(sources, binding.manifest_path, bytes)}}
+      else
+        {:error, %Error{}} = error -> {:halt, error}
+        _changed -> {:halt, error(:import_source_changed, "legacy manifest changed while planning", binding.manifest_path)}
+      end
+    end)
+  end
+
+  defp load_legacy_manifest(path, opts) do
+    loader = Keyword.get(opts, :load_legacy_manifest, &default_load_legacy_manifest/1)
+
+    case invoke(fn -> loader.(path) end) do
+      {:ok, {:ok, manifest}} when is_map(manifest) -> {:ok, manifest}
+      {:ok, {:error, %Error{}} = error} -> error
+      _failure -> error(:manifest_invalid, "legacy repository manifest is invalid", path)
+    end
+  end
+
+  # The raw manifest is validated with RepositoryPolicy.validate_raw_policy/2
+  # before Manifest.read normalization: normalization silently drops unknown
+  # closed-section fields, so validating only the normalized form could import
+  # a silently weakened policy.
+  defp default_load_legacy_manifest(manifest_path) do
+    with {:ok, bytes} <- File.read(manifest_path),
+         {:ok, raw} <- Yaml.decode(bytes),
+         [] <- RepositoryPolicy.validate_raw_policy(raw, manifest_path),
+         {:ok, manifest} <- Manifest.read(manifest_path, repo_setup?: true),
+         %{errors: []} <- Manifest.validate(Path.dirname(manifest_path), manifest),
+         %{config: %{"manifest" => compiled}} <- Manifest.compile(manifest) do
+      {:ok, compiled}
+    else
+      diagnostics when is_list(diagnostics) ->
+        error(:manifest_invalid, "legacy repository manifest has invalid raw policy: #{inspect(diagnostics)}", manifest_path)
+
+      _failure ->
+        error(:manifest_invalid, "legacy repository manifest is invalid", manifest_path)
+    end
+  end
+
+  defp source_map(local_config, legacy_registry, manifest_sources) do
+    %{}
+    |> put_source_bytes(local_config)
+    |> put_source_bytes(legacy_registry)
+    |> Map.merge(manifest_sources)
+  end
+
+  defp put_source_bytes(map, nil), do: map
+  defp put_source_bytes(map, source), do: Map.put(map, source.path, source.bytes)
+
+  defp verify_sources_unchanged(sources, opts) do
+    Enum.reduce_while(sources, :ok, fn {path, bytes}, :ok ->
+      case read_exact(path, opts) do
+        {:ok, ^bytes} -> {:cont, :ok}
+        _changed -> {:halt, {:error, :source_changed}}
+      end
+    end)
+  end
+
+  defp preview_legacy_import(input, opts) do
+    previewer = Keyword.get(opts, :preview_legacy_import, &RegistryLegacyImport.preview/1)
+
+    case invoke(fn -> previewer.(input) end) do
+      {:ok, {:ok, %RegistryLegacyImport.Result{}} = result} -> result
+      {:ok, {:error, %TargetRegistry.Error{}} = result} -> result
+      {:ok, {:error, %Error{}} = result} -> result
+      _failure -> error(:import_preview_failed, "legacy import preview dependency failed", "$.command")
+    end
+  end
+
+  # The migration target registry is decoded tolerantly (a legacy in-place
+  # document need not pass current schema validation) but closed: exactly a
+  # version 1 document with host and targets maps, no unknown root keys, and
+  # nothing the proposal would silently drop when it resets the document.
+  defp tolerant_current_document(bytes) do
+    case Yaml.decode(bytes) do
+      {:ok, %{"version" => 1, "host" => host, "targets" => targets} = document}
+      when is_map(host) and is_map(targets) ->
+        unknown = document |> Map.keys() |> Kernel.--(~w(version host targets)) |> Enum.sort()
+
+        if unknown == [] do
+          {:ok, document}
+        else
+          error(:invalid_registry, "registry contains unsupported root keys: #{Enum.join(unknown, ", ")}", "$.registry")
+        end
+
+      {:ok, _other} ->
+        error(:invalid_registry, "registry must be a version 1 document with host and targets maps", "$.registry")
+
+      {:error, source} ->
+        error(source.code, source.message, "$.registry")
+    end
+  end
+
+  defp persist_legacy_import_plan(command, result, sources, registry_path, plan_dir, current_file, opts) do
+    result = %{result | sources: bound_source_checksums(result.sources, sources)}
+    public_result = public_legacy_result(result)
+
+    if result.applicable? do
+      created_at = now(opts)
+      source_hashes = Map.new(sources, fn {path, bytes} -> {path, Preview.generation(bytes)} end)
+
+      command_data = %{
+        "target_id" => @host_target_id,
+        "local_config" => command.local_config,
+        "legacy_registry" => command.legacy_registry,
+        "connection_id" => command.connection_id
+      }
+
+      with {:ok, envelope} <-
+             build_envelope(
+               "legacy_import",
+               command_data,
+               registry_path,
+               current_file.generation,
+               source_hashes,
+               created_at,
+               result.proposed_bytes
+             ),
+           {:ok, stored} <- store_envelope(plan_dir, envelope, opts) do
+        {:ok,
+         public_plan(
+           stored,
+           :legacy_import,
+           @host_target_id,
+           registry_path,
+           true,
+           %{
+             "registry" => json_value(result.registry_preview),
+             "legacy_import" => public_result
+           }
+         )}
+      end
+    else
+      {:ok,
+       %Plan{
+         id: nil,
+         action: :legacy_import,
+         target_id: @host_target_id,
+         registry_path: registry_path,
+         expected_generation: current_file.generation,
+         proposed_generation: result.registry_preview.proposed_generation,
+         applicable?: false,
+         preview: %{
+           "registry" => json_value(result.registry_preview),
+           "legacy_import" => public_result
+         },
+         created_at: now(opts)
+       }}
+    end
+  end
+
+  defp bound_source_checksums(result_sources, sources) do
+    Enum.map(result_sources, fn source ->
+      case Map.get(sources, source.path) do
+        bytes when is_binary(bytes) -> %{source | checksum: Preview.generation(bytes)}
+        _missing -> source
+      end
+    end)
+  end
+
+  defp public_legacy_result(%RegistryLegacyImport.Result{} = result) do
+    %{
+      "applicable?" => result.applicable?,
+      "sources" => json_value(result.sources),
+      "field_dispositions" => json_value(result.field_dispositions),
+      "source_differences" => json_value(result.source_differences),
+      "import_diagnostics" => json_value(result.import_diagnostics),
+      "parity" => json_value(result.parity)
+    }
+  end
+
+  defp verify_envelope_source_hashes(envelope, sources) do
+    expected = envelope["source_hashes"] || %{}
+
+    cond do
+      Enum.sort(Map.keys(expected)) != Enum.sort(Map.keys(sources)) ->
+        error(:plan_mismatch, "legacy import source bindings are invalid", "$.plan.source_hashes")
+
+      expected == Map.new(sources, fn {path, bytes} -> {path, Preview.generation(bytes)} end) ->
+        :ok
+
+      true ->
+        error(:import_source_changed, "legacy import source changed after preview", "$.plan.source_hashes")
+    end
+  end
 
   defp configured_registry_path(opts) do
     case Keyword.fetch(opts, :registry_path) do

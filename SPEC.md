@@ -14,8 +14,10 @@ Apply saves configuration; Activate separately permits admission. Runs retain pi
 
 Host-registry policy authority, manifest-free admission, immutable run revisions, and source revision
 history/export/backup are implemented by SID-494. Legacy single-run manifest discovery and saved
-launchers below remain operational only for those legacy paths. The full terminal setup flow and
-reviewed migration remain separate work under
+launchers below remain operational only for those legacy paths. SID-497 implements the explicit
+preview/confirmation cutover import for legacy local configuration, legacy registries, repository
+manifests, and saved workflows, including restriction-parity proof and pre-cutover archival. The
+full terminal setup flow and reviewed migration remain separate work under
 [SID-463](https://linear.app/antonio-pontarelli/issue/SID-463).
 Do not remove legacy setup files before migrating the setup that uses them.
 

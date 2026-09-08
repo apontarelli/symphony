@@ -54,7 +54,7 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
     "source_hashes",
     "created_at"
   ]
-  @actions ~w(add import patch host_patch activate dispatch_mode pause drain retire remove dispatch)
+  @actions ~w(add import legacy_import patch host_patch activate dispatch_mode pause drain retire remove dispatch)
   @forbidden_key_families ~w(authorization bearer private_key connection_string access_token client_secret credential credentials password passwords secret secrets token tokens api_key api_keys)
   @forbidden_exact_keys MapSet.new(~w(audit audit_claim audit_claims env environment prompt prompts provider_error raw_error))
   @target_id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
@@ -629,6 +629,25 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
     end
   end
 
+  # Source paths such as /repo/legacy_access_token are dynamic keys, not
+  # credential field names; their values stay plain scalar generations.
+  defp plain_source_hashes(_pairs, remaining) when remaining <= 0, do: {:error, :too_large}
+
+  defp plain_source_hashes(pairs, remaining) do
+    keys = Enum.map(pairs, &elem(&1, 0))
+
+    cond do
+      length(pairs) > @max_collection_width ->
+        {:error, :too_wide}
+
+      not (Enum.all?(keys, &(is_binary(&1) and valid_string?(&1))) and length(Enum.uniq(keys)) == length(keys)) ->
+        {:error, :invalid_object}
+
+      true ->
+        plain_json_pairs(pairs, 1, remaining)
+    end
+  end
+
   defp plain_json(_value, depth, _remaining) when depth > @max_depth,
     do: {:error, :too_deep}
 
@@ -674,6 +693,15 @@ defmodule SymphonyElixir.OperatorCommandService.PlanStore do
       {:ok, %{}, remaining - 1},
       &plain_json_pair(&1, &2, depth)
     )
+  end
+
+  # Only the envelope's source hashes use filesystem paths as keys.
+  # All other objects retain credential-key checks and traversal limits.
+  defp plain_json_pair({"source_hashes", %OrderedObject{values: pairs}}, {:ok, map, left}, 0) do
+    case plain_source_hashes(pairs, left) do
+      {:ok, hashes, next_left} -> {:cont, {:ok, Map.put(map, "source_hashes", hashes), next_left}}
+      {:error, _reason} = error -> {:halt, error}
+    end
   end
 
   defp plain_json_pair({key, value}, {:ok, map, left}, depth) do

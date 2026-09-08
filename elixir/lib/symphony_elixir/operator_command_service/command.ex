@@ -43,6 +43,18 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
           }
   end
 
+  defmodule LegacyImport do
+    @moduledoc false
+    @enforce_keys []
+    defstruct [:local_config, :legacy_registry, :connection_id]
+
+    @type t :: %__MODULE__{
+            local_config: Path.t() | nil,
+            legacy_registry: Path.t() | nil,
+            connection_id: String.t() | nil
+          }
+  end
+
   defmodule Activate do
     @moduledoc false
 
@@ -85,6 +97,7 @@ defmodule SymphonyElixir.OperatorCommandService.Command do
   @type t ::
           Add.t()
           | Import.t()
+          | LegacyImport.t()
           | Patch.t()
           | HostPatch.t()
           | Activate.t()

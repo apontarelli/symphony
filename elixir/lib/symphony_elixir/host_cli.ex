@@ -6,8 +6,10 @@ defmodule SymphonyElixir.HostCLI do
   alias SymphonyElixir.OperatorCommandService
   alias SymphonyElixir.OperatorCommandService.Command
   alias SymphonyElixir.OperatorCommandService.PlanStore
+  alias SymphonyElixir.TargetRegistry.LegacyImport
   alias SymphonyElixir.TargetRegistry.Preview
   alias SymphonyElixir.TargetRegistry.Revisions
+  alias SymphonyElixir.TargetRegistry.Schema
   alias SymphonyElixir.TargetRegistry.Yaml
   require Logger
 
@@ -17,6 +19,9 @@ defmodule SymphonyElixir.HostCLI do
     symphony host config export [--revision <sha256:hash>] [--registry <path>]
     symphony host config history [--registry <path>]
     symphony host config backup [--registry <path>]
+    symphony host config import [--local-config <path>] [--legacy-registry <path>] [--connection <id>] [--registry <path>] [--json]
+    symphony host config import --confirm <plan-id> [--registry <path>] [--json]
+    symphony host config recover --revision <sha256:hash> [--registry <path>]
     symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
     symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
     symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -48,6 +53,17 @@ defmodule SymphonyElixir.HostCLI do
   Usage:
     symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
     symphony host target import <id> --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @config_import_usage """
+  Usage:
+    symphony host config import [--local-config <path>] [--legacy-registry <path>] [--connection <id>] [--registry <path>] [--json]
+    symphony host config import --confirm <plan-id> [--registry <path>] [--json]
+  """
+
+  @config_recover_usage """
+  Usage:
+    symphony host config recover --revision <sha256:hash> [--registry <path>]
   """
 
   @plan_usage """
@@ -84,7 +100,7 @@ defmodule SymphonyElixir.HostCLI do
     symphony host target retire <id> --confirm <plan-id> [--registry <path>] [--json]
   """
 
-  @actions [:add, :import, :patch, :activate, :pause, :drain, :retire]
+  @actions [:add, :import, :legacy_import, :patch, :activate, :pause, :drain, :retire]
   @lifecycle_actions [:activate, :pause, :drain, :retire]
 
   @target_id_regex ~r/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/
@@ -146,6 +162,30 @@ defmodule SymphonyElixir.HostCLI do
 
   def evaluate(["run" | args], deps) do
     evaluate_run(args, deps)
+  end
+
+  def evaluate(["config", "import", "--help"], _deps) do
+    {:ok, config_import_usage()}
+  end
+
+  def evaluate(["config", "import" | args], deps) do
+    evaluate_config_import(args, deps)
+  end
+
+  def evaluate(["config", "recover", "--help"], _deps) do
+    {:ok, config_recover_usage()}
+  end
+
+  def evaluate(["config", "recover" | args], _deps) do
+    with :ok <- prevalidate_argv(args, [:registry, :revision]),
+         {opts, [], []} <- OptionParser.parse(args, strict: [registry: :keep, revision: :keep]),
+         true <- valid_singleton_counts?(opts, [:registry, :revision]),
+         {:ok, revision} <- recover_revision(opts),
+         {:ok, path} <- resolve_registry_path(registry_opt(opts)) do
+      recover_configuration(path, revision)
+    else
+      _invalid -> {:error, config_recover_usage()}
+    end
   end
 
   def evaluate(["config", action | args], _deps) when action in ["export", "history", "backup"] do
@@ -758,6 +798,137 @@ defmodule SymphonyElixir.HostCLI do
       {:ok, output}
     else
       error -> format_host_error(error, json?, patch_usage(), deps)
+    end
+  end
+
+  defp evaluate_config_import(args, deps) do
+    case parse_config_import_args(args) do
+      {:ok, opts} ->
+        dispatch_config_import(opts, deps)
+
+      :error ->
+        if json_selected?(args),
+          do: json_error_envelope("invalid_arguments", "Invalid arguments", config_import_usage(), deps),
+          else: {:error, config_import_usage()}
+    end
+  end
+
+  defp parse_config_import_args(args) do
+    option_keys = [:local_config, :legacy_registry, :connection, :registry, :confirm, :json]
+
+    with :ok <- prevalidate_argv(args, option_keys),
+         {opts, [], []} <-
+           OptionParser.parse(args,
+             strict: [
+               local_config: :keep,
+               legacy_registry: :keep,
+               connection: :keep,
+               registry: :keep,
+               confirm: :keep,
+               json: :boolean
+             ]
+           ),
+         true <- valid_singleton_counts?(opts, option_keys) do
+      {:ok, opts}
+    else
+      _invalid -> :error
+    end
+  end
+
+  # Recovery reads archived host policy only. Re-reading a legacy manifest here
+  # would make a changed source authoritative again.
+  defp recover_revision(opts) do
+    case Keyword.get(opts, :revision) do
+      revision when is_binary(revision) and byte_size(revision) > 0 -> {:ok, revision}
+      _missing -> :error
+    end
+  end
+
+  defp recover_configuration(path, revision) do
+    with {:ok, document} <- Revisions.revision_document(path, revision),
+         [] <- LegacyImport.manifest_bindings(nil, document),
+         {:ok, snapshot} <- Schema.validate(document),
+         true <- snapshot.globally_valid? and Enum.all?(snapshot.targets, fn {_id, target} -> target.valid? end) do
+      targets =
+        Map.new(document["targets"], fn {id, target} ->
+          {id, target |> Map.put("state", "paused") |> Map.delete("dispatch_mode")}
+        end)
+
+      {:ok, Yaml.encode(%{document | "targets" => targets})}
+    else
+      bindings when is_list(bindings) and bindings != [] ->
+        {:error, "config_recovery_requires_host_owned_revision"}
+
+      _unavailable ->
+        {:error, "config_recovery_failed"}
+    end
+  end
+
+  defp dispatch_config_import(opts, deps) do
+    json? = Keyword.get(opts, :json, false)
+
+    case config_import_mode(opts) do
+      :preview ->
+        do_config_import_preview(opts, deps)
+
+      :confirm ->
+        do_config_import_confirm(opts, deps)
+
+      :invalid ->
+        if json?,
+          do: json_error_envelope("invalid_arguments", "Invalid arguments", config_import_usage(), deps),
+          else: {:error, config_import_usage()}
+    end
+  end
+
+  defp config_import_mode(opts) do
+    has_confirm = Keyword.has_key?(opts, :confirm)
+    has_local_config = Keyword.has_key?(opts, :local_config)
+    has_legacy_registry = Keyword.has_key?(opts, :legacy_registry)
+    has_source = has_local_config or has_legacy_registry
+
+    cond do
+      has_confirm and not has_source and not Keyword.has_key?(opts, :connection) -> :confirm
+      has_source and not has_confirm -> :preview
+      true -> :invalid
+    end
+  end
+
+  defp do_config_import_preview(opts, deps) do
+    json? = Keyword.get(opts, :json, false)
+    registry_opt = registry_opt(opts)
+    expected_path = expected_registry_path(registry_opt)
+
+    command = %Command.LegacyImport{
+      local_config: Keyword.get(opts, :local_config),
+      legacy_registry: Keyword.get(opts, :legacy_registry),
+      connection_id: Keyword.get(opts, :connection)
+    }
+
+    with service_opts <- build_service_opts(registry_opt),
+         {:ok, plan} <- plan(command, service_opts, deps),
+         :ok <- validate_plan_for_command(plan, :legacy_import, "host", expected_path),
+         {:ok, output} <- render_plan_output(plan, json?, deps) do
+      {:ok, output}
+    else
+      error -> format_host_error(error, json?, config_import_usage(), deps)
+    end
+  end
+
+  defp do_config_import_confirm(opts, deps) do
+    plan_id = Keyword.fetch!(opts, :confirm)
+    json? = Keyword.get(opts, :json, false)
+    registry_opt = registry_opt(opts)
+    expected_path = expected_registry_path(registry_opt)
+
+    with :ok <- validate_plan_id(plan_id),
+         service_opts <- build_service_opts(registry_opt),
+         {:ok, result} <- confirm_action("host", plan_id, :legacy_import, true, service_opts, deps),
+         :ok <- validate_apply_result_for_command(result, :legacy_import, "host", plan_id, expected_path),
+         {:ok, output} <- render_apply_output(result, json?, deps) do
+      {:ok, output}
+    else
+      error -> format_host_error(error, json?, config_import_usage(), deps)
     end
   end
 
@@ -1480,6 +1651,8 @@ defmodule SymphonyElixir.HostCLI do
   defp run_usage, do: @run_usage |> String.trim()
   defp add_usage, do: @add_usage |> String.trim()
   defp import_usage, do: @import_usage |> String.trim()
+  defp config_import_usage, do: @config_import_usage |> String.trim()
+  defp config_recover_usage, do: @config_recover_usage |> String.trim()
   defp plan_usage, do: @plan_usage |> String.trim()
   defp patch_usage, do: @patch_usage |> String.trim()
   defp lifecycle_usage(:activate), do: @activate_usage |> String.trim()

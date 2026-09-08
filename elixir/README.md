@@ -292,6 +292,8 @@ symphony host run [--registry <path>]
 symphony host config export [--revision <sha256:hash>] [--registry <path>]
 symphony host config history [--registry <path>]
 symphony host config backup [--registry <path>]
+symphony host config import [--local-config <path>] [--legacy-registry <path>] [--connection <id>] [--registry <path>] [--json]
+symphony host config import --confirm <plan-id> [--registry <path>] [--json]
 symphony host target add <id> --input <target.yml> [--registry <path>] [--json]
 symphony host target add <id> --confirm <plan-id> [--registry <path>] [--json]
 symphony host target import <id> --workflow <path> --repo <path> [--connection <id>] [--runner <source>=<id>] [--registry <path>] [--json]
@@ -343,9 +345,12 @@ Repeated previews with the same identity reuse the existing valid plan without c
 
 Add and import always create paused targets with no dispatch mode. Import reads the source runtime
 and repository without modifying either and copies repository policy into the proposed host target.
-After admission, repository files are not live Symphony configuration authority. Patch input is a
-target-only recursive schema patch, not JSON Patch or JSON Merge Patch. General patch operations
-cannot change lifecycle state or dispatch mode.
+Every import preview proves restriction parity between the raw repository manifest and the inlined
+policy: dropped or weakened validation commands, docs and capability requirements, protected review
+paths and labels, landing posture, dry-run settings, completion requirements, budgets, or
+side-effect gates block the import. After admission, repository files are not live Symphony
+configuration authority. Patch input is a target-only recursive schema patch, not JSON Patch or
+JSON Merge Patch. General patch operations cannot change lifecycle state or dispatch mode.
 
 The optional target field `repo.branch` overrides the resolved host policy's `vcs.default_branch`
 in the admitted runtime policy and compiled prompt. For example, a patch can contain
@@ -364,6 +369,135 @@ immutable `TargetContext`, and starts one target orchestrator for every active o
 Only active targets receive new grants. The default registry is used when `--registry` is omitted.
 If a later reload fails, the daemon keeps the last verified generation visible but blocks new grants
 until it can verify the current file generation again.
+
+### Legacy configuration cutover (SID-497)
+
+Existing operators move legacy configuration into the host registry through one
+explicit, previewed, and confirmed import surface:
+
+```text
+symphony host config import --local-config <config.yml> [--legacy-registry <legacy-targets.yml>] [--connection <id>] [--registry <path>] [--json]
+symphony host config import --confirm <plan-id> [--registry <path>] [--json]
+```
+
+`--local-config` imports the legacy local `config.yml`: the tracker connection
+(environment reference only; inline credentials are rejected), the runner
+catalog (runners missing per-runner limits get the restrictive default of one
+agent and one startup), the polling interval, and the capacity ceilings
+(`deployment.ceilings`, or the older top-level `capacity_ceiling`). Every
+other field — top-level sections like `workspace`, `agent`, or
+`capacity_profiles`, and unknown nested fields inside `tracker`, `polling`, or
+`deployment` — blocks the import with `unsupported_field` instead of being
+dropped: trim the import source to the host-mappable fields first. Tracker
+state and label policy that has no host-wide home blocks with
+`unmapped_tracker_policy` and must arrive through the saved-workflow
+`target import`.
+
+`--legacy-registry` migrates a legacy `targets.yml` whose targets still
+reference repository manifests through an explicit `repo.manifest`. Each
+referenced manifest is validated raw (`RepositoryPolicy.validate_raw_policy`,
+before any normalization that could silently drop closed-section fields),
+compiled, and inlined as that target's `repository_policy`; `repo.manifest` is
+removed, `repo.expected_repository` is pinned from the manifest's project
+repository, and the target always migrates paused without a dispatch mode.
+Targets without an explicit manifest reference are carried as-is (paused,
+dispatch mode dropped) and never reread from a repository — a profile-only
+target stays profile-only. An in-place migration (the legacy registry IS the
+target registry) rewrites exactly the still-manifest-backed current targets;
+a legacy target that differs from a different registry target is a blocking
+`target_conflict`. Supported shared policy layers on the legacy host
+(`repository_defaults`, `repository_profiles`, `capabilities`) carry into the
+proposal; any other legacy host field blocks with `unsupported_host_field`.
+Activation is a separate confirmed `target activate`.
+
+The preview shows every source with its kind, path, and SHA-256 checksum, a
+field-by-field mapping disposition (`mapped`, `defaulted_restrictive`,
+`unchanged`, `forced_paused`, `inlined_repository_policy`, `host_entry_conflict`,
+`not_mapped`), unsupported-field differences, host-section effects, and a
+per-target parity verdict. The parity check proves that no validation command,
+required file, docs reference, required capability, protected review path or
+label, landing posture, dry-run setting, completion requirement, budget, or
+side-effect gate is weakened by the migration; any weakening, unmappable
+policy, or unsupported field blocks the import instead of being dropped.
+Comparison uses the manifest's normalized policy, so harmless whitespace does
+not block import. Validation commands with the same name remain separate
+requirements; every command entry must be preserved.
+
+Host application is fail-closed: the registry never adopts a legacy value
+that differs from a value it already holds. Absent entries or fields map in
+(`mapped`), equal values are explicit no-ops (`unchanged`), and any differing
+mapped field or entry blocks with `host_entry_conflict` — align the registry
+or the import sources first; there is no precedence that overwrites host
+policy. If the two legacy sources define the same connection, runner, or
+host field with different values, the import blocks with
+`import_source_conflict` instead of guessing. The registry never silently
+overwrites or duplicates targets: re-importing identical content is an
+explicit no-op (`unchanged`), and any difference is a blocking
+`target_conflict`.
+
+Confirmation re-reads every bound source, verifies each checksum, re-derives
+the proposal, verifies every source is byte-identical one final time after all
+manifests load, and compares generations before the atomic registry
+replacement; changed sources invalidate the preview with
+`import_source_changed`; the registry remains unchanged. Confirmation archives
+both the pre-cutover registry and the proposed host-owned policy in the private
+`<registry>.revisions/` directory before registry replacement. It also persists
+`<registry>.revisions/import-<plan-id>.json` with the bound source checksums and
+the expected and proposed generations. An interrupted confirmation can leave
+these prepared records without committing the registry.
+`config export` and `config backup` never resolve credentials; they reject
+inline values.
+
+Recovery uses the archived revision boundary, not a second authority:
+
+```bash
+# Stop the host first; select a host-owned revision from config history.
+# Write to a separate file; inspect it before replacing the stopped host registry.
+symphony host config recover --revision <sha256:hash> --registry <path> > recovered-targets.yml
+```
+
+`config recover` reads a hash-verified, credential-checked archived revision
+and emits a registry document in which every target is paused with no dispatch
+mode. It never reads a source repository or saved setup. A raw legacy revision
+with `repo.manifest` references is refused: select the host-owned cutover revision
+instead. Confirmation archives that complete, inlined policy before publishing
+the registry, so recovery still works after legacy files change or disappear.
+The original pre-cutover registry remains archived for inspection.
+
+Raw `config export --revision` shows history as recorded, including active states
+or legacy references. Do not use raw export as a recovery artifact. Import
+provenance records describe prepared source hashes and generations; a record
+alone does not prove the registry replacement committed.
+
+After confirmation, the legacy sources are no longer runtime authorities:
+editing or deleting the repository `symphony.yml`, the saved setup, or the
+legacy registry cannot change host policy, and registry reloads never reread a
+migrated manifest. Only an explicit subsequent import can propose changes.
+Imported targets enter paused without a dispatch mode; in-flight runs keep
+their pinned policy and recover from durable state.
+
+Run the following dogfood procedure only when deployment is authorized.
+Use the original sources for preview. If unsupported fields or conflicting
+values block the import, stop and resolve each restriction explicitly. Do not
+filter YAML text, remove policy fields, or raise host limits to make a preview
+pass. A blocked preview is not a completed migration.
+
+```bash
+# Preview (non-mutating; inspect sources, dispositions, conflicts, and parity)
+symphony host config import \
+  --local-config ~/.config/symphony/config.yml \
+  --legacy-registry ~/.config/symphony/<legacy-targets.yml> \
+  --registry ~/.config/symphony/targets.yml
+# Commit exactly the printed plan ID
+symphony host config import --confirm <plan-id> --registry ~/.config/symphony/targets.yml
+# Import the saved dogfood workflow as its own paused target
+symphony host target import main --workflow ~/.config/symphony/runtime/main.runtime.yml \
+  --repo ~/dev/symphony --registry ~/.config/symphony/targets.yml
+symphony host target import main --confirm <plan-id> --registry ~/.config/symphony/targets.yml
+```
+
+Legacy source files stay in place after cutover; removing them is a separate
+human decision.
 
 ### Host repository policy and revisions
 

@@ -9,10 +9,11 @@ defmodule SymphonyElixir.TargetRegistry.Revisions do
   @reference ~r/^(?:\$[A-Za-z0-9._-]+|\$\{[A-Za-z0-9._-]+\}|env:[A-Za-z_][A-Za-z0-9_]*|secret:\/\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*)$/
   @uri ~r{[a-z][a-z0-9+.-]*://[^\s<>"']+}i
 
-  # Dynamic IDs are not credential field names; their value fields still need
-  # credential checks.
+  # Dynamic keys (IDs, provenance source paths) are not credential field
+  # names; their value fields still need credential checks.
   @dynamic_key_paths MapSet.new([
                        ["targets"],
+                       ["source_hashes"],
                        ["host", "repository_profiles"],
                        ["host", "runners"],
                        ["host", "tracker_connections"],
@@ -42,6 +43,35 @@ defmodule SymphonyElixir.TargetRegistry.Revisions do
       {:ok, Yaml.encode(document)}
     end
   end
+
+  @doc """
+  Persists an import's bound sources and proposed generations before registry
+  replacement. A record is evidence of a prepared import, not proof of commit;
+  compare its new generation with registry history to determine the outcome.
+  """
+  @spec record_import(Path.t(), map()) :: :ok | {:error, Error.t()}
+  def record_import(registry_path, %{"plan_id" => plan_id} = record) do
+    with true <- is_binary(plan_id) and Regex.match?(~r/^[0-9a-f]{64}$/, plan_id),
+         true <- credential_safe?(record),
+         {:ok, directory} <- directory(registry_path, true),
+         {:ok, encoded} <- Jason.encode(record, pretty: true),
+         :ok <- write_private(Path.join(directory, "import-#{plan_id}.json"), encoded) do
+      :ok
+    else
+      _invalid -> failure()
+    end
+  end
+
+  def record_import(_registry_path, _record), do: failure()
+
+  @doc """
+  Returns the registry document for a source revision (or the current
+  registry when the revision is omitted). The document is credential-checked
+  and its canonical hash is verified against the revision before it is
+  returned, so recovery cannot consume a tampered or unsafe archive.
+  """
+  @spec revision_document(Path.t(), String.t() | nil) :: {:ok, map()} | {:error, Error.t()}
+  def revision_document(registry_path, revision \\ nil), do: configuration(registry_path, revision)
 
   @spec history(Path.t()) :: {:ok, [map()]} | {:error, Error.t()}
   def history(registry_path) do
@@ -208,6 +238,38 @@ defmodule SymphonyElixir.TargetRegistry.Revisions do
   end
 
   defp filename("sha256:" <> digest), do: digest <> ".json"
+
+  defp write_private(path, bytes) do
+    with {:ok, ownership} <- FileStore.create_temp(path, bytes) do
+      try do
+        case File.ln(ownership.path, path) do
+          :ok ->
+            FileStore.sync_directory(Path.dirname(path))
+
+          {:error, :eexist} ->
+            verify_import(path, bytes)
+
+          _failure ->
+            failure()
+        end
+      after
+        FileStore.remove_temp(ownership)
+      end
+    end
+  end
+
+  defp verify_import(path, expected_bytes) do
+    with {:ok, %{bytes: stored_bytes}} <- FileStore.read(path),
+         {:ok, stored} <- Jason.decode(stored_bytes),
+         {:ok, expected} <- Jason.decode(expected_bytes),
+         true <- is_map(stored) and is_binary(stored["recorded_at"]),
+         {:ok, _time, _offset} <- DateTime.from_iso8601(stored["recorded_at"]),
+         true <- Map.delete(stored, "recorded_at") == Map.delete(expected, "recorded_at") do
+      :ok
+    else
+      _different -> failure()
+    end
+  end
 
   defp failure do
     {:error,

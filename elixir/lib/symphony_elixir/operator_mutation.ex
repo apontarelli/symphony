@@ -26,8 +26,9 @@ defmodule SymphonyElixir.OperatorMutation do
 
   @target_actions ~w(activate pause drain retire patch settings_apply batch)
   @run_actions ~w(resume_run abandon_run)
-  @actions @target_actions ++ @run_actions ++ ~w(refresh shutdown prune)
+  @actions @target_actions ++ @run_actions ++ ~w(legacy_import refresh shutdown prune)
   @settings_input_keys ~w(selections repository linear_revision scope)
+  @legacy_import_input_keys ~w(local_config legacy_registry connection_id)
   @max_batch_issues 100
   @disabled_target_codes [
     :invalid_transition,
@@ -134,8 +135,20 @@ defmodule SymphonyElixir.OperatorMutation do
     end
   end
 
+  defp validate_inputs("legacy_import", inputs) do
+    if Enum.all?(Map.keys(inputs), &(&1 in @legacy_import_input_keys)) and
+         optional_binary?(inputs, "local_config") and optional_binary?(inputs, "legacy_registry") and
+         optional_binary?(inputs, "connection_id") and
+         (is_binary(inputs["local_config"]) or is_binary(inputs["legacy_registry"])) do
+      :ok
+    else
+      {:error, :invalid_inputs}
+    end
+  end
+
   defp validate_inputs(action, inputs)
-       when action not in ["activate", "patch", "settings_apply", "batch"] and map_size(inputs) == 0,
+       when action not in ["activate", "patch", "settings_apply", "batch", "legacy_import"] and
+              map_size(inputs) == 0,
        do: :ok
 
   defp validate_inputs(_action, _inputs), do: {:error, :invalid_inputs}
@@ -175,6 +188,9 @@ defmodule SymphonyElixir.OperatorMutation do
     generation = registry_generation(snapshot)
 
     case command["action"] do
+      "legacy_import" ->
+        preview_legacy_import(command, snapshot, generation, host_id)
+
       "settings_apply" ->
         preview_settings_apply(command, opts, snapshot, generation, host_id, scheduler)
 
@@ -342,6 +358,72 @@ defmodule SymphonyElixir.OperatorMutation do
 
       {:error, %{} = error} ->
         {:error, error}
+
+      {:error, reason} ->
+        {:error, public_code(reason)}
+    end
+  end
+
+  # Legacy cutover import: host-scope preview/confirm of the migration of
+  # legacy local configuration and legacy registries into the host registry.
+  # The registry is the only authority afterward; imported targets are paused.
+  defp preview_legacy_import(command, snapshot, generation, host_id) do
+    inputs = command["inputs"]
+
+    with {:ok, registry_path} <- registry_path(snapshot),
+         typed_command <-
+           %Command.LegacyImport{
+             local_config: inputs["local_config"],
+             legacy_registry: inputs["legacy_registry"],
+             connection_id: inputs["connection_id"]
+           },
+         {:ok, plan} <- OperatorCommandService.plan(typed_command, registry_path: registry_path),
+         true <- plan.expected_generation == generation do
+      registry_preview = safe_term(Map.get(plan.preview, "registry", %{}))
+      applicable? = plan.applicable?
+      disabled_reason = if(applicable?, do: nil, else: "plan_not_applicable")
+
+      binding =
+        if applicable? do
+          %{
+            kind: :registry,
+            action: "legacy_import",
+            host_id: host_id,
+            registry_generation: generation,
+            plan_id: plan.id,
+            registry_path: registry_path,
+            target_id: "host",
+            command: command
+          }
+        else
+          disabled_binding(command, host_id, generation, disabled_reason)
+        end
+
+      {:ok,
+       %{
+         identity: %{action: command["action"], target_id: "host", host_id: host_id},
+         current_state: %{registry: %{generation: generation}},
+         proposed_state: %{
+           registry: registry_preview,
+           legacy_import: safe_term(Map.get(plan.preview, "legacy_import", %{}))
+         },
+         consequences: [
+           "migrate the legacy configuration into the host registry; repository manifests and saved setups stop being runtime authority",
+           "imported targets enter paused state without a dispatch mode; activation is a separate confirmed command",
+           "the pre-cutover registry is archived as a source revision for recovery"
+         ],
+         warnings: target_warnings(registry_preview, applicable?),
+         disabled_reason: disabled_reason,
+         registry_generation: generation,
+         binding: binding,
+         command: command
+       }}
+    else
+      false ->
+        {:error, :stale_generation}
+
+      {:error, %OperatorCommandService.Error{} = error} ->
+        {:error, public_backend_error(error)}
 
       {:error, reason} ->
         {:error, public_code(reason)}

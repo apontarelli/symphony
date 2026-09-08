@@ -6,6 +6,72 @@ defmodule SymphonyElixir.TargetRegistry.RevisionsTest do
   alias SymphonyElixir.TargetRegistry.{Composition, Revisions, Yaml}
 
   @tag :tmp_dir
+  test "re-preparing the same import preserves provenance without blocking recovery from interruption", %{tmp_dir: root} do
+    path = Path.join(root, "targets.yml")
+    plan_id = String.duplicate("a", 64)
+
+    record = %{
+      "plan_id" => plan_id,
+      "action" => "legacy_import",
+      "recorded_at" => "2026-09-07T00:00:00Z",
+      "source_hashes" => %{},
+      "old_generation" => "sha256:" <> String.duplicate("b", 64),
+      "new_generation" => "sha256:" <> String.duplicate("c", 64)
+    }
+
+    assert :ok = Revisions.record_import(path, record)
+    provenance = Path.join(path <> ".revisions", "import-#{plan_id}.json")
+    original = File.read!(provenance)
+    retry = Map.put(record, "recorded_at", "2026-09-08T00:00:00Z")
+    assert :ok = Revisions.record_import(path, retry)
+    assert File.read!(provenance) == original
+    assert {:error, _} = Revisions.record_import(path, Map.put(retry, "source_hashes", %{"source" => "changed"}))
+    assert File.read!(provenance) == original
+  end
+
+  @tag :tmp_dir
+  test "import provenance accepts source paths named like credentials when their digests are valid", %{tmp_dir: root} do
+    path = Path.join(root, "targets.yml")
+    plan_id = String.duplicate("a", 64)
+    digest = "sha256:" <> String.duplicate("d", 64)
+
+    record = %{
+      "plan_id" => plan_id,
+      "action" => "legacy_import",
+      "recorded_at" => "2026-09-07T00:00:00Z",
+      "source_hashes" => %{"/tmp/legacy_access_token" => digest, "/tmp/legacy.yml" => digest},
+      "old_generation" => "sha256:" <> String.duplicate("b", 64),
+      "new_generation" => "sha256:" <> String.duplicate("c", 64)
+    }
+
+    assert :ok = Revisions.record_import(path, record)
+    provenance = Path.join(path <> ".revisions", "import-#{plan_id}.json")
+    assert {:ok, stored} = provenance |> File.read!() |> Jason.decode()
+    assert stored["source_hashes"] == record["source_hashes"]
+  end
+
+  @tag :tmp_dir
+  test "import provenance still rejects inline credentials in record fields", %{tmp_dir: root} do
+    path = Path.join(root, "targets.yml")
+    digest = "sha256:" <> String.duplicate("d", 64)
+
+    record = %{
+      "plan_id" => String.duplicate("a", 64),
+      "action" => "legacy_import",
+      "recorded_at" => "2026-09-07T00:00:00Z",
+      "source_hashes" => %{"/tmp/legacy_access_token" => digest},
+      "old_generation" => "sha256:" <> String.duplicate("b", 64),
+      "new_generation" => "sha256:" <> String.duplicate("c", 64)
+    }
+
+    for field <- ["token", "access_token", "password"] do
+      assert {:error, _} = Revisions.record_import(path, Map.put(record, field, "live-secret-value"))
+    end
+
+    refute File.exists?(path <> ".revisions")
+  end
+
+  @tag :tmp_dir
   test "history preserves replaced configuration and exports references without resolving them", %{tmp_dir: root} do
     path = Path.join(root, "targets.yml")
     first = document("mix test")

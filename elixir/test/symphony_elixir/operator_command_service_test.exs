@@ -1467,6 +1467,129 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
     assert File.exists?(envelope_path)
   end
 
+  @tag :tmp_dir
+  test "saved workflow restrictions cannot be replaced by a weaker repository manifest", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{})
+    workflow = Path.join(tmp_dir, "restricted.runtime.yml")
+    {:ok, source} = Yaml.decode(applicable_import_source())
+    source = Map.put(source, "validation", %{"required_files" => ["security-review.txt"]})
+    File.write!(workflow, Yaml.encode(source))
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Import{target_id: "restricted", workflow: workflow, repo: @manifest_fixture_root, connection_id: "linear-main"},
+               registry_path: registry_path
+             )
+
+    refute plan.applicable?
+    assert is_nil(plan.id)
+
+    assert Enum.any?(
+             plan.preview["import"]["import_diagnostics"],
+             &(&1["code"] == "validation_required_file_dropped")
+           )
+  end
+
+  @tag :tmp_dir
+  test "saved workflow duplicate command names cannot collapse into one requirement", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{})
+    workflow = Path.join(tmp_dir, "duplicates.runtime.yml")
+
+    {:ok, source} = Yaml.decode(applicable_import_source())
+
+    source =
+      Map.put(source, "validation", %{
+        "commands" => [
+          %{"name" => "verify", "command" => "mix lint"},
+          %{"name" => "verify", "command" => "mix test"}
+        ]
+      })
+
+    File.write!(workflow, Yaml.encode(source))
+
+    repo =
+      repo_with_manifest(
+        "duplicates-repo",
+        put_in(fixture_manifest(), ["validation", "commands"], [
+          %{"name" => "verify", "command" => "mix test"}
+        ])
+      )
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Import{target_id: "duplicates", workflow: workflow, repo: repo, connection_id: "linear-main"},
+               registry_path: registry_path
+             )
+
+    refute plan.applicable?
+    assert is_nil(plan.id)
+
+    assert Enum.any?(
+             plan.preview["import"]["import_diagnostics"],
+             &(&1["code"] == "validation_command_changed")
+           )
+  end
+
+  @tag :tmp_dir
+  test "saved workflow duplicate command names import when every entry is retained", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{})
+    workflow = Path.join(tmp_dir, "retained.runtime.yml")
+
+    duplicates = [
+      %{"name" => "verify", "command" => "mix lint"},
+      %{"name" => "verify", "command" => "mix test"}
+    ]
+
+    {:ok, source} = Yaml.decode(applicable_import_source())
+    source = Map.put(source, "validation", %{"commands" => duplicates})
+    File.write!(workflow, Yaml.encode(source))
+
+    repo =
+      repo_with_manifest(
+        "retained-repo",
+        put_in(fixture_manifest(), ["validation", "commands"], duplicates)
+      )
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Import{target_id: "retained", workflow: workflow, repo: repo, connection_id: "linear-main"},
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?, inspect(plan.preview["import"]["import_diagnostics"])
+    assert is_binary(plan.id)
+  end
+
+  @tag :tmp_dir
+  test "whitespace-normalized docs and commands import without parity findings", %{tmp_dir: tmp_dir} do
+    registry_path = write_registry(tmp_dir, %{})
+    workflow = Path.join(tmp_dir, "padded.runtime.yml")
+
+    {:ok, source} = Yaml.decode(applicable_import_source())
+
+    source =
+      source
+      |> Map.put("docs", %{"entrypoints" => [" README.md "]})
+      |> Map.put("validation", %{
+        "commands" => [%{"name" => " focused ", "command" => " mix test "}]
+      })
+
+    File.write!(workflow, Yaml.encode(source))
+
+    assert {:ok, plan} =
+             OperatorCommandService.plan(
+               %Command.Import{target_id: "padded", workflow: workflow, repo: @manifest_fixture_root, connection_id: "linear-main"},
+               registry_path: registry_path
+             )
+
+    assert plan.applicable?, inspect(plan.preview["import"]["import_diagnostics"])
+
+    refute Enum.any?(
+             plan.preview["import"]["import_diagnostics"],
+             &(&1["code"] in ["docs_entrypoint_dropped", "validation_command_changed"])
+           )
+  end
+
   defp applicable_import_source do
     Yaml.encode(%{
       "runtime" => %{
@@ -1488,6 +1611,27 @@ defmodule SymphonyElixir.OperatorCommandServiceTest do
         }
       }
     })
+  end
+
+  defp fixture_manifest do
+    {:ok, manifest} = @manifest_fixture_root |> Path.join("symphony.yml") |> File.read!() |> Yaml.decode()
+    manifest
+  end
+
+  # Import validation rejects target repo and worktree paths that overlap
+  # the registry directory, so custom repos live next to the shared fixture
+  # root in the system temp dir instead of the per-test registry directory.
+  defp repo_with_manifest(name, manifest) do
+    repo = Path.join(System.tmp_dir!(), "operator-service-custom-repo-#{System.unique_integer([:positive])}-" <> name)
+    File.mkdir_p!(repo)
+    File.write!(Path.join(repo, "symphony.yml"), Yaml.encode(manifest))
+    File.cp!(Path.join(@manifest_fixture_root, "README.md"), Path.join(repo, "README.md"))
+    git!(repo, ["init", "--initial-branch=main"])
+    git!(repo, ["remote", "add", "origin", "https://github.com/example/symphony-fixture.git"])
+    git!(repo, ["add", "."])
+    git!(repo, ["-c", "user.name=Operator Service Tests", "-c", "user.email=operator-service-tests@example.invalid", "commit", "-m", name])
+    on_exit(fn -> File.rm_rf!(repo) end)
+    repo
   end
 
   @tag :tmp_dir
